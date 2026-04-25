@@ -38,63 +38,149 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 
 ## 已完成功能与对应逻辑
 
+### 模块总览
+
+| 模块 | 入口 | 核心职责 | 主要数据表 |
+| --- | --- | --- | --- |
+| 排课 | 📅 | 月度课程录入、状态管理、冲突检测、周课表导出 | `lessons` |
+| 学生 | 👥 | 学生档案、费用明细、充值结转、专享价管理 | `students` / `recharge_records` / `student_pricing` / `fee_overrides` |
+| 教师 | 👨‍🏫 | 教师薪资汇总、四周车贴、xlsx 导出 | `teachers` / `teacher_adjustments_monthly` |
+| 运营 | 💼 | 员工档案与薪资、日常开销、月份生命周期 | `staff` / `staff_salary_monthly` / `operating_expenses` |
+| 经营概览 | 📊 | 财务汇总、环比、分布、6 月趋势、资产负债 | 跨表只读 |
+| 设置 / 数据对账 | ⚙️ | 标准单价、内部审计、xlsx 对账、档案 CRUD | `pricing_standards` / `audit_logs` / `audit_ignores` |
+
+---
+
 ### 1. 排课（📅）
 
-- **课程总表 `lessons`**：按月分页，可在表内直接改授课老师、日期、状态、时间、教室、年级、科目、学生名单、课时费、备注。
-- **状态机**：唯一权威字段是 `status`（待上 / 已上 / 请假 / 试课 / 考试 / 未缴费），`lesson_status` + `course_status` 是兼容旧 xlsx 的双字段（`legacyStatusFields` / `deriveStatus` 双向同步）。
-- **批量复制课程**：`POST /api/lessons/copy` 接受 `pairs:[{source_id, target_date}]` 或 `(source_lesson_ids[] × target_dates[])` 笛卡尔积，单次最多 200 行。复制的目标日期会按 `MAX(sort_order)+1` 追加，默认重置为「待上」。
-- **冲突检测 `scheduleConflicts(monthKey)`**：跨课程同日同时段若同一老师/教室/共同学生，会标 `teacher` / `classroom` / `student` 三类冲突，时间段无法解析时标 `invalid_time`。
-- **周课表**：把月份切成 4 周（`[1,8] [9,15] [16,22] [23,月末]`），按老师 / 学生两种受众生成可读视图，支持文本下载、SVG 图片包、PNG manifest 三种导出。
+核心数据表 `lessons`，每行 = 一节课，多个学生用顿号分隔写在 `student_names`。
+
+| 子功能 | 实现 | 说明 |
+| --- | --- | --- |
+| 月度总表 | 表内直接编辑 | 字段：授课老师 / 日期 / 状态 / 时间 / 教室 / 年级 / 科目 / 学生名单 / 课时费 / 备注 |
+| 状态机 | 权威字段 `status` | 取值：待上 / 已上 / 请假 / 试课 / 考试 / 未缴费；`legacyStatusFields` + `deriveStatus` 与旧 xlsx 的 `lesson_status` / `course_status` 双向同步 |
+| 批量复制课程 | `POST /api/lessons/copy` | 接受 `pairs:[{source_id, target_date}]` 或 `(source_lesson_ids[] × target_dates[])` 笛卡尔积；单次 ≤ 200 行；目标日期按 `MAX(sort_order)+1` 追加，状态重置为「待上」 |
+| 冲突检测 | `scheduleConflicts(monthKey)` | 同日同时段同老师 / 教室 / 共同学生 → `teacher` / `classroom` / `student` 三类；时间段无法解析 → `invalid_time` |
+| 周课表导出 | 月份切 4 周（`[1,8] [9,15] [16,22] [23,月末]`） | 按老师 / 学生两种受众生成可读视图；支持文本下载、SVG 图片包、PNG manifest 三种导出 |
+
+---
 
 ### 2. 学生（👥）
 
-- **费用明细 `feeDetails`**：把每节课按学生展开成一行，每行的单价由 `unitPriceFor` 决定优先级 —— **手动覆盖 → 考试（强制 0） → 学生专享价 → 标准价**。`price_source` 字段把这个判定结果带回前端供调试。
-- **学生费用汇总 `studentSummary`**：核心金额逻辑见下面 [金额结算口径](#金额结算口径)。
-- **充值记录**：表内编辑 `prev_actual / prev_gift / cur_recharge / cur_gift / recharge_date / notes`，提交时按 `(student_name, month_key)` upsert。
-- **从上月结转**：`/api/recharges/rollover?from=...&to=...` 把 `fromMonth` 的月末余额作为 `toMonth` 的 `prev_actual / prev_gift`。`shouldRefreshCarryOver` 决定哪些行可被覆盖：自动结转的行、或 `prev_actual=prev_gift=0` 的空行；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷。
-- **学生查询**：选中学生后，`renderStudentQuery` 带出当月汇总 + 当月明细 + `studentHistoryRows` 跨月历史对比表。
-- **学生单价 `student_pricing`**：可设置学生×科目专享价，UI 显示「当月用过 N 节 / 历史 M 节」帮助识别孤儿配置；偏离标准价 50% 以上会在保存时提示加备注（`pricingWarnings`）。
-- **价格重算 `POST /api/pricing-recompute`**：把当月该学生该科目所有 `fee_overrides` 删除，让单价回到「专享价/标准价」，并把变更前后总价记入审计日志。
+#### 2.1 单价决定优先级（`unitPriceFor`）
+
+按下列顺序逐级回退（高 → 低），命中即停止：
+
+| 优先级 | 来源 | 字段 |
+| --- | --- | --- |
+| 1 | 手动覆盖 | `fee_overrides.unit_price` |
+| 2 | 考试课强制 0 | `lessons.status = '考试'` |
+| 3 | 学生×科目专享价 | `student_pricing.custom_price` |
+| 4 | 标准单价 | `pricing_standards`（年级 × 班型） |
+
+`feeDetails` 把每节课按学生展开成一行，`price_source` 字段把命中的优先级带回前端供调试。
+
+#### 2.2 子功能
+
+| 子功能 | 实现 | 说明 |
+| --- | --- | --- |
+| 学生费用汇总 | `studentSummary` | 详见下文 [金额结算口径](#金额结算口径) |
+| 充值记录 | 表内编辑 + upsert | 字段：`prev_actual / prev_gift / cur_recharge / cur_gift / recharge_date / notes`；以 `(student_name, month_key)` 唯一键 upsert |
+| 上月结转 | `GET /api/recharges/rollover?from=...&to=...` | 把上月月末余额作为本月 `prev_actual / prev_gift`；`shouldRefreshCarryOver` 决定可覆盖范围（自动结转行 / 全空行）；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷 |
+| 学生查询 | `renderStudentQuery` | 选中学生 → 当月汇总 + 当月明细 + `studentHistoryRows` 跨月历史对比 |
+| 学生专享价 | `student_pricing` | 学生×科目；UI 显示「当月用过 N 节 / 历史 M 节」识别孤儿配置；偏离标准价 ≥ 50% 时保存提示加备注（`pricingWarnings`） |
+| 价格重算 | `POST /api/pricing-recompute` | 删除当月该学生该科目所有 `fee_overrides`（让单价回到专享/标准价）；变更前后总价写入审计日志 |
+
+---
 
 ### 3. 教师（👨‍🏫）
 
-- **教师薪资汇总**：`teacherSummary(monthKey)` 按老师汇总「有效课时数」、「课时合计」、四周车贴、备注；只有 `已上 / 未缴费` 状态的课才算入有效课时与课时合计（`isEffective`）。
-- **教师明细**：选中老师查看当月课程明细及合计课时费。
-- **车票 `teacher_adjustments_monthly`**：每老师每月四周车贴单独存，月份切换互不影响；`weightedTeacherTransport` 在自定义区间下按区间天数线性分摊。
-- **xlsx 导出**：`/api/export/teacher-salary.xlsx` 直接由 `xlsxBuffer` 拼包，无第三方依赖。
+| 子功能 | 实现 | 说明 |
+| --- | --- | --- |
+| 教师薪资汇总 | `teacherSummary(monthKey)` | 输出：有效课时数 / 课时合计 / 四周车贴 / 备注；只有 `已上 / 未缴费` 计入有效课时（`isEffective`） |
+| 教师明细 | 选老师 → 当月课程明细 | 表底显示合计课时费 |
+| 四周车贴 | `teacher_adjustments_monthly` | 每老师每月四周分别存；自定义区间下 `weightedTeacherTransport` 按区间天数线性分摊 |
+| xlsx 导出 | `GET /api/export/teacher-salary.xlsx` | 由 `xlsxBuffer` 自实现拼包，无第三方依赖 |
+
+---
 
 ### 4. 运营（💼）
 
-- **员工档案 `staff`**：教学主管 / 教务主管 / 小助手 / 做饭阿姨 / 前台 / 其他六类。删除有薪资历史的员工会软删（保留状态=离职），无历史的硬删。
-- **员工薪资 `staff_salary_monthly`**：访问月份时 `ensureStaffSalaryRows` 自动 `INSERT OR IGNORE` 把所有「在职/暂停」员工 seed 进当月，初值取员工档案的 `base_salary`，`bonus / deduction` 默认 0。
-- **日常开销 `operating_expenses`**：按 `category` 分类，按 `expense_date` 时间筛选，支持 vendor/notes 模糊搜索。
-- **创建月份/删除月份**：`POST /api/months` 会从最早数据月起一路 `ensureCarryOver` 到目标月，把每个中间月份的余额结转都补全；`DELETE /api/months/:key?force=1` 会把该月 `lessons / recharge_records / teacher_adjustments_monthly / staff_salary_monthly / operating_expenses` 清空，并自动备份 db。
+| 子功能 | 实现 | 说明 |
+| --- | --- | --- |
+| 员工档案 | `staff` | 六类：教学主管 / 教务主管 / 小助手 / 做饭阿姨 / 前台 / 其他；有薪资历史 → 软删（status = 离职），无历史 → 硬删 |
+| 员工薪资 | `staff_salary_monthly` + `ensureStaffSalaryRows` | 访问月份时 `INSERT OR IGNORE` 把所有「在职/暂停」员工 seed 进当月；初值取档案 `base_salary`，`bonus / deduction` 默认 0 |
+| 日常开销 | `operating_expenses` | 按 `category` 分类、`expense_date` 时间筛选、`vendor` / `notes` 模糊搜索 |
+| 创建月份 | `POST /api/months` | 从最早数据月起一路 `ensureCarryOver` 到目标月，补全所有中间月份的余额结转 |
+| 删除月份 | `DELETE /api/months/:key?force=1` | 清空该月 `lessons` / `recharge_records` / `teacher_adjustments_monthly` / `staff_salary_monthly` / `operating_expenses`；自动备份 db |
+
+---
 
 ### 5. 经营概览（📊）
 
-- **`financeBase(range)`** 是入口，输出 `revenue / gift_consumption / teacher_cost / transport_cost / operating_cost / gross_profit / gross_margin / cash_in / gift_issued / net_cash_flow`。
-- **环比 `previousEqualRange(range)`** 取相邻等长区间。
-- **分布 `financeBreakdowns`**：年级×收入、科目×收入、班型×收入×毛利率、Top 10 学生消费、老师 ROI（贡献/课时费）、低余额名单（实际余额 < 平均单次课费）、未缴费课时清单。
-- **6 个月趋势 `financeTrend6m`**：以 `range.end` 所在月为锚，往前数 6 个月，每月独立跑一次 `financeBase(monthRange)`。
-- **`balance_sheet`**：月末沉淀现金 `total_actual_balance`、月末赠送余额 `total_gift_balance`、应收账款 `accounts_receivable`（仅统计 `状态=未缴费` 的课）。
-- **导出 CSV**：`/api/export/finance-summary.csv` 输出当期快照。
+入口：`financeBase(range)`，输出 10 项核心指标。
+
+#### 5.1 核心指标（`financeBase`）
+
+| 指标 | 含义 |
+| --- | --- |
+| `revenue` | 收入（按学生当月实付占比认现，详见金额口径） |
+| `gift_consumption` | 赠送余额消耗 |
+| `teacher_cost` | 教师课时费 |
+| `transport_cost` | 教师车贴 |
+| `operating_cost` | 员工薪资 + 日常开销 |
+| `gross_profit` | 毛利 = `revenue` − `teacher_cost` − `transport_cost` − `operating_cost` |
+| `gross_margin` | 毛利率 |
+| `cash_in` | 当期现金充值 |
+| `gift_issued` | 当期赠送发放 |
+| `net_cash_flow` | 净现金流 |
+
+#### 5.2 衍生分析
+
+| 板块 | 实现 | 说明 |
+| --- | --- | --- |
+| 环比 | `previousEqualRange(range)` | 取相邻等长区间 |
+| 分布 | `financeBreakdowns` | 年级×收入、科目×收入、班型×收入×毛利率、Top 10 学生消费、老师 ROI（贡献/课时费）、低余额名单（实际余额 < 平均单次课费）、未缴费课时清单 |
+| 6 月趋势 | `financeTrend6m` | 以 `range.end` 所在月为锚，往前 6 个月，每月独立跑一次 `financeBase(monthRange)` |
+| 资产负债 | `balance_sheet` | 月末沉淀现金 `total_actual_balance`、月末赠送余额 `total_gift_balance`、应收账款 `accounts_receivable`（仅 `状态=未缴费` 的课） |
+| CSV 导出 | `GET /api/export/finance-summary.csv` | 当期快照 |
+
+---
 
 ### 6. 设置 / 数据对账（⚙️）
 
-- **费用标准 `pricing_standards`**：可改单价。年级 + 班型 → 单价的两维表（高/初年级班型档位略有差异，见 `priceBucket`）。
-- **数据对账（审计）**：
-  - **内部审计 `internalAudit(monthKey)`**：检测多年级学生、缺年级学生、相似的老师/学生姓名（Levenshtein ≤ 1）、孤儿专享价、专享价偏离标准价 30% 以上、有效课时单价 0。
-  - **xlsx 对账 `runNodeXlsxAudit`**：上传 xlsx「N月总表」，按 `(date, teacher, time_slot)` 三元组比对每节课的字段差异，输出可一键回填的 patch。
-  - **审计修复 `applyAuditIssues`**：批量应用 patch；CRITICAL 默认拒绝，需要 `confirm_critical=true`。
-  - **忽略 `audit_ignores`**：用 `issue_key`（来源/类型/实体/字段/前后值的拼串）记忆已忽略的问题，下一次审计直接跳过。
-- **档案管理**：教师/学生/员工档案的 CRUD，软删除策略统一。
+#### 6.1 子功能
+
+| 子功能 | 实现 | 说明 |
+| --- | --- | --- |
+| 标准单价 | `pricing_standards` | 年级 × 班型 → 单价；高/初年级班型档位略有差异（见 `priceBucket`） |
+| 内部审计 | `internalAudit(monthKey)` | 检测项见下表 |
+| xlsx 对账 | `runNodeXlsxAudit` | 上传 xlsx「N月总表」，按 `(date, teacher, time_slot)` 三元组比对每节课字段差异，输出可一键回填的 patch |
+| 审计修复 | `applyAuditIssues` | 批量应用 patch；CRITICAL 默认拒绝，需 `confirm_critical=true` |
+| 忽略列表 | `audit_ignores` | 用 `issue_key`（来源/类型/实体/字段/前后值的拼串）记忆已忽略问题，下次审计跳过 |
+| 档案管理 | 教师 / 学生 / 员工 CRUD | 软删除策略统一 |
+
+#### 6.2 内部审计检测项
+
+| 检测项 | 触发条件 |
+| --- | --- |
+| 多年级学生 | 同一学生同月出现在多个年级 |
+| 缺年级学生 | 学生档案 `grade` 为空 |
+| 老师 / 学生姓名相似 | Levenshtein 距离 ≤ 1 |
+| 孤儿专享价 | `student_pricing` 行无对应学生或科目 |
+| 专享价偏离过大 | 偏离标准价 ≥ 30% |
+| 单价为零 | 有效课时单价 = 0 |
+
+---
 
 ### 通用基础设施
 
-- **xlsx / zip 自实现**：服务端 `unzipXlsx` / `zipStore` 直接处理 ZIP 文件结构，没有 `xlsx` / `archiver` 之类依赖。前端 `zipStoreFiles` 镜像同样的实现，用于客户端 PNG 打包。
-- **审计日志去重**：用 `issue_key` 做去重 key，相同问题再次出现时只更新 `run_at` 不新建条目。
-- **多月结转链 `ensureCarryOverChain`**：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录都齐。
-- **暗色 / 亮色主题**：顶栏切换，`localStorage` 持久化，`prefers-color-scheme` 跟随系统。
+| 项 | 说明 |
+| --- | --- |
+| xlsx / zip 自实现 | 服务端 `unzipXlsx` / `zipStore` 直接处理 ZIP 文件结构，无 `xlsx` / `archiver` 依赖；前端 `zipStoreFiles` 镜像同实现，用于客户端 PNG 打包 |
+| 审计日志去重 | 用 `issue_key` 做去重 key，相同问题再次出现时只更新 `run_at`，不新建条目 |
+| 多月结转链 | `ensureCarryOverChain`：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录齐全 |
+| 主题切换 | 顶栏切换亮色 / 暗色，`localStorage` 持久化，默认跟随系统 `prefers-color-scheme` |
 
 ## 金额结算口径
 
