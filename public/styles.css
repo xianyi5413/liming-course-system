@@ -1255,7 +1255,6 @@ select.control,
 }
 
 .filter-bar.compact {
-  position: static;
   flex-wrap: wrap;
   justify-content: flex-start;
   align-items: center;
@@ -2794,7 +2793,8 @@ tr.risk-unpaid:hover td {
 }
 
 .filter-bar {
-  position: static;
+  position: relative;
+  z-index: 3;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
