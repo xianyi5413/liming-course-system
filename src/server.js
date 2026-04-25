@@ -1859,6 +1859,15 @@ function normalizeAuditName(value) {
   return text(value).replace(/\s+/g, "");
 }
 
+function inactiveStudentStatus(status) {
+  return ["离校", "已流出"].includes(text(status));
+}
+
+function activeStudentProfile(name) {
+  const student = get("SELECT * FROM students WHERE name = ?", [name]);
+  return !student || !inactiveStudentStatus(student.status);
+}
+
 function levenshtein(a, b) {
   const left = Array.from(String(a || ""));
   const right = Array.from(String(b || ""));
@@ -1954,13 +1963,34 @@ function internalAudit(monthKey, { log = true } = {}) {
   }
 
   const studentCounts = new Map();
+  const studentGrades = new Map();
   for (const item of lessonStudents) studentCounts.set(item.studentName, (studentCounts.get(item.studentName) || 0) + 1);
+  for (const item of lessonStudents) {
+    if (!studentGrades.has(item.studentName)) studentGrades.set(item.studentName, new Set());
+    const lessonGrade = text(item.lesson.grade);
+    if (lessonGrade) studentGrades.get(item.studentName).add(lessonGrade);
+  }
+  for (const studentName of studentCounts.keys()) {
+    const profileGrade = text(get("SELECT grade FROM students WHERE name = ?", [studentName])?.grade);
+    if (profileGrade) {
+      if (!studentGrades.has(studentName)) studentGrades.set(studentName, new Set());
+      studentGrades.get(studentName).add(profileGrade);
+    }
+  }
   const studentNames = [...studentCounts.keys()];
   for (let i = 0; i < studentNames.length; i += 1) {
     for (let j = i + 1; j < studentNames.length; j += 1) {
       const a = studentNames[i];
       const b = studentNames[j];
-      if (a !== b && levenshtein(normalizeAuditName(a), normalizeAuditName(b)) <= 1) {
+      if (!activeStudentProfile(a) || !activeStudentProfile(b)) continue;
+      const gradesA = studentGrades.get(a) || new Set();
+      const gradesB = studentGrades.get(b) || new Set();
+      const knownA = [...gradesA];
+      const knownB = [...gradesB];
+      const sameKnownGrade = knownA.length && knownB.length && knownA.some((grade) => gradesB.has(grade));
+      const gradeUnknown = !knownA.length || !knownB.length;
+      if (a !== b && (sameKnownGrade || gradeUnknown) && levenshtein(normalizeAuditName(a), normalizeAuditName(b)) <= 1) {
+        const gradeNote = sameKnownGrade ? `（年级：${knownA.filter((grade) => gradesB.has(grade)).join("、")}）` : "（年级缺失，需人工确认）";
         issues.push(auditIssue({
           severity: "WARN",
           type: "student_typo",
@@ -1968,7 +1998,8 @@ function internalAudit(monthKey, { log = true } = {}) {
           field: "student_name",
           before_value: a,
           after_value: b,
-          message: `学生姓名疑似变体：${a} / ${b}`,
+          message: `学生姓名疑似变体：${a} / ${b}${gradeNote}`,
+          data: { grade_a: knownA.join("、"), grade_b: knownB.join("、") },
         }));
       }
     }
@@ -1977,6 +2008,7 @@ function internalAudit(monthKey, { log = true } = {}) {
   const usedPricing = new Set();
   const pricingRows = all("SELECT * FROM student_pricing ORDER BY student_name, subject");
   for (const pricing of pricingRows) {
+    if (!activeStudentProfile(pricing.student_name)) continue;
     const usages = lessonStudents.filter((item) => item.studentName === pricing.student_name && item.lesson.subject === pricing.subject);
     if (!usages.length) {
       issues.push(auditIssue({
