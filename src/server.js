@@ -200,6 +200,7 @@ function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at TEXT DEFAULT CURRENT_TIMESTAMP,
       run_id TEXT DEFAULT '',
+      issue_key TEXT DEFAULT '',
       source TEXT,
       severity TEXT,
       entity TEXT,
@@ -209,12 +210,25 @@ function initDb() {
       status TEXT DEFAULT 'open',
       notes TEXT DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS audit_ignores (
+      issue_key TEXT PRIMARY KEY,
+      ignored_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      source TEXT DEFAULT '',
+      entity TEXT DEFAULT '',
+      field TEXT DEFAULT '',
+      notes TEXT DEFAULT ''
+    );
   `);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
   if (!auditColumns.includes("run_id")) {
     db.prepare("ALTER TABLE audit_logs ADD COLUMN run_id TEXT DEFAULT ''").run();
   }
+  if (!auditColumns.includes("issue_key")) {
+    db.prepare("ALTER TABLE audit_logs ADD COLUMN issue_key TEXT DEFAULT ''").run();
+  }
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_logs_issue_key ON audit_logs(issue_key)").run();
 
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
@@ -1836,13 +1850,79 @@ function auditIssue({ source = "internal", severity = "WARN", type = "", entity 
   return { source, severity, type, entity, field, before_value: text(before_value), after_value: text(after_value), message, fix, ...data };
 }
 
+function auditKeyPart(value) {
+  return text(value).replace(/\s+/g, " ");
+}
+
+function auditIssueKey(issue, source = "internal") {
+  return [
+    auditKeyPart(issue.source || source),
+    auditKeyPart(issue.type || issue.source || ""),
+    auditKeyPart(issue.entity || ""),
+    auditKeyPart(issue.field || ""),
+    auditKeyPart(issue.before_value ?? issue.db_value ?? ""),
+    auditKeyPart(issue.after_value ?? issue.xlsx_value ?? ""),
+  ].join("||");
+}
+
+function auditLogFallbackKey(log) {
+  return [
+    auditKeyPart(log.source || ""),
+    auditKeyPart(log.severity || ""),
+    auditKeyPart(log.entity || ""),
+    auditKeyPart(log.field || ""),
+    auditKeyPart(log.before_value || ""),
+    auditKeyPart(log.after_value || ""),
+    auditKeyPart(log.notes || ""),
+  ].join("||");
+}
+
+function visibleAuditIssues(issues, source = "internal") {
+  return issues.filter((issue) => {
+    issue.issue_key = auditIssueKey(issue, source);
+    return !get("SELECT 1 FROM audit_ignores WHERE issue_key = ?", [issue.issue_key]);
+  });
+}
+
 function recordAuditIssues(runId, issues, source = "internal") {
   for (const issue of issues) {
+    const issueKey = issue.issue_key || auditIssueKey(issue, source);
+    issue.issue_key = issueKey;
+    if (get("SELECT 1 FROM audit_ignores WHERE issue_key = ?", [issueKey])) continue;
+    const existing = get("SELECT id FROM audit_logs WHERE issue_key = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [issueKey]);
+    if (existing) {
+      db.prepare(`
+        UPDATE audit_logs
+        SET run_at = CURRENT_TIMESTAMP,
+            run_id = ?,
+            source = ?,
+            severity = ?,
+            entity = ?,
+            field = ?,
+            before_value = ?,
+            after_value = ?,
+            notes = ?
+        WHERE id = ?
+      `).run(
+        runId,
+        issue.source || source,
+        issue.severity || "",
+        issue.entity || "",
+        issue.field || "",
+        issue.before_value ?? issue.db_value ?? "",
+        issue.after_value ?? issue.xlsx_value ?? "",
+        issue.message || issue.notes || "",
+        existing.id,
+      );
+      issue.audit_log_id = existing.id;
+      continue;
+    }
     db.prepare(`
-      INSERT INTO audit_logs(run_id, source, severity, entity, field, before_value, after_value, status, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)
+      INSERT INTO audit_logs(run_id, issue_key, source, severity, entity, field, before_value, after_value, status, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
     `).run(
       runId,
+      issueKey,
       issue.source || source,
       issue.severity || "",
       issue.entity || "",
@@ -1901,9 +1981,20 @@ function monthLessonStudents(monthKey) {
   return items;
 }
 
+function studentSubjectUsageSet() {
+  const used = new Set();
+  const rows = all("SELECT subject, student_names FROM lessons WHERE TRIM(subject) <> '' AND TRIM(student_names) <> ''");
+  for (const lesson of rows) {
+    for (const studentName of splitStudents(lesson.student_names)) {
+      used.add(`${studentName}|${lesson.subject}`);
+    }
+  }
+  return used;
+}
+
 function internalAudit(monthKey, { log = true } = {}) {
   const runId = `internal_${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
-  const issues = [];
+  let issues = [];
   const lessonStudents = monthLessonStudents(monthKey);
   const byStudent = new Map();
   for (const item of lessonStudents) {
@@ -2006,18 +2097,20 @@ function internalAudit(monthKey, { log = true } = {}) {
   }
 
   const usedPricing = new Set();
+  const historicalStudentSubjects = studentSubjectUsageSet();
   const pricingRows = all("SELECT * FROM student_pricing ORDER BY student_name, subject");
   for (const pricing of pricingRows) {
     if (!activeStudentProfile(pricing.student_name)) continue;
     const usages = lessonStudents.filter((item) => item.studentName === pricing.student_name && item.lesson.subject === pricing.subject);
     if (!usages.length) {
+      if (historicalStudentSubjects.has(`${pricing.student_name}|${pricing.subject}`)) continue;
       issues.push(auditIssue({
         severity: "WARN",
         type: "orphan_pricing",
         entity: `pricing_${pricing.id}`,
         field: "student_pricing",
         before_value: `${pricing.student_name}-${pricing.subject}`,
-        message: `${pricing.student_name}-${pricing.subject} 本月课程未使用，可能是历史残留`,
+        message: `${pricing.student_name}-${pricing.subject} 从未在课程中使用，可能是误建的个性价`,
         data: { pricing_id: pricing.id },
       }));
       continue;
@@ -2054,6 +2147,7 @@ function internalAudit(monthKey, { log = true } = {}) {
     }
   }
 
+  issues = visibleAuditIssues(issues, "internal");
   if (log) recordAuditIssues(runId, issues, "internal");
   const groups = {};
   for (const issue of issues) {
@@ -2646,7 +2740,22 @@ function backupDb(prefix = "pre_audit") {
 }
 
 function recentAuditLogs(limit = 200) {
-  return all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", [limit]);
+  return all(`
+    SELECT *
+    FROM audit_logs
+    WHERE id IN (
+      SELECT MAX(id)
+      FROM audit_logs
+      GROUP BY COALESCE(
+        NULLIF(issue_key, ''),
+        COALESCE(source, '') || '|' || COALESCE(severity, '') || '|' || COALESCE(entity, '') || '|' ||
+        COALESCE(field, '') || '|' || COALESCE(before_value, '') || '|' || COALESCE(after_value, '') || '|' ||
+        COALESCE(notes, '')
+      )
+    )
+    ORDER BY run_at DESC, id DESC
+    LIMIT ?
+  `, [limit]);
 }
 
 function canonicalStudents(value) {
@@ -2855,10 +2964,10 @@ function runNodeXlsxAudit(uploadPath, monthKey) {
   if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
   const runId = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const { sheet_name: sheetName, rows } = readXlsxTotalSheet(fs.readFileSync(uploadPath), monthKey);
-  const issues = [
+  const issues = visibleAuditIssues([
     ...compareXlsxLessons(monthKey, rows),
     ...xlsxStudentCrossChecks(rows),
-  ];
+  ], "xlsx");
   const report = {
     run_id: runId,
     month_key: monthKey,
@@ -3458,14 +3567,39 @@ function applyAuditIssues(issues, confirmCritical = false) {
   return { ok: true, fixed, skipped, backup };
 }
 
-function ignoreAuditIssues(ids) {
+function ignoreAuditIssues(ids, issueKeys = []) {
   const backup = backupDb();
   let ignored = 0;
+  const keys = new Set(issueKeys.map(text).filter(Boolean));
   for (const id of ids.map(Number).filter(Boolean)) {
-    const result = db.prepare("UPDATE audit_logs SET status = 'ignored' WHERE id = ?").run(id);
+    const log = get("SELECT * FROM audit_logs WHERE id = ?", [id]);
+    if (!log) continue;
+    const issueKey = text(log.issue_key) || auditLogFallbackKey(log);
+    keys.add(issueKey);
+    const result = db.prepare("UPDATE audit_logs SET status = 'ignored', issue_key = ? WHERE id = ?").run(issueKey, id);
     ignored += result.changes || 0;
   }
-  return { ok: true, ignored, backup };
+  for (const issueKey of keys) {
+    const log = get("SELECT * FROM audit_logs WHERE issue_key = ? ORDER BY id DESC LIMIT 1", [issueKey]) || {};
+    db.prepare(`
+      INSERT INTO audit_ignores(issue_key, source, entity, field, notes)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(issue_key) DO UPDATE SET
+        ignored_at = CURRENT_TIMESTAMP,
+        source = excluded.source,
+        entity = excluded.entity,
+        field = excluded.field,
+        notes = excluded.notes
+    `).run(
+      issueKey,
+      log.source || "",
+      log.entity || "",
+      log.field || "",
+      log.notes || "",
+    );
+    db.prepare("UPDATE audit_logs SET status = 'ignored' WHERE issue_key = ?").run(issueKey);
+  }
+  return { ok: true, ignored, ignored_keys: keys.size, backup };
 }
 
 function lessonWarnings(lesson) {
@@ -3641,7 +3775,7 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/audit/ignore") {
     const body = await readBody(req);
-    return sendJson(res, ignoreAuditIssues(body.ids || []));
+    return sendJson(res, ignoreAuditIssues(body.ids || [], body.issue_keys || []));
   }
   if (req.method === "GET" && url.pathname === "/api/schedule-conflicts") {
     return sendJson(res, scheduleConflicts(resolveMonthKey(url)));

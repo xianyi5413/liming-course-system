@@ -1355,7 +1355,7 @@ function issueRows(issues, sourceKey) {
       <td class="text-cell">${escapeHtml(issue.message || issue.notes || "")}</td>
       <td class="text-cell audit-actions">
         ${hasApplicablePatch(issue) ? `<button class="btn audit-apply-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id || ""}">${issue.patch?.type === "insert_lesson" ? "从 xlsx 补录" : "以 xlsx 为准"}</button>` : ""}
-        ${issue.audit_log_id ? `<button class="btn audit-ignore-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id}">以数据库为准</button>` : ""}
+        ${issue.audit_log_id ? `<button class="btn audit-ignore-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id}" data-issue-key="${escapeHtml(issue.issue_key || "")}">忽略此项</button>` : ""}
       </td>
     </tr>
   `).join("");
@@ -3811,10 +3811,16 @@ function wireEvents() {
   document.querySelectorAll(".audit-ignore-one").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!button.dataset.logId) return;
-      const result = await request("/api/audit/ignore", { method: "POST", body: { ids: [Number(button.dataset.logId)] } });
+      const result = await request("/api/audit/ignore", {
+        method: "POST",
+        body: {
+          ids: [Number(button.dataset.logId)],
+          issue_keys: button.dataset.issueKey ? [button.dataset.issueKey] : [],
+        },
+      });
       removeAuditIssueByLogId(button.dataset.source, button.dataset.logId);
       await refreshAuditLogs();
-      alert(`已忽略 ${result.ignored} 条。已备份：${result.backup}`);
+      alert(`已忽略 ${result.ignored_keys || result.ignored} 类问题。之后相同问题不会再提示。已备份：${result.backup}`);
       render();
     });
   });
