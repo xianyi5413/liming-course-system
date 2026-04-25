@@ -65,6 +65,10 @@ let expenseFilter = (() => {
 })();
 let auditState = { xlsxReport: null, internalReport: null, logs: [], busy: false };
 let customSelectEventsBound = false;
+let customDateEventsBound = false;
+let customDatePickerEl = null;
+let activeCustomDateInput = null;
+let activeCustomDateMonth = null;
 
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
@@ -258,8 +262,14 @@ function closeCustomSelects(except = null) {
   document.querySelectorAll(".custom-select.open").forEach((selectBox) => {
     if (selectBox === except) return;
     selectBox.classList.remove("open");
+    selectBox.classList.remove("open-up");
+    customSelectMenu(selectBox)?.classList.remove("open", "open-up");
     selectBox.querySelector(".custom-select-button")?.setAttribute("aria-expanded", "false");
   });
+}
+
+function customSelectMenu(wrapper) {
+  return wrapper?._customSelectMenu || wrapper?.querySelector(".custom-select-menu") || null;
 }
 
 function selectDisplayText(select) {
@@ -268,14 +278,73 @@ function selectDisplayText(select) {
 
 function syncCustomSelect(select, wrapper) {
   wrapper.querySelector(".custom-select-value").textContent = selectDisplayText(select);
-  wrapper.querySelectorAll(".custom-select-option").forEach((option) => {
+  customSelectMenu(wrapper)?.querySelectorAll(".custom-select-option").forEach((option) => {
     const selected = option.dataset.value === select.value;
     option.classList.toggle("selected", selected);
     option.setAttribute("aria-selected", selected ? "true" : "false");
   });
 }
 
+function cleanupCustomSelectPortals() {
+  document.querySelectorAll('.custom-select-menu[data-select-portal="1"]').forEach((menu) => {
+    if (!menu._customSelectOwner?.isConnected) menu.remove();
+  });
+}
+
+function positionCustomSelectMenu(wrapper) {
+  const button = wrapper.querySelector(".custom-select-button");
+  const menu = customSelectMenu(wrapper);
+  if (!button || !menu || !wrapper.classList.contains("open")) return;
+
+  const rect = button.getBoundingClientRect();
+  menu.style.minWidth = `${rect.width}px`;
+  menu.style.maxWidth = `${Math.max(160, window.innerWidth - 16)}px`;
+  menu.style.left = "8px";
+  menu.style.top = "8px";
+
+  const belowSpace = window.innerHeight - rect.bottom - 8;
+  const aboveSpace = rect.top - 8;
+  const openUp = belowSpace < 180 && aboveSpace > belowSpace;
+  const availableHeight = Math.max(132, openUp ? aboveSpace : belowSpace);
+  menu.style.maxHeight = `${Math.min(280, availableHeight)}px`;
+
+  const menuRect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuRect.width - 8));
+  const top = openUp
+    ? Math.max(8, rect.top - Math.min(menuRect.height, availableHeight) - 6)
+    : Math.min(window.innerHeight - 8, rect.bottom + 6);
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  wrapper.classList.toggle("open-up", openUp);
+  menu.classList.toggle("open-up", openUp);
+}
+
+function scrollCustomSelectOptionIntoView(wrapper) {
+  const menu = customSelectMenu(wrapper);
+  const selected = menu?.querySelector(".custom-select-option.selected");
+  if (!menu || !selected) return;
+  const top = selected.offsetTop;
+  const bottom = top + selected.offsetHeight;
+  if (top < menu.scrollTop) {
+    menu.scrollTop = top;
+  } else if (bottom > menu.scrollTop + menu.clientHeight) {
+    menu.scrollTop = bottom - menu.clientHeight;
+  }
+}
+
+function openCustomSelect(wrapper) {
+  closeCustomSelects(wrapper);
+  wrapper.classList.add("open");
+  customSelectMenu(wrapper)?.classList.add("open");
+  wrapper.querySelector(".custom-select-button")?.setAttribute("aria-expanded", "true");
+  positionCustomSelectMenu(wrapper);
+  scrollCustomSelectOptionIntoView(wrapper);
+  positionCustomSelectMenu(wrapper);
+}
+
 function enhanceCustomSelects() {
+  cleanupCustomSelectPortals();
   document.querySelectorAll("select").forEach((select) => {
     if (select.multiple || select.dataset.customSelect === "1") return;
     select.dataset.customSelect = "1";
@@ -301,7 +370,10 @@ function enhanceCustomSelects() {
 
     const menu = document.createElement("div");
     menu.className = "custom-select-menu";
+    menu.dataset.selectPortal = "1";
     menu.setAttribute("role", "listbox");
+    menu._customSelectOwner = wrapper;
+    wrapper._customSelectMenu = menu;
 
     [...select.options].forEach((nativeOption) => {
       const option = document.createElement("button");
@@ -323,11 +395,11 @@ function enhanceCustomSelects() {
     button.addEventListener("click", () => {
       const willOpen = !wrapper.classList.contains("open");
       closeCustomSelects(wrapper);
-      wrapper.classList.toggle("open", willOpen);
-      button.setAttribute("aria-expanded", willOpen ? "true" : "false");
-      if (willOpen) {
-        const selected = wrapper.querySelector(".custom-select-option.selected");
-        selected?.scrollIntoView({ block: "nearest" });
+      if (willOpen) openCustomSelect(wrapper);
+      else {
+        wrapper.classList.remove("open", "open-up");
+        customSelectMenu(wrapper)?.classList.remove("open", "open-up");
+        button.setAttribute("aria-expanded", "false");
       }
     });
     button.addEventListener("keydown", (event) => {
@@ -337,10 +409,8 @@ function enhanceCustomSelects() {
       }
       if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        closeCustomSelects(wrapper);
-        wrapper.classList.add("open");
-        button.setAttribute("aria-expanded", "true");
-        (wrapper.querySelector(".custom-select-option.selected") || wrapper.querySelector(".custom-select-option"))?.focus();
+        openCustomSelect(wrapper);
+        (customSelectMenu(wrapper)?.querySelector(".custom-select-option.selected") || customSelectMenu(wrapper)?.querySelector(".custom-select-option"))?.focus();
       }
     });
     menu.addEventListener("keydown", (event) => {
@@ -358,17 +428,166 @@ function enhanceCustomSelects() {
       }
     });
 
-    wrapper.append(button, menu);
+    wrapper.append(button);
     select.insertAdjacentElement("afterend", wrapper);
+    document.body.appendChild(menu);
     syncCustomSelect(select, wrapper);
   });
 
   if (!customSelectEventsBound) {
     customSelectEventsBound = true;
     document.addEventListener("click", (event) => {
-      if (!event.target.closest(".custom-select")) closeCustomSelects();
+      if (!event.target.closest(".custom-select") && !event.target.closest(".custom-select-menu")) closeCustomSelects();
     });
     window.addEventListener("resize", () => closeCustomSelects());
+    window.addEventListener("scroll", () => {
+      document.querySelectorAll(".custom-select.open").forEach(positionCustomSelectMenu);
+    }, true);
+  }
+}
+
+function parseDateValue(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function customDateMonthFor(input) {
+  const current = parseDateValue(input.value);
+  if (current) return new Date(current.getFullYear(), current.getMonth(), 1);
+  const month = parseDateValue(state?.settings?.month_key || activeMonth);
+  const fallback = month || new Date();
+  return new Date(fallback.getFullYear(), fallback.getMonth(), 1);
+}
+
+function ensureCustomDatePicker() {
+  if (customDatePickerEl) return customDatePickerEl;
+  customDatePickerEl = document.createElement("div");
+  customDatePickerEl.className = "custom-date-picker";
+  customDatePickerEl.hidden = true;
+  customDatePickerEl.addEventListener("click", (event) => {
+    const nav = event.target.closest("[data-month-offset]");
+    if (nav && activeCustomDateInput) {
+      activeCustomDateMonth.setMonth(activeCustomDateMonth.getMonth() + Number(nav.dataset.monthOffset || 0));
+      renderCustomDatePicker();
+      return;
+    }
+
+    const day = event.target.closest("[data-date]");
+    if (day && activeCustomDateInput) {
+      const input = activeCustomDateInput;
+      input.value = day.dataset.date;
+      closeCustomDatePicker();
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+  document.body.appendChild(customDatePickerEl);
+  return customDatePickerEl;
+}
+
+function customDatePickerCells(month, selectedValue) {
+  const today = todayDate();
+  const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);
+  const gridStart = new Date(monthStart);
+  gridStart.setDate(monthStart.getDate() - ((monthStart.getDay() + 6) % 7));
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const value = dateKey(date);
+    const classes = [
+      "custom-date-day",
+      date.getMonth() === month.getMonth() ? "" : "outside",
+      value === selectedValue ? "selected" : "",
+      value === today ? "today" : "",
+    ].filter(Boolean).join(" ");
+    return `<button class="${classes}" type="button" data-date="${escapeHtml(value)}">${date.getDate()}</button>`;
+  }).join("");
+}
+
+function positionCustomDatePicker() {
+  if (!activeCustomDateInput || !customDatePickerEl || customDatePickerEl.hidden) return;
+  const rect = activeCustomDateInput.getBoundingClientRect();
+  const width = Math.min(292, window.innerWidth - 16);
+  customDatePickerEl.style.width = `${width}px`;
+  customDatePickerEl.style.left = "8px";
+  customDatePickerEl.style.top = "8px";
+  const pickerRect = customDatePickerEl.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - pickerRect.width - 8));
+  let top = rect.bottom + 8;
+  if (top + pickerRect.height > window.innerHeight - 8) {
+    top = Math.max(8, rect.top - pickerRect.height - 8);
+  }
+  customDatePickerEl.style.left = `${left}px`;
+  customDatePickerEl.style.top = `${top}px`;
+}
+
+function renderCustomDatePicker() {
+  if (!activeCustomDateInput || !activeCustomDateMonth) return;
+  const picker = ensureCustomDatePicker();
+  const title = `${activeCustomDateMonth.getFullYear()}年${activeCustomDateMonth.getMonth() + 1}月`;
+  picker.innerHTML = `
+    <div class="custom-date-head">
+      <button class="custom-date-nav" type="button" data-month-offset="-1" aria-label="上个月">‹</button>
+      <div class="custom-date-title">${escapeHtml(title)}</div>
+      <button class="custom-date-nav" type="button" data-month-offset="1" aria-label="下个月">›</button>
+    </div>
+    <div class="custom-date-weekdays" aria-hidden="true">
+      <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+    </div>
+    <div class="custom-date-grid">
+      ${customDatePickerCells(activeCustomDateMonth, activeCustomDateInput.value)}
+    </div>
+  `;
+  picker.hidden = false;
+  positionCustomDatePicker();
+}
+
+function openCustomDatePicker(input) {
+  closeCustomSelects();
+  activeCustomDateInput = input;
+  activeCustomDateMonth = customDateMonthFor(input);
+  renderCustomDatePicker();
+  input.setAttribute("aria-expanded", "true");
+}
+
+function closeCustomDatePicker() {
+  if (activeCustomDateInput) activeCustomDateInput.setAttribute("aria-expanded", "false");
+  activeCustomDateInput = null;
+  activeCustomDateMonth = null;
+  if (customDatePickerEl) customDatePickerEl.hidden = true;
+}
+
+function enhanceCustomDateInputs() {
+  document.querySelectorAll('.date-range-inputs input[type="date"]').forEach((input) => {
+    if (input.dataset.customDate === "1") return;
+    input.dataset.customDate = "1";
+    input.type = "text";
+    input.readOnly = true;
+    input.placeholder = "选择日期";
+    input.classList.add("custom-date-input");
+    input.setAttribute("aria-haspopup", "dialog");
+    input.setAttribute("aria-expanded", "false");
+    input.addEventListener("click", () => openCustomDatePicker(input));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeCustomDatePicker();
+      } else if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+        event.preventDefault();
+        openCustomDatePicker(input);
+      }
+    });
+  });
+
+  if (!customDateEventsBound) {
+    customDateEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (event.target.closest(".custom-date-picker") || event.target.closest(".custom-date-input")) return;
+      closeCustomDatePicker();
+    });
+    window.addEventListener("resize", positionCustomDatePicker);
+    window.addEventListener("scroll", positionCustomDatePicker, true);
   }
 }
 
@@ -1371,19 +1590,13 @@ function activeGroup() {
 }
 
 function renderSecondaryNav(group) {
-  const primaryTabs = (group.views || []).map(([key, label]) => `
+  const tabs = [...(group.views || []), ...(group.moreViews || [])].map(([key, label]) => `
     <button class="nav-sub-btn ${view === key ? "active" : ""}" data-group="${group.key}" data-view="${key}">
       ${escapeHtml(label)}
     </button>
   `).join("");
-  const more = group.moreViews?.length ? `
-    <select class="nav-more-select" data-group="${group.key}" aria-label="更多功能">
-      <option value="">更多</option>
-      ${group.moreViews.map(([key, label]) => `<option value="${escapeHtml(key)}" ${view === key ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-    </select>
-  ` : "";
-  if (!primaryTabs && !more) return "";
-  return `<div class="nav-subtabs">${primaryTabs}${more}</div>`;
+  if (!tabs) return "";
+  return `<div class="nav-subtabs">${tabs}</div>`;
 }
 
 function renderNav() {
@@ -2066,12 +2279,37 @@ function compactMoney(value) {
   return money2(n);
 }
 
+function chartPointPath(points) {
+  return points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+}
+
+function chartSmoothPath(points) {
+  if (!points.length) return "";
+  if (points.length < 3) return chartPointPath(points);
+  let path = `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const midX = (p1.x + p2.x) / 2;
+    path += ` C${midX.toFixed(1)},${p1.y.toFixed(1)} ${midX.toFixed(1)},${p2.y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+  }
+  return path;
+}
+
+function chartAreaPath(points, baselineY) {
+  if (!points.length) return "";
+  const line = chartSmoothPath(points);
+  const first = points[0];
+  const last = points[points.length - 1];
+  return `${line} L${last.x.toFixed(1)},${baselineY.toFixed(1)} L${first.x.toFixed(1)},${baselineY.toFixed(1)} Z`;
+}
+
 function financeTrendChart(rows) {
   const data = (rows || []).slice(-12);
   if (!data.length) return `<div class="trend-empty">暂无走势数据</div>`;
-  const width = 760;
-  const height = 280;
-  const margin = { left: 64, right: 64, top: 28, bottom: 44 };
+  const width = 820;
+  const height = 380;
+  const margin = { left: 60, right: 58, top: 48, bottom: 54 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
   const profits = data.map((row) => numberValue(row.gross_profit));
@@ -2085,19 +2323,21 @@ function financeTrendChart(rows) {
   const x = (index) => margin.left + (data.length <= 1 ? innerW / 2 : index * innerW / (data.length - 1));
   const yP = (value) => margin.top + (pMax - value) / pSpan * innerH;
   const yR = (value) => margin.top + (rMax - value) / rSpan * innerH;
+  const profitPoints = data.map((row, index) => ({ x: x(index), y: yP(numberValue(row.gross_profit)) }));
+  const ratePoints = data.map((row, index) => ({ x: x(index), y: yR(numberValue(row.gross_margin)) }));
+  const profitLine = chartSmoothPath(profitPoints);
+  const profitArea = chartAreaPath(profitPoints, Math.max(margin.top, Math.min(margin.top + innerH, yP(0))));
+  const rateLine = chartSmoothPath(ratePoints);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
     const y = margin.top + ratio * innerH;
     const profitValue = pMax - ratio * pSpan;
     const rateValue = rMax - ratio * rSpan;
     return `
-      <line x1="${margin.left}" x2="${width - margin.right}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--line-soft)" stroke-dasharray="2 4"></line>
+      <line class="trend-grid" x1="${margin.left}" x2="${width - margin.right}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"></line>
       <text class="trend-tick" x="${margin.left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${escapeHtml(compactMoney(profitValue))}</text>
       <text class="trend-tick" x="${width - margin.right + 8}" y="${(y + 4).toFixed(1)}">${escapeHtml(percent(rateValue))}</text>
     `;
   }).join("");
-  const profitLine = data.map((row, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${yP(numberValue(row.gross_profit)).toFixed(1)}`).join(" ");
-  const profitArea = `${profitLine} L${x(data.length - 1).toFixed(1)},${(margin.top + innerH).toFixed(1)} L${x(0).toFixed(1)},${(margin.top + innerH).toFixed(1)} Z`;
-  const rateLine = data.map((row, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${yR(numberValue(row.gross_margin)).toFixed(1)}`).join(" ");
   const peakIndex = profits.indexOf(Math.max(...profits));
   const points = data.map((row, index) => {
     const px = x(index);
@@ -2111,34 +2351,35 @@ function financeTrendChart(rows) {
     return `
       <g>
         <title>${escapeHtml(`${month}：毛利 ¥${money2(row.gross_profit)} / 毛利率 ${percent(row.gross_margin)}`)}</title>
-        <circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4.5" fill="var(--brand)" stroke="var(--panel)" stroke-width="2"></circle>
-        <circle cx="${px.toFixed(1)}" cy="${ry.toFixed(1)}" r="3.5" fill="var(--panel)" stroke="var(--accent)" stroke-width="2"></circle>
+        <circle class="trend-profit-point" cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3.8"></circle>
+        <circle class="trend-rate-point" cx="${px.toFixed(1)}" cy="${ry.toFixed(1)}" r="3.4"></circle>
         ${label}
         <text class="trend-month" x="${px.toFixed(1)}" y="${height - margin.bottom + 18}" text-anchor="middle">${escapeHtml(month)}</text>
       </g>
     `;
   }).join("");
   const legend = `
-    <g class="trend-legend" transform="translate(${margin.left}, 10)">
-      <circle cx="6" cy="6" r="4" fill="var(--brand)"></circle>
-      <text x="16" y="10">毛利</text>
-      <circle cx="80" cy="6" r="3.5" fill="var(--panel)" stroke="var(--accent)" stroke-width="2"></circle>
-      <text x="92" y="10">毛利率</text>
+    <g class="trend-legend" transform="translate(${margin.left}, 18)">
+      <rect class="trend-legend-profit" x="0" y="-6" width="22" height="10" rx="2"></rect>
+      <text x="30" y="4">毛利</text>
+      <rect class="trend-legend-rate" x="92" y="-6" width="22" height="10" rx="2"></rect>
+      <text x="122" y="4">毛利率</text>
     </g>
   `;
   return `
     <svg class="trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="利润走势">
       <defs>
         <linearGradient id="trendArea" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.22"></stop>
+          <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.2"></stop>
+          <stop offset="58%" stop-color="var(--brand)" stop-opacity="0.08"></stop>
           <stop offset="100%" stop-color="var(--brand)" stop-opacity="0"></stop>
         </linearGradient>
       </defs>
       ${ticks}
       <line class="trend-axis" x1="${margin.left}" x2="${width - margin.right}" y1="${height - margin.bottom}" y2="${height - margin.bottom}"></line>
-      <path d="${profitArea}" fill="url(#trendArea)"></path>
-      <path d="${profitLine}" fill="none" stroke="var(--brand)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-      <path d="${rateLine}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round"></path>
+      <path class="trend-profit-area" d="${profitArea}"></path>
+      <path class="trend-profit-line" d="${profitLine}"></path>
+      <path class="trend-rate-line" d="${rateLine}"></path>
       ${points}
       ${legend}
     </svg>
@@ -2156,12 +2397,6 @@ function renderFinance() {
   const rangeLabel = `${summary.range?.start || financeRange.start} 至 ${summary.range?.end || financeRange.end}`;
   const netCashFlow = summary.overview.net_cash_flow || {};
   const netCashValue = numberValue(netCashFlow.current);
-  const commandStats = [
-    { label: "期间收入", value: `¥${money2(summary.overview.revenue.current)}`, tone: "success" },
-    { label: "毛利", value: `¥${money2(summary.overview.gross_profit.current)}`, tone: "brand" },
-    { label: "毛利率", value: percent(summary.overview.gross_margin.current), tone: "info" },
-    { label: "期末沉淀", value: `¥${money2(depositMetric.current)}`, tone: "neutral" },
-  ];
   renderTopbar(
     "经营概览",
     `期间汇总：${rangeLabel}`,
@@ -2218,14 +2453,6 @@ function renderFinance() {
         <span>净现金流</span>
         <strong>¥${money2(netCashValue)}</strong>
         <small class="mom ${momClass(netCashFlow.mom_pct)}">环比 ${momLabel(netCashFlow.mom_pct)}</small>
-      </div>
-      <div class="finance-command-stats">
-        ${commandStats.map((item) => `
-          <div class="finance-command-stat ${item.tone}">
-            <span>${escapeHtml(item.label)}</span>
-            <strong>${escapeHtml(item.value)}</strong>
-          </div>
-        `).join("")}
       </div>
     </div>
 
@@ -3147,17 +3374,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".nav-more-select").forEach((select) => {
-    select.addEventListener("change", () => {
-      if (!select.value) return;
-      view = select.value;
-      activeNavGroup = select.dataset.group || groupForView(view).key;
-      localStorage.setItem("liming:view", view);
-      localStorage.setItem("liming:nav-group", activeNavGroup);
-      render();
-    });
-  });
-
   document.querySelectorAll(".month-select").forEach((select) => {
     select.addEventListener("change", async () => {
       activeMonth = select.value;
@@ -3617,16 +3833,18 @@ function wireEvents() {
 
   document.querySelectorAll(".lesson-filter-input").forEach((input) => {
     const applyLessonFilter = (rerender = true) => {
+      const field = input.dataset.filterField;
+      const monthKey = state.settings.month_key;
       focusedLessonIds = [];
       lessonFilter = {
         ...lessonFilter,
-        month_key: state.settings.month_key,
-        [input.dataset.filterField]: input.value,
+        month_key: monthKey,
+        [field]: input.value,
       };
       saveLessonFilter();
       if (rerender) {
-        if (input.tagName === "SELECT" || input.type === "date") render();
-        else renderLessonFilterSoon(input.dataset.filterField, input.value);
+        if (input.tagName === "SELECT" || input.type === "date" || field === "start_date" || field === "end_date") render();
+        else renderLessonFilterSoon(field, input.value);
       }
     };
 
@@ -4124,6 +4342,7 @@ function wireEvents() {
   });
 
   enhanceCustomSelects();
+  enhanceCustomDateInputs();
 }
 
 load().catch((error) => {

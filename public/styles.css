@@ -433,8 +433,7 @@ button:disabled,
   margin-left: 14px;
 }
 
-.nav-sub-btn,
-.nav-more-select {
+.nav-sub-btn {
   min-height: 32px;
   border: 0;
   border-radius: 6px;
@@ -450,22 +449,14 @@ button:disabled,
   cursor: pointer;
 }
 
-.nav-sub-btn:hover,
-.nav-more-select:hover {
+.nav-sub-btn:hover {
   background: var(--sidebar-hover);
   color: var(--sidebar-ink);
 }
 
-.nav-sub-btn.active,
-.nav-more-select:has(option:checked:not([value=""])) {
+.nav-sub-btn.active {
   background: var(--sidebar-active);
   color: var(--sidebar-ink);
-}
-
-.nav-more-select {
-  width: 100%;
-  padding: 7px 10px;
-  appearance: none;
 }
 
 .main {
@@ -1659,9 +1650,9 @@ select.control {
 }
 
 .custom-select-menu {
-  position: absolute;
-  z-index: 90;
-  top: calc(100% + 6px);
+  position: fixed;
+  z-index: 220;
+  top: 0;
   left: 0;
   display: none;
   min-width: 100%;
@@ -1674,11 +1665,14 @@ select.control {
   border-radius: var(--radius);
   background: var(--panel-raised);
   box-shadow: 0 18px 42px rgba(17, 27, 37, 0.16), 0 2px 8px rgba(17, 27, 37, 0.08);
+  overscroll-behavior: contain;
 }
 
-.custom-select.open .custom-select-menu {
+.custom-select.open .custom-select-menu,
+.custom-select-menu.open {
   display: grid;
   gap: 2px;
+  animation: surface-enter 120ms var(--ease-out);
 }
 
 .custom-select-option {
@@ -1979,14 +1973,10 @@ select.control {
 }
 
 .finance-command-panel {
-  display: grid;
-  grid-template-columns: minmax(280px, 1.1fr) minmax(420px, 2fr);
-  gap: var(--space-4);
   margin-bottom: var(--space-5);
 }
 
-.finance-command-main,
-.finance-command-stat {
+.finance-command-main {
   border: 1px solid rgba(169, 186, 199, 0.28);
   border-radius: var(--radius);
   background: var(--panel-raised);
@@ -2000,7 +1990,7 @@ select.control {
   align-content: center;
   border-left: 0;
   background:
-    linear-gradient(135deg, rgba(15, 118, 110, 0.11), rgba(23, 92, 211, 0.06)),
+    linear-gradient(135deg, rgba(15, 118, 110, 0.12), rgba(23, 92, 211, 0.05)),
     var(--panel-raised);
 }
 
@@ -2010,8 +2000,7 @@ select.control {
     var(--panel-raised);
 }
 
-.finance-command-main span,
-.finance-command-stat span {
+.finance-command-main span {
   color: var(--muted);
   font-size: var(--text-caption);
   font-weight: 700;
@@ -2039,24 +2028,6 @@ select.control {
   margin-top: var(--space-3);
 }
 
-.finance-command-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-4);
-}
-
-.finance-command-stat {
-  min-height: 168px;
-  padding: var(--space-5);
-  display: grid;
-  align-content: center;
-  gap: var(--space-2);
-  position: relative;
-  overflow: hidden;
-  border-top: 0;
-}
-
-.finance-command-stat::after,
 .finance-kpi::after {
   content: "";
   position: absolute;
@@ -2068,7 +2039,6 @@ select.control {
   background: var(--line-soft);
 }
 
-.finance-command-stat::before,
 .finance-kpi::before {
   content: "";
   position: absolute;
@@ -2079,30 +2049,6 @@ select.control {
   height: 3px;
   border-radius: 999px;
   background: var(--brand);
-}
-
-.finance-command-stat strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--ink-strong);
-  font-family: var(--font-number);
-  font-size: 1.55rem;
-  font-weight: 650;
-  line-height: 1.08;
-  font-variant-numeric: tabular-nums;
-}
-
-.finance-command-stat.success {
-  --brand: var(--success);
-}
-
-.finance-command-stat.brand {
-  --brand: var(--brand-dark);
-}
-
-.finance-command-stat.info {
-  --brand: var(--info);
 }
 
 .finance-kpi {
@@ -2421,6 +2367,7 @@ select.control {
 .trend-svg {
   max-width: 1040px;
   margin: 0 auto;
+  padding: 4px var(--space-4) var(--space-3);
 }
 
 .trend-svg text {
@@ -2430,29 +2377,85 @@ select.control {
 .trend-svg .trend-tick {
   font-size: 11px;
   fill: var(--muted);
+  opacity: 0.82;
 }
 
 .trend-svg .trend-month {
   font-size: 12px;
   fill: var(--muted);
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .trend-svg .trend-label {
   font-size: 11px;
-  fill: var(--brand-dark);
-  font-weight: 700;
+  fill: var(--ink-strong);
+  font-weight: 800;
 }
 
 .trend-svg .trend-axis {
   stroke: var(--line);
   stroke-width: 1;
+  opacity: 0.82;
+}
+
+.trend-svg .trend-grid {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+  stroke-dasharray: 3 7;
+  opacity: 0.9;
+}
+
+.trend-profit-area {
+  fill: url(#trendArea);
+}
+
+.trend-profit-line,
+.trend-rate-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trend-profit-line {
+  stroke: var(--brand);
+  stroke-width: 2.8;
+  filter: drop-shadow(0 4px 8px rgba(15, 118, 110, 0.12));
+}
+
+.trend-rate-line {
+  stroke: var(--accent);
+  stroke-width: 2.3;
+  opacity: 0.92;
+}
+
+.trend-profit-point {
+  fill: var(--brand);
+  stroke: var(--panel-raised);
+  stroke-width: 2.4;
+}
+
+.trend-rate-point {
+  fill: var(--panel-raised);
+  stroke: var(--accent);
+  stroke-width: 2.2;
+}
+
+.trend-legend-profit {
+  fill: rgba(15, 118, 110, 0.12);
+  stroke: var(--brand);
+  stroke-width: 2;
+}
+
+.trend-legend-rate {
+  fill: rgba(23, 92, 211, 0.08);
+  stroke: var(--accent);
+  stroke-width: 2;
 }
 
 .trend-svg .trend-legend text {
   font-size: 12px;
   fill: var(--muted);
-  font-weight: 600;
+  font-weight: 750;
 }
 
 .trend-empty {
@@ -2841,18 +2844,181 @@ tr.risk-unpaid:hover td {
 }
 
 .date-range-inputs {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--input-bg);
+  background: color-mix(in srgb, var(--input-bg) 86%, var(--panel-raised));
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  transition: border-color 140ms var(--ease-out), background-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
 }
 
 .date-range-inputs .control {
-  min-width: 146px;
+  min-width: 132px;
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font-family: var(--font-number);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  padding: 5px 8px;
+}
+
+.date-range-inputs:hover {
+  border-color: var(--brand-border);
+  background: var(--surface-hover);
+}
+
+.date-range-inputs:focus-within {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--ring);
+}
+
+.date-range-inputs .control:hover,
+.date-range-inputs .control:focus {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.date-range-inputs input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.62;
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.date-range-inputs input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  background: var(--brand-soft);
+  opacity: 0.92;
+}
+
+.date-range-inputs .custom-date-input {
+  cursor: pointer;
+  text-align: center;
+  caret-color: transparent;
+}
+
+.date-range-inputs .custom-date-input::placeholder {
+  color: var(--muted);
+  font-family: var(--font-ui);
 }
 
 .date-range-inputs b {
+  flex: 0 0 auto;
+  width: 16px;
   color: var(--muted);
   font-weight: 600;
+  text-align: center;
+}
+
+.custom-date-picker {
+  position: fixed;
+  z-index: 120;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  box-shadow: 0 18px 42px rgba(17, 27, 37, 0.14), 0 2px 8px rgba(17, 27, 37, 0.08);
+  color: var(--ink);
+  animation: surface-enter 140ms var(--ease-out);
+}
+
+.custom-date-head {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.custom-date-title {
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  font-weight: 850;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.custom-date-nav,
+.custom-date-day {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  transition: background-color 120ms var(--ease-out), color 120ms var(--ease-out), box-shadow 120ms var(--ease-out);
+}
+
+.custom-date-nav {
+  width: 34px;
+  height: 34px;
+  color: var(--muted);
+  font-size: 21px;
+  line-height: 1;
+}
+
+.custom-date-nav:hover,
+.custom-date-nav:focus-visible {
+  outline: 0;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.custom-date-weekdays,
+.custom-date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.custom-date-weekdays {
+  margin-bottom: var(--space-1);
+}
+
+.custom-date-weekdays span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+  line-height: 28px;
+  text-align: center;
+}
+
+.custom-date-day {
+  height: 34px;
+  min-width: 0;
+  color: var(--ink);
+  font-family: var(--font-number);
+  font-size: var(--text-ui);
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.custom-date-day.outside {
+  color: var(--muted);
+  opacity: 0.58;
+}
+
+.custom-date-day:hover,
+.custom-date-day:focus-visible {
+  outline: 0;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.custom-date-day.today {
+  box-shadow: inset 0 0 0 1px var(--brand-border);
+}
+
+.custom-date-day.selected {
+  background: var(--brand);
+  color: var(--primary-ink);
+  box-shadow: none;
 }
 
 .filter-summary {
@@ -2882,13 +3048,8 @@ tr.risk-unpaid:hover td {
 
 @media (max-width: 1180px) {
   .summary-grid,
-  .finance-kpi-grid,
-  .finance-command-stats {
+  .finance-kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .finance-command-panel {
-    grid-template-columns: 1fr;
   }
 
   .finance-visual-grid {
@@ -2950,7 +3111,6 @@ tr.risk-unpaid:hover td {
   .query-head,
   .finance-kpi-grid,
   .finance-command-panel,
-  .finance-command-stats,
   .finance-visual-grid,
   .finance-two,
   .finance-panels {
@@ -3005,6 +3165,19 @@ tr.risk-unpaid:hover td {
   .date-range-inputs .control {
     width: 100%;
     min-width: 0;
+  }
+
+  .date-range-inputs {
+    flex-wrap: wrap;
+  }
+
+  .date-range-inputs .custom-select,
+  .date-range-inputs .control {
+    flex: 1 1 132px;
+  }
+
+  .date-range-inputs b {
+    display: none;
   }
 }
 
