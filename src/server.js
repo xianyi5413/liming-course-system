@@ -1237,49 +1237,88 @@ function monthsBetweenExclusive(startMonth, endMonth) {
   return monthsCovered(startMonth, endMonth).slice(1);
 }
 
+function carryOverNote(existing, fromMonth) {
+  const marker = `自动结转 ← ${fromMonth.slice(0, 7)}`;
+  const notes = text(existing?.notes);
+  if (!notes || notes.startsWith("自动结转")) return marker;
+  if (notes.includes(marker) || notes.includes("自动结转")) return notes;
+  return `${notes}；${marker}`;
+}
+
+function isAutoCarryOverRecord(row) {
+  if (!row) return false;
+  const notes = text(row.notes);
+  return text(row.source) === "carry_over" && (!notes || notes.startsWith("自动结转"));
+}
+
+function hasEmptyCarryOverFields(row) {
+  return row && num(row.prev_actual) === 0 && num(row.prev_gift) === 0;
+}
+
+function shouldRefreshCarryOver(row, force = false) {
+  if (!row) return true;
+  if (force) return true;
+  return isAutoCarryOverRecord(row) || hasEmptyCarryOverFields(row);
+}
+
+function carryOverCandidates(fromMonth, includeZero = false) {
+  return studentSummary(feeDetails(fromMonth), fromMonth, true)
+    .filter((row) => includeZero || num(row.actual_balance) !== 0 || num(row.gift_balance) !== 0);
+}
+
 function ensureCarryOver(monthKey) {
   if (!validMonthKey(monthKey)) throw new Error("month_key must be YYYY-MM-01");
   const fromMonth = previousDataMonth(monthKey);
   if (!fromMonth) {
-    return { month_key: monthKey, from_month: "", ensured: 0, carried_actual: 0, carried_gift: 0 };
+    return { month_key: monthKey, from_month: "", ensured: 0, updated: 0, skipped: 0, carried_actual: 0, carried_gift: 0 };
   }
 
-  const existing = new Set(all(`
-    SELECT student_name
-    FROM recharge_records
-    WHERE month_key = ? AND source = 'carry_over' AND TRIM(student_name) <> ''
-  `, [monthKey]).map((row) => row.student_name));
-  const candidates = studentSummary(feeDetails(fromMonth), fromMonth, true)
-    .filter((row) => num(row.actual_balance) !== 0 || num(row.gift_balance) !== 0);
-  db.prepare(`
-    UPDATE recharge_records
-    SET notes = ?
-    WHERE month_key = ?
-      AND source = 'carry_over'
-      AND (notes IS NULL OR notes = '' OR notes NOT LIKE '%←%')
-  `).run(`自动结转 ← ${fromMonth.slice(0, 7)}`, monthKey);
+  const candidates = carryOverCandidates(fromMonth);
   const insertRecharge = db.prepare(`
     INSERT OR IGNORE INTO recharge_records(
       student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
     )
     VALUES (?, ?, ?, ?, 0, 0, '', ?, 'carry_over', ?)
   `);
-  const note = `自动结转(补全) ← ${fromMonth.slice(0, 7)}`;
+  const updateRecharge = db.prepare(`
+    UPDATE recharge_records
+    SET grade = ?,
+        prev_actual = ?,
+        prev_gift = ?,
+        source = 'carry_over',
+        notes = ?
+    WHERE student_name = ? AND month_key = ?
+  `);
   let ensured = 0;
+  let updated = 0;
+  let skipped = 0;
   let carriedActual = 0;
   let carriedGift = 0;
   for (const row of candidates) {
-    if (existing.has(row.student_name)) continue;
     const actual = num(row.actual_balance);
     const gift = num(row.gift_balance);
-    const result = insertRecharge.run(row.student_name, row.grade || "", actual, gift, note, monthKey);
-    if (result.changes) {
+    const existing = get(
+      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
+      [row.student_name, monthKey],
+    );
+    if (existing) {
+      if (!shouldRefreshCarryOver(existing)) {
+        skipped += 1;
+        continue;
+      }
+      const changed = num(existing.prev_actual) !== actual
+        || num(existing.prev_gift) !== gift
+        || text(existing.grade) !== text(row.grade)
+        || !isAutoCarryOverRecord(existing);
+      updateRecharge.run(row.grade || "", actual, gift, carryOverNote(existing, fromMonth), row.student_name, monthKey);
+      if (changed) updated += 1;
+    } else if (insertRecharge.run(row.student_name, row.grade || "", actual, gift, carryOverNote(null, fromMonth), monthKey).changes) {
       ensured += 1;
-      carriedActual += actual;
-      carriedGift += gift;
     }
+    carriedActual += actual;
+    carriedGift += gift;
   }
-  return { month_key: monthKey, from_month: fromMonth, ensured, carried_actual: carriedActual, carried_gift: carriedGift };
+  return { month_key: monthKey, from_month: fromMonth, ensured, updated, skipped, carried_actual: carriedActual, carried_gift: carriedGift };
 }
 
 function ensureCarryOverChain(monthKey) {
@@ -1292,6 +1331,8 @@ function ensureCarryOverChain(monthKey) {
   }
   return {
     ensured: results.reduce((sum, row) => sum + num(row.ensured), 0),
+    updated: results.reduce((sum, row) => sum + num(row.updated), 0),
+    skipped: results.reduce((sum, row) => sum + num(row.skipped), 0),
     carried_actual: results.reduce((sum, row) => sum + num(row.carried_actual), 0),
     carried_gift: results.reduce((sum, row) => sum + num(row.carried_gift), 0),
     results,
@@ -2161,18 +2202,17 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
   if (!fromMonth || !toMonth) {
     throw new Error("from and to are required");
   }
-  const fromDetails = feeDetails(fromMonth);
-  const rows = studentSummary(fromDetails, fromMonth);
+  const rows = carryOverCandidates(fromMonth);
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
 
   for (const row of rows) {
     const existing = get(
-      "SELECT id FROM recharge_records WHERE student_name = ? AND month_key = ?",
+      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
       [row.student_name, toMonth],
     );
-    if (existing && !force) {
+    if (existing && !shouldRefreshCarryOver(existing, force)) {
       skipped += 1;
       continue;
     }
@@ -2181,17 +2221,26 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
         UPDATE recharge_records
         SET grade = ?,
             prev_actual = ?,
-            prev_gift = ?
+            prev_gift = ?,
+            source = 'carry_over',
+            notes = ?
         WHERE student_name = ? AND month_key = ?
-      `).run(row.grade || "", num(row.actual_balance), num(row.gift_balance), row.student_name, toMonth);
+      `).run(
+        row.grade || "",
+        num(row.actual_balance),
+        num(row.gift_balance),
+        carryOverNote(existing, fromMonth),
+        row.student_name,
+        toMonth,
+      );
       updated += 1;
     } else {
       db.prepare(`
         INSERT INTO recharge_records(
           student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
         )
-        VALUES (?, ?, ?, ?, 0, 0, '', '自动结转', 'carry_over', ?)
-      `).run(row.student_name, row.grade || "", num(row.actual_balance), num(row.gift_balance), toMonth);
+        VALUES (?, ?, ?, ?, 0, 0, '', ?, 'carry_over', ?)
+      `).run(row.student_name, row.grade || "", num(row.actual_balance), num(row.gift_balance), carryOverNote(null, fromMonth), toMonth);
       inserted += 1;
     }
   }

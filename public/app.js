@@ -4185,13 +4185,13 @@ function wireEvents() {
       const toMonth = state.settings.month_key;
       const fromMonth = previousMonth(toMonth);
       if (!fromMonth) return alert("当前月份无效，无法结转");
-      if (!confirm(`从 ${formatMonthOption(fromMonth)} 结转余额到 ${formatMonthOption(toMonth)}？已存在的学生将跳过。`)) return;
+      if (!confirm(`从 ${formatMonthOption(fromMonth)} 结转余额到 ${formatMonthOption(toMonth)}？自动结转和空白结转会刷新，已手工填写的非 0 结转会跳过。`)) return;
       const result = await request(`/api/recharges/rollover?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(toMonth)}`, { method: "POST" });
-      if (result.skipped > 0 && confirm(`已结转 ${result.inserted} 人，跳过 ${result.skipped} 人。是否覆盖已存在记录？`)) {
+      if (result.skipped > 0 && confirm(`新增 ${result.inserted} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人。是否覆盖这些手工结转？`)) {
         const forced = await request(`/api/recharges/rollover?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(toMonth)}&force=1`, { method: "POST" });
         alert(`结转完成：新增 ${forced.inserted} 人，覆盖 ${forced.updated} 人，跳过 ${forced.skipped} 人。`);
       } else {
-        alert(`结转完成：新增 ${result.inserted} 人，覆盖 ${result.updated} 人，跳过 ${result.skipped} 人。`);
+        alert(`结转完成：新增 ${result.inserted} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人。`);
       }
       await load();
     });
