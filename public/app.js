@@ -63,7 +63,7 @@ let expenseFilter = (() => {
     return { month_key: "", start: "", end: "", category: "", q: "" };
   }
 })();
-let auditState = { xlsxReport: null, internalReport: null, logs: [], busy: false };
+let auditState = { xlsxReport: null, internalReport: null, logs: [], busy: false, notice: "" };
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
 let customDatePickerEl = null;
@@ -1457,6 +1457,19 @@ function removeAuditIssueByLogId(sourceKey, logId) {
   report.issue_count = report.issues.length;
 }
 
+function removeAuditIssueByIdentity(sourceKey, logId, issueKey) {
+  const report = auditState[sourceKey];
+  if (!report?.issues) return;
+  report.issues = report.issues.filter((issue) => {
+    const sameLog = logId && String(issue.audit_log_id || "") === String(logId);
+    const sameIssue = issueKey && String(issue.issue_key || "") === String(issueKey);
+    return !(sameLog || sameIssue);
+  });
+  report.counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
+  for (const issue of report.issues) report.counts[issue.severity] = (report.counts[issue.severity] || 0) + 1;
+  report.issue_count = report.issues.length;
+}
+
 async function refreshAuditLogs() {
   const data = await request("/api/audit/logs?limit=200");
   auditState.logs = data.logs || [];
@@ -2687,6 +2700,7 @@ function renderAudit() {
   );
   contentEl.innerHTML = `
     ${auditRiskOverview()}
+    ${auditState.notice ? `<div class="audit-inline-notice">${escapeHtml(auditState.notice)}</div>` : ""}
 
     <div class="band audit-panel">
       <div class="section-head">
@@ -3809,19 +3823,34 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".audit-ignore-one").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       if (!button.dataset.logId) return;
-      const result = await request("/api/audit/ignore", {
-        method: "POST",
-        body: {
-          ids: [Number(button.dataset.logId)],
-          issue_keys: button.dataset.issueKey ? [button.dataset.issueKey] : [],
-        },
-      });
-      removeAuditIssueByLogId(button.dataset.source, button.dataset.logId);
-      await refreshAuditLogs();
-      alert(`已忽略 ${result.ignored_keys || result.ignored} 类问题。之后相同问题不会再提示。已备份：${result.backup}`);
-      render();
+      const sourceKey = button.dataset.source;
+      const logId = button.dataset.logId;
+      const issueKey = button.dataset.issueKey || "";
+      const scrollTop = window.scrollY;
+      button.disabled = true;
+      button.textContent = "忽略中";
+      try {
+        const result = await request("/api/audit/ignore", {
+          method: "POST",
+          body: {
+            ids: [Number(logId)],
+            issue_keys: issueKey ? [issueKey] : [],
+          },
+        });
+        removeAuditIssueByIdentity(sourceKey, logId, issueKey);
+        await refreshAuditLogs();
+        auditState.notice = `已忽略 ${result.ignored_keys || result.ignored} 类问题，之后相同问题不会再提示。`;
+        render();
+        requestAnimationFrame(() => window.scrollTo(0, scrollTop));
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "忽略此项";
+        alert(error.message);
+      }
     });
   });
 
