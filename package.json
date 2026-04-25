@@ -1,0 +1,14 @@
+{
+  "name": "liming-course-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "黎明教育课程管理系统本地 MVP",
+  "scripts": {
+    "start": "node src/server.js",
+    "init": "node src/server.js --init-db",
+    "import:excel": "node -e \"console.log('Usage: python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01')\""
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,38 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 数据库（含真实业务数据，绝不上传）
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.sqlite-journal
+
+# 上传文件、源工作簿、备份、审计报告（数据/隐私）
+data/uploads/
+data/source-workbooks/
+data/backups/
+data/audit_report_*
+
+# 服务器日志
+data/server.*.log
+data/write-test.txt
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本地快照（自动生成）
+.snapshots/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Claude 本地配置（如未来本目录引入）
+.claude/settings.local.json
