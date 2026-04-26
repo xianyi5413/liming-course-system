@@ -35,6 +35,7 @@ let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
 let feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
 let summaryFilter = { student: "", grade: "", balance: "" };
+let studentPricingFilter = { student: "", subject: "", price: "", usage: "" };
 let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
@@ -706,6 +707,12 @@ function momLabel(value) {
   return signed;
 }
 
+function momPointLabel(value) {
+  if (value == null) return "无上月";
+  const arrow = value >= 0 ? "▲" : "▼";
+  return `${arrow}${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}pp`;
+}
+
 function momClass(value, reverse = false) {
   if (value == null || value === 0) return "flat";
   const good = reverse ? value < 0 : value > 0;
@@ -1073,6 +1080,8 @@ function priceSourceFilterValue(source) {
   if (source === "manual" || source === "override") return "manual";
   if (source === "custom") return "custom";
   if (source === "exam") return "exam";
+  if (source === "trial") return "trial";
+  if (source === "waiver") return "waiver";
   return "standard";
 }
 
@@ -1131,6 +1140,8 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
             ${sourceOption("custom", "个性价")}
             ${sourceOption("manual", "手填")}
             ${sourceOption("exam", "考试")}
+            ${sourceOption("trial", "试课")}
+            ${sourceOption("waiver", "退费/减免")}
           </select>
         </label>
         <label class="filter-field filter-date-range">
@@ -1250,6 +1261,8 @@ function priceSourceLabel(source) {
   if (source === "manual") return "手动";
   if (source === "custom") return "个性价";
   if (source === "exam") return "考试手填";
+  if (source === "trial") return "试课免费";
+  if (source === "waiver") return "退费/减免";
   return "标准价";
 }
 
@@ -1258,6 +1271,8 @@ function priceSourceTitle(row) {
   if (row.price_source === "manual") return `本节课手动调整：${amount}`;
   if (row.price_source === "custom") return `该学生本科目专享价：${amount}`;
   if (row.price_source === "exam") return "考试课需手动填写费用";
+  if (row.price_source === "trial") return "试课不向学生收费，且不计入教师课时费";
+  if (row.price_source === "waiver") return "退费/减免口径：学生费用为 0，教师课时费按课程状态计算";
   return "按年级+班型标准价";
 }
 
@@ -1266,14 +1281,17 @@ function priceSourceBadge(row) {
   if (row.price_source === "manual") return `<span class="price-source-badge manual" title="${title}">✏</span>`;
   if (row.price_source === "custom") return `<span class="price-source-badge custom" title="${title}">★</span>`;
   if (row.price_source === "exam") return `<span class="price-source-badge exam" title="${title}">考</span>`;
+  if (row.price_source === "trial") return `<span class="price-source-badge trial" title="${title}">试</span>`;
+  if (row.price_source === "waiver") return `<span class="price-source-badge waiver" title="${title}">免</span>`;
   return "";
 }
 
 function editablePriceCell(row) {
   const title = escapeHtml(priceSourceTitle(row));
+  const locked = row.price_source === "trial";
   return `
     <td class="price-cell-wrap" title="${title}">
-      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" value="${money(row.unit_price)}" title="${title}">
+      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" value="${money(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
       ${priceSourceBadge(row)}
     </td>
   `;
@@ -2169,24 +2187,59 @@ function financeMetric(label, metric, options = {}) {
   `;
 }
 
+function financeQualityNotices(summary) {
+  const notices = [];
+  const quality = summary.data_quality || {};
+  const missingTeacherSalary = numberValue(quality.teacher_salary_missing_lessons);
+  const salaryLessons = numberValue(quality.teacher_salary_lessons);
+  if (salaryLessons > 0 && missingTeacherSalary > 0) {
+    notices.push({
+      title: "教师课时费待录入",
+      body: `${missingTeacherSalary} / ${salaryLessons} 节有效课还没有课时费，当前毛利和 ROI 是暂估口径。`,
+    });
+  }
+  const debt = numberValue(summary.balance_sheet?.account_debt_receivable);
+  if (debt > 0) {
+    notices.push({
+      title: "存在账户欠款",
+      body: `学生现金余额为负的欠款合计 ¥${money2(debt)}，已并入应收合计。`,
+    });
+  }
+  if (!notices.length) return "";
+  return `
+    <div class="finance-notice-list">
+      ${notices.map((item) => `
+        <div class="finance-notice">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.body)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function profitTable(summary) {
   const rows = [
-    ["收入", summary.overview.revenue, false, true],
-    ["赠送消耗", summary.overview.gift_consumption, false, true],
-    ["课时费", summary.overview.teacher_cost, true, true],
-    ["交通", summary.overview.transport_cost, true, true],
-    ["运营成本", summary.overview.operating_cost, true, true],
-    ["毛利", summary.overview.gross_profit, false, true],
-    ["毛利率", summary.overview.gross_margin, false, false],
+    ["收入", summary.overview.revenue, false, true, "pct"],
+    ["赠送消耗", summary.overview.gift_consumption, false, true, "pct"],
+    ["课时费", summary.overview.teacher_cost, true, true, "pct"],
+    ["交通", summary.overview.transport_cost, true, true, "pct"],
+    ["运营成本", summary.overview.operating_cost, true, true, "pct"],
+    ["毛利", summary.overview.gross_profit, false, true, "pct"],
+    ["毛利率", summary.overview.gross_margin, false, false, "pp"],
   ];
-  return rows.map(([label, metric, reverse, isMoney]) => `
+  return rows.map(([label, metric, reverse, isMoney, deltaType]) => {
+    const delta = deltaType === "pp" ? metric.mom_pp : metric.mom_pct;
+    const deltaLabel = deltaType === "pp" ? momPointLabel(delta) : momLabel(delta);
+    return `
     <tr>
       <td class="text-cell">${escapeHtml(label)}</td>
       <td class="text-cell right">${isMoney ? `¥${money2(metric.current)}` : percent(metric.current)}</td>
       <td class="text-cell right">${isMoney ? `¥${money2(metric.previous)}` : percent(metric.previous)}</td>
-      <td class="text-cell right mom ${momClass(metric.mom_pct, reverse)}">${escapeHtml(momLabel(metric.mom_pct))}</td>
+      <td class="text-cell right mom ${momClass(delta, reverse)}">${escapeHtml(deltaLabel)}</td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function stackedBar(title, segments) {
@@ -2401,11 +2454,13 @@ function financeTrendChart(rows) {
 
 function renderFinance() {
   const summary = state.finance;
+  const balanceSheet = summary.balance_sheet || {};
+  const dataQuality = summary.data_quality || {};
   const teacherCostMetric = combinedMetric(summary.overview.teacher_cost, summary.overview.transport_cost);
   const depositMetric = {
-    current: numberValue(summary.balance_sheet.total_actual_balance),
+    current: numberValue(balanceSheet.total_actual_balance),
     previous: numberValue(summary.prev_balance_sheet?.total_actual_balance),
-    mom_pct: pctChangeValue(numberValue(summary.balance_sheet.total_actual_balance), numberValue(summary.prev_balance_sheet?.total_actual_balance)),
+    mom_pct: pctChangeValue(numberValue(balanceSheet.total_actual_balance), numberValue(summary.prev_balance_sheet?.total_actual_balance)),
   };
   const rangeLabel = `${summary.range?.start || financeRange.start} 至 ${summary.range?.end || financeRange.end}`;
   const netCashFlow = summary.overview.net_cash_flow || {};
@@ -2416,6 +2471,13 @@ function renderFinance() {
     `<button class="btn export-finance-csv" type="button">导出</button>`,
   );
   const riskRows = [
+    ...(summary.top_lists.account_debts || []).map((row) => ({
+      type: "账户欠款",
+      name: row.student_name,
+      amount: row.amount,
+      note: `现金余额 ¥${money2(row.actual_balance)}`,
+      cls: "risk-debt",
+    })),
     ...summary.top_lists.low_balance.map((row) => ({
       type: "低余额",
       name: row.student_name,
@@ -2461,6 +2523,8 @@ function renderFinance() {
       </div>
     </div>
 
+    ${financeQualityNotices(summary)}
+
     <div class="finance-command-panel">
       <div class="finance-command-main ${netCashValue >= 0 ? "positive" : "negative"}">
         <span>净现金流</span>
@@ -2476,7 +2540,9 @@ function renderFinance() {
         reverse: true,
         title: `员工工资 ¥${money2(op.staff_salary_total)} / 日常开销 ¥${money2(op.operating_expense_total)}`,
       })}
-      ${financeMetric("毛利", summary.overview.gross_profit, { subtitle: `毛利率 ${percent(summary.overview.gross_margin.current)}` })}
+      ${financeMetric("毛利", summary.overview.gross_profit, {
+        subtitle: `毛利率 ${percent(summary.overview.gross_margin.current)}${numberValue(dataQuality.teacher_salary_missing_lessons) ? " · 暂估" : ""}`,
+      })}
       ${financeMetric("净现金流", summary.overview.net_cash_flow)}
       ${financeMetric("期末沉淀", depositMetric)}
     </div>
@@ -2508,9 +2574,11 @@ function renderFinance() {
           <table class="finance-table balance-table">
             <thead><tr><th>项目</th><th>期末金额</th></tr></thead>
             <tbody>
-              <tr><td class="text-cell">月末沉淀现金</td><td class="text-cell right">¥${money2(summary.balance_sheet.total_actual_balance)}</td></tr>
-              <tr><td class="text-cell">月末赠送余额</td><td class="text-cell right">¥${money2(summary.balance_sheet.total_gift_balance)}</td></tr>
-              <tr><td class="text-cell">应收账款</td><td class="text-cell right">¥${money2(summary.balance_sheet.accounts_receivable)}</td></tr>
+              <tr><td class="text-cell">月末沉淀现金</td><td class="text-cell right">¥${money2(balanceSheet.total_actual_balance)}</td></tr>
+              <tr><td class="text-cell">月末赠送余额</td><td class="text-cell right">¥${money2(balanceSheet.total_gift_balance)}</td></tr>
+              <tr><td class="text-cell">未缴费课时</td><td class="text-cell right">¥${money2(balanceSheet.unpaid_lesson_receivable)}</td></tr>
+              <tr><td class="text-cell">账户欠款</td><td class="text-cell right negative">¥${money2(balanceSheet.account_debt_receivable)}</td></tr>
+              <tr><td class="text-cell">应收合计</td><td class="text-cell right">¥${money2(balanceSheet.accounts_receivable)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -2835,13 +2903,74 @@ function pricingAuditModalMarkup() {
   `;
 }
 
+function studentPricingMatchesFilter(row) {
+  const filter = studentPricingFilter;
+  const studentNeedle = filter.student.trim().toLowerCase();
+  if (studentNeedle) {
+    const haystack = [
+      row.student_name,
+      row.lookup_key,
+      row.notes,
+    ].map((value) => String(value || "").toLowerCase()).join(" ");
+    if (!haystack.includes(studentNeedle)) return false;
+  }
+  if (filter.subject && row.subject !== filter.subject) return false;
+  if (filter.price === "zero" && numberValue(row.custom_price) > 0) return false;
+  if (filter.price === "positive" && numberValue(row.custom_price) <= 0) return false;
+  const currentLessons = numberValue(row.current_month_lessons);
+  const totalLessons = numberValue(row.total_lessons);
+  if (filter.usage === "current" && currentLessons <= 0) return false;
+  if (filter.usage === "historical" && (currentLessons > 0 || totalLessons <= 0)) return false;
+  if (filter.usage === "unused" && totalLessons > 0) return false;
+  return true;
+}
+
+function renderStudentPricingFilterBar(rows, visibleRows) {
+  return `
+    <div class="filter-bar compact student-pricing-filter-bar">
+      <label>学生/备注</label>
+      <input class="control student-pricing-filter-input" data-filter-field="student" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名或备注" value="${escapeHtml(studentPricingFilter.student)}">
+      <label>科目</label>
+      <select class="control student-pricing-filter-input" data-filter-field="subject">${filterSelectOptions(state.lookups.subjects, studentPricingFilter.subject, "全部")}</select>
+      <label>价格状态</label>
+      <select class="control student-pricing-filter-input" data-filter-field="price">
+        <option value="" ${studentPricingFilter.price === "" ? "selected" : ""}>全部</option>
+        <option value="positive" ${studentPricingFilter.price === "positive" ? "selected" : ""}>正常价</option>
+        <option value="zero" ${studentPricingFilter.price === "zero" ? "selected" : ""}>0 元</option>
+      </select>
+      <label>影响范围</label>
+      <select class="control student-pricing-filter-input" data-filter-field="usage">
+        <option value="" ${studentPricingFilter.usage === "" ? "selected" : ""}>全部</option>
+        <option value="current" ${studentPricingFilter.usage === "current" ? "selected" : ""}>本月有课</option>
+        <option value="historical" ${studentPricingFilter.usage === "historical" ? "selected" : ""}>历史有课</option>
+        <option value="unused" ${studentPricingFilter.usage === "unused" ? "selected" : ""}>未使用</option>
+      </select>
+      <div class="filter-summary">
+        <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
+        <button class="btn primary apply-student-pricing-filter" type="button">筛选</button>
+        <button class="btn reset-student-pricing-filter" type="button">清空筛选</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderStudentPricing() {
   const rows = state.student_pricing;
+  const visibleRows = rows.filter(studentPricingMatchesFilter);
+  const zeroPriceRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
   const studentNames = (state.profile_students || state.students || [])
     .filter((row) => !["已流出", "离校"].includes(row.status || "在读"))
     .map((row) => row.name);
-  renderTopbar("学生单价表", `${rows.length} 条个性化价格`, historyToggleAction());
+  renderTopbar("学生单价表", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条个性化价格`, historyToggleAction());
   contentEl.innerHTML = `
+    ${zeroPriceRows.length ? `
+      <div class="finance-notice-list">
+        <div class="finance-notice">
+          <strong>发现 ${zeroPriceRows.length} 条 0 元专享价</strong>
+          <span>专享价是长期规则。试课请改课程状态为「试课」，退费/减免请到费用明细做单节手动覆盖。</span>
+        </div>
+      </div>
+    ` : ""}
     <div class="band">
       <div class="section-head"><div class="section-title">新增个性化单价</div></div>
       <div class="table-wrap">
@@ -2850,7 +2979,7 @@ function renderStudentPricing() {
             <tr>
               <td><input id="new-student-price-name" class="cell-input" list="student-name-list" placeholder="学生姓名"></td>
               <td><select id="new-student-price-subject" class="cell-select">${options(state.lookups.subjects, "", "科目")}</select></td>
-              <td><input id="new-student-price-value" class="cell-input number" type="number" placeholder="单价"></td>
+              <td><input id="new-student-price-value" class="cell-input number" type="number" min="0.01" step="0.01" placeholder="单价"></td>
               <td><input id="new-student-price-notes" class="cell-input wide" placeholder="备注"></td>
               <td class="readonly"><button class="btn primary add-student-price">新增</button></td>
             </tr>
@@ -2860,15 +2989,16 @@ function renderStudentPricing() {
       </div>
     </div>
     <div class="band">
+      ${renderStudentPricingFilterBar(rows, visibleRows)}
       <div class="table-wrap">
         <table class="student-pricing-table">
           <thead><tr><th>学生姓名</th><th>科目</th><th>单价</th><th>本月影响</th><th>查找键</th><th class="wide">备注</th><th>操作</th></tr></thead>
           <tbody>
-            ${rows.map((row) => `
+            ${visibleRows.map((row) => `
               <tr>
                 <td><input class="cell-input student-pricing-field" data-id="${row.id}" data-field="student_name" value="${escapeHtml(row.student_name)}"></td>
                 <td><select class="cell-select student-pricing-field" data-id="${row.id}" data-field="subject">${options(state.lookups.subjects, row.subject)}</select></td>
-                <td><input class="cell-input number student-pricing-field" data-id="${row.id}" data-field="custom_price" type="number" value="${money(row.custom_price)}"></td>
+                <td><input class="cell-input number student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}" data-id="${row.id}" data-field="custom_price" type="number" min="0.01" step="0.01" value="${money(row.custom_price)}"></td>
                 <td class="text-cell right">
                   <button class="btn ghost pricing-impact-btn" type="button" data-name="${escapeHtml(row.student_name)}" data-subject="${escapeHtml(row.subject)}">${row.current_month_lessons || 0} 次</button>
                   <span class="muted-tip">/ 累计 ${row.total_lessons || 0}</span>
@@ -3948,6 +4078,47 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
+    const applyStudentPricingFilter = (value) => {
+      studentPricingFilter = { ...studentPricingFilter, [input.dataset.filterField]: value };
+    };
+    if (input.tagName === "SELECT") {
+      input.addEventListener("change", () => {
+        applyStudentPricingFilter(input.value);
+        render();
+      });
+      return;
+    }
+    input.addEventListener("input", () => {
+      applyStudentPricingFilter(input.value);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        applyStudentPricingFilter(input.value);
+        render();
+      }
+    });
+    input.addEventListener("change", () => {
+      applyStudentPricingFilter(input.value);
+    });
+  });
+
+  document.querySelectorAll(".apply-student-pricing-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
+        studentPricingFilter = { ...studentPricingFilter, [input.dataset.filterField]: input.value };
+      });
+      render();
+    });
+  });
+
+  document.querySelectorAll(".reset-student-pricing-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      studentPricingFilter = { student: "", subject: "", price: "", usage: "" };
+      render();
+    });
+  });
+
   document.querySelectorAll(".reset-lesson-filter").forEach((button) => {
     button.addEventListener("click", () => {
       focusedLessonIds = [];
@@ -4262,6 +4433,10 @@ function wireEvents() {
   document.querySelectorAll(".student-pricing-field").forEach((input) => {
     input.addEventListener("change", () => {
       const value = input.type === "number" ? numberValue(input.value) : input.value;
+      if (input.dataset.field === "custom_price" && numberValue(value) <= 0) {
+        alert("学生专享价必须大于 0。试课请设置课程状态，退费/减免请到费用明细做单节手动覆盖。");
+        return load();
+      }
       refreshAfter(() => request(`/api/student-pricing/${input.dataset.id}`, {
         method: "PATCH",
         body: { [input.dataset.field]: value },
@@ -4276,6 +4451,7 @@ function wireEvents() {
       const customPrice = document.querySelector("#new-student-price-value").value;
       const notes = document.querySelector("#new-student-price-notes").value;
       if (!studentName || !subject) return alert("请填写学生姓名和科目");
+      if (numberValue(customPrice) <= 0) return alert("学生专享价必须大于 0。试课请设置课程状态，退费/减免请到费用明细做单节手动覆盖。");
       refreshAfter(() => request("/api/student-pricing", {
         method: "POST",
         body: { student_name: studentName, subject, custom_price: customPrice, notes },

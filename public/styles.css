@@ -1182,6 +1182,16 @@ select.control,
   color: var(--warning);
 }
 
+.price-source-badge.trial {
+  background: var(--neutral-chip-bg);
+  color: var(--neutral-chip-fg);
+}
+
+.price-source-badge.waiver {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
 .btn {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1986,6 +1996,26 @@ select.control {
   margin-bottom: var(--space-5);
 }
 
+.finance-notice-list {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.finance-notice {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.finance-notice strong {
+  color: var(--ink-strong);
+}
+
 .finance-command-main {
   border: 1px solid rgba(169, 186, 199, 0.28);
   border-radius: var(--radius);
@@ -2529,7 +2559,17 @@ tr.risk-unpaid td {
   font-weight: 700;
 }
 
+tr.risk-debt td {
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-weight: 700;
+}
+
 tr.risk-unpaid:hover td {
+  background: var(--risk-unpaid-bg);
+}
+
+tr.risk-debt:hover td {
   background: var(--risk-unpaid-bg);
 }
 

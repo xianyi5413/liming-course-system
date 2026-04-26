@@ -567,6 +567,8 @@ function priceBucket(grade, studentCount) {
 }
 
 function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status }) {
+  if (status === "试课") return { unit_price: 0, source: "trial" };
+
   const override = get(
     "SELECT unit_price FROM fee_overrides WHERE lesson_id = ? AND student_name = ?",
     [lessonId, studentName],
@@ -576,10 +578,15 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
   if (status === "考试") return { unit_price: 0, source: "exam" };
 
   const custom = get(
-    "SELECT custom_price FROM student_pricing WHERE student_name = ? AND subject = ?",
+    "SELECT custom_price, notes FROM student_pricing WHERE student_name = ? AND subject = ?",
     [studentName, subject],
   );
-  if (custom && custom.custom_price !== "") return { unit_price: num(custom.custom_price), source: "custom" };
+  if (custom && custom.custom_price !== "") {
+    const customPrice = num(custom.custom_price);
+    const customNotes = text(custom.notes);
+    if (customPrice > 0) return { unit_price: customPrice, source: "custom" };
+    if (customPrice === 0 && !/试课|试听|试/.test(customNotes)) return { unit_price: 0, source: "waiver" };
+  }
 
   const bucket = priceBucket(grade, studentCount);
   const standard = get(
@@ -1482,6 +1489,9 @@ function financeRangeFromUrl(url) {
 }
 
 function previousEqualRange(range) {
+  if (validMonthKey(range.start) && range.end === monthEndKey(range.start)) {
+    return monthRange(previousMonthKey(range.start));
+  }
   const prevEnd = addDays(range.start, -1);
   const prevStart = addDays(prevEnd, -(range.days - 1));
   return { start: prevStart, end: prevEnd, days: range.days };
@@ -1645,6 +1655,8 @@ function financeBase(range) {
     teacherSalary.set(teacherName, (teacherSalary.get(teacherName) || 0) + salary);
   }
   const teacherCost = [...lessonSalary.values()].reduce((sum, value) => sum + value, 0);
+  const lessonSalaryValues = [...lessonSalary.values()];
+  const teacherSalaryMissingLessons = lessonSalaryValues.filter((value) => num(value) <= 0).length;
   const transport = weightedTeacherTransport(range);
   const staffSalary = weightedStaffSalary(range);
   const expenses = operatingExpenseSummary(range);
@@ -1669,6 +1681,12 @@ function financeBase(range) {
     recharges,
     teacher_salary_by_teacher: teacherSalary,
     transport_by_teacher: transport.by_teacher,
+    data_quality: {
+      teacher_salary_lessons: lessonSalaryValues.length,
+      teacher_salary_filled_lessons: lessonSalaryValues.length - teacherSalaryMissingLessons,
+      teacher_salary_missing_lessons: teacherSalaryMissingLessons,
+      teacher_salary_complete: teacherSalaryMissingLessons === 0,
+    },
     overview_raw: {
       revenue,
       gift_consumption: giftConsumption,
@@ -1692,13 +1710,18 @@ function metricOverview(current, previous) {
     "teacher_cost",
     "transport_cost",
     "gross_profit",
-    "gross_margin",
     "cash_in",
     "gift_issued",
     "net_cash_flow",
   ]) {
     overview[key] = overviewMetric(num(current[key]), num(previous?.[key]));
   }
+  const currentMargin = num(current.gross_margin);
+  const previousMargin = num(previous?.gross_margin);
+  overview.gross_margin = {
+    ...overviewMetric(currentMargin, previousMargin),
+    mom_pp: currentMargin - previousMargin,
+  };
   overview.operating_cost = {
     ...current.operating_cost,
     current: num(current.operating_cost?.total),
@@ -1710,12 +1733,29 @@ function metricOverview(current, previous) {
 
 function financeBreakdowns(current) {
   const effectiveDetails = current.effective_details;
+  const summaries = current.end_month_summaries || [];
+  const unpaidByStudent = new Map();
+  for (const row of current.details.filter(isUnpaid)) {
+    const name = row.student_name || row.student || "未填写";
+    unpaidByStudent.set(name, (unpaidByStudent.get(name) || 0) + num(row.unit_price));
+  }
+  const debtByStudent = new Map();
+  for (const row of summaries) {
+    const debt = Math.max(0, -num(row.actual_balance));
+    if (debt > 0) debtByStudent.set(row.student_name, debt);
+  }
+  const receivableNames = new Set([...unpaidByStudent.keys(), ...debtByStudent.keys()]);
+  const accountDebtReceivable = [...debtByStudent.values()].reduce((sum, value) => sum + value, 0);
+  const unpaidLessonReceivable = [...unpaidByStudent.values()].reduce((sum, value) => sum + value, 0);
   const balanceSheet = {
-    total_actual_balance: current.end_month_summaries.reduce((sum, row) => sum + num(row.actual_balance), 0),
-    total_gift_balance: current.end_month_summaries.reduce((sum, row) => sum + num(row.gift_balance), 0),
-    accounts_receivable: current.details
-      .filter(isUnpaid)
-      .reduce((sum, row) => sum + num(row.unit_price), 0),
+    total_actual_balance: summaries.reduce((sum, row) => sum + Math.max(0, num(row.actual_balance)), 0),
+    raw_actual_balance: summaries.reduce((sum, row) => sum + num(row.actual_balance), 0),
+    total_gift_balance: summaries.reduce((sum, row) => sum + num(row.gift_balance), 0),
+    account_debt_receivable: accountDebtReceivable,
+    unpaid_lesson_receivable: unpaidLessonReceivable,
+    accounts_receivable: [...receivableNames].reduce((sum, name) => (
+      sum + Math.max(num(unpaidByStudent.get(name)), num(debtByStudent.get(name)))
+    ), 0),
   };
 
   const teacherMap = new Map();
@@ -1785,10 +1825,11 @@ function financeBreakdowns(current) {
       total_fee: row.total_fee,
     }));
 
-  const lowBalance = current.end_month_summaries
+  const lowBalance = summaries
     .filter((row) => {
       const avg = row.lesson_count ? num(row.total_fee) / row.lesson_count : 0;
-      return avg > 0 && num(row.actual_balance) < avg;
+      const actualBalance = num(row.actual_balance);
+      return avg > 0 && actualBalance >= 0 && actualBalance < avg;
     })
     .map((row) => ({
       student_name: row.student_name,
@@ -1797,6 +1838,17 @@ function financeBreakdowns(current) {
       lesson_count: row.lesson_count,
     }))
     .sort((a, b) => a.actual_balance - b.actual_balance);
+
+  const accountDebts = summaries
+    .filter((row) => num(row.actual_balance) < 0)
+    .map((row) => ({
+      student_name: row.student_name,
+      amount: Math.max(0, -num(row.actual_balance)),
+      actual_balance: row.actual_balance,
+      lesson_count: row.lesson_count,
+      total_fee: row.total_fee,
+    }))
+    .sort((a, b) => b.amount - a.amount);
 
   const unpaidLessons = current.details
     .filter(isUnpaid)
@@ -1818,6 +1870,7 @@ function financeBreakdowns(current) {
     },
     top_lists: {
       top_students: topStudents,
+      account_debts: accountDebts,
       low_balance: lowBalance,
       unpaid_lessons: unpaidLessons,
     },
@@ -1870,6 +1923,8 @@ function financeSummary(range) {
     available_range: financeAvailableRange(),
     overview,
     prev_overview: previous.overview_raw,
+    data_quality: current.data_quality,
+    prev_data_quality: previous.data_quality,
     balance_sheet: sections.balance_sheet,
     prev_balance_sheet: previousSections.balance_sheet,
     breakdowns: sections.breakdowns,
@@ -2160,6 +2215,19 @@ function internalAudit(monthKey, { log = true } = {}) {
     const latest = usages[usages.length - 1];
     const std = standardPrice(latest.lesson.grade, latest.student_count);
     const custom = num(pricing.custom_price);
+    if (custom <= 0) {
+      const hasCurrentNonTrialUse = usages.some((item) => deriveStatus(item.lesson) !== "试课");
+      issues.push(auditIssue({
+        severity: hasCurrentNonTrialUse ? "HIGH" : "MEDIUM",
+        type: "zero_custom_pricing",
+        entity: `pricing_${pricing.id}`,
+        field: "custom_price",
+        before_value: custom,
+        message: `${pricing.student_name}-${pricing.subject} 专享价为 0，建议改为试课状态或单节手动费用覆盖`,
+        data: { pricing_id: pricing.id, student_name: pricing.student_name, subject: pricing.subject, custom_price: custom },
+      }));
+      continue;
+    }
     if (std > 0 && Math.abs(custom - std) / std > 0.3) {
       issues.push(auditIssue({
         severity: "WARN",
@@ -2457,14 +2525,17 @@ function financeCsvRows(summary) {
   };
   for (const [key, label] of Object.entries(overviewLabels)) {
     const item = summary.overview[key];
-    rows.push([label, item.current, item.previous, item.mom_pct == null ? "" : item.mom_pct]);
+    const delta = key === "gross_margin" ? item.mom_pp : item.mom_pct;
+    rows.push([label, item.current, item.previous, delta == null ? "" : delta]);
   }
   rows.push(
     [],
     ["资金负债表", "金额"],
     ["月末沉淀现金", summary.balance_sheet.total_actual_balance],
     ["月末赠送余额", summary.balance_sheet.total_gift_balance],
-    ["应收账款", summary.balance_sheet.accounts_receivable],
+    ["未缴费课时", summary.balance_sheet.unpaid_lesson_receivable],
+    ["账户欠款", summary.balance_sheet.account_debt_receivable],
+    ["应收合计", summary.balance_sheet.accounts_receivable],
     [],
     ["收入分布", "收入", "占比"],
     ...summary.breakdowns.by_grade.map((row) => [`年级：${row.name}`, row.revenue, row.share]),
@@ -2480,6 +2551,7 @@ function financeCsvRows(summary) {
     ...summary.breakdowns.by_teacher.map((row) => [row.teacher_name, row.revenue_contribution, row.salary_total, row.roi == null ? "" : row.roi]),
     [],
     ["风险清单", "类型", "金额/余额", "日期/参考"],
+    ...summary.top_lists.account_debts.map((row) => [row.student_name, "账户欠款", row.amount, `现金余额 ${row.actual_balance}`]),
     ...summary.top_lists.low_balance.map((row) => [row.student_name, "低余额", row.actual_balance, `平均单次课费 ${row.avg_unit_price}`]),
     ...summary.top_lists.unpaid_lessons.map((row) => [row.student, "未缴费课时", row.unit_price, `${row.date} #${row.lesson_id}`]),
     [],
@@ -2526,7 +2598,12 @@ function studentStatementRows(monthKey, studentName) {
       row.subject,
       row.notes,
       row.unit_price,
-      row.price_source === "manual" ? "手动" : row.price_source === "custom" ? "个性价" : row.price_source === "exam" ? "考试手填" : "标准价",
+      row.price_source === "manual" ? "手动"
+        : row.price_source === "custom" ? "个性价"
+          : row.price_source === "exam" ? "考试手填"
+            : row.price_source === "trial" ? "试课免费"
+              : row.price_source === "waiver" ? "退费/减免"
+                : "标准价",
     ]),
   ];
 }
@@ -4103,6 +4180,10 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/student-pricing") {
     const body = await readBody(req);
+    if (!text(body.student_name) || !text(body.subject)) return sendError(res, 400, "student_name and subject are required");
+    if (num(body.custom_price) <= 0) {
+      return sendError(res, 400, "学生专享价必须大于 0；试课请设置课程状态为「试课」，退费/减免请在费用明细中做单节手动覆盖");
+    }
     const result = db.prepare(`
       INSERT INTO student_pricing(student_name, subject, custom_price, notes)
       VALUES (?, ?, ?, ?)
@@ -4115,6 +4196,9 @@ async function handleApi(req, res, url) {
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
   if (studentPricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
+    if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) <= 0) {
+      return sendError(res, 400, "学生专享价必须大于 0；试课请设置课程状态为「试课」，退费/减免请在费用明细中做单节手动覆盖");
+    }
     patchTable("student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "subject", "custom_price", "notes"], body);
     const row = get("SELECT * FROM student_pricing WHERE id = ?", [Number(studentPricingMatch[1])]);
     return sendJson(res, { ...row, warnings: pricingWarnings(row) });
