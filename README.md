@@ -69,16 +69,20 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 
 #### 2.1 单价决定优先级（`unitPriceFor`）
 
-按下列顺序逐级回退（高 → 低），命中即停止：
+按下列顺序逐级回退（高 → 低），命中即停止；`feeDetails` 把每节课按学生展开成一行，`price_source` 字段把命中的优先级带回前端供调试：
 
-| 优先级 | 来源 | 字段 |
-| --- | --- | --- |
-| 1 | 手动覆盖 | `fee_overrides.unit_price` |
-| 2 | 考试课强制 0 | `lessons.status = '考试'` |
-| 3 | 学生×科目专享价 | `student_pricing.custom_price` |
-| 4 | 标准单价 | `pricing_standards`（年级 × 班型） |
+| 优先级 | 触发条件 | 单价 | `price_source` |
+| --- | --- | --- | --- |
+| 1 | `lessons.status = '试课'` | 0 | `trial` |
+| 2 | `fee_overrides` 命中 `(lesson_id, student_name)` | 取覆盖值 | `manual` |
+| 3 | `lessons.status = '考试'` | 0 | `exam` |
+| 4 | `student_pricing.custom_price > 0` | 取专享价 | `custom` |
+| 5 | `student_pricing.custom_price = 0` 且备注不含「试」字 | 0（视为免单） | `waiver` |
+| 6 | 兜底 | `pricing_standards`（年级 × 班型） | `standard` |
 
-`feeDetails` 把每节课按学生展开成一行，`price_source` 字段把命中的优先级带回前端供调试。
+> 录入约束：`POST/PATCH /api/student-pricing` 拒绝 `custom_price ≤ 0`；规则 5 仅作为存量数据兜底语义，新建/编辑专享价时无法保存 0。
+
+> 收入计入口径：`isBillableDetail` 控制是否计入 `revenue` —— 默认只看 `已上 / 未缴费`；考试课例外，仅当 `price_source='manual'` 且单价 > 0 时才参与（用于「考试也按节收费」的特殊场景）。
 
 #### 2.2 子功能
 
@@ -86,7 +90,7 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 | --- | --- | --- |
 | 学生费用汇总 | `studentSummary` | 详见下文 [金额结算口径](#金额结算口径) |
 | 充值记录 | 表内编辑 + upsert | 字段：`prev_actual / prev_gift / cur_recharge / cur_gift / recharge_date / notes`；以 `(student_name, month_key)` 唯一键 upsert |
-| 上月结转 | `GET /api/recharges/rollover?from=...&to=...` | 把上月月末余额作为本月 `prev_actual / prev_gift`；`shouldRefreshCarryOver` 决定可覆盖范围（自动结转行 / 全空行）；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷 |
+| 上月结转 | `GET /api/recharges/rollover?from=...&to=...` + `ensureCarryOver` 自动刷新 | 把上月月末余额作为本月 `prev_actual / prev_gift`；`shouldRefreshCarryOver` 决定可覆盖范围（自动结转行 / 全空行）；上游月数据变化后，下游月自动结转行会在下次访问时被刷新；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷 |
 | 学生查询 | `renderStudentQuery` | 选中学生 → 当月汇总 + 当月明细 + `studentHistoryRows` 跨月历史对比 |
 | 学生专享价 | `student_pricing` | 学生×科目；UI 显示「当月用过 N 节 / 历史 M 节」识别孤儿配置；偏离标准价 ≥ 50% 时保存提示加备注（`pricingWarnings`） |
 | 价格重算 | `POST /api/pricing-recompute` | 删除当月该学生该科目所有 `fee_overrides`（让单价回到专享/标准价）；变更前后总价写入审计日志 |
@@ -112,7 +116,7 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 | 员工薪资 | `staff_salary_monthly` + `ensureStaffSalaryRows` | 访问月份时 `INSERT OR IGNORE` 把所有「在职/暂停」员工 seed 进当月；初值取档案 `base_salary`，`bonus / deduction` 默认 0 |
 | 日常开销 | `operating_expenses` | 按 `category` 分类、`expense_date` 时间筛选、`vendor` / `notes` 模糊搜索 |
 | 创建月份 | `POST /api/months` | 从最早数据月起一路 `ensureCarryOver` 到目标月，补全所有中间月份的余额结转 |
-| 删除月份 | `DELETE /api/months/:key?force=1` | 清空该月 `lessons` / `recharge_records` / `teacher_adjustments_monthly` / `staff_salary_monthly` / `operating_expenses`；自动备份 db |
+| 删除月份 | `DELETE /api/months/:key?force=1` | 有数据时返回 `blocked: 'has_data'` + 各表行数；UI 弹出二次确认弹窗，需手输 `month_key` 字符串才能解锁删除按钮；执行时清空 `lessons` / `recharge_records` / `teacher_adjustments_monthly` / `staff_salary_monthly` / `operating_expenses`，并写入 `pre_month_delete` 备份 |
 
 ---
 
@@ -142,7 +146,7 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 | 环比 | `previousEqualRange(range)` | 取相邻等长区间 |
 | 分布 | `financeBreakdowns` | 年级×收入、科目×收入、班型×收入×毛利率、Top 10 学生消费、老师 ROI（贡献/课时费）、低余额名单（实际余额 < 平均单次课费）、未缴费课时清单 |
 | 6 月趋势 | `financeTrend6m` | 以 `range.end` 所在月为锚，往前 6 个月，每月独立跑一次 `financeBase(monthRange)` |
-| 资产负债 | `balance_sheet` | 月末沉淀现金 `total_actual_balance`、月末赠送余额 `total_gift_balance`、应收账款 `accounts_receivable`（仅 `状态=未缴费` 的课） |
+| 资产负债 | `balance_sheet` | 四档拆分：`total_actual_balance`（月末沉淀正现金）/ `total_gift_balance`（月末赠送余额）/ `unpaid_lesson_receivable`（`状态=未缴费` 的课时金额）/ `account_debt_receivable`（学生 `actual_balance` 负值合计，即已上但欠款）；`accounts_receivable` = 按学生取 `unpaid` 与 `debt` 的最大值后求和，避免双重计入 |
 | CSV 导出 | `GET /api/export/finance-summary.csv` | 当期快照 |
 
 ---
@@ -154,22 +158,25 @@ python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总
 | 子功能 | 实现 | 说明 |
 | --- | --- | --- |
 | 标准单价 | `pricing_standards` | 年级 × 班型 → 单价；高/初年级班型档位略有差异（见 `priceBucket`） |
-| 内部审计 | `internalAudit(monthKey)` | 检测项见下表 |
+| 内部审计 | `internalAudit(monthKey)` | 检测项见下表；离校 / 已流出学生不参与姓名相似 / 孤儿专享价检查 |
 | xlsx 对账 | `runNodeXlsxAudit` | 上传 xlsx「N月总表」，按 `(date, teacher, time_slot)` 三元组比对每节课字段差异，输出可一键回填的 patch |
 | 审计修复 | `applyAuditIssues` | 批量应用 patch；CRITICAL 默认拒绝，需 `confirm_critical=true` |
-| 忽略列表 | `audit_ignores` | 用 `issue_key`（来源/类型/实体/字段/前后值的拼串）记忆已忽略问题，下次审计跳过 |
+| 问题去重 | `auditIssueKey` + `visibleAuditIssues` | 用 `issue_key`（来源/类型/实体/字段/前后值的拼串）做主键，相同问题重复出现时复用同一条 |
+| 忽略列表 | `audit_ignores` | 用同一 `issue_key` 持久化已忽略问题，跨审计运行保留，UI 侧显示「已忽略」分组 |
 | 档案管理 | 教师 / 学生 / 员工 CRUD | 软删除策略统一 |
 
 #### 6.2 内部审计检测项
 
-| 检测项 | 触发条件 |
-| --- | --- |
-| 多年级学生 | 同一学生同月出现在多个年级 |
-| 缺年级学生 | 学生档案 `grade` 为空 |
-| 老师 / 学生姓名相似 | Levenshtein 距离 ≤ 1 |
-| 孤儿专享价 | `student_pricing` 行无对应学生或科目 |
-| 专享价偏离过大 | 偏离标准价 ≥ 30% |
-| 单价为零 | 有效课时单价 = 0 |
+| 类型 | 严重度 | 触发条件 |
+| --- | --- | --- |
+| `grade_inconsistency` | CRITICAL | 同一学生同月出现在多个年级 |
+| `missing_grade` | MEDIUM | 学生有当月课程，但 `students.grade` 为空（自动建议最后一节课的年级） |
+| `teacher_typo` | WARN | 两个老师姓名 Levenshtein 距离 ≤ 1（去空格后比较） |
+| `student_typo` | WARN | 两个学生姓名 Levenshtein ≤ 1，且共享某个已知年级或一方年级缺失，且双方均非离校 / 已流出 |
+| `orphan_pricing` | WARN | `student_pricing` 行历史从未在任何 `lessons.subject` 中出现，且学生未离校 |
+| `zero_custom_pricing` | HIGH / MEDIUM | `custom_price ≤ 0`；当月有非试课节课命中 → HIGH，否则 MEDIUM |
+| `price_outlier` | WARN | 专享价相对标准价偏离 ≥ 30% |
+| `price_zero` | HIGH | 有效课时（已上 / 未缴费）单价 = 0 |
 
 ---
 
@@ -209,58 +216,54 @@ else:
 
 ## 已知 bug / 风险（重点关注金额相关）
 
-按严重程度排序。复审过 `unitPriceFor / studentSummary / financeBase / weightedTeacherTransport / weightedStaffSalary / ensureCarryOver / rolloverRecharges / recomputePricing / patchExpense / upsertStaffSalary / deleteMonth` 等所有金额触达点。
+按严重程度排序。已复审 `unitPriceFor / studentSummary / financeBase / weightedTeacherTransport / weightedStaffSalary / ensureCarryOver / rolloverRecharges / recomputePricing / patchExpense / upsertStaffSalary / deleteMonth` 等所有金额触达点。
+
+### 修复历史摘要
+
+下表列出已通过代码修复的历史问题，仅供回溯：
+
+| 历史问题 | 修复方式 | 相关代码 |
+| --- | --- | --- |
+| 应收账款口径只统计「状态=未缴费」 | 拆出 `account_debt_receivable` + `unpaid_lesson_receivable`，`accounts_receivable` 按学生取最大值合并去重 | `financeBreakdowns` |
+| 专享价 `custom_price = 0` 会强制覆盖课时价为 0 | POST/PATCH 拒绝 `≤ 0`；存量 0 显式归为 `price_source='waiver'`，备注含「试」字时回退至标准价 | `unitPriceFor` / `/api/student-pricing` |
+| `recomputePricing` 静默删除手填覆盖 | UI 弹窗显式显示「将清除 N 条手填价格、重算 M 节课」 | `app.js` `.pricing-recompute` |
+| 强删月份无确认 | UI 二次确认弹窗，需手输 `month_key` 字符串才能解锁删除按钮；同时 `ensureCarryOver` 在下次访问下游月时按新的 `previousDataMonth` 自动刷新自动结转行 | `deleteMonth` / `month-delete-confirm` |
+| `previousEqualRange` 用滑动窗口处理自然月 | 当 `range` 是完整自然月时，改用真实的上一自然月；自定义区间仍走滑动窗口 | `previousEqualRange` |
+| `gross_margin` 用 `pctChange` 误导 | 增加 `mom_pp`（百分点差），UI 切换到 pp 显示 | `metricOverview` |
+| `severityCounts` 吞掉非标准 severity | 动态新增桶，`pricing_recompute` 等写入的 `info` 也会被汇总 | `severityCounts` |
 
 ### 高（建议尽快修）
 
-1. **应收账款口径不全**
-   `balance_sheet.accounts_receivable` 只统计 `状态=未缴费` 的课；状态为「已上」但学生账户余额不足造成的 `actual_balance < 0` 没被并进应收，仅以负余额形式藏在 `total_actual_balance` 内。月底对账容易漏估真实欠款。建议把 `actual_balance` 的负值之和也并入应收，或在 UI 单独列出来。
-
-2. **专享价 `custom_price = 0` 会强制把课时价覆盖为 0**
-   `unitPriceFor` 里 `if (custom && custom.custom_price !== "")` —— 0 不等于空串，所以专享单价 0 元会越过标准价。`internalAudit` 的 `price_zero` 兜底告警，但创建/修改专享价时没有阻止 0 元保存，对账时容易误以为是专享免单。建议在 `POST /api/student-pricing` 拒绝 `custom_price <= 0`，或显式让 0 元 fall back 到标准价。
-
-3. **`recomputePricing` 静默删除手填覆盖**
-   学生单价的「重算」按钮会把这个学生该科目下**所有**节课的 `fee_overrides` 一并删除，但 UI 措辞是「重算」，容易让人以为只是刷新。审计日志里有记一笔且把清除条数返回给前端，但 UI 上没有显式的二次确认。建议在执行前弹窗显示要清除几条手填覆盖。
-
-4. **强删月份会破坏后续月份的结转链**
-   `DELETE /api/months/:key?force=1` 会把该月 `recharge_records` 也删掉。后一个月里源自被删月的 `prev_actual / prev_gift` 仍是旧值，系统不会自动重算。如果用户没意识到这一点直接强删，会出现"金额对不上"。备份是兜底，但需要 UI 显式提示「会让 X 月的结转失效，是否一起重算？」。
+1. **强删月份不会重算后续月份的结转链**
+   UI 已有二次确认且 `ensureCarryOver` 在访问下游月时刷新自动结转行；但 `previousDataMonth` 是基于 `availableMonths()` 的，如果中间月份被删，下游月会跳过被删月直接结转上上月余额，业务语义上未必对。仍需 UI 显式提示「下一月的结转将基于 X 月而不是被删月」。
 
 ### 中（语义不一致或边界数据可能踩坑）
 
-5. **`previousEqualRange` 用滑动窗口而不是自然月**
-   月度视图下，"上期"对比是当前区间起点之前 N 天（N=本期天数）。例如 4 月 30 天，"上月"会拿到 3.2–3.31 30 天的窗口，不包含 3.1。环比百分比会和直觉对不上。建议在 `range` 等于自然月时改用真实的上一自然月，自定义区间再用滑动窗口。
-
-6. **未填 `recharge_date` 时 fall back 到月初**
+2. **未填 `recharge_date` 时 fall back 到月初**
    `rechargesInRange` 用 `COALESCE(NULLIF(recharge_date, ''), month_key)`。在半月级 finance 自定义区间（如 4.16–4.30）下，本月里没填日期的充值会落到 4.1，被错排除。建议要么在录入时强制日期，要么 fall back 到月末。
 
-7. **Finance 自定义区间下，员工薪资和老师车贴按"日数线性比例"**
+3. **Finance 自定义区间下，员工薪资和老师车贴按"日数线性比例"**
    `weightedStaffSalary` 和 `weightedTeacherTransport` 用 `overlapDays / monthDays` 做权重。但员工工资是月度发放、不可日切，半月视图会显示一半工资，半月利润分析会被低估。建议自定义区间下显式提示"成本按时间分摊"，或允许用户在 UI 选择"成本不分摊"。
 
-8. **`gross_margin` 也走 `pctChange`**
-   毛利率（百分数）也跑 month-over-month 百分比。25% → 30% 报"+20.0%"，意思是"毛利率本身上升 20%"，不是"+5pp"。经营者容易误读。建议比例类指标改成 `pp`（百分点）差。
+4. **同步学生年级会被 lesson 上的错误年级覆盖**
+   `syncStudentsFromLessons` 用 `COALESCE(NULLIF(excluded.grade,''), students.grade)`，最后一次遍历到的非空 lesson 年级会写入档案。某节课误录入错年级会污染学生档案。审计的 `grade_inconsistency` 能兜底告警，但同步本身仍写入。建议只在 `students.grade` 为空时填年级，不要覆盖。
 
-9. **同步学生年级会被 lesson 上的错误年级覆盖**
-   `syncStudentsFromLessons` 用 `COALESCE(NULLIF(excluded.grade,''), students.grade)`，最后一次遍历到的非空 lesson 年级会写入档案。某节课误录入错年级，会污染学生档案。审计的 `grade_inconsistency` 能兜底，但同步本身仍写入。建议只在 `students.grade` 为空时填年级，不要覆盖。
+5. **`staff_salary_monthly.salary_actual` 和 `expected_salary` 双源**
+   存储字段 `salary_actual` 取 INSERT 时的 `base_salary` 快照，但 SELECT 同时返回 `expected_salary`（用当前 `base_salary` 重算）。员工调薪后历史月份两栏会不一致，UI 上一旦展示 `expected` 会让历史月看起来"工资变了"。`weightedStaffSalary` 用的是 stored `salary_actual`，所以经营概览的运营成本是稳定的。建议 UI 上明确区分"按当时基薪"和"按当前基薪"，或干脆不返回 `expected_salary`。
 
-10. **`staff_salary_monthly.salary_actual` 和 `expected_salary` 双源**
-    存储字段 `salary_actual` 取 INSERT 时的 `base_salary` 快照，但 SELECT 同时返回 `expected_salary`（用当前 `base_salary` 重算）。员工调薪后历史月份的两栏会不一致，UI 上一旦展示 `expected` 会让历史月看起来"工资变了"。`weightedStaffSalary` 用的是 stored salary_actual，所以经营概览的运营成本是稳定的。建议 UI 上明确区分"按当时基薪"和"按当前基薪"，或干脆不返回 `expected_salary`。
-
-11. **试课 / 考试的老师课时费完全靠手填**
-    `teacherSummary` 只把 `已上 / 未缴费` 计入老师课时合计；试课、考试不计入。`lessons.teacher_salary` 是手填字段，没有跟单价或学生数联动。如果机构对试课/监考有薪资政策，目前需要在每节课的 `teacher_salary` 单元格里手动维护。
+6. **试课 / 考试的老师课时费完全靠手填**
+   `teacherSummary` 只把 `已上 / 未缴费` 计入老师课时合计；试课、考试不计入。`lessons.teacher_salary` 是手填字段，没有跟单价或学生数联动。如果机构对试课/监考有薪资政策，目前需要在每节课的 `teacher_salary` 单元格里手动维护。
 
 ### 低（边界 / 体验）
 
-12. **`upsertStaffSalary` 对离职员工的保护过严**
-    只要 `staff.status='离职'` 且当月已经存在 salary 行，任何修改都被拒。即使要修复历史录入错误也得先把员工恢复在职。
+7. **`upsertStaffSalary` 对离职员工的保护过严**
+   只要 `staff.status='离职'` 且当月已经存在 salary 行，任何修改都被拒。即使要修复历史录入错误也得先把员工恢复在职。
 
-13. **`expense q` 模糊查询不转义 `%` `_`**
-    用户搜 `2_` 之类时会触发 SQL LIKE 通配。本地工具，影响小。
+8. **`expense q` 模糊查询不转义 `%` `_`**
+   用户搜 `2_` 之类时会触发 SQL LIKE 通配。本地工具，影响小。
 
-14. **`splitStudents` 不规范化中间空格**
-    "小 明" 与 "小明" 被当成两个学生。审计的 `student_typo` 用 levenshtein 兜底，但平时录入时不会自动合并。
-
-15. **`audit_logs` 用 severity='info' 等非标准值时不计入 `severityCounts`**
-    `pricing_recompute` 写日志的 severity 不在 `CRITICAL/HIGH/MEDIUM/LOW/WARN` 之列，前端汇总时会被吞掉。
+9. **`splitStudents` 不规范化中间空格**
+   "小 明" 与 "小明" 被当成两个学生。审计 `student_typo` 通过 `normalizeAuditName` 去空格后做 Levenshtein 兜底，但平时录入时不会自动合并。
 
 ## 受限范围（不在 MVP 内）
 
