@@ -1,15 +1,15 @@
 const navGroups = [
-  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"]] },
+  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"]] },
   {
     key: "students",
     label: "👥 学生",
     views: [["feeDetails", "费用明细"], ["summary", "费用汇总"], ["studentQuery", "学生查询"], ["recharges", "充值记录"]],
-    moreViews: [["studentPricing", "学生单价"]],
+    moreViews: [["studentPricing", "学生单价"], ["studentProfiles", "学生档案"]],
   },
-  { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"]] },
-  { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffProfiles", "员工档案"], ["expenses", "日常开销"]] },
+  { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherProfiles", "老师档案"]] },
+  { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "📊 经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "⚙️ 设置", views: [["pricing", "费用标准"], ["studentPricing", "学生单价"], ["profiles", "档案管理"], ["audit", "数据对账"]] },
+  { key: "settings", label: "⚙️ 设置", views: [["pricing", "费用标准"], ["audit", "数据对账"]] },
 ];
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
@@ -17,10 +17,13 @@ const LESSON_FILTER_KEY = "liming:lesson-filter";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
+const MATRIX_RANGE_KEY = "liming:matrix-range";
 const THEME_KEY = "liming:theme";
 let state = null;
 let view = localStorage.getItem("liming:view") || "lessons";
+if (view === "staffProfiles") view = "staffPayroll";
 let activeWeek = Number(localStorage.getItem("liming:week") || 0);
+let matrixRange = readMatrixRange();
 let months = [];
 let activeMonth = localStorage.getItem("liming:month") || "";
 let includeInactive = localStorage.getItem("liming:include-inactive") === "1";
@@ -39,6 +42,7 @@ let studentPricingFilter = { student: "", subject: "", price: "", usage: "" };
 let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
+if (view === "profiles") view = profileTab === "students" ? "studentProfiles" : "teacherProfiles";
 let profileSearch = "";
 let profileStatusFilter = (() => {
   try {
@@ -67,6 +71,7 @@ let expenseFilter = (() => {
 let auditState = { xlsxReport: null, internalReport: null, logs: [], busy: false, notice: "" };
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
+let filterComboEventsBound = false;
 let customDatePickerEl = null;
 let activeCustomDateInput = null;
 let activeCustomDateMonth = null;
@@ -468,11 +473,18 @@ function ensureCustomDatePicker() {
   customDatePickerEl = document.createElement("div");
   customDatePickerEl.className = "custom-date-picker";
   customDatePickerEl.hidden = true;
+  customDatePickerEl.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
   customDatePickerEl.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const nav = event.target.closest("[data-month-offset]");
     if (nav && activeCustomDateInput) {
       activeCustomDateMonth.setMonth(activeCustomDateMonth.getMonth() + Number(nav.dataset.monthOffset || 0));
       renderCustomDatePicker();
+      activeCustomDateInput.focus({ preventScroll: true });
       return;
     }
 
@@ -561,7 +573,7 @@ function closeCustomDatePicker() {
 }
 
 function enhanceCustomDateInputs() {
-  document.querySelectorAll('.date-range-inputs input[type="date"]').forEach((input) => {
+  document.querySelectorAll('input[type="date"]').forEach((input) => {
     if (input.dataset.customDate === "1") return;
     input.dataset.customDate = "1";
     input.type = "text";
@@ -637,12 +649,26 @@ async function load() {
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
+  ensureLessonFilterDates();
+  const lessonRange = lessonLoadRange();
+  if (lessonRange) {
+    state.lessons = ((await request(`/api/lessons-range?start=${encodeURIComponent(lessonRange.start)}&end=${encodeURIComponent(lessonRange.end)}`)).lessons || []);
+    state.lesson_loaded_range = lessonRange;
+  }
+  const weekSpan = naturalWeekSpan(activeMonth);
+  ensureMatrixRange();
+  const matrixStart = matrixRange.start && (!weekSpan || matrixRange.start < weekSpan.start) ? matrixRange.start : weekSpan?.start;
+  const matrixEnd = matrixRange.end && (!weekSpan || matrixRange.end > weekSpan.end) ? matrixRange.end : weekSpan?.end;
+  state.week_lessons = matrixStart && matrixEnd
+    ? ((await request(`/api/lessons-range?start=${encodeURIComponent(matrixStart)}&end=${encodeURIComponent(matrixEnd)}`)).lessons || [])
+    : state.lessons;
   ensureFinanceRangeDates();
   state.finance = await request(`/api/finance-summary?${financeRangeQuery()}`);
   state.profile_teachers = (await request("/api/teachers")).teachers || [];
   state.profile_students = (await request("/api/students")).students || [];
   state.staff = (await request("/api/staff")).staff || [];
   state.staff_salary = (await request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`)).rows || [];
+  state.staff_attendance = (await request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`)).rows || [];
   ensureExpenseFilterDates();
   const expenseParams = new URLSearchParams();
   if (expenseFilter.start) expenseParams.set("start", expenseFilter.start);
@@ -815,6 +841,87 @@ function weekDates(start) {
   return Array.from({ length: 7 }, (_, index) => addDays(start, index)).filter(Boolean);
 }
 
+function dateRangeDates(start, end) {
+  const startDate = parseDateValue(start);
+  const endDate = parseDateValue(end);
+  if (!startDate || !endDate || start > end) return [];
+  const dates = [];
+  for (const cursor = new Date(startDate); cursor <= endDate; cursor.setDate(cursor.getDate() + 1)) {
+    dates.push(dateKey(cursor));
+  }
+  return dates;
+}
+
+function naturalWeekRanges(monthKey = activeMonth) {
+  const bounds = monthBounds(monthKey);
+  const monthStart = parseDateValue(bounds.start);
+  const monthEnd = parseDateValue(bounds.end);
+  if (!monthStart || !monthEnd) return [];
+  const cursor = parseDateValue(startOfWeek(bounds.start));
+  const ranges = [];
+  while (cursor && cursor <= monthEnd) {
+    const start = dateKey(cursor);
+    const end = addDays(start, 6);
+    const endDate = parseDateValue(end);
+    ranges.push({
+      start_date: start,
+      end_date: end,
+      label: `${cursor.getMonth() + 1}.${cursor.getDate()}-${endDate.getMonth() + 1}.${endDate.getDate()}`,
+      includes(value) {
+        return value >= start && value <= end;
+      },
+    });
+    cursor.setDate(cursor.getDate() + 7);
+  }
+  return ranges;
+}
+
+function naturalWeekSpan(monthKey = activeMonth) {
+  const ranges = naturalWeekRanges(monthKey);
+  if (!ranges.length) return null;
+  return {
+    start: ranges[0].start_date,
+    end: ranges[ranges.length - 1].end_date,
+  };
+}
+
+function readMatrixRange() {
+  try {
+    return { month_key: "", start: "", end: "", ...JSON.parse(localStorage.getItem(MATRIX_RANGE_KEY) || "{}") };
+  } catch {
+    return { month_key: "", start: "", end: "" };
+  }
+}
+
+function saveMatrixRange() {
+  localStorage.setItem(MATRIX_RANGE_KEY, JSON.stringify(matrixRange));
+}
+
+function matrixDefaultRange(monthKey = activeMonth) {
+  const ranges = naturalWeekRanges(monthKey);
+  const index = Math.min(Math.max(activeWeek, 0), Math.max(0, ranges.length - 1));
+  const range = ranges[index] || ranges[0];
+  const bounds = monthBounds(monthKey);
+  return {
+    month_key: monthKey,
+    start: range?.start_date || bounds.start,
+    end: range?.end_date || bounds.end,
+  };
+}
+
+function ensureMatrixRange() {
+  const monthKey = state?.settings?.month_key || activeMonth;
+  if (
+    matrixRange.month_key !== monthKey
+    || !isDateValue(matrixRange.start)
+    || !isDateValue(matrixRange.end)
+    || matrixRange.start > matrixRange.end
+  ) {
+    matrixRange = matrixDefaultRange(monthKey);
+    saveMatrixRange();
+  }
+}
+
 function readFinanceRange() {
   try {
     return { start: "", end: "", preset: "month", ...JSON.parse(localStorage.getItem(FINANCE_RANGE_KEY) || "{}") };
@@ -833,9 +940,39 @@ function saveFinanceRange() {
   localStorage.setItem(FINANCE_RANGE_KEY, JSON.stringify(financeRange));
 }
 
+function financeRangeMatches(a, b) {
+  return a?.start === b?.start && a?.end === b?.end;
+}
+
+function monthScopedFinanceRange(preset = "month") {
+  const range = preset === "prev-month"
+    ? monthBounds(previousMonth(activeMonth))
+    : monthBounds(activeMonth);
+  return { ...range, preset, anchor_month: activeMonth };
+}
+
+function resetFinanceRangeToActiveMonth() {
+  financeRange = monthScopedFinanceRange("month");
+  saveFinanceRange();
+}
+
 function ensureFinanceRangeDates() {
-  if (isDateValue(financeRange.start) && isDateValue(financeRange.end) && financeRange.start <= financeRange.end) return;
-  financeRange = { ...financeRange, ...monthBounds(activeMonth), preset: "month" };
+  const validRange = isDateValue(financeRange.start) && isDateValue(financeRange.end) && financeRange.start <= financeRange.end;
+  if ((financeRange.preset === "month" || financeRange.preset === "prev-month") && activeMonth) {
+    const expected = monthScopedFinanceRange(financeRange.preset);
+    if (
+      validRange
+      && financeRange.anchor_month === activeMonth
+      && financeRangeMatches(financeRange, expected)
+    ) {
+      return;
+    }
+    financeRange = expected;
+    saveFinanceRange();
+    return;
+  }
+  if (validRange) return;
+  financeRange = monthScopedFinanceRange("month");
   saveFinanceRange();
 }
 
@@ -858,8 +995,7 @@ function semesterBounds() {
 }
 
 function financePresetRange(preset) {
-  if (preset === "month") return { ...monthBounds(activeMonth), preset };
-  if (preset === "prev-month") return { ...monthBounds(previousMonth(activeMonth)), preset };
+  if (preset === "month" || preset === "prev-month") return monthScopedFinanceRange(preset);
   if (preset === "30d") {
     const end = todayDate();
     return { start: addDays(end, -29), end, preset };
@@ -970,6 +1106,24 @@ function ensureLessonFilterDates() {
   }
 }
 
+function lessonLoadRange() {
+  const bounds = monthBounds(state?.settings?.month_key || activeMonth);
+  const start = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : bounds.start;
+  const end = isDateValue(lessonFilter.end_date) ? lessonFilter.end_date : bounds.end;
+  if (!start || !end || start > end) return null;
+  return {
+    start: start < bounds.start ? start : bounds.start,
+    end: end > bounds.end ? end : bounds.end,
+  };
+}
+
+function lessonRangeLoaded() {
+  const desired = lessonLoadRange();
+  const loaded = state?.lesson_loaded_range;
+  if (!desired || !loaded) return false;
+  return loaded.start <= desired.start && loaded.end >= desired.end;
+}
+
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
   const bounds = monthBounds(monthKey);
@@ -991,7 +1145,7 @@ function lessonFilterOptions(rows) {
 
 function lessonMatchesFilter(row, filter, options = {}) {
   const { includeDate = true, includeStatus = true, includeQuery = true } = options;
-  if (filter.teacher && row.teacher_name !== filter.teacher) return false;
+  if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
   if (filter.student) {
     const needle = filter.student.toLowerCase();
     if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
@@ -1000,7 +1154,7 @@ function lessonMatchesFilter(row, filter, options = {}) {
     if (filter.start_date && (!row.date || row.date < filter.start_date)) return false;
     if (filter.end_date && (!row.date || row.date > filter.end_date)) return false;
   }
-  if (includeStatus && filter.status && rowStatus(row) !== filter.status) return false;
+  if (includeStatus && filter.status && !textContains(rowStatus(row), filter.status)) return false;
   if (includeQuery && filter.query) {
     const needle = filter.query.toLowerCase();
     const haystack = [row.student_names, row.notes, row.classroom, row.subject].join(" ").toLowerCase();
@@ -1014,20 +1168,55 @@ function filterSelectOptions(values, current, emptyText) {
   return options(normalized, current, emptyText);
 }
 
+function filterComboControl({ className, field, value, values, placeholder = "全部", dataAttr = "filter-field" }) {
+  const normalized = uniqueSorted(value && !values.includes(value) ? [...values, value] : values);
+  const dataName = dataAttr === "field" ? "data-field" : "data-filter-field";
+  return `
+    <span class="filter-combo">
+      <input class="control filter-combo-input ${className}" ${dataName}="${escapeHtml(field)}" type="text" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || "")}">
+      <button class="filter-combo-toggle" type="button" aria-label="展开候选">⌄</button>
+      <span class="filter-combo-menu">
+        <button class="filter-combo-option muted" type="button" data-value="">全部</button>
+        ${normalized.map((item) => `<button class="filter-combo-option" type="button" data-value="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join("")}
+      </span>
+    </span>
+  `;
+}
+
+function textContains(value, filter) {
+  const needle = String(filter || "").trim().toLowerCase();
+  if (!needle) return true;
+  return String(value || "").toLowerCase().includes(needle);
+}
+
+function canonicalFilterValue(entries, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const match = entries.find(([key, label]) => raw === key || raw === label);
+  return match ? match[0] : raw;
+}
+
+function filterLabel(entries, value) {
+  return entries.find(([key]) => key === value)?.[1] || value || "";
+}
+
+const rechargeSourceOptions = [["all", "全部"], ["manual", "手动/无来源"], ["carry_over", "自动结转"]];
+const balanceFilterOptions = [["actual", "有现金余额"], ["gift", "有赠送余额"], ["zero", "全为零"]];
+const priceFilterOptions = [["positive", "正常价"], ["zero", "0 元"]];
+const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
+
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
   const opts = lessonFilterOptions(rows);
   const teacherSelect = `
     <label class="filter-field">
       <span>老师</span>
-      <select class="control lesson-filter-input" data-filter-field="teacher">
-        ${filterSelectOptions(opts.teachers, lessonFilter.teacher, "全部")}
-      </select>
+      ${filterComboControl({ className: "lesson-filter-input", field: "teacher", value: lessonFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
     </label>
   `;
   const studentInput = `
     <label class="filter-field">
       <span>学生</span>
-      <input class="control lesson-filter-input" data-filter-field="student" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名" value="${escapeHtml(lessonFilter.student)}">
+      ${filterComboControl({ className: "lesson-filter-input", field: "student", value: lessonFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
     </label>
   `;
   const fullFilters = compact ? "" : `
@@ -1041,9 +1230,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
     </label>
     <label class="filter-field">
       <span>状态</span>
-      <select class="control lesson-filter-input" data-filter-field="status">
-        ${options(statusValues(), lessonFilter.status, "全部")}
-      </select>
+      ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: statusValues(), placeholder: "输入或选择状态" })}
     </label>
     <label class="filter-field filter-search">
       <span>搜索</span>
@@ -1092,17 +1279,20 @@ function feeDetailStatusOptions() {
 function feeDetailMatchesFilter(row) {
   const filter = feeDetailsFilter;
   if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
-  if (filter.teacher && row.teacher_name !== filter.teacher) return false;
-  if (filter.grade && row.grade !== filter.grade) return false;
+  if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
+  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.status) {
     const status = rowStatus(row);
-    const match = status === filter.status
-      || (filter.status === "未上" && (status === "待上" || row.course_status === "未上"))
-      || (filter.status === "暂停" && String(row.course_status || "").startsWith("暂停"))
-      || (filter.status === "调课" && String(row.notes || "").includes("调课"));
+    const match = textContains(status, filter.status)
+      || (textContains("未上", filter.status) && (status === "待上" || row.course_status === "未上"))
+      || (textContains("暂停", filter.status) && String(row.course_status || "").startsWith("暂停"))
+      || (textContains("调课", filter.status) && String(row.notes || "").includes("调课"));
     if (!match) return false;
   }
-  if (filter.source && priceSourceFilterValue(row.price_source) !== filter.source) return false;
+  if (filter.source) {
+    const source = priceSourceFilterValue(row.price_source);
+    if (!textContains(source, filter.source) && !textContains(priceSourceLabel(source), filter.source)) return false;
+  }
   if (filter.start && (!row.date || row.date < filter.start)) return false;
   if (filter.end && (!row.date || row.date > filter.end)) return false;
   return true;
@@ -1112,37 +1302,29 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
   const students = uniqueSorted(rows.map((row) => row.student_name));
   const teachers = uniqueSorted(rows.map((row) => row.teacher_name));
   const grades = uniqueSorted(rows.map((row) => row.grade));
-  const sourceOption = (value, label) => `<option value="${value}" ${feeDetailsFilter.source === value ? "selected" : ""}>${label}</option>`;
+  const sourceOptions = ["标准价", "个性价", "手动", "考试手填", "试课免费", "退费/减免"];
   return `
     <div class="filter-bar">
       <div class="filter-controls">
         <label class="filter-field">
           <span>学生姓名</span>
-          <input class="control fee-details-filter-input" data-filter-field="student" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名" value="${escapeHtml(feeDetailsFilter.student)}">
+          ${filterComboControl({ className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: students, placeholder: "输入或选择学生" })}
         </label>
         <label class="filter-field">
           <span>授课老师</span>
-          <select class="control fee-details-filter-input" data-filter-field="teacher">${filterSelectOptions(teachers, feeDetailsFilter.teacher, "全部")}</select>
+          ${filterComboControl({ className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: teachers, placeholder: "输入或选择老师" })}
         </label>
         <label class="filter-field">
           <span>年级</span>
-          <select class="control fee-details-filter-input" data-filter-field="grade">${filterSelectOptions(grades, feeDetailsFilter.grade, "全部")}</select>
+          ${filterComboControl({ className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: grades, placeholder: "输入或选择年级" })}
         </label>
         <label class="filter-field">
           <span>状态</span>
-          <select class="control fee-details-filter-input" data-filter-field="status">${filterSelectOptions(feeDetailStatusOptions(), feeDetailsFilter.status, "全部")}</select>
+          ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: feeDetailStatusOptions(), placeholder: "输入或选择状态" })}
         </label>
         <label class="filter-field">
           <span>价格来源</span>
-          <select class="control fee-details-filter-input" data-filter-field="source">
-            ${sourceOption("", "全部")}
-            ${sourceOption("standard", "标准价")}
-            ${sourceOption("custom", "个性价")}
-            ${sourceOption("manual", "手填")}
-            ${sourceOption("exam", "考试")}
-            ${sourceOption("trial", "试课")}
-            ${sourceOption("waiver", "退费/减免")}
-          </select>
+          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: sourceOptions, placeholder: "输入或选择来源" })}
         </label>
         <label class="filter-field filter-date-range">
           <span>日期</span>
@@ -1163,7 +1345,7 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
 
 function summaryMatchesFilter(row) {
   if (summaryFilter.student && !row.student_name.toLowerCase().includes(summaryFilter.student.toLowerCase())) return false;
-  if (summaryFilter.grade && row.grade !== summaryFilter.grade) return false;
+  if (summaryFilter.grade && !textContains(row.grade, summaryFilter.grade)) return false;
   if (summaryFilter.balance === "actual" && numberValue(row.actual_balance) === 0) return false;
   if (summaryFilter.balance === "gift" && numberValue(row.gift_balance) === 0) return false;
   if (summaryFilter.balance === "zero" && (numberValue(row.actual_balance) !== 0 || numberValue(row.gift_balance) !== 0)) return false;
@@ -1176,16 +1358,11 @@ function renderSummaryFilterBar(rows, filteredRows) {
   return `
     <div class="filter-bar compact summary-filter-bar">
       <label>学生姓名</label>
-      <input class="control summary-filter-input" data-filter-field="student" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名" value="${escapeHtml(summaryFilter.student)}">
+      ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: students, placeholder: "输入或选择学生" })}
       <label>年级</label>
-      <select class="control summary-filter-input" data-filter-field="grade">${filterSelectOptions(grades, summaryFilter.grade, "全部")}</select>
+      ${filterComboControl({ className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: grades, placeholder: "输入或选择年级" })}
       <label>余额状态</label>
-      <select class="control summary-filter-input" data-filter-field="balance">
-        <option value="" ${summaryFilter.balance === "" ? "selected" : ""}>全部</option>
-        <option value="actual" ${summaryFilter.balance === "actual" ? "selected" : ""}>有现金余额</option>
-        <option value="gift" ${summaryFilter.balance === "gift" ? "selected" : ""}>有赠送余额</option>
-        <option value="zero" ${summaryFilter.balance === "zero" ? "selected" : ""}>全为零</option>
-      </select>
+      ${filterComboControl({ className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "输入或选择余额状态" })}
       <div class="filter-summary">
         <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn reset-summary-filter" type="button">清空筛选</button>
@@ -1568,7 +1745,7 @@ function restoreInputFocus(selector, value) {
   });
 }
 
-function bindSafeTextInput(input, applyValue, renderAction, delay = 380) {
+function bindSafeTextInput(input, applyValue, renderAction, delay = 650) {
   let composing = false;
   const selector = inputFocusSelector(input);
   const commit = debounce(async () => {
@@ -1679,8 +1856,8 @@ function historyToggleAction() {
   `;
 }
 
-function sortedLessons() {
-  return [...state.lessons].sort((a, b) => {
+function sortLessons(rows) {
+  return [...(rows || [])].sort((a, b) => {
     const av = [
       a.date || "",
       a.teacher_name || "",
@@ -1697,6 +1874,10 @@ function sortedLessons() {
     ].join("|");
     return av.localeCompare(bv, "zh-Hans-CN");
   });
+}
+
+function sortedLessons() {
+  return sortLessons(state.lessons);
 }
 
 function lessonRow(row, cumulative) {
@@ -1791,7 +1972,7 @@ function lessonCopyModal() {
 
 function weekCopySourceRows(sourceStart) {
   const dates = new Set(weekDates(sourceStart));
-  return sortedLessons()
+  return sortLessons(state.week_lessons || state.lessons || [])
     .filter((row) => dates.has(row.date))
     .sort((a, b) => `${a.date} ${a.time_slot} ${String(a.id).padStart(8, "0")}`.localeCompare(`${b.date} ${b.time_slot} ${String(b.id).padStart(8, "0")}`, "zh-Hans-CN"));
 }
@@ -1905,21 +2086,7 @@ function renderLessons() {
 }
 
 function weekRanges() {
-  const month = state.settings.month_key || "2026-04-01";
-  const date = new Date(`${month}T00:00:00`);
-  const y = date.getFullYear();
-  const m = date.getMonth();
-  const last = new Date(y, m + 1, 0).getDate();
-  const ranges = [[1, 8], [9, 15], [16, 22], [23, last]];
-  return ranges.map(([start, end]) => ({
-    start,
-    end,
-    label: `${m + 1}.${start}-${m + 1}.${end}`,
-    includes(value) {
-      const d = new Date(`${value}T00:00:00`);
-      return d.getFullYear() === y && d.getMonth() === m && d.getDate() >= start && d.getDate() <= end;
-    },
-  }));
+  return naturalWeekRanges(state.settings.month_key || activeMonth);
 }
 
 function weekConflictIssues(range) {
@@ -1937,6 +2104,150 @@ function conflictTypeLabel(type) {
   }[type] || type || "冲突";
 }
 
+function parseLessonTimeRange(value) {
+  const raw = String(value || "")
+    .replaceAll("：", ":")
+    .replace(/[—–~～至到]/g, "-")
+    .replace(/\s+/g, "");
+  if (!raw) return null;
+  const toMinutes = (token) => {
+    const match = String(token || "").match(/^(\d{1,2})(?::?(\d{2}))?$/);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2] || 0);
+    if (hour > 23 || minute > 59) return null;
+    return hour * 60 + minute;
+  };
+  const parts = raw.split("-").filter(Boolean);
+  let start = null;
+  let end = null;
+  if (parts.length >= 2) {
+    start = toMinutes(parts[0]);
+    end = toMinutes(parts[1]);
+  } else {
+    const tokens = [...raw.matchAll(/\d{1,2}:?\d{0,2}/g)].map((item) => item[0]);
+    if (tokens.length >= 2) {
+      start = toMinutes(tokens[0]);
+      end = toMinutes(tokens[1]);
+    }
+  }
+  if (start == null || end == null || end <= start) return null;
+  return { start, end };
+}
+
+function scheduleConflictLessonDetail(row) {
+  return {
+    id: row.id,
+    date: row.date || "",
+    weekday: weekdayCn(row.date),
+    time_slot: row.time_slot || "",
+    teacher_name: row.teacher_name || "",
+    classroom: row.classroom || "",
+    grade: row.grade || "",
+    subject: row.subject || "",
+    student_names: row.student_names || "",
+    status: rowStatus(row),
+    notes: row.notes || "",
+  };
+}
+
+function localScheduleConflicts(rows) {
+  const issues = [];
+  const parsed = [];
+  const activeRows = rows.filter((row) => (
+    rowStatus(row) !== "请假"
+    && String(row.lesson_status || "").trim() !== "休息"
+    && !String(row.course_status || "").trim().startsWith("暂停")
+  ));
+  const pushIssue = (issue) => issues.push({
+    severity: issue.severity || "HIGH",
+    type: issue.type,
+    date: issue.date || "",
+    time_slot: issue.time_slot || "",
+    entity: issue.entity || "",
+    lesson_ids: issue.lesson_ids || [],
+    message: issue.message || "",
+    lesson_details: issue.lesson_details || [],
+  });
+  for (const row of activeRows) {
+    const range = parseLessonTimeRange(row.time_slot);
+    if (!row.date || !range) {
+      pushIssue({
+        severity: "MEDIUM",
+        type: "invalid_time",
+        date: row.date,
+        time_slot: row.time_slot,
+        entity: `lesson_${row.id}`,
+        lesson_ids: [row.id],
+        message: "课程日期或时间段无法识别，无法参与冲突判断",
+        lesson_details: [scheduleConflictLessonDetail(row)],
+      });
+      continue;
+    }
+    parsed.push({ row, ...range });
+  }
+  for (let i = 0; i < parsed.length; i += 1) {
+    for (let j = i + 1; j < parsed.length; j += 1) {
+      const a = parsed[i];
+      const b = parsed[j];
+      if (a.row.date !== b.row.date) continue;
+      if (!(a.start < b.end && b.start < a.end)) continue;
+      const sharedStudents = splitStudents(a.row.student_names)
+        .filter((name) => splitStudents(b.row.student_names).includes(name));
+      const lessonIds = [a.row.id, b.row.id].map(Number).filter(Boolean);
+      const lessonDetails = [scheduleConflictLessonDetail(a.row), scheduleConflictLessonDetail(b.row)];
+      if (a.row.teacher_name && a.row.teacher_name === b.row.teacher_name) {
+        pushIssue({
+          type: "teacher",
+          date: a.row.date,
+          time_slot: `${a.row.time_slot} / ${b.row.time_slot}`,
+          entity: a.row.teacher_name,
+          lesson_ids: lessonIds,
+          message: `${a.row.teacher_name} 在重叠时间段有两节课`,
+          lesson_details: lessonDetails,
+        });
+      }
+      if (a.row.classroom && a.row.classroom === b.row.classroom) {
+        pushIssue({
+          type: "classroom",
+          date: a.row.date,
+          time_slot: `${a.row.time_slot} / ${b.row.time_slot}`,
+          entity: a.row.classroom,
+          lesson_ids: lessonIds,
+          message: `${a.row.classroom} 在重叠时间段被重复占用`,
+          lesson_details: lessonDetails,
+        });
+      }
+      if (sharedStudents.length) {
+        pushIssue({
+          type: "student",
+          date: a.row.date,
+          time_slot: `${a.row.time_slot} / ${b.row.time_slot}`,
+          entity: sharedStudents.join("、"),
+          lesson_ids: lessonIds,
+          message: `${sharedStudents.join("、")} 在重叠时间段有重复课程`,
+          lesson_details: lessonDetails,
+        });
+      }
+    }
+  }
+  return issues.sort((a, b) => `${a.date || ""} ${a.time_slot || ""} ${a.type || ""}`.localeCompare(`${b.date || ""} ${b.time_slot || ""} ${b.type || ""}`, "zh-Hans-CN"));
+}
+
+function conflictMapByLesson(issues) {
+  const map = new Map();
+  for (const issue of issues) {
+    const label = conflictTypeLabel(issue.type);
+    for (const id of issue.lesson_ids || []) {
+      const key = Number(id);
+      if (!key) continue;
+      if (!map.has(key)) map.set(key, new Set());
+      map.get(key).add(label);
+    }
+  }
+  return map;
+}
+
 function scheduleConflictPanel(issues) {
   const counts = { teacher: 0, student: 0, classroom: 0, invalid_time: 0 };
   for (const issue of issues) counts[issue.type] = (counts[issue.type] || 0) + 1;
@@ -1946,7 +2257,7 @@ function scheduleConflictPanel(issues) {
     <div class="band schedule-conflict-panel ${total ? "has-conflict" : "ok"}">
       <div class="section-head">
         <div>
-          <div class="section-title">本周冲突检查</div>
+          <div class="section-title">时间冲突检查</div>
           <div class="section-subtitle">${total ? `发现 ${total} 条需要确认的排课问题` : "未发现老师、学生或教室时间冲突"}</div>
         </div>
         <div class="conflict-counts">
@@ -2001,16 +2312,185 @@ function scheduleConflictPanel(issues) {
   `;
 }
 
-function renderWeek() {
+function timeSlotSortValue(value) {
+  const match = String(value || "").match(/(\d{1,2})[:：点时]?(\d{2})?/);
+  if (!match) return 9999;
+  return Number(match[1]) * 60 + Number(match[2] || 0);
+}
+
+function weekDayColumns(range, rows = null) {
+  const activeDates = rows
+    ? new Set(rows.map((row) => row.date).filter(Boolean))
+    : null;
+  const dates = dateRangeDates(range.start_date, range.end_date)
+    .filter((date) => !activeDates || activeDates.has(date));
+  return dates.map((date) => ({
+    date,
+    weekday: weekdayCn(date),
+    short: `${Number(date.slice(5, 7))}.${Number(date.slice(8, 10))}`,
+    inMonth: monthKeyFromDateValue(date) === (state.settings.month_key || activeMonth),
+  }));
+}
+
+function weekGrid(rows, range) {
+  const days = weekDayColumns(range, rows);
+  const timeSlots = uniqueSorted(rows.map((row) => row.time_slot || "未填时间"))
+    .sort((a, b) => timeSlotSortValue(a) - timeSlotSortValue(b) || a.localeCompare(b, "zh-Hans-CN"));
+  const byCell = new Map();
+  for (const row of rows) {
+    const key = `${row.time_slot || "未填时间"}|${row.date}`;
+    if (!byCell.has(key)) byCell.set(key, []);
+    byCell.get(key).push(row);
+  }
+  return { days, timeSlots, byCell };
+}
+
+function weekGridLessonCard(row, conflictMap = new Map()) {
+  const course = `${row.grade || ""}${row.subject || ""}` || "课程";
+  const meta = [
+    row.teacher_name ? `<span>老师：${escapeHtml(row.teacher_name)}</span>` : "",
+    row.classroom ? `<span>教室：${escapeHtml(row.classroom)}</span>` : "",
+  ].filter(Boolean).join("");
+  const students = splitStudents(row.student_names).join("、");
+  const notes = row.notes ? `<div class="week-grid-notes">${escapeHtml(row.notes)}</div>` : "";
+  const conflictLabels = [...(conflictMap.get(Number(row.id)) || [])];
+  const conflictBadges = conflictLabels.length
+    ? `<div class="week-grid-conflicts">${conflictLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>`
+    : "";
+  return `
+    <div class="week-grid-card ${isAbnormal(row) ? "abnormal" : ""} ${conflictLabels.length ? "has-conflict" : ""}">
+      <div class="week-grid-course">${escapeHtml(course)} ${statusBadge(rowStatus(row))}</div>
+      ${conflictBadges}
+      <div class="week-grid-meta">${meta}</div>
+      <div class="week-grid-students">${escapeHtml(students || "未填学生")}</div>
+      ${notes}
+    </div>
+  `;
+}
+
+function renderWeekGrid(rows, range, conflicts = []) {
+  const { days, timeSlots, byCell } = weekGrid(rows, range);
+  const conflictMap = conflictMapByLesson(conflicts);
+  const rangeDays = dateRangeDates(range.start_date, range.end_date);
+  const compact = rangeDays.length > 10;
+  if (compact) {
+    return `
+      <div class="band week-grid-panel">
+        <div class="section-head">
+          <div>
+            <div class="section-title">核对课表</div>
+            <div class="section-subtitle">按所选日期范围汇总，只显示有课程的日期。</div>
+          </div>
+        </div>
+        <div class="week-grid-sparse">
+          ${timeSlots.map((slot) => {
+            const activeDays = days.filter((day) => (byCell.get(`${slot}|${day.date}`) || []).length);
+            return `
+              <div class="week-grid-sparse-row">
+                <div class="week-grid-sparse-time">${escapeHtml(slot)}</div>
+                <div class="week-grid-sparse-cells">
+                  ${activeDays.map((day) => {
+                    const lessons = byCell.get(`${slot}|${day.date}`) || [];
+                    return `
+                      <div class="week-grid-sparse-cell ${day.inMonth ? "" : "outside-month"}">
+                        <div class="week-grid-sparse-date">
+                          <strong>${escapeHtml(day.weekday)}</strong>
+                          <span>${escapeHtml(day.short)}</span>
+                        </div>
+                        ${lessons.map((lesson) => weekGridLessonCard(lesson, conflictMap)).join("")}
+                      </div>
+                    `;
+                  }).join("") || `<div class="week-grid-sparse-empty">这个时间段暂无课程</div>`}
+                </div>
+              </div>
+            `;
+          }).join("") || `<div class="empty">当前日期范围暂无课程</div>`}
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="band week-grid-panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">核对课表</div>
+          <div class="section-subtitle">按所选日期范围汇总，空白日期自动隐藏。</div>
+        </div>
+      </div>
+      <div class="week-grid-scroll">
+        <table class="week-grid-table">
+          <thead>
+            <tr>
+              <th class="week-grid-time-head">时间</th>
+              ${days.map((day) => `<th class="${day.inMonth ? "" : "outside-month"}"><strong>${escapeHtml(day.weekday)}</strong><span>${escapeHtml(day.short)}</span></th>`).join("")}
+            </tr>
+          </thead>
+          <tbody>
+            ${timeSlots.map((slot) => `
+              <tr>
+                <th class="week-grid-time">${escapeHtml(slot)}</th>
+                ${days.map((day) => {
+                  const lessons = byCell.get(`${slot}|${day.date}`) || [];
+                  return `<td class="${day.inMonth ? "" : "outside-month"}">${lessons.map((lesson) => weekGridLessonCard(lesson, conflictMap)).join("") || `<span class="week-grid-empty">-</span>`}</td>`;
+                }).join("")}
+              </tr>
+            `).join("") || `<tr><td colspan="${Math.max(1, days.length + 1)}" class="empty">当前日期范围暂无课程</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function weekViewData({ customRange = false } = {}) {
   ensureLessonFilterDates();
   const ranges = weekRanges();
-  const range = ranges[activeWeek] || ranges[0];
-  const weekRows = sortedLessons()
+  if (activeWeek >= ranges.length) activeWeek = Math.max(0, ranges.length - 1);
+  ensureMatrixRange();
+  const weekRange = ranges[activeWeek] || ranges[0];
+  const range = customRange
+    ? {
+      start_date: matrixRange.start,
+      end_date: matrixRange.end,
+      label: `${Number(matrixRange.start.slice(5, 7))}.${Number(matrixRange.start.slice(8, 10))}-${Number(matrixRange.end.slice(5, 7))}.${Number(matrixRange.end.slice(8, 10))}`,
+      custom: true,
+      includes(value) {
+        return value >= matrixRange.start && value <= matrixRange.end;
+      },
+    }
+    : weekRange;
+  const weekRows = sortLessons(state.week_lessons || state.lessons || [])
     .filter((row) => range.includes(row.date));
   const rows = weekRows
     .filter((row) => lessonMatchesFilter(row, lessonFilter, { includeDate: false, includeStatus: false, includeQuery: false }))
     .sort((a, b) => `${a.date || ""} ${a.teacher_name || ""} ${a.time_slot || ""}`.localeCompare(`${b.date || ""} ${b.teacher_name || ""} ${b.time_slot || ""}`, "zh-Hans-CN"));
-  const conflicts = weekConflictIssues(range);
+  const conflicts = localScheduleConflicts(weekRows);
+  return { ranges, range, weekRows, rows, conflicts };
+}
+
+function renderWeekTabs(ranges) {
+  return `
+    <div class="tabs">
+      ${ranges.map((item, index) => `<button class="tab week-tab ${activeWeek === index ? "active" : ""}" data-week="${index}">${escapeHtml(item.label)}</button>`).join("")}
+    </div>
+  `;
+}
+
+function renderMatrixDateFilter() {
+  ensureMatrixRange();
+  return `
+    <div class="filter-bar compact matrix-date-filter">
+      <label>开始日期</label>
+      <input class="control matrix-range-input" data-field="start" type="date" value="${escapeHtml(matrixRange.start)}">
+      <label>结束日期</label>
+      <input class="control matrix-range-input" data-field="end" type="date" value="${escapeHtml(matrixRange.end)}">
+      <button class="btn matrix-range-reset" type="button">恢复当前周</button>
+    </div>
+  `;
+}
+
+function renderWeek() {
+  const { ranges, range, weekRows, rows, conflicts } = weekViewData();
   renderTopbar(
     `${monthLabel()} 周课表`,
     `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
@@ -2020,12 +2500,16 @@ function renderWeek() {
      <button class="btn weekly-image-export" type="button" data-audience="student">导出学生/班课 PNG</button>`,
   );
   contentEl.innerHTML = `
-    <div class="tabs">
-      ${ranges.map((item, index) => `<button class="tab week-tab ${activeWeek === index ? "active" : ""}" data-week="${index}">${escapeHtml(item.label)}</button>`).join("")}
-    </div>
+    ${renderWeekTabs(ranges)}
     ${scheduleConflictPanel(conflicts)}
     ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
     <div class="band">
+      <div class="section-head">
+        <div>
+          <div class="section-title">周课表明细</div>
+          <div class="section-subtitle">保留原列表视图，便于逐条核对课程信息。</div>
+        </div>
+      </div>
       <div class="table-wrap">
         <table class="course-table">
           <thead>
@@ -2056,6 +2540,25 @@ function renderWeek() {
         </table>
       </div>
     </div>
+  `;
+}
+
+function renderWeekMatrix() {
+  const { ranges, range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
+  renderTopbar(
+    `${monthLabel()} 矩阵课表`,
+    `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
+    `<button class="btn weekly-copy" type="button" data-audience="teacher">复制老师课表</button>
+     <button class="btn weekly-copy" type="button" data-audience="student">复制学生课表</button>
+     <button class="btn weekly-image-export" type="button" data-audience="teacher">导出老师 PNG</button>
+     <button class="btn weekly-image-export" type="button" data-audience="student">导出学生/班课 PNG</button>`,
+  );
+  contentEl.innerHTML = `
+    ${renderWeekTabs(ranges)}
+    ${renderMatrixDateFilter()}
+    ${scheduleConflictPanel(conflicts)}
+    ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
+    ${renderWeekGrid(rows, range, conflicts)}
   `;
 }
 
@@ -2549,7 +3052,10 @@ function renderFinance() {
 
     <div class="finance-visual-grid">
       <div class="band finance-chart-panel">
-        <div class="section-head"><div class="section-title">利润走势</div></div>
+        <div class="section-head">
+          <div class="section-title">利润走势</div>
+          <div class="section-subtitle">截至 ${escapeHtml(summary.trend_as_of || todayDate())}</div>
+        </div>
         ${financeTrendChart(summary.trend_6m || [])}
       </div>
       <div class="band finance-stack-panel">
@@ -2632,7 +3138,7 @@ function renderRecharges() {
     if (rechargeSourceFilter === "carry_over" && source !== "carry_over") return false;
     if (rechargeSourceFilter === "manual" && source === "carry_over") return false;
     if (rechargeStudentFilter && !row.student_name.toLowerCase().includes(rechargeStudentFilter.toLowerCase())) return false;
-    if (rechargeGradeFilter && row.grade !== rechargeGradeFilter) return false;
+    if (rechargeGradeFilter && !textContains(row.grade, rechargeGradeFilter)) return false;
     return true;
   });
   renderTopbar(`${monthLabel()} 充值记录`, `已显示 ${visibleRows.length} / 共 ${rows.length} 名学生`);
@@ -2640,15 +3146,11 @@ function renderRecharges() {
     <div class="band">
       <div class="filter-bar compact">
         <label>来源</label>
-        <select class="control recharge-source-filter">
-          <option value="all" ${rechargeSourceFilter === "all" ? "selected" : ""}>全部</option>
-          <option value="manual" ${rechargeSourceFilter === "manual" ? "selected" : ""}>手动/无来源</option>
-          <option value="carry_over" ${rechargeSourceFilter === "carry_over" ? "selected" : ""}>自动结转</option>
-        </select>
+        ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
         <label>学生姓名</label>
-        <input class="control recharge-student-filter" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名" value="${escapeHtml(rechargeStudentFilter)}">
+        ${filterComboControl({ className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: uniqueSorted(rows.map((row) => row.student_name)), placeholder: "输入或选择学生", dataAttr: "field" })}
         <label>年级</label>
-        <select class="control recharge-grade-filter">${filterSelectOptions(grades, rechargeGradeFilter, "全部")}</select>
+        ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: grades, placeholder: "输入或选择年级" })}
         <button class="btn reset-recharge-filter" type="button">清空筛选</button>
       </div>
       <div class="table-wrap">
@@ -2914,7 +3416,7 @@ function studentPricingMatchesFilter(row) {
     ].map((value) => String(value || "").toLowerCase()).join(" ");
     if (!haystack.includes(studentNeedle)) return false;
   }
-  if (filter.subject && row.subject !== filter.subject) return false;
+  if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.price === "zero" && numberValue(row.custom_price) > 0) return false;
   if (filter.price === "positive" && numberValue(row.custom_price) <= 0) return false;
   const currentLessons = numberValue(row.current_month_lessons);
@@ -2926,25 +3428,17 @@ function studentPricingMatchesFilter(row) {
 }
 
 function renderStudentPricingFilterBar(rows, visibleRows) {
+  const students = uniqueSorted(rows.map((row) => row.student_name));
   return `
     <div class="filter-bar compact student-pricing-filter-bar">
       <label>学生/备注</label>
-      <input class="control student-pricing-filter-input" data-filter-field="student" type="text" autocomplete="off" spellcheck="false" placeholder="输入学生姓名或备注" value="${escapeHtml(studentPricingFilter.student)}">
+      ${filterComboControl({ className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students, placeholder: "输入或选择学生/备注" })}
       <label>科目</label>
-      <select class="control student-pricing-filter-input" data-filter-field="subject">${filterSelectOptions(state.lookups.subjects, studentPricingFilter.subject, "全部")}</select>
+      ${filterComboControl({ className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects, placeholder: "输入或选择科目" })}
       <label>价格状态</label>
-      <select class="control student-pricing-filter-input" data-filter-field="price">
-        <option value="" ${studentPricingFilter.price === "" ? "selected" : ""}>全部</option>
-        <option value="positive" ${studentPricingFilter.price === "positive" ? "selected" : ""}>正常价</option>
-        <option value="zero" ${studentPricingFilter.price === "zero" ? "selected" : ""}>0 元</option>
-      </select>
+      ${filterComboControl({ className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "输入或选择价格状态" })}
       <label>影响范围</label>
-      <select class="control student-pricing-filter-input" data-filter-field="usage">
-        <option value="" ${studentPricingFilter.usage === "" ? "selected" : ""}>全部</option>
-        <option value="current" ${studentPricingFilter.usage === "current" ? "selected" : ""}>本月有课</option>
-        <option value="historical" ${studentPricingFilter.usage === "historical" ? "selected" : ""}>历史有课</option>
-        <option value="unused" ${studentPricingFilter.usage === "unused" ? "selected" : ""}>未使用</option>
-      </select>
+      ${filterComboControl({ className: "student-pricing-filter-input", field: "usage", value: filterLabel(usageFilterOptions, studentPricingFilter.usage), values: usageFilterOptions.map((item) => item[1]), placeholder: "输入或选择影响范围" })}
       <div class="filter-summary">
         <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn primary apply-student-pricing-filter" type="button">筛选</button>
@@ -3016,10 +3510,10 @@ function renderStudentPricing() {
   `;
 }
 
-function profileRows() {
-  const rows = profileTab === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
-  const statusFilter = profileStatusFilter[profileTab] || "";
-  const statusRows = statusFilter ? rows.filter((row) => (row.status || "") === statusFilter) : rows;
+function profileRows(kind = profileTab) {
+  const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
+  const statusFilter = profileStatusFilter[kind] || "";
+  const statusRows = statusFilter ? rows.filter((row) => textContains(row.status || "", statusFilter)) : rows;
   const query = profileSearch.trim().toLowerCase();
   if (!query) return statusRows;
   return statusRows.filter((row) => [
@@ -3056,11 +3550,13 @@ function profileModalMarkup() {
   `;
 }
 
-function renderProfiles() {
-  const rows = profileRows();
-  const isTeacher = profileTab === "teachers";
+function renderProfileDirectory(kind = profileTab) {
+  profileTab = kind;
+  localStorage.setItem("liming:profile-tab", profileTab);
+  const rows = profileRows(kind);
+  const isTeacher = kind === "teachers";
   const statusValues = isTeacher ? ["在职", "离职", "暂停"] : ["在读", "离校", "已流出", "暂停"];
-  renderTopbar("档案管理", `${isTeacher ? "老师" : "学生"} ${rows.length} 条`, historyToggleAction());
+  renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
     <table class="profile-table">
       <thead><tr><th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide">备注</th><th>操作</th></tr></thead>
@@ -3102,16 +3598,14 @@ function renderProfiles() {
   contentEl.innerHTML = `
     <div class="band profile-panel">
       <div class="section-head profile-head">
-        <div class="tabs">
-          <button class="tab profile-tab ${profileTab === "teachers" ? "active" : ""}" data-tab="teachers" type="button">老师</button>
-          <button class="tab profile-tab ${profileTab === "students" ? "active" : ""}" data-tab="students" type="button">学生</button>
+        <div>
+          <div class="section-title">${isTeacher ? "老师档案" : "学生档案"}</div>
+          <div class="section-subtitle">${isTeacher ? "维护老师联系方式、在职状态和入离职日期。" : "维护学生年级、监护人、在读状态和入离校日期。"}</div>
         </div>
         <div class="profile-actions">
-          <select class="control profile-status-filter">
-            ${options(statusValues, profileStatusFilter[profileTab] || "", "全部状态")}
-          </select>
+          ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
           <input class="control profile-search" type="text" autocomplete="off" spellcheck="false" placeholder="搜索姓名、电话、备注" value="${escapeHtml(profileSearch)}">
-          <button class="btn primary new-profile" type="button" data-kind="${profileTab}">+ 新增</button>
+          <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -3125,11 +3619,83 @@ function renderProfiles() {
 function filteredStaffRows() {
   const query = staffProfileSearch.trim().toLowerCase();
   return (state.staff || []).filter((row) => {
-    if (staffStatusFilter && row.status !== staffStatusFilter) return false;
+    if (staffStatusFilter && !textContains(row.status, staffStatusFilter)) return false;
     if (!query) return true;
     return [row.name, row.role, row.phone, row.status, row.notes]
       .some((value) => String(value || "").toLowerCase().includes(query));
   });
+}
+
+const attendanceMeta = {
+  上班: { label: "上", title: "正常上班" },
+  休息: { label: "休", title: "休息" },
+  请假: { label: "请", title: "请假" },
+  病假: { label: "病", title: "病假" },
+  事假: { label: "事", title: "事假" },
+  半天: { label: "半", title: "半天" },
+  加班: { label: "加", title: "加班" },
+  调休: { label: "调", title: "调休" },
+  旷工: { label: "旷", title: "旷工" },
+};
+
+function attendanceStatusOptions(value) {
+  const statuses = state.lookups.attendance_status || Object.keys(attendanceMeta);
+  return statuses.map((status) => `<option value="${escapeHtml(status)}" ${status === value ? "selected" : ""}>${escapeHtml(attendanceMeta[status]?.title || status)}</option>`).join("");
+}
+
+function attendanceDates(monthKey) {
+  const bounds = monthBounds(monthKey);
+  const start = parseDateValue(bounds.start);
+  const end = parseDateValue(bounds.end);
+  if (!start || !end) return [];
+  const days = [];
+  for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+    const value = dateKey(cursor);
+    days.push({ value, day: cursor.getDate(), weekday: weekdayCn(value), weekend: [0, 6].includes(cursor.getDay()) });
+  }
+  return days;
+}
+
+function attendanceByStaffDate() {
+  const map = new Map();
+  for (const row of state.staff_attendance || []) map.set(`${row.staff_id}|${row.attendance_date}`, row);
+  return map;
+}
+
+function attendanceSummaryFor(staffId) {
+  const rows = (state.staff_attendance || []).filter((row) => Number(row.staff_id) === Number(staffId));
+  const byStatus = {};
+  let payUnits = 0;
+  for (const row of rows) {
+    byStatus[row.status] = (byStatus[row.status] || 0) + 1;
+    payUnits += numberValue(row.pay_units);
+  }
+  return { count: rows.length, payUnits, byStatus };
+}
+
+function attendanceVisibleStaffRows() {
+  return filteredStaffRows().filter((row) => (row.status || "在职") !== "离职" || includeInactive);
+}
+
+function attendanceWeekdayOptions(value = "all") {
+  const items = [
+    ["all", "全部日期"],
+    ["1", "周一"],
+    ["2", "周二"],
+    ["3", "周三"],
+    ["4", "周四"],
+    ["5", "周五"],
+    ["6", "周六"],
+    ["0", "周日"],
+  ];
+  return items.map(([key, label]) => `<option value="${escapeHtml(key)}" ${key === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+}
+
+function attendanceBulkModeOptions(value = "blank") {
+  return [
+    ["blank", "只填空白"],
+    ["overwrite", "覆盖已有"],
+  ].map(([key, label]) => `<option value="${escapeHtml(key)}" ${key === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
 }
 
 function staffModalMarkup() {
@@ -3148,6 +3714,9 @@ function staffModalMarkup() {
           <label>姓名<input class="control staff-modal-field" data-field="name" placeholder="员工姓名"></label>
           <label>角色<input class="control staff-modal-field" data-field="role" list="staff-role-list" placeholder="角色"></label>
           <label>基础工资<input class="control staff-modal-field" data-field="base_salary" type="number" value="0"></label>
+          <label>计薪方式<select class="control staff-modal-field" data-field="pay_type">${options(["月薪", "日薪"], "月薪")}</select></label>
+          <label>日薪单价<input class="control staff-modal-field" data-field="daily_rate" type="number" value="0"></label>
+          <label>标准天数<input class="control staff-modal-field" data-field="standard_work_days" type="number" value="26"></label>
           <label>手机<input class="control staff-modal-field" data-field="phone" placeholder="联系电话"></label>
           <label>状态<select class="control staff-modal-field" data-field="status">${options(["在职", "暂停", "离职"], "在职")}</select></label>
           <label>入职日期<input class="control staff-modal-field" data-field="joined_at" type="date"></label>
@@ -3162,30 +3731,33 @@ function staffModalMarkup() {
   `;
 }
 
-function renderStaffProfiles() {
+function staffProfilesPanelMarkup() {
   const rows = filteredStaffRows();
-  renderTopbar("员工档案", `${rows.length} 名员工`, historyToggleAction());
-  contentEl.innerHTML = `
+  return `
     <div class="band profile-panel">
       <div class="section-head profile-head">
-        <div class="section-title">员工档案</div>
+        <div>
+          <div class="section-title">员工档案</div>
+          <div class="section-subtitle">这里维护计薪方式、基础工资、日薪和入离职日期；上方薪资会按这些档案计算。</div>
+        </div>
         <div class="profile-actions">
-          <select class="control staff-status-filter">
-            ${options(["在职", "暂停", "离职"], staffStatusFilter, "全部状态")}
-          </select>
+          ${filterComboControl({ className: "staff-status-filter", field: "status", value: staffStatusFilter, values: ["在职", "暂停", "离职"], placeholder: "输入或选择状态" })}
           <input class="control staff-profile-search" type="text" autocomplete="off" spellcheck="false" placeholder="搜索姓名、角色、电话、备注" value="${escapeHtml(staffProfileSearch)}">
           <button class="btn primary new-staff" type="button">+ 新增员工</button>
         </div>
       </div>
       <div class="table-wrap">
         <table class="profile-table staff-profile-table">
-          <thead><tr><th>姓名</th><th>角色</th><th>基础工资</th><th>手机</th><th>状态</th><th>入职</th><th>离职</th><th class="wide">备注</th><th>操作</th></tr></thead>
+          <thead><tr><th>姓名</th><th>角色</th><th>计薪</th><th>基础工资</th><th>日薪</th><th>标准天数</th><th>手机</th><th>状态</th><th>入职</th><th>离职</th><th class="wide">备注</th><th>操作</th></tr></thead>
           <tbody>
             ${rows.map((row) => `
               <tr class="staff-row" data-id="${row.id}">
                 <td><input class="cell-input staff-field" data-field="name" value="${escapeHtml(row.name)}"></td>
                 <td><input class="cell-input staff-field" data-field="role" list="staff-role-options" value="${escapeHtml(row.role)}"></td>
+                <td><select class="cell-select staff-field" data-field="pay_type">${options(["月薪", "日薪"], row.pay_type || "月薪")}</select></td>
                 <td><input class="cell-input number staff-field" data-field="base_salary" type="number" value="${money(row.base_salary)}"></td>
+                <td><input class="cell-input number staff-field" data-field="daily_rate" type="number" value="${money(row.daily_rate)}"></td>
+                <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${money(row.standard_work_days || 26)}"></td>
                 <td><input class="cell-input staff-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
                 <td><select class="cell-select staff-field" data-field="status">${options(["在职", "暂停", "离职"], row.status || "在职")}</select></td>
                 <td><input class="cell-input staff-field" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
@@ -3193,13 +3765,147 @@ function renderStaffProfiles() {
                 <td><input class="cell-input wide staff-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
                 <td class="readonly"><button class="btn danger delete-staff" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无员工</td></tr>`}
+            `).join("") || `<tr><td colspan="12" class="empty">暂无员工</td></tr>`}
           </tbody>
         </table>
         <datalist id="staff-role-options">${(state.lookups.staff_roles || []).map((role) => `<option value="${escapeHtml(role)}"></option>`).join("")}</datalist>
       </div>
     </div>
+  `;
+}
+
+function renderTeacherProfiles() {
+  renderProfileDirectory("teachers");
+}
+
+function renderStudentProfiles() {
+  renderProfileDirectory("students");
+}
+
+function renderProfiles() {
+  renderProfileDirectory(profileTab === "students" ? "students" : "teachers");
+}
+
+function renderStaffProfiles() {
+  const rows = filteredStaffRows();
+  renderTopbar("员工档案", `${rows.length} 名员工`, historyToggleAction());
+  contentEl.innerHTML = `
+    ${staffProfilesPanelMarkup()}
     ${staffModalMarkup()}
+  `;
+}
+
+function renderStaffAttendance() {
+  const monthKey = state.settings.month_key;
+  const dates = attendanceDates(monthKey);
+  const byDate = attendanceByStaffDate();
+  const rows = attendanceVisibleStaffRows();
+  const summaries = rows.map((staff) => ({ staff, summary: attendanceSummaryFor(staff.id) }));
+  const totalRecords = summaries.reduce((sum, row) => sum + row.summary.count, 0);
+  const totalPayUnits = summaries.reduce((sum, row) => sum + row.summary.payUnits, 0);
+  const totalLeave = summaries.reduce((sum, row) => sum + (row.summary.byStatus["请假"] || 0) + (row.summary.byStatus["病假"] || 0) + (row.summary.byStatus["事假"] || 0), 0);
+  const totalOvertime = summaries.reduce((sum, row) => sum + (row.summary.byStatus["加班"] || 0), 0);
+  const expectedCells = rows.length * dates.length;
+  const missingCells = Math.max(0, expectedCells - totalRecords);
+  renderTopbar(`${monthLabel()} 员工考勤`, `${rows.length} 人，已登记 ${totalRecords} 天`, historyToggleAction());
+  contentEl.innerHTML = `
+    <div class="summary-grid operations-summary attendance-summary-grid">
+      <div class="metric"><div class="metric-label">本月员工</div><div class="metric-value">${rows.length}</div></div>
+      <div class="metric"><div class="metric-label">已登记</div><div class="metric-value">${totalRecords}</div></div>
+      <div class="metric"><div class="metric-label">计薪天数</div><div class="metric-value">${money(totalPayUnits)}</div></div>
+      <div class="metric"><div class="metric-label">请假/加班</div><div class="metric-value">${totalLeave}/${totalOvertime}</div></div>
+    </div>
+    <div class="attendance-layout">
+      <div class="band attendance-panel attendance-main">
+        <div class="section-head profile-head attendance-head">
+          <div>
+            <div class="section-title">考勤登记</div>
+            <div class="section-subtitle">按员工横向登记整月状态；特殊原因会保留在日期格提示里。</div>
+          </div>
+          <div class="profile-actions">
+            ${filterComboControl({ className: "staff-status-filter", field: "status", value: staffStatusFilter, values: ["在职", "暂停", "离职"], placeholder: "输入或选择状态" })}
+            <input class="control staff-profile-search" type="text" autocomplete="off" spellcheck="false" placeholder="搜索员工/角色/电话/备注" value="${escapeHtml(staffProfileSearch)}">
+          </div>
+        </div>
+        <div class="attendance-toolbar">
+          <div class="attendance-legend">
+            ${["上班", "休息", "请假", "半天", "加班", "调休", "旷工"].map((status) => {
+              const meta = attendanceMeta[status] || { label: status };
+              return `<span class="attendance-legend-item status-${escapeHtml(status)}"><span>${escapeHtml(meta.label)}</span>${escapeHtml(status)}</span>`;
+            }).join("")}
+          </div>
+          <div class="attendance-gap">未登记 ${missingCells} 格</div>
+        </div>
+        <div class="attendance-quickbar">
+          <div class="attendance-quick-title">快捷登记</div>
+          <select class="control attendance-bulk-weekday">${attendanceWeekdayOptions()}</select>
+          <select class="control attendance-bulk-status">${attendanceStatusOptions("上班")}</select>
+          <select class="control attendance-bulk-mode">${attendanceBulkModeOptions()}</select>
+          <button class="btn attendance-bulk-apply" type="button">应用到当前员工列表</button>
+          <button class="btn ghost attendance-bulk-one" data-action="fill-all-work" type="button">全月上班</button>
+          <button class="btn ghost attendance-bulk-one" data-action="fill-weekend-work" type="button">周末上班</button>
+          <button class="btn ghost attendance-bulk-one" data-action="clear-visible" type="button">清空当前列表</button>
+        </div>
+        <div class="table-wrap attendance-wrap">
+          <table class="staff-attendance-table">
+            <thead>
+              <tr>
+                <th class="sticky-name">员工</th>
+                ${dates.map((date) => `<th class="${date.weekend ? "weekend" : ""}" title="${escapeHtml(date.weekday)}"><span>${date.day}</span><small>${escapeHtml(date.weekday.replace("周", ""))}</small></th>`).join("")}
+                <th>出勤</th><th>计薪</th><th>请假</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${summaries.map(({ staff, summary }) => `
+                  <tr>
+                    <td class="text-cell sticky-name">
+                      <strong>${escapeHtml(staff.name)}</strong>
+                      <span>${escapeHtml(staff.role || "")}</span>
+                    </td>
+                    ${dates.map((date) => {
+                      const item = byDate.get(`${staff.id}|${date.value}`);
+                      const status = item?.status || "";
+                      const meta = attendanceMeta[status] || { label: "" };
+                      const hasNote = Boolean(item?.reason || item?.notes);
+                      return `
+                        <td class="attendance-cell ${date.weekend ? "weekend" : ""}">
+                          <select class="attendance-select status-${escapeHtml(status || "blank")}" data-staff-id="${staff.id}" data-date="${date.value}" title="${escapeHtml(item?.reason || item?.notes || "")}">
+                            <option value="">-</option>
+                            ${attendanceStatusOptions(status)}
+                          </select>
+                          <span class="attendance-label">${escapeHtml(meta.label)}</span>
+                          ${hasNote ? `<span class="attendance-note-dot"></span>` : ""}
+                        </td>
+                      `;
+                    }).join("")}
+                    <td class="text-cell right">${summary.count}</td>
+                    <td class="text-cell right">${money(summary.payUnits)}</td>
+                    <td class="text-cell right">${(summary.byStatus["请假"] || 0) + (summary.byStatus["病假"] || 0) + (summary.byStatus["事假"] || 0)}</td>
+                  </tr>
+                `).join("") || `<tr><td colspan="${dates.length + 4}" class="empty">暂无员工</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <aside class="band attendance-side">
+        <div class="section-title">结算摘要</div>
+        <div class="section-subtitle">薪资页会按这里的计薪天数自动更新。</div>
+        <div class="attendance-side-list">
+          ${summaries.map(({ staff, summary }) => `
+            <div class="attendance-side-row">
+              <div>
+                <strong>${escapeHtml(staff.name)}</strong>
+                <span>${escapeHtml(staff.pay_type || "月薪")} · ${escapeHtml(staff.role || "未设置角色")}</span>
+              </div>
+              <div class="attendance-side-numbers">
+                <b>${money(summary.payUnits)}</b>
+                <span>${summary.count} 天</span>
+              </div>
+            </div>
+          `).join("") || `<div class="empty">暂无员工</div>`}
+        </div>
+      </aside>
+    </div>
   `;
 }
 
@@ -3214,10 +3920,11 @@ function payrollRows() {
 
 function renderStaffPayroll() {
   const rows = payrollRows();
+  const profileRows = filteredStaffRows();
   const total = rows.reduce((sum, row) => sum + numberValue(row.salary_actual), 0);
   const totalBonus = rows.reduce((sum, row) => sum + numberValue(row.bonus), 0);
   const totalDeduction = rows.reduce((sum, row) => sum + numberValue(row.deduction), 0);
-  renderTopbar(`${monthLabel()} 员工薪资`, `${rows.length} 人，工资合计 ${yuan2(total)}`);
+  renderTopbar(`${monthLabel()} 员工薪资`, `${rows.length} 条薪资，${profileRows.length} 名档案，工资合计 ${yuan2(total)}`);
   contentEl.innerHTML = `
     <div class="summary-grid operations-summary">
       <div class="metric"><div class="metric-label">本月人数</div><div class="metric-value">${rows.length}</div></div>
@@ -3232,7 +3939,7 @@ function renderStaffPayroll() {
       </div>
       <div class="table-wrap">
         <table class="staff-payroll-table">
-          <thead><tr><th>姓名</th><th>角色</th><th>基础</th><th>奖金</th><th>扣款</th><th>实发</th><th class="wide">备注</th><th>操作</th></tr></thead>
+          <thead><tr><th>姓名</th><th>角色</th><th>计薪</th><th>基础/日薪</th><th>计薪天数</th><th>奖金</th><th>扣款</th><th>实发</th><th class="wide">备注</th><th>操作</th></tr></thead>
           <tbody>
             ${rows.map((row) => {
               const mismatch = Math.abs(numberValue(row.salary_actual) - numberValue(row.expected_salary)) > 0.01;
@@ -3243,7 +3950,9 @@ function renderStaffPayroll() {
                 <tr class="staff-salary-row ${inactive ? "row-inactive" : ""}" data-id="${row.id}" data-staff-id="${row.staff_id}">
                   <td class="text-cell">${escapeHtml(row.name)} ${inactiveTag}</td>
                   <td class="text-cell">${escapeHtml(row.role)}</td>
-                  <td class="text-cell right">${money(row.base_salary)}</td>
+                  <td class="text-cell">${escapeHtml(row.pay_type || "月薪")}</td>
+                  <td class="text-cell right">${row.pay_type === "日薪" ? money(row.daily_rate || row.base_salary) : money(row.base_salary)}</td>
+                  <td class="text-cell right" title="${row.attendance_days ? `已登记 ${row.attendance_days} 天考勤` : "未登记考勤，按整月基础工资"}">${row.attendance_days ? money(row.pay_units) : "整月"}</td>
                   <td><input class="cell-input number staff-salary-field" data-field="bonus" type="number" value="${money(row.bonus)}" ${disabled}></td>
                   <td><input class="cell-input number staff-salary-field" data-field="deduction" type="number" value="${money(row.deduction)}" ${disabled}></td>
                   <td class="text-cell right ${mismatch ? "warning-cell" : ""}" title="${mismatch ? `按基础+奖金-扣款应为 ${money(row.expected_salary)}` : ""}">${mismatch ? "⚠ " : ""}${money(row.salary_actual)}</td>
@@ -3251,11 +3960,13 @@ function renderStaffPayroll() {
                   <td class="readonly"><button class="btn danger delete-staff-salary" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
                 </tr>
               `;
-            }).join("") || `<tr><td colspan="8" class="empty">暂无薪资记录</td></tr>`}
+            }).join("") || `<tr><td colspan="10" class="empty">暂无薪资记录</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
+    ${staffProfilesPanelMarkup()}
+    ${staffModalMarkup()}
   `;
 }
 
@@ -3325,7 +4036,7 @@ function renderExpenses() {
       <div class="filter-bar compact expense-filter-bar">
         <label>开始 <input class="control expense-filter-input" data-field="start" type="date" value="${escapeHtml(expenseFilter.start)}"></label>
         <label>结束 <input class="control expense-filter-input" data-field="end" type="date" value="${escapeHtml(expenseFilter.end)}"></label>
-        <label>类别 <select class="control expense-filter-input" data-field="category">${options(state.lookups.expense_categories || [], expenseFilter.category, "全部类别")}</select></label>
+        <label>类别 ${filterComboControl({ className: "expense-filter-input", field: "category", value: expenseFilter.category, values: state.lookups.expense_categories || [], placeholder: "输入或选择类别", dataAttr: "field" })}</label>
         <label>搜索 <input class="control expense-filter-input" data-field="q" type="text" autocomplete="off" spellcheck="false" placeholder="商家/备注" value="${escapeHtml(expenseFilter.q)}"></label>
       </div>
       <div class="expense-bar-wrap">
@@ -3439,6 +4150,7 @@ function render() {
   const renderers = {
     lessons: renderLessons,
     week: renderWeek,
+    weekMatrix: renderWeekMatrix,
     feeDetails: renderFeeDetails,
     summary: renderSummary,
     finance: renderFinance,
@@ -3446,7 +4158,10 @@ function render() {
     studentQuery: renderStudentQuery,
     audit: renderAudit,
     profiles: renderProfiles,
+    teacherProfiles: renderTeacherProfiles,
+    studentProfiles: renderStudentProfiles,
     staffPayroll: renderStaffPayroll,
+    staffAttendance: renderStaffAttendance,
     staffProfiles: renderStaffProfiles,
     expenses: renderExpenses,
     pricing: renderPricing,
@@ -3470,6 +4185,26 @@ async function refreshAfter(action) {
   }
 }
 
+function captureAttendanceScroll() {
+  const wrap = document.querySelector(".attendance-wrap");
+  return wrap ? { left: wrap.scrollLeft, top: wrap.scrollTop } : { left: 0, top: 0 };
+}
+
+function restoreAttendanceScroll(position) {
+  requestAnimationFrame(() => {
+    const wrap = document.querySelector(".attendance-wrap");
+    if (!wrap) return;
+    wrap.scrollLeft = position?.left || 0;
+    wrap.scrollTop = position?.top || 0;
+  });
+}
+
+async function loadWithAttendanceScroll() {
+  const position = captureAttendanceScroll();
+  await load();
+  restoreAttendanceScroll(position);
+}
+
 function collectRowPayload(row, selector) {
   const payload = {};
   row.querySelectorAll(selector).forEach((input) => {
@@ -3478,21 +4213,116 @@ function collectRowPayload(row, selector) {
   return payload;
 }
 
+async function applyAttendanceBulk({ weekday = "all", status = "上班", mode = "blank", clear = false } = {}) {
+  const monthKey = state.settings.month_key;
+  const dates = attendanceDates(monthKey).filter((date) => {
+    if (weekday === "all") return true;
+    const day = parseDateValue(date.value)?.getDay();
+    if (weekday === "weekend") return day === 0 || day === 6;
+    return String(day) === String(weekday);
+  });
+  const staffRows = attendanceVisibleStaffRows();
+  const existing = attendanceByStaffDate();
+  if (!dates.length || !staffRows.length) return alert("当前筛选下没有可处理的考勤。");
+  const existingTargets = [];
+  const createTargets = [];
+  for (const staff of staffRows) {
+    for (const date of dates) {
+      const key = `${staff.id}|${date.value}`;
+      const current = existing.get(key);
+      if (clear) {
+        if (current) existingTargets.push({ staffId: staff.id, date: date.value });
+      } else if (mode === "overwrite" || !current) {
+        createTargets.push({ staffId: staff.id, date: date.value });
+      }
+    }
+  }
+
+  if (clear) {
+    if (!existingTargets.length) return alert("当前筛选下没有可清空的考勤。");
+    if (!confirm(`清空当前员工列表中 ${existingTargets.length} 条考勤记录？`)) return;
+    try {
+      for (const item of existingTargets) {
+        await request(`/api/staff-attendance?staff_id=${encodeURIComponent(item.staffId)}&date=${encodeURIComponent(item.date)}`, { method: "DELETE" });
+      }
+      await loadWithAttendanceScroll();
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
+
+  if (!createTargets.length) return alert("没有需要填充的空白考勤。");
+  const modeLabel = mode === "overwrite" ? "覆盖" : "填充空白";
+  if (!confirm(`${modeLabel} ${createTargets.length} 个考勤格为“${status}”？`)) return;
+  try {
+    for (const item of createTargets) {
+      await request("/api/staff-attendance", {
+        method: "POST",
+        body: {
+          staff_id: Number(item.staffId),
+          attendance_date: item.date,
+          status,
+        },
+      });
+    }
+    await loadWithAttendanceScroll();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 function wireEvents() {
-  const renderLessonFilterSoon = debounce((field, value) => {
-    const cursor = String(value || "").length;
-    render();
-    requestAnimationFrame(() => {
-      const next = document.querySelector(`.lesson-filter-input[data-filter-field="${field}"]`);
-      if (!next || next.tagName === "SELECT" || next.type === "date") return;
-      next.focus({ preventScroll: true });
-      try {
-        next.setSelectionRange(cursor, cursor);
-      } catch {
-        // Some input types do not support selection ranges.
+  document.querySelectorAll(".filter-combo").forEach((combo) => {
+    const input = combo.querySelector(".filter-combo-input");
+    const menu = combo.querySelector(".filter-combo-menu");
+    const close = () => combo.classList.remove("open");
+    combo.querySelector(".filter-combo-toggle")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.querySelectorAll(".filter-combo.open").forEach((item) => {
+        if (item !== combo) item.classList.remove("open");
+      });
+      combo.classList.toggle("open");
+    });
+    menu?.querySelectorAll(".filter-combo-option").forEach((option) => {
+      option.addEventListener("click", () => {
+        input.value = option.dataset.value || "";
+        close();
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    });
+    input?.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        combo.classList.add("open");
+        menu?.querySelector(".filter-combo-option")?.focus();
+      }
+      if (event.key === "Escape") close();
+    });
+    menu?.addEventListener("keydown", (event) => {
+      const optionsList = [...menu.querySelectorAll(".filter-combo-option")];
+      const index = optionsList.indexOf(document.activeElement);
+      if (event.key === "Escape") {
+        close();
+        input?.focus();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        optionsList[Math.min(optionsList.length - 1, index + 1)]?.focus();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        optionsList[Math.max(0, index - 1)]?.focus();
       }
     });
-  }, 450);
+  });
+
+  if (!filterComboEventsBound) {
+    filterComboEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".filter-combo")) {
+        document.querySelectorAll(".filter-combo.open").forEach((combo) => combo.classList.remove("open"));
+      }
+    });
+  }
 
   document.querySelectorAll(".nav-btn").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3522,6 +4352,7 @@ function wireEvents() {
     select.addEventListener("change", async () => {
       activeMonth = select.value;
       localStorage.setItem("liming:month", activeMonth);
+      resetFinanceRangeToActiveMonth();
       await load();
     });
   });
@@ -3543,6 +4374,7 @@ function wireEvents() {
       }
       activeMonth = month;
       localStorage.setItem("liming:month", activeMonth);
+      resetFinanceRangeToActiveMonth();
       if (result.created) {
         const from = result.from_month ? `从 ${monthOptionShort(result.from_month)} 结转` : "未找到上一个可结转月份，创建";
         alert(`${from} ${result.carried_students || 0} 位学生，实际余额合计 ¥${money2(result.carried_actual || 0)}，赠送余额合计 ¥${money2(result.carried_gift || 0)}`);
@@ -3577,6 +4409,7 @@ function wireEvents() {
       }
       activeMonth = data.next_month || "";
       if (activeMonth) localStorage.setItem("liming:month", activeMonth);
+      if (activeMonth) resetFinanceRangeToActiveMonth();
       alert("月份已删除。");
       await load();
     });
@@ -3610,6 +4443,7 @@ function wireEvents() {
       monthDeleteDraft = null;
       activeMonth = data.next_month || "";
       if (activeMonth) localStorage.setItem("liming:month", activeMonth);
+      if (activeMonth) resetFinanceRangeToActiveMonth();
       alert(`已删除 ${formatMonthOption(monthKey)}。${data.backup ? `删除前备份：${data.backup}` : ""}`);
       await load();
     });
@@ -3623,12 +4457,11 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".recharge-source-filter").forEach((select) => {
-    select.addEventListener("change", () => {
-      rechargeSourceFilter = select.value || "all";
+  document.querySelectorAll(".recharge-source-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      rechargeSourceFilter = canonicalFilterValue(rechargeSourceOptions, value) || "all";
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
-      render();
-    });
+    }, () => render());
   });
 
   document.querySelectorAll(".recharge-student-filter").forEach((input) => {
@@ -3637,11 +4470,10 @@ function wireEvents() {
     }, () => render());
   });
 
-  document.querySelectorAll(".recharge-grade-filter").forEach((select) => {
-    select.addEventListener("change", () => {
-      rechargeGradeFilter = select.value;
-      render();
-    });
+  document.querySelectorAll(".recharge-grade-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      rechargeGradeFilter = value;
+    }, () => render());
   });
 
   document.querySelectorAll(".reset-recharge-filter").forEach((button) => {
@@ -3669,12 +4501,11 @@ function wireEvents() {
     }, () => render());
   });
 
-  document.querySelectorAll(".profile-status-filter").forEach((select) => {
-    select.addEventListener("change", () => {
-      profileStatusFilter = { ...profileStatusFilter, [profileTab]: select.value };
+  document.querySelectorAll(".profile-status-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      profileStatusFilter = { ...profileStatusFilter, [profileTab]: value };
       localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
-      render();
-    });
+    }, () => render());
   });
 
   document.querySelectorAll(".new-profile").forEach((button) => {
@@ -3734,18 +4565,66 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".staff-status-filter").forEach((select) => {
-    select.addEventListener("change", () => {
-      staffStatusFilter = select.value;
+  document.querySelectorAll(".staff-status-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      staffStatusFilter = value;
       localStorage.setItem("liming:staff-status-filter", staffStatusFilter);
-      render();
-    });
+    }, () => render());
   });
 
   document.querySelectorAll(".staff-profile-search").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       staffProfileSearch = value;
     }, () => render());
+  });
+
+  document.querySelectorAll(".attendance-select").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const status = select.value;
+      try {
+        if (!status) {
+          await request(`/api/staff-attendance?staff_id=${encodeURIComponent(select.dataset.staffId)}&date=${encodeURIComponent(select.dataset.date)}`, { method: "DELETE" });
+        } else {
+          const needsReason = ["请假", "病假", "事假", "旷工", "调休"].includes(status);
+          const reason = needsReason ? prompt(`${select.dataset.date} ${status}原因`, "") || "" : "";
+          await request("/api/staff-attendance", {
+            method: "POST",
+            body: {
+              staff_id: Number(select.dataset.staffId),
+              attendance_date: select.dataset.date,
+              status,
+              reason,
+            },
+          });
+        }
+        await loadWithAttendanceScroll();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll(".attendance-bulk-apply").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const panel = button.closest(".attendance-panel");
+      const weekday = panel.querySelector(".attendance-bulk-weekday")?.value || "all";
+      const status = panel.querySelector(".attendance-bulk-status")?.value || "上班";
+      const mode = panel.querySelector(".attendance-bulk-mode")?.value || "blank";
+      await applyAttendanceBulk({ weekday, status, mode });
+    });
+  });
+
+  document.querySelectorAll(".attendance-bulk-one").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.action;
+      if (action === "fill-all-work") {
+        await applyAttendanceBulk({ weekday: "all", status: "上班", mode: "overwrite" });
+      } else if (action === "fill-weekend-work") {
+        await applyAttendanceBulk({ weekday: "weekend", status: "上班", mode: "blank" });
+      } else if (action === "clear-visible") {
+        await applyAttendanceBulk({ clear: true });
+      }
+    });
   });
 
   document.querySelectorAll(".new-staff").forEach((button) => {
@@ -3997,39 +4876,39 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".lesson-filter-input").forEach((input) => {
-    const applyLessonFilter = (rerender = true) => {
+    const applyLessonFilter = async (value = input.value, rerender = true) => {
       const field = input.dataset.filterField;
       const monthKey = state.settings.month_key;
       focusedLessonIds = [];
       lessonFilter = {
         ...lessonFilter,
         month_key: monthKey,
-        [field]: input.value,
+        [field]: value,
       };
       saveLessonFilter();
       if (rerender) {
-        if (input.tagName === "SELECT" || input.type === "date" || field === "start_date" || field === "end_date") render();
-        else renderLessonFilterSoon(field, input.value);
+        if ((field === "start_date" || field === "end_date") && !lessonRangeLoaded()) {
+          await load();
+        } else {
+          render();
+        }
       }
     };
 
     if (input.tagName === "SELECT" || input.type === "date") {
-      input.addEventListener("change", () => applyLessonFilter(true));
+      input.addEventListener("change", () => applyLessonFilter(input.value, true));
       return;
     }
 
-    let composing = false;
-    input.addEventListener("compositionstart", () => {
-      composing = true;
-    });
-    input.addEventListener("compositionend", () => {
-      composing = false;
-      applyLessonFilter(true);
-    });
-    input.addEventListener("input", () => {
-      if (!composing) applyLessonFilter(true);
-    });
-    input.addEventListener("change", () => applyLessonFilter(true));
+    bindSafeTextInput(input, (value) => {
+      applyLessonFilter(value, false);
+    }, async () => {
+      if ((input.dataset.filterField === "start_date" || input.dataset.filterField === "end_date") && !lessonRangeLoaded()) {
+        await load();
+      } else {
+        render();
+      }
+    }, 650);
   });
 
   document.querySelectorAll(".fee-details-filter-input").forEach((input) => {
@@ -4059,7 +4938,11 @@ function wireEvents() {
 
   document.querySelectorAll(".summary-filter-input").forEach((input) => {
     const applySummaryFilter = (value) => {
-      summaryFilter = { ...summaryFilter, [input.dataset.filterField]: value };
+      const field = input.dataset.filterField;
+      summaryFilter = {
+        ...summaryFilter,
+        [field]: field === "balance" ? canonicalFilterValue(balanceFilterOptions, value) : value,
+      };
     };
     if (input.tagName === "SELECT") {
       input.addEventListener("change", () => {
@@ -4080,7 +4963,13 @@ function wireEvents() {
 
   document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
     const applyStudentPricingFilter = (value) => {
-      studentPricingFilter = { ...studentPricingFilter, [input.dataset.filterField]: value };
+      const field = input.dataset.filterField;
+      const canonical = field === "price"
+        ? canonicalFilterValue(priceFilterOptions, value)
+        : field === "usage"
+          ? canonicalFilterValue(usageFilterOptions, value)
+          : value;
+      studentPricingFilter = { ...studentPricingFilter, [field]: canonical };
     };
     if (input.tagName === "SELECT") {
       input.addEventListener("change", () => {
@@ -4106,7 +4995,13 @@ function wireEvents() {
   document.querySelectorAll(".apply-student-pricing-filter").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
-        studentPricingFilter = { ...studentPricingFilter, [input.dataset.filterField]: input.value };
+        const field = input.dataset.filterField;
+        const value = field === "price"
+          ? canonicalFilterValue(priceFilterOptions, input.value)
+          : field === "usage"
+            ? canonicalFilterValue(usageFilterOptions, input.value)
+            : input.value;
+        studentPricingFilter = { ...studentPricingFilter, [field]: value };
       });
       render();
     });
@@ -4173,6 +5068,7 @@ function wireEvents() {
       if (nextMonth && confirm(`已复制 ${result.created} 节课，其中 ${outside.length} 节在 ${formatMonthOption(nextMonth)}，是否切换查看？`)) {
         activeMonth = nextMonth;
         localStorage.setItem("liming:month", activeMonth);
+        resetFinanceRangeToActiveMonth();
       } else {
         alert(`已复制 ${result.created} 节课。`);
       }
@@ -4325,6 +5221,34 @@ function wireEvents() {
     button.addEventListener("click", () => {
       activeWeek = Number(button.dataset.week);
       localStorage.setItem("liming:week", String(activeWeek));
+      if (view === "weekMatrix") {
+        matrixRange = matrixDefaultRange(state.settings.month_key || activeMonth);
+        saveMatrixRange();
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll(".matrix-range-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const field = input.dataset.field;
+      matrixRange = {
+        ...matrixRange,
+        month_key: state.settings.month_key || activeMonth,
+        [field]: input.value,
+      };
+      if (matrixRange.start && matrixRange.end && matrixRange.start > matrixRange.end) {
+        matrixRange = { ...matrixRange, [field === "start" ? "end" : "start"]: input.value };
+      }
+      saveMatrixRange();
+      await load();
+    });
+  });
+
+  document.querySelectorAll(".matrix-range-reset").forEach((button) => {
+    button.addEventListener("click", () => {
+      matrixRange = matrixDefaultRange(state.settings.month_key || activeMonth);
+      saveMatrixRange();
       render();
     });
   });

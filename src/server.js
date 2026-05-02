@@ -24,6 +24,18 @@ const CLASSROOMS = [
 const SUBJECTS = ["英语", "数学", "物理", "语文", "生物", "化学", "地理", "道法", "历史"];
 const STAFF_ROLES = ["教学主管", "教务主管", "小助手", "做饭阿姨", "前台", "其他"];
 const EXPENSE_CATEGORIES = ["房租", "水电", "食材", "办公", "维修", "推广", "杂项", "其他"];
+const ATTENDANCE_STATUS = ["上班", "休息", "请假", "病假", "事假", "半天", "加班", "调休", "旷工"];
+const ATTENDANCE_PAY_UNITS = {
+  上班: 1,
+  休息: 0,
+  请假: 0,
+  病假: 0,
+  事假: 0,
+  半天: 0.5,
+  加班: 1.5,
+  调休: 0,
+  旷工: 0,
+};
 const GRADES = [
   { name: "初一", color: "#E8F5E9" },
   { name: "初二", color: "#E3F2FD" },
@@ -167,6 +179,9 @@ function initDb() {
       name TEXT NOT NULL,
       role TEXT NOT NULL,
       base_salary REAL DEFAULT 0,
+      pay_type TEXT DEFAULT '月薪',
+      daily_rate REAL DEFAULT 0,
+      standard_work_days REAL DEFAULT 26,
       phone TEXT DEFAULT '',
       status TEXT DEFAULT '在职',
       joined_at TEXT DEFAULT '',
@@ -183,6 +198,21 @@ function initDb() {
       deduction REAL DEFAULT 0,
       notes TEXT DEFAULT '',
       UNIQUE (staff_id, month_key),
+      FOREIGN KEY (staff_id) REFERENCES staff(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS staff_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL,
+      attendance_date TEXT NOT NULL,
+      month_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT '上班',
+      pay_units REAL DEFAULT 1,
+      hours REAL DEFAULT 0,
+      reason TEXT DEFAULT '',
+      notes TEXT DEFAULT '',
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (staff_id, attendance_date),
       FOREIGN KEY (staff_id) REFERENCES staff(id) ON DELETE CASCADE
     );
 
@@ -233,6 +263,16 @@ function initDb() {
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
     db.prepare("ALTER TABLE recharge_records ADD COLUMN source TEXT DEFAULT ''").run();
+  }
+
+  const staffColumns = db.prepare("PRAGMA table_info(staff)").all().map((column) => column.name);
+  const staffColumnDefs = {
+    pay_type: "TEXT DEFAULT '月薪'",
+    daily_rate: "REAL DEFAULT 0",
+    standard_work_days: "REAL DEFAULT 26",
+  };
+  for (const [column, definition] of Object.entries(staffColumnDefs)) {
+    if (!staffColumns.includes(column)) db.prepare(`ALTER TABLE staff ADD COLUMN ${column} ${definition}`).run();
   }
 
   const teacherColumns = db.prepare("PRAGMA table_info(teachers)").all().map((column) => column.name);
@@ -671,7 +711,7 @@ function studentsForMonth(monthKey, includeInactive = false) {
 }
 
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return dateKey(new Date());
 }
 
 function teacherProfiles() {
@@ -779,12 +819,15 @@ function createStaff(body) {
   if (!name) return { error: "name is required", status: 400 };
   return withTransaction(() => {
     const result = db.prepare(`
-      INSERT INTO staff(name, role, base_salary, phone, status, joined_at, left_at, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO staff(name, role, base_salary, pay_type, daily_rate, standard_work_days, phone, status, joined_at, left_at, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       name,
       text(body.role) || "其他",
       num(body.base_salary),
+      text(body.pay_type) || "月薪",
+      num(body.daily_rate),
+      num(body.standard_work_days) || 26,
       text(body.phone),
       text(body.status || "在职"),
       text(body.joined_at),
@@ -803,12 +846,14 @@ function patchStaff(id, body) {
   }
   return withTransaction(() => {
     const payload = {};
-    for (const field of ["name", "role", "phone", "status", "joined_at", "left_at", "notes"]) {
+    for (const field of ["name", "role", "pay_type", "phone", "status", "joined_at", "left_at", "notes"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
     if (Object.prototype.hasOwnProperty.call(body, "base_salary")) payload.base_salary = num(body.base_salary);
+    if (Object.prototype.hasOwnProperty.call(body, "daily_rate")) payload.daily_rate = num(body.daily_rate);
+    if (Object.prototype.hasOwnProperty.call(body, "standard_work_days")) payload.standard_work_days = num(body.standard_work_days) || 26;
     patchTable("staff", "id", Number(id), [
-      "name", "role", "base_salary", "phone", "status", "joined_at", "left_at", "notes",
+      "name", "role", "base_salary", "pay_type", "daily_rate", "standard_work_days", "phone", "status", "joined_at", "left_at", "notes",
     ], payload);
     return get("SELECT *, CASE WHEN status IN ('在职', '暂停') THEN 1 ELSE 0 END AS active FROM staff WHERE id = ?", [Number(id)]);
   });
@@ -833,6 +878,7 @@ function deleteStaff(id) {
       return { deleted: false, soft_deleted: true, row: get("SELECT * FROM staff WHERE id = ?", [Number(id)]) };
     }
     db.prepare("DELETE FROM staff_salary_monthly WHERE staff_id = ?").run(Number(id));
+    db.prepare("DELETE FROM staff_attendance WHERE staff_id = ?").run(Number(id));
     db.prepare("DELETE FROM staff WHERE id = ?").run(Number(id));
     return { deleted: true, soft_deleted: false };
   });
@@ -848,8 +894,52 @@ function ensureStaffSalaryRows(monthKey) {
   `).run(monthKey);
 }
 
+function attendancePayUnit(statusValue) {
+  const status = text(statusValue) || "上班";
+  return Object.prototype.hasOwnProperty.call(ATTENDANCE_PAY_UNITS, status) ? ATTENDANCE_PAY_UNITS[status] : 1;
+}
+
+function staffAttendanceSummary(monthKey) {
+  const rows = all(`
+    SELECT staff_id, status, COUNT(*) AS count, SUM(COALESCE(pay_units, 0)) AS pay_units
+    FROM staff_attendance
+    WHERE month_key = ?
+    GROUP BY staff_id, status
+  `, [monthKey]);
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.staff_id)) {
+      map.set(row.staff_id, { attendance_days: 0, pay_units: 0, by_status: {} });
+    }
+    const summary = map.get(row.staff_id);
+    summary.attendance_days += num(row.count);
+    summary.pay_units += num(row.pay_units);
+    summary.by_status[row.status] = num(row.count);
+  }
+  return map;
+}
+
+function staffBasePay(row, attendanceSummary = null) {
+  if (!attendanceSummary || !attendanceSummary.attendance_days) return num(row.base_salary);
+  if (row.pay_type === "日薪") {
+    const rate = num(row.daily_rate) || num(row.base_salary);
+    return rate * num(attendanceSummary.pay_units);
+  }
+  const standardDays = Math.max(1, num(row.standard_work_days) || 26);
+  return num(row.base_salary) / standardDays * num(attendanceSummary.pay_units);
+}
+
 function staffSalaryRows(monthKey) {
   ensureStaffSalaryRows(monthKey);
+  const attendance = staffAttendanceSummary(monthKey);
+  for (const row of all(`
+    SELECT s.*, ssm.bonus, ssm.deduction, ssm.notes
+    FROM staff_salary_monthly ssm
+    JOIN staff s ON s.id = ssm.staff_id
+    WHERE ssm.month_key = ?
+  `, [monthKey])) {
+    upsertStaffSalaryRow(row, monthKey, row.bonus, row.deduction, row.notes);
+  }
   return all(`
     SELECT
       ssm.id,
@@ -857,6 +947,9 @@ function staffSalaryRows(monthKey) {
       s.name,
       s.role,
       s.base_salary,
+      s.pay_type,
+      s.daily_rate,
+      s.standard_work_days,
       s.phone,
       s.status,
       s.left_at,
@@ -864,13 +957,37 @@ function staffSalaryRows(monthKey) {
       ssm.salary_actual,
       ssm.bonus,
       ssm.deduction,
-      ssm.notes,
-      (s.base_salary + COALESCE(ssm.bonus, 0) - COALESCE(ssm.deduction, 0)) AS expected_salary
+      ssm.notes
     FROM staff_salary_monthly ssm
     JOIN staff s ON s.id = ssm.staff_id
     WHERE ssm.month_key = ?
     ORDER BY s.role, s.name
-  `, [monthKey]);
+  `, [monthKey]).map((row) => {
+    const summary = attendance.get(row.staff_id) || { attendance_days: 0, pay_units: 0, by_status: {} };
+    const basePay = staffBasePay(row, summary.attendance_days ? summary : null);
+    return {
+      ...row,
+      attendance_days: summary.attendance_days,
+      pay_units: summary.pay_units,
+      attendance_by_status: summary.by_status,
+      expected_salary: basePay + num(row.bonus) - num(row.deduction),
+    };
+  });
+}
+
+function upsertStaffSalaryRow(staff, monthKey, bonus, deduction, notes) {
+  const attendance = staffAttendanceSummary(monthKey).get(staff.id);
+  const salaryActual = staffBasePay(staff, attendance) + num(bonus) - num(deduction);
+  db.prepare(`
+    INSERT INTO staff_salary_monthly(staff_id, month_key, salary_actual, bonus, deduction, notes)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(staff_id, month_key) DO UPDATE SET
+      salary_actual = excluded.salary_actual,
+      bonus = excluded.bonus,
+      deduction = excluded.deduction,
+      notes = excluded.notes
+  `).run(staff.id, monthKey, salaryActual, num(bonus), num(deduction), text(notes));
+  return salaryActual;
 }
 
 function upsertStaffSalary(body) {
@@ -887,25 +1004,87 @@ function upsertStaffSalary(body) {
     }
     const bonus = num(body.bonus);
     const deduction = num(body.deduction);
-    const salaryActual = num(staff.base_salary) + bonus - deduction;
-    db.prepare(`
-      INSERT INTO staff_salary_monthly(staff_id, month_key, salary_actual, bonus, deduction, notes)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(staff_id, month_key) DO UPDATE SET
-        salary_actual = excluded.salary_actual,
-        bonus = excluded.bonus,
-        deduction = excluded.deduction,
-        notes = excluded.notes
-    `).run(staffId, monthKey, salaryActual, bonus, deduction, text(body.notes));
+    upsertStaffSalaryRow(staff, monthKey, bonus, deduction, body.notes);
     return get(`
       SELECT
-        ssm.id, s.id AS staff_id, s.name, s.role, s.base_salary, s.status, s.left_at,
+        ssm.id, s.id AS staff_id, s.name, s.role, s.base_salary, s.pay_type, s.daily_rate, s.standard_work_days, s.status, s.left_at,
         ssm.month_key, ssm.salary_actual, ssm.bonus, ssm.deduction, ssm.notes,
-        (s.base_salary + COALESCE(ssm.bonus, 0) - COALESCE(ssm.deduction, 0)) AS expected_salary
+        ssm.salary_actual AS expected_salary
       FROM staff_salary_monthly ssm
       JOIN staff s ON s.id = ssm.staff_id
       WHERE ssm.staff_id = ? AND ssm.month_key = ?
     `, [staffId, monthKey]);
+  });
+}
+
+function staffAttendanceRows(monthKey) {
+  if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
+  return all(`
+    SELECT
+      sa.*,
+      s.name,
+      s.role,
+      s.status AS staff_status,
+      s.left_at
+    FROM staff_attendance sa
+    JOIN staff s ON s.id = sa.staff_id
+    WHERE sa.month_key = ?
+    ORDER BY s.role, s.name, sa.attendance_date
+  `, [monthKey]);
+}
+
+function upsertStaffAttendance(body) {
+  const staffId = Number(body.staff_id);
+  const date = isoDateValue(body.attendance_date || body.date);
+  const monthKey = monthKeyFromDate(date);
+  if (!staffId || !date || !monthKey) return { error: "staff_id and attendance_date are required", status: 400 };
+  const staff = get("SELECT * FROM staff WHERE id = ?", [staffId]);
+  if (!staff) return { error: "staff not found", status: 404 };
+  const status = ATTENDANCE_STATUS.includes(text(body.status)) ? text(body.status) : "上班";
+  const payUnits = Object.prototype.hasOwnProperty.call(body, "pay_units") ? num(body.pay_units) : attendancePayUnit(status);
+  return withTransaction(() => {
+    db.prepare(`
+      INSERT INTO staff_attendance(staff_id, attendance_date, month_key, status, pay_units, hours, reason, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(staff_id, attendance_date) DO UPDATE SET
+        status = excluded.status,
+        pay_units = excluded.pay_units,
+        hours = excluded.hours,
+        reason = excluded.reason,
+        notes = excluded.notes,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      staffId,
+      date,
+      monthKey,
+      status,
+      payUnits,
+      num(body.hours),
+      text(body.reason),
+      text(body.notes),
+    );
+    // Keep the monthly payroll row in sync once attendance starts driving pay.
+    const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [staffId, monthKey]);
+    if (salary) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
+    return get(`
+      SELECT sa.*, s.name, s.role, s.status AS staff_status
+      FROM staff_attendance sa
+      JOIN staff s ON s.id = sa.staff_id
+      WHERE sa.staff_id = ? AND sa.attendance_date = ?
+    `, [staffId, date]);
+  });
+}
+
+function deleteStaffAttendance(staffId, date) {
+  const dateValue = isoDateValue(date);
+  if (!staffId || !dateValue) return { error: "staff_id and attendance_date are required", status: 400 };
+  const monthKey = monthKeyFromDate(dateValue);
+  return withTransaction(() => {
+    const staff = get("SELECT * FROM staff WHERE id = ?", [Number(staffId)]);
+    const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [Number(staffId), monthKey]);
+    const result = db.prepare("DELETE FROM staff_attendance WHERE staff_id = ? AND attendance_date = ?").run(Number(staffId), dateValue);
+    if (salary && staff) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
+    return { deleted: (result.changes || 0) > 0 };
   });
 }
 
@@ -1210,13 +1389,14 @@ function monthDataCounts(monthKey) {
     recharge_records: countByMonth("recharge_records", monthKey),
     teacher_adjustments_monthly: countByMonth("teacher_adjustments_monthly", monthKey),
     staff_salary_monthly: countByMonth("staff_salary_monthly", monthKey),
+    staff_attendance: countByMonth("staff_attendance", monthKey),
     operating_expenses: countByMonth("operating_expenses", monthKey),
   };
 }
 
 function allPartitionedMonths() {
   const months = new Set(availableMonths());
-  for (const table of ["teacher_adjustments_monthly", "staff_salary_monthly", "operating_expenses"]) {
+  for (const table of ["teacher_adjustments_monthly", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
     if (!tableExists(table)) continue;
     for (const row of all(`SELECT DISTINCT month_key FROM ${safeIdentifier(table)} WHERE month_key IS NOT NULL AND month_key <> ''`)) {
       months.add(row.month_key);
@@ -1402,7 +1582,7 @@ function deleteMonth(monthKey, force = false) {
 
   const backup = total > 0 ? backupDb("pre_month_delete") : "";
   return withTransaction(() => {
-    for (const table of ["lessons", "recharge_records", "teacher_adjustments_monthly", "staff_salary_monthly", "operating_expenses"]) {
+    for (const table of ["lessons", "recharge_records", "teacher_adjustments_monthly", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
       if (tableExists(table)) db.prepare(`DELETE FROM ${safeIdentifier(table)} WHERE month_key = ?`).run(monthKey);
     }
     const afterMonths = allPartitionedMonths().filter((month) => month !== monthKey);
@@ -1877,20 +2057,25 @@ function financeBreakdowns(current) {
   };
 }
 
-function financeTrend6m(endDateKey) {
-  const endMonth = monthKeyFromDate(endDateKey);
+function financeTrend6m(asOfDateKey = todayKey()) {
+  const asOfDate = parseDateKey(asOfDateKey) ? asOfDateKey : todayKey();
+  const endMonth = monthKeyFromDate(asOfDate);
   if (!endMonth) return [];
   const endDate = parseDateKey(endMonth);
   const rows = [];
   for (let offset = 5; offset >= 0; offset -= 1) {
     const date = new Date(endDate.getFullYear(), endDate.getMonth() - offset, 1);
     const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-01`;
-    const base = financeBase(monthRange(month));
+    const range = month === endMonth
+      ? normalizeRange(month, asOfDate)
+      : monthRange(month);
+    const base = financeBase(range);
     const totalCost = num(base.overview_raw.teacher_cost)
       + num(base.overview_raw.transport_cost)
       + num(base.overview_raw.operating_cost?.total);
     rows.push({
       month,
+      range,
       revenue: base.overview_raw.revenue,
       total_cost: totalCost,
       gross_profit: base.overview_raw.gross_profit,
@@ -1929,7 +2114,8 @@ function financeSummary(range) {
     prev_balance_sheet: previousSections.balance_sheet,
     breakdowns: sections.breakdowns,
     top_lists: sections.top_lists,
-    trend_6m: financeTrend6m(currentRange.end),
+    trend_as_of: todayKey(),
+    trend_6m: financeTrend6m(),
   };
 }
 
@@ -2731,6 +2917,7 @@ function bootstrap(monthKey, includeInactive = false) {
       grades: GRADES,
       staff_roles: STAFF_ROLES,
       expense_categories: EXPENSE_CATEGORIES,
+      attendance_status: ATTENDANCE_STATUS,
     },
     teachers: teachersForMonth(monthKey, includeInactive),
     students: studentsForMonth(monthKey, includeInactive),
@@ -2744,6 +2931,17 @@ function bootstrap(monthKey, includeInactive = false) {
       teacher_summary: teacherSummary(monthKey, includeInactive),
     },
   };
+}
+
+function lessonsInDateRange(start, end) {
+  const range = normalizeRange(start, end);
+  if (!range) return null;
+  return all(
+    `SELECT *, '' AS weekday FROM lessons
+     WHERE date >= ? AND date <= ?
+     ORDER BY date, teacher_name, time_slot, classroom, sort_order, id`,
+    [range.start, range.end],
+  );
 }
 
 function sendJson(res, data, status = 200) {
@@ -3291,15 +3489,26 @@ function dateKeyFromDay(monthKey, day) {
 
 function monthWeekRanges(monthKey) {
   if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
-  const date = new Date(`${monthKey}T00:00:00`);
-  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  return [[1, 8], [9, 15], [16, 22], [23, last]].map(([start, end]) => ({
-    start,
-    end,
-    start_date: dateKeyFromDay(monthKey, start),
-    end_date: dateKeyFromDay(monthKey, end),
-    label: `${date.getMonth() + 1}.${start}-${date.getMonth() + 1}.${end}`,
-  }));
+  const monthStart = parseDateKey(monthKey);
+  const monthEnd = parseDateKey(monthEndKey(monthKey));
+  const cursor = new Date(monthStart);
+  const day = cursor.getDay() || 7;
+  cursor.setDate(cursor.getDate() - day + 1);
+  const ranges = [];
+  while (cursor <= monthEnd) {
+    const start = new Date(cursor);
+    const end = new Date(cursor);
+    end.setDate(end.getDate() + 6);
+    ranges.push({
+      start: start.getDate(),
+      end: end.getDate(),
+      start_date: dateKey(start),
+      end_date: dateKey(end),
+      label: `${start.getMonth() + 1}.${start.getDate()}-${end.getMonth() + 1}.${end.getDate()}`,
+    });
+    cursor.setDate(cursor.getDate() + 7);
+  }
+  return ranges;
 }
 
 function weekRangeByIndex(monthKey, index) {
@@ -3309,12 +3518,7 @@ function weekRangeByIndex(monthKey, index) {
 
 function weeklyScheduleLessons(monthKey, weekIndex) {
   const week = weekRangeByIndex(monthKey, weekIndex);
-  const lessons = all(
-    `SELECT * FROM lessons
-     WHERE month_key = ? AND date >= ? AND date <= ?
-     ORDER BY date, teacher_name, time_slot, classroom, sort_order, id`,
-    [monthKey, week.start_date, week.end_date],
-  ).filter(isScheduleActive)
+  const lessons = (lessonsInDateRange(week.start_date, week.end_date) || []).filter(isScheduleActive)
     .sort((a, b) => `${a.date || ""}|${a.teacher_name || ""}|${a.time_slot || ""}|${String(a.id).padStart(8, "0")}`
       .localeCompare(`${b.date || ""}|${b.teacher_name || ""}|${b.time_slot || ""}|${String(b.id).padStart(8, "0")}`, "zh-Hans-CN"));
   return { week, lessons };
@@ -3909,6 +4113,11 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     return sendJson(res, bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"));
   }
+  if (req.method === "GET" && url.pathname === "/api/lessons-range") {
+    const lessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
+    if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    return sendJson(res, { lessons });
+  }
   if (req.method === "GET" && url.pathname === "/api/finance-summary") {
     const range = financeRangeFromUrl(url);
     if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
@@ -3978,6 +4187,22 @@ async function handleApi(req, res, url) {
   if (staffSalaryMatch && req.method === "DELETE") {
     const result = withTransaction(() => db.prepare("DELETE FROM staff_salary_monthly WHERE id = ?").run(Number(staffSalaryMatch[1])));
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/staff-attendance") {
+    const monthKey = resolveMonthKey(url);
+    if (!validMonthKey(monthKey)) return sendError(res, 400, "month must be YYYY-MM-01");
+    return sendJson(res, { rows: staffAttendanceRows(monthKey) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/staff-attendance") {
+    const result = upsertStaffAttendance(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    return sendJson(res, result, 201);
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/staff-attendance") {
+    const result = deleteStaffAttendance(Number(url.searchParams.get("staff_id")), url.searchParams.get("date"));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    return sendJson(res, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/operating-expenses") return sendJson(res, { expenses: expenseRows(url) });

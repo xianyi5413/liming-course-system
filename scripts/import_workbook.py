@@ -9,7 +9,10 @@ import openpyxl
 from openpyxl.utils.datetime import from_excel
 
 
-DEFAULT_TEACHERS = ["何君", "李骥", "陆俊诚", "王硕", "吴昌泽", "晏英杰", "张君扬", "周奇洋"]
+KNOWN_SHEET_NAMES = {
+    "充值记录", "学生查询", "费用标准", "学生单价表", "学生费用明细", "教师薪资汇总",
+    "教师副本", "课程拆分", "Claude Log",
+}
 
 
 def find_total_sheet(wb):
@@ -19,6 +22,20 @@ def find_total_sheet(wb):
     if "4月总表" in wb.sheetnames:
         return "4月总表"
     raise RuntimeError("未找到月度总表（如 2月总表、3月总表、4月总表）")
+
+
+def month_key_from_filename(path):
+    match = re.search(r"(\d{4})年(\d{1,2})月", os.path.basename(path))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2).zfill(2)}-01"
+
+
+def month_key_from_sheet_name(name, year=None):
+    match = re.fullmatch(r"(\d{1,2})月总表", text(name))
+    if not match:
+        return ""
+    return f"{year or dt.date.today().year}-{match.group(1).zfill(2)}-01"
 
 
 def text(value):
@@ -59,8 +76,62 @@ def iso_date(value):
     return raw
 
 
+def month_key_from_date(value):
+    raw = iso_date(value)
+    match = re.fullmatch(r"(\d{4})-(\d{2})-\d{2}", raw)
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-01"
+
+
+def infer_month_key(workbook_path, wb, total_sheet_name, explicit_month):
+    if explicit_month:
+        return iso_date(explicit_month)
+    q1_month = iso_date(wb[total_sheet_name]["Q1"].value)
+    if q1_month:
+        return q1_month
+    file_month = month_key_from_filename(workbook_path)
+    if file_month:
+        return file_month
+    sheet_month = month_key_from_sheet_name(total_sheet_name)
+    if sheet_month:
+        return sheet_month
+    return "2026-04-01"
+
+
 def split_students(value):
     return [part.strip() for part in re.split(r"[、,，;；]", text(value)) if part.strip()]
+
+
+def valid_teacher_name(value):
+    name = text(value)
+    if not name or name == "合计" or name.startswith("#"):
+        return ""
+    if name in KNOWN_SHEET_NAMES or re.fullmatch(r"\d+月.*", name) or re.fullmatch(r".*学生费用汇总", name):
+        return ""
+    if re.fullmatch(r"\d{1,2}\.\d{1,2}[-－~～]\d{1,2}\.\d{1,2}", name):
+        return ""
+    return name
+
+
+def parse_teacher_order(value):
+    return [valid_teacher_name(name) for name in re.split(r"[、,，;；]", text(value)) if valid_teacher_name(name)]
+
+
+def derive_status(lesson_status, course_status):
+    lesson_status = text(lesson_status)
+    course_status = text(course_status)
+    if lesson_status == "试课":
+        return "试课"
+    if lesson_status == "考试":
+        return "考试"
+    if lesson_status == "上课（未缴费）":
+        return "未缴费"
+    if lesson_status == "请假" or course_status == "请假":
+        return "请假"
+    if course_status == "已上":
+        return "已上"
+    return "待上"
 
 
 def ensure_schema_exists(conn):
@@ -95,11 +166,8 @@ def upsert_teacher(conn, name):
     conn.execute("INSERT OR IGNORE INTO teachers(name) VALUES (?)", (name,))
 
 
-def import_lessons(conn, wb, total_sheet_name, month_key, replace):
-    ws = wb[total_sheet_name]
-    if replace:
-        conn.execute("DELETE FROM lessons WHERE month_key = ?", (month_key,))
-    inserted = 0
+def lesson_rows(ws, fallback_month_key):
+    rows = []
     for row_idx in range(3, ws.max_row + 1):
         teacher = text(ws.cell(row_idx, 1).value)
         date = iso_date(ws.cell(row_idx, 2).value)
@@ -114,35 +182,86 @@ def import_lessons(conn, wb, total_sheet_name, month_key, replace):
         teacher_salary = number(ws.cell(row_idx, 12).value)
         if not any([teacher, date, lesson_status, time_slot, classroom, grade, subject, student_names, notes, course_status, teacher_salary]):
             continue
-        upsert_teacher(conn, teacher)
-        for name in split_students(student_names):
-            upsert_student(conn, name, grade)
+        if not date:
+            continue
+        row_month_key = month_key_from_date(date) or fallback_month_key
+        rows.append({
+            "row_idx": row_idx,
+            "teacher": teacher,
+            "date": date,
+            "lesson_status": lesson_status,
+            "time_slot": time_slot,
+            "classroom": classroom,
+            "grade": grade,
+            "subject": subject,
+            "student_names": student_names,
+            "notes": notes,
+            "course_status": course_status,
+            "teacher_salary": teacher_salary,
+            "month_key": row_month_key,
+            "status": derive_status(lesson_status, course_status),
+        })
+    return rows
+
+
+def import_lessons(conn, wb, total_sheet_name, month_key, replace):
+    ws = wb[total_sheet_name]
+    rows = lesson_rows(ws, month_key)
+    if replace:
+        dates = sorted({row["date"] for row in rows if row["date"]})
+        if dates:
+            conn.executemany("DELETE FROM lessons WHERE date = ?", [(date,) for date in dates])
+        else:
+            conn.execute("DELETE FROM lessons WHERE month_key = ?", (month_key,))
+    inserted = 0
+    for row in rows:
+        upsert_teacher(conn, row["teacher"])
+        for name in split_students(row["student_names"]):
+            upsert_student(conn, name, row["grade"])
         conn.execute(
             """
             INSERT INTO lessons(
               teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
-              student_names, notes, course_status, teacher_salary, month_key, sort_order
+              student_names, notes, course_status, status, teacher_salary, month_key, sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                teacher,
-                date,
-                lesson_status or "上课",
-                time_slot,
-                classroom,
-                grade,
-                subject,
-                student_names,
-                notes,
-                course_status or "未上",
-                teacher_salary,
-                month_key,
-                row_idx,
+                row["teacher"],
+                row["date"],
+                row["lesson_status"] or "上课",
+                row["time_slot"],
+                row["classroom"],
+                row["grade"],
+                row["subject"],
+                row["student_names"],
+                row["notes"],
+                row["course_status"] or "未上",
+                row["status"],
+                row["teacher_salary"],
+                row["month_key"],
+                row["row_idx"],
             ),
         )
         inserted += 1
-    return inserted
+    return inserted, rows
+
+
+def backup_database(conn, db_path):
+    backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_path = os.path.join(backup_dir, f"pre_import_{stamp}.sqlite")
+    try:
+        backup_conn = sqlite3.connect(backup_path)
+        conn.backup(backup_conn)
+    except sqlite3.Error as exc:
+        print(f"备份跳过：{exc}", file=sys.stderr)
+        return ""
+    finally:
+        if "backup_conn" in locals():
+            backup_conn.close()
+    return backup_path
 
 
 def import_recharges(conn, wb, month_key):
@@ -243,14 +362,30 @@ def import_pricing_standards(conn, wb):
     return count
 
 
-def import_teacher_adjustments(conn, wb, month_key):
+def import_teacher_adjustments(conn, wb, month_key, fallback_teacher_names=None, replace=True):
     if "教师薪资汇总" not in wb.sheetnames:
         return 0
     ws = wb["教师薪资汇总"]
+    if replace:
+        conn.execute("DELETE FROM teacher_adjustments_monthly WHERE month_key = ?", (month_key,))
+    fallback_teacher_names = fallback_teacher_names or []
     count = 0
     for row_idx in range(3, ws.max_row + 1):
-        teacher_name = text(ws.cell(row_idx, 1).value)
-        if not teacher_name or teacher_name == "合计":
+        teacher_name = valid_teacher_name(ws.cell(row_idx, 1).value)
+        fallback_index = row_idx - 3
+        if not teacher_name and fallback_index < len(fallback_teacher_names):
+            teacher_name = fallback_teacher_names[fallback_index]
+        if not teacher_name:
+            if not any(number(ws.cell(row_idx, col).value) for col in range(4, 8)):
+                continue
+            raise RuntimeError(
+                f"教师薪资汇总第 {row_idx} 行有车票金额，但无法识别教师姓名。"
+                "请先用 Excel/WPS 打开并保存，让 A 列公式计算出老师姓名；"
+                "或使用 --teacher-order \"老师1,老师2,...\" 指定薪资汇总行顺序。"
+            )
+        transports = [number(ws.cell(row_idx, col).value) for col in range(4, 8)]
+        notes = text(ws.cell(row_idx, 9).value)
+        if not any(transports) and not notes and row_idx - 3 >= len(fallback_teacher_names):
             continue
         upsert_teacher(conn, teacher_name)
         conn.execute(
@@ -269,11 +404,11 @@ def import_teacher_adjustments(conn, wb, month_key):
             (
                 teacher_name,
                 month_key,
-                number(ws.cell(row_idx, 4).value),
-                number(ws.cell(row_idx, 5).value),
-                number(ws.cell(row_idx, 6).value),
-                number(ws.cell(row_idx, 7).value),
-                text(ws.cell(row_idx, 9).value),
+                transports[0],
+                transports[1],
+                transports[2],
+                transports[3],
+                notes,
             ),
         )
         count += 1
@@ -283,9 +418,15 @@ def import_teacher_adjustments(conn, wb, month_key):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("workbook", help="Excel 工作簿路径")
-    parser.add_argument("--month", help="导入到指定月份，格式 YYYY-MM-01；不传时读取工作簿 4月总表!Q1")
+    parser.add_argument("--month", help="导入到指定月份，格式 YYYY-MM-01；不传时自动从工作簿 Q1 / 文件名 / 总表页名识别")
     parser.add_argument("--db", default=os.path.join(os.path.dirname(__file__), "..", "data", "liming-local.sqlite"))
-    parser.add_argument("--append", action="store_true", help="追加课程，不清空同月已有课程")
+    parser.add_argument("--append", action="store_true", help="追加课程，不按工作簿中出现的日期替换已有课程")
+    parser.add_argument("--no-backup", action="store_true", help="导入前不创建数据库备份")
+    parser.add_argument("--skip-teacher-adjustments", action="store_true", help="不导入「教师薪资汇总」页里的车票")
+    parser.add_argument(
+        "--teacher-order",
+        help="当教师薪资汇总 A 列无法读取时，手动指定第 3 行起的老师顺序，例如：何君,李骥,陆俊诚",
+    )
     args = parser.parse_args()
 
     workbook_path = os.path.abspath(args.workbook)
@@ -296,31 +437,42 @@ def main():
     wb = openpyxl.load_workbook(workbook_path, data_only=True, read_only=False)
     total_sheet_name = find_total_sheet(wb)
 
-    month_key = iso_date(args.month) or iso_date(wb[total_sheet_name]["Q1"].value) or "2026-04-01"
+    month_key = infer_month_key(workbook_path, wb, total_sheet_name, args.month)
 
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        conn.execute("PRAGMA journal_mode = OFF")
-        conn.execute("PRAGMA synchronous = OFF")
-        conn.execute("PRAGMA temp_store = MEMORY")
-        conn.execute("PRAGMA locking_mode = EXCLUSIVE")
-        conn.execute("BEGIN")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        conn.execute("PRAGMA foreign_keys = ON")
         ensure_schema_exists(conn)
+        backup_path = "" if args.no_backup else backup_database(conn, db_path)
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE settings SET value = ? WHERE key = 'month_key'", (month_key,))
-        for teacher in DEFAULT_TEACHERS:
-            upsert_teacher(conn, teacher)
-        lessons = import_lessons(conn, wb, total_sheet_name, month_key, replace=not args.append)
+        lessons, lesson_payload = import_lessons(conn, wb, total_sheet_name, month_key, replace=not args.append)
         recharges = import_recharges(conn, wb, month_key)
         student_prices = import_student_pricing(conn, wb)
         standards = import_pricing_standards(conn, wb)
-        teacher_adjustments = import_teacher_adjustments(conn, wb, month_key)
+        adjustment_teachers = parse_teacher_order(args.teacher_order)
+        teacher_adjustments = 0 if args.skip_teacher_adjustments else import_teacher_adjustments(
+            conn,
+            wb,
+            month_key,
+            fallback_teacher_names=adjustment_teachers,
+            replace=not args.append,
+        )
         conn.commit()
     finally:
         conn.close()
 
     print(f"导入完成：{workbook_path}")
     print(f"月份：{month_key}")
+    if backup_path:
+        print(f"备份：{backup_path}")
     print(f"课程：{lessons}")
+    month_counts = {}
+    for row in lesson_payload:
+        month_counts[row["month_key"]] = month_counts.get(row["month_key"], 0) + 1
+    if month_counts:
+        print("课程按实际日期归属：" + "，".join(f"{key}: {value}" for key, value in sorted(month_counts.items())))
     print(f"充值记录：{recharges}")
     print(f"学生单价：{student_prices}")
     print(f"费用标准：{standards}")

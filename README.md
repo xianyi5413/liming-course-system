@@ -9,8 +9,10 @@
 ```bash
 npm start              # 启动服务（端口 5177）
 npm run init           # 仅初始化数据库后退出（不开服务）
-python scripts/import_workbook.py <xlsx-path> --month YYYY-MM-01  # 从月度总表导入
+python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总表、充值、学生单价、费用标准、教师车票
 ```
+
+如果「教师薪资汇总」页 A 列是未计算出来的动态公式（导入时报无法识别教师姓名），先用 Excel/WPS 打开并保存一次；或临时用 `--teacher-order 老师1,老师2,...` 指定第 3 行起的老师顺序。
 
 数据库文件、上传文件、备份都在 `data/` 下：
 

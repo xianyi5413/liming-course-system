@@ -1133,6 +1133,21 @@ select.control,
   font-family: var(--font-number);
 }
 
+.cell-input.custom-date-input,
+.control.custom-date-input {
+  cursor: pointer;
+  font-family: var(--font-number);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  caret-color: transparent;
+}
+
+.cell-input.custom-date-input::placeholder,
+.control.custom-date-input::placeholder {
+  color: var(--muted);
+  font-family: var(--font-ui);
+}
+
 .manual-price {
   background: var(--manual-bg);
   color: var(--manual-fg);
@@ -1494,6 +1509,293 @@ select.control,
   color: var(--muted);
   background: var(--surface-hover);
   border-color: var(--line-soft);
+}
+
+.attendance-summary-grid {
+  margin-bottom: var(--space-4);
+}
+
+.attendance-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.attendance-main {
+  min-width: 0;
+}
+
+.attendance-head {
+  align-items: flex-start;
+}
+
+.attendance-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.attendance-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.attendance-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+}
+
+.attendance-legend-item span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--muted);
+}
+
+.attendance-gap {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-table);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance-quickbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--surface-hover) 54%, transparent);
+}
+
+.attendance-quick-title {
+  margin-right: var(--space-1);
+  color: var(--ink-strong);
+  font-size: var(--text-table);
+  font-weight: 900;
+}
+
+.attendance-quickbar .control {
+  width: auto;
+  min-width: 128px;
+  height: 38px;
+}
+
+.attendance-quickbar .btn {
+  height: 38px;
+  white-space: nowrap;
+}
+
+.attendance-wrap {
+  max-height: calc(100vh - 330px);
+}
+
+.staff-attendance-table {
+  min-width: 1280px;
+}
+
+.staff-attendance-table th,
+.staff-attendance-table td {
+  min-width: 42px;
+  padding: 0;
+}
+
+.staff-attendance-table th.sticky-name,
+.staff-attendance-table td.sticky-name {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  min-width: 132px;
+  background: var(--panel-raised);
+}
+
+.staff-attendance-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+}
+
+.staff-attendance-table th span,
+.staff-attendance-table th small {
+  display: block;
+  line-height: 1.2;
+}
+
+.staff-attendance-table th small,
+.staff-attendance-table td.sticky-name span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.attendance-cell {
+  position: relative;
+  height: 38px;
+}
+
+.attendance-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.attendance-label {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-sm);
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.status-上班 + .attendance-label {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.attendance-legend-item.status-上班 span {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.status-休息 + .attendance-label,
+.status-调休 + .attendance-label {
+  color: var(--neutral-chip-fg);
+  background: var(--neutral-chip-bg);
+}
+
+.attendance-legend-item.status-休息 span,
+.attendance-legend-item.status-调休 span {
+  color: var(--neutral-chip-fg);
+  background: var(--neutral-chip-bg);
+}
+
+.status-请假 + .attendance-label,
+.status-病假 + .attendance-label,
+.status-事假 + .attendance-label,
+.status-旷工 + .attendance-label {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.attendance-legend-item.status-请假 span,
+.attendance-legend-item.status-病假 span,
+.attendance-legend-item.status-事假 span,
+.attendance-legend-item.status-旷工 span {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.status-半天 + .attendance-label,
+.status-加班 + .attendance-label {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.attendance-legend-item.status-半天 span,
+.attendance-legend-item.status-加班 span {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.attendance-note-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.attendance-side {
+  position: sticky;
+  top: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.attendance-side-list {
+  display: grid;
+  gap: var(--space-2);
+  max-height: calc(100vh - 260px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.attendance-side-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.attendance-side-row div:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.attendance-side-row strong,
+.attendance-side-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attendance-side-row span,
+.attendance-side-numbers span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+}
+
+.attendance-side-numbers {
+  display: grid;
+  justify-items: end;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance-side-numbers b {
+  color: var(--text);
+  font-family: var(--font-number);
+  font-size: 1rem;
+}
+
+@media (max-width: 1180px) {
+  .attendance-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance-side {
+    position: static;
+  }
+
+  .attendance-side-list {
+    max-height: 280px;
+  }
 }
 
 .inactive-tag {
@@ -2887,6 +3189,319 @@ tr.risk-debt:hover td {
 
 .filter-field .control {
   min-width: 136px;
+}
+
+.filter-combo {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 136px;
+}
+
+.filter-combo .control {
+  width: 100%;
+  min-width: 136px;
+  padding-right: 34px;
+}
+
+.filter-combo-toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: 32px;
+  border: 0;
+  border-left: 1px solid var(--line-soft);
+  border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.filter-combo-toggle:hover,
+.filter-combo.open .filter-combo-toggle {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.filter-combo-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  display: none;
+  width: max(100%, 168px);
+  max-height: 240px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  box-shadow: var(--shadow-sticky);
+}
+
+.filter-combo.open .filter-combo-menu {
+  display: grid;
+  gap: 2px;
+}
+
+.filter-combo-option {
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.filter-combo-option:hover,
+.filter-combo-option:focus-visible {
+  outline: none;
+  background: var(--surface-hover);
+}
+
+.filter-combo-option.muted {
+  color: var(--muted);
+}
+
+.week-grid-panel {
+  overflow: visible;
+}
+
+.week-grid-scroll {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.week-grid-sparse {
+  display: grid;
+  gap: 10px;
+}
+
+.week-grid-sparse-row {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.week-grid-sparse-time {
+  padding: 14px 12px;
+  border-right: 1px solid var(--line-soft);
+  background: var(--section-head);
+  color: var(--ink-strong);
+  font-family: var(--font-number);
+  font-size: var(--text-ui);
+  font-weight: 850;
+}
+
+.week-grid-sparse-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.week-grid-sparse-cell {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.week-grid-sparse-cell.outside-month {
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+}
+
+.week-grid-sparse-date {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  font-weight: 850;
+}
+
+.week-grid-sparse-date span {
+  color: var(--muted);
+  font-family: var(--font-number);
+  font-size: var(--text-caption);
+  font-weight: 800;
+}
+
+.week-grid-sparse-empty {
+  padding: 16px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.week-grid-table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.week-grid-table th,
+.week-grid-table td {
+  vertical-align: top;
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.week-grid-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px 8px;
+  background: var(--section-head);
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  text-align: center;
+}
+
+.week-grid-table thead th span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 700;
+}
+
+.week-grid-time-head,
+.week-grid-time {
+  width: 118px;
+}
+
+.week-grid-time {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 12px 10px;
+  border-left: 4px solid var(--brand);
+  background: color-mix(in srgb, var(--section-head) 76%, var(--panel-raised));
+  color: var(--ink-strong);
+  font-family: var(--font-number);
+  font-size: var(--text-ui);
+  text-align: left;
+}
+
+.week-grid-table tbody tr + tr th,
+.week-grid-table tbody tr + tr td {
+  border-top: 8px solid var(--bg);
+}
+
+.week-grid-table td {
+  height: 108px;
+  padding: 7px;
+  background: var(--panel);
+}
+
+.week-grid-table .outside-month {
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+}
+
+.week-grid-card {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  margin-bottom: 6px;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-left: 4px solid var(--brand);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  overflow: hidden;
+}
+
+.week-grid-card.abnormal {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning-bg) 34%, var(--panel-raised));
+}
+
+.week-grid-card.has-conflict {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger-bg) 42%, var(--panel-raised));
+}
+
+.week-grid-course {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.week-grid-conflicts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.week-grid-conflicts span {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: 999px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-caption);
+  font-weight: 850;
+}
+
+.week-grid-meta,
+.week-grid-students,
+.week-grid-notes {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.week-grid-meta {
+  display: grid;
+  gap: 1px;
+}
+
+.week-grid-meta span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.week-grid-students {
+  color: var(--text);
+}
+
+.week-grid-empty {
+  display: block;
+  padding-top: 30px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .filter-search .control {
