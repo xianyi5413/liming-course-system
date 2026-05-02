@@ -1809,14 +1809,26 @@ function renderSecondaryNav(group) {
 
 function renderNav() {
   const currentGroup = activeGroup();
-  navEl.innerHTML = navGroups.map((group) => `
-    <div class="nav-group ${currentGroup.key === group.key ? "open" : ""}">
-      <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}">
-        <span>${escapeHtml(group.label)}</span>
-      </button>
-      ${currentGroup.key === group.key && groupViews(group).length > 1 ? renderSecondaryNav(group) : ""}
+  navEl.innerHTML = `
+    <div class="nav-sections">
+      ${navGroups.map((group) => `
+        <div class="nav-group ${currentGroup.key === group.key ? "open" : ""}">
+          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}">
+            <span>${escapeHtml(group.label)}</span>
+          </button>
+          ${currentGroup.key === group.key && groupViews(group).length > 1 ? renderSecondaryNav(group) : ""}
+        </div>
+      `).join("")}
     </div>
-  `).join("");
+    <div class="sidebar-tools">
+      <label class="sidebar-tool-label" for="sidebar-theme-select">主题</label>
+      <select id="sidebar-theme-select" class="control theme-select" title="默认跟随系统">
+        <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
+        <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
+        <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
+      </select>
+    </div>
+  `;
 }
 
 function renderTopbar(title, meta = "", actions = "") {
@@ -1832,12 +1844,6 @@ function renderTopbar(title, meta = "", actions = "") {
       <label>月份</label>
       <select class="control month-select">
         ${monthOptions}
-      </select>
-      <label>主题</label>
-      <select class="control theme-select" title="默认跟随系统">
-        <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
-        <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
-        <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
       </select>
       <button class="btn new-month" type="button">新建月份</button>
       <button class="btn icon-btn delete-month" type="button" title="删除当前月份" aria-label="删除当前月份">🗑</button>

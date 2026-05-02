@@ -1435,7 +1435,21 @@ function carryOverNote(existing, fromMonth) {
 function isAutoCarryOverRecord(row) {
   if (!row) return false;
   const notes = text(row.notes);
-  return text(row.source) === "carry_over" && (!notes || notes.startsWith("自动结转"));
+  return text(row.source) === "carry_over"
+    && num(row.cur_recharge) === 0
+    && num(row.cur_gift) === 0
+    && !text(row.recharge_date)
+    && (!notes || notes.startsWith("自动结转"));
+}
+
+function hasManualRechargeData(row) {
+  if (!row) return false;
+  const notes = text(row.notes);
+  return num(row.cur_recharge) !== 0
+    || num(row.cur_gift) !== 0
+    || !!text(row.recharge_date)
+    || (!!notes && !notes.startsWith("自动结转"))
+    || (text(row.source) && text(row.source) !== "carry_over");
 }
 
 function hasEmptyCarryOverFields(row) {
@@ -1446,6 +1460,19 @@ function shouldRefreshCarryOver(row, force = false) {
   if (!row) return true;
   if (force) return true;
   return isAutoCarryOverRecord(row) || hasEmptyCarryOverFields(row);
+}
+
+function carryOverRecordPatch(existing, fromMonth) {
+  if (hasManualRechargeData(existing)) {
+    return {
+      source: text(existing?.source),
+      notes: text(existing?.notes),
+    };
+  }
+  return {
+    source: "carry_over",
+    notes: carryOverNote(existing, fromMonth),
+  };
 }
 
 function carryOverCandidates(fromMonth, includeZero = false) {
@@ -1472,7 +1499,7 @@ function ensureCarryOver(monthKey) {
     SET grade = ?,
         prev_actual = ?,
         prev_gift = ?,
-        source = 'carry_over',
+        source = ?,
         notes = ?
     WHERE student_name = ? AND month_key = ?
   `);
@@ -1497,13 +1524,20 @@ function ensureCarryOver(monthKey) {
         || num(existing.prev_gift) !== gift
         || text(existing.grade) !== text(row.grade)
         || !isAutoCarryOverRecord(existing);
-      updateRecharge.run(row.grade || "", actual, gift, carryOverNote(existing, fromMonth), row.student_name, monthKey);
+      const patch = carryOverRecordPatch(existing, fromMonth);
+      updateRecharge.run(row.grade || "", actual, gift, patch.source, patch.notes, row.student_name, monthKey);
       if (changed) updated += 1;
     } else if (insertRecharge.run(row.student_name, row.grade || "", actual, gift, carryOverNote(null, fromMonth), monthKey).changes) {
       ensured += 1;
     }
     carriedActual += actual;
     carriedGift += gift;
+  }
+  const candidateNames = new Set(candidates.map((row) => row.student_name));
+  for (const existing of all("SELECT * FROM recharge_records WHERE month_key = ?", [monthKey])) {
+    if (candidateNames.has(existing.student_name) || !isAutoCarryOverRecord(existing)) continue;
+    db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
+    updated += 1;
   }
   return { month_key: monthKey, from_month: fromMonth, ensured, updated, skipped, carried_actual: carriedActual, carried_gift: carriedGift };
 }
@@ -1514,6 +1548,24 @@ function ensureCarryOverChain(monthKey) {
   if (!start || start >= monthKey) return { ensured: 0, results: [] };
   const results = [];
   for (const month of monthsBetweenExclusive(start, monthKey)) {
+    results.push(ensureCarryOver(month));
+  }
+  return {
+    ensured: results.reduce((sum, row) => sum + num(row.ensured), 0),
+    updated: results.reduce((sum, row) => sum + num(row.updated), 0),
+    skipped: results.reduce((sum, row) => sum + num(row.skipped), 0),
+    carried_actual: results.reduce((sum, row) => sum + num(row.carried_actual), 0),
+    carried_gift: results.reduce((sum, row) => sum + num(row.carried_gift), 0),
+    results,
+  };
+}
+
+function refreshCarryOverAfter(monthKey) {
+  if (!validMonthKey(monthKey)) return { ensured: 0, updated: 0, skipped: 0, carried_actual: 0, carried_gift: 0, results: [] };
+  const latest = allPartitionedMonths().sort((a, b) => b.localeCompare(a))[0] || monthKey;
+  if (monthKey >= latest) return { ensured: 0, updated: 0, skipped: 0, carried_actual: 0, carried_gift: 0, results: [] };
+  const results = [];
+  for (const month of monthsBetweenExclusive(monthKey, latest)) {
     results.push(ensureCarryOver(month));
   }
   return {
@@ -2471,19 +2523,21 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
       continue;
     }
     if (existing) {
+      const patch = carryOverRecordPatch(existing, fromMonth);
       db.prepare(`
         UPDATE recharge_records
         SET grade = ?,
             prev_actual = ?,
             prev_gift = ?,
-            source = 'carry_over',
+            source = ?,
             notes = ?
         WHERE student_name = ? AND month_key = ?
       `).run(
         row.grade || "",
         num(row.actual_balance),
         num(row.gift_balance),
-        carryOverNote(existing, fromMonth),
+        patch.source,
+        patch.notes,
         row.student_name,
         toMonth,
       );
@@ -2497,6 +2551,12 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
       `).run(row.student_name, row.grade || "", num(row.actual_balance), num(row.gift_balance), carryOverNote(null, fromMonth), toMonth);
       inserted += 1;
     }
+  }
+  const candidateNames = new Set(rows.map((row) => row.student_name));
+  for (const existing of all("SELECT * FROM recharge_records WHERE month_key = ?", [toMonth])) {
+    if (candidateNames.has(existing.student_name) || !isAutoCarryOverRecord(existing)) continue;
+    db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
+    updated += 1;
   }
 
   return {
@@ -2797,6 +2857,8 @@ function studentStatementRows(monthKey, studentName) {
 function studentHistoryRows(studentName) {
   const name = text(studentName);
   if (!name) return [];
+  const earliest = earliestDataMonth();
+  if (earliest) withTransaction(() => refreshCarryOverAfter(earliest));
   const rows = [];
   for (const monthKey of allPartitionedMonths()) {
     const details = feeDetails(monthKey);
@@ -4436,32 +4498,36 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
-    db.prepare(`
-      INSERT INTO recharge_records(
-        student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(student_name, month_key) DO UPDATE SET
-        grade = excluded.grade,
-        prev_actual = excluded.prev_actual,
-        prev_gift = excluded.prev_gift,
-        cur_recharge = excluded.cur_recharge,
-        cur_gift = excluded.cur_gift,
-        recharge_date = excluded.recharge_date,
-        notes = excluded.notes
-    `).run(
-      text(body.student_name),
-      text(body.grade),
-      num(body.prev_actual),
-      num(body.prev_gift),
-      num(body.cur_recharge),
-      num(body.cur_gift),
-      text(body.recharge_date),
-      text(body.notes),
-      text(body.source),
-      monthKey,
-    );
-    return sendJson(res, { ok: true });
+    const result = withTransaction(() => {
+      db.prepare(`
+        INSERT INTO recharge_records(
+          student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(student_name, month_key) DO UPDATE SET
+          grade = excluded.grade,
+          prev_actual = excluded.prev_actual,
+          prev_gift = excluded.prev_gift,
+          cur_recharge = excluded.cur_recharge,
+          cur_gift = excluded.cur_gift,
+          recharge_date = excluded.recharge_date,
+          notes = excluded.notes,
+          source = excluded.source
+      `).run(
+        text(body.student_name),
+        text(body.grade),
+        num(body.prev_actual),
+        num(body.prev_gift),
+        num(body.cur_recharge),
+        num(body.cur_gift),
+        text(body.recharge_date),
+        text(body.notes),
+        text(body.source),
+        monthKey,
+      );
+      return refreshCarryOverAfter(monthKey);
+    });
+    return sendJson(res, { ok: true, carry_over: result });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fee-overrides") {

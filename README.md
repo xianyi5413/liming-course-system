@@ -188,8 +188,9 @@ python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总�
 | --- | --- |
 | xlsx / zip 自实现 | 服务端 `unzipXlsx` / `zipStore` 直接处理 ZIP 文件结构，无 `xlsx` / `archiver` 依赖；前端 `zipStoreFiles` 镜像同实现，用于客户端 PNG 打包 |
 | 审计日志去重 | 用 `issue_key` 做去重 key，相同问题再次出现时只更新 `run_at`，不新建条目 |
-| 多月结转链 | `ensureCarryOverChain`：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录齐全 |
-| 主题切换 | 顶栏切换亮色 / 暗色，`localStorage` 持久化，默认跟随系统 `prefers-color-scheme` |
+| 多月结转链 | `ensureCarryOverChain`：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录齐全；上游充值或费用补录后，`refreshCarryOverAfter` 会清理已经失效的下游自动结转记录，避免旧欠款继续滚到后续月份 |
+| 主题切换 | 左侧导航底部切换亮色 / 暗色，`localStorage` 持久化，默认跟随系统 `prefers-color-scheme` |
+| 矩阵课表 | 10 天以内使用紧凑矩阵表格，时间段之间有明显横向分隔；超过 10 天自动切换为按时间段分组的有课日期卡片；同日重叠时间会标记老师 / 学生 / 教室冲突 |
 
 ## 金额结算口径
 
@@ -233,11 +234,14 @@ else:
 | `previousEqualRange` 用滑动窗口处理自然月 | 当 `range` 是完整自然月时，改用真实的上一自然月；自定义区间仍走滑动窗口 | `previousEqualRange` |
 | `gross_margin` 用 `pctChange` 误导 | 增加 `mom_pp`（百分点差），UI 切换到 pp 显示 | `metricOverview` |
 | `severityCounts` 吞掉非标准 severity | 动态新增桶，`pricing_recompute` 等写入的 `info` 也会被汇总 | `severityCounts` |
+| 上游充值补录后，下游旧自动结转不会消失 | `ensureCarryOver` / `rolloverRecharges` 会删除余额已归零学生的失效自动结转；`POST /api/recharges` 保存后级联刷新后续月份，学生历史页也会先刷新结转链 | `refreshCarryOverAfter` / `isAutoCarryOverRecord` / `/api/recharges` |
+| 主题选择占用顶栏空间 | 主题下拉移到左侧导航底部，顶栏只保留月份和当前页面操作 | `renderNav` / `renderTopbar` |
+| 短范围矩阵课表时间段界限弱、天数少时表格过宽 | 缩小矩阵列宽和单元格高度，并用符合设计系统的边框色做时间段分组分隔；暗色 / 亮色都可见 | `week-grid-table` CSS |
 
 ### 高（建议尽快修）
 
-1. **强删月份不会重算后续月份的结转链**
-   UI 已有二次确认且 `ensureCarryOver` 在访问下游月时刷新自动结转行；但 `previousDataMonth` 是基于 `availableMonths()` 的，如果中间月份被删，下游月会跳过被删月直接结转上上月余额，业务语义上未必对。仍需 UI 显式提示「下一月的结转将基于 X 月而不是被删月」。
+1. **强删月份的业务语义仍需 UI 明确提示**
+   `ensureCarryOver` / `refreshCarryOverAfter` 会按当前存在的数据月重算后续自动结转；但 `previousDataMonth` 是基于 `availableMonths()` 的，如果中间月份被删，下游月会跳过被删月直接结转上上月余额。技术上已能刷新，业务上仍需 UI 显式提示「下一月的结转将基于 X 月而不是被删月」。
 
 ### 中（语义不一致或边界数据可能踩坑）
 

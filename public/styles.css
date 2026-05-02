@@ -329,6 +329,8 @@ button:disabled,
 }
 
 .sidebar {
+  display: flex;
+  flex-direction: column;
   background: var(--sidebar);
   color: var(--sidebar-ink);
   padding: var(--space-5) var(--space-3);
@@ -352,6 +354,36 @@ button:disabled,
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.nav-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar-tools {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding: var(--space-4) var(--space-2) 0;
+  border-top: 1px solid var(--sidebar-line);
+}
+
+.sidebar-tool-label {
+  color: var(--sidebar-muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+}
+
+.sidebar-tools .control {
+  width: 100%;
+  min-width: 0;
+  border-color: var(--sidebar-line);
+  background: var(--sidebar-hover);
+  color: var(--sidebar-ink);
 }
 
 .brand-mark {
@@ -3351,11 +3383,16 @@ tr.risk-debt:hover td {
 }
 
 .week-grid-table {
-  width: 100%;
-  min-width: 1080px;
+  width: max-content;
+  min-width: min(100%, 720px);
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
+}
+
+.week-grid-table th:not(.week-grid-time-head):not(.week-grid-time),
+.week-grid-table td {
+  width: 148px;
 }
 
 .week-grid-table th,
@@ -3404,11 +3441,11 @@ tr.risk-debt:hover td {
 
 .week-grid-table tbody tr + tr th,
 .week-grid-table tbody tr + tr td {
-  border-top: 8px solid var(--bg);
+  border-top: 10px solid color-mix(in srgb, var(--line) 42%, var(--bg));
 }
 
 .week-grid-table td {
-  height: 108px;
+  height: 96px;
   padding: 7px;
   background: var(--panel);
 }
@@ -3745,9 +3782,19 @@ tr.risk-debt:hover td {
   }
 
   #nav {
+    display: flex;
+    gap: 4px;
+  }
+
+  .nav-sections {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 4px;
+  }
+
+  .sidebar-tools {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
   }
 
   .topbar {
@@ -3803,6 +3850,10 @@ tr.risk-debt:hover td {
 
 @media (max-width: 640px) {
   #nav {
+    grid-template-columns: none;
+  }
+
+  .nav-sections {
     grid-template-columns: 1fr;
   }
 
