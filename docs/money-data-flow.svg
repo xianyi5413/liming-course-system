@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="780" viewBox="0 0 1240 780" role="img" aria-labelledby="title desc">
+  <title id="title">黎明教育课程系统金额数据流向</title>
+  <desc id="desc">展示课程、单价、充值、结转、薪资、运营成本到学生汇总和经营概览的流向。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4f7f6; }
+      .lane { fill: #ffffff; stroke: #d7e4e2; stroke-width: 1.2; }
+      .box { fill: #ffffff; stroke: #94cfc6; stroke-width: 2; rx: 10; }
+      .input { fill: #fff8ea; stroke: #e7b36d; }
+      .calc { fill: #eef9f7; stroke: #50c2b2; }
+      .money { fill: #edf4ff; stroke: #7faef0; }
+      .risk { fill: #fff1f3; stroke: #ee8899; }
+      .title { fill: #102a2a; font: 700 24px "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+      .lane-title { fill: #24524f; font: 700 16px "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+      .text { fill: #17212b; font: 14px "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+      .small { fill: #667780; font: 12px "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+      .arrow { stroke: #4b6868; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .soft-arrow { stroke: #8aa4a0; stroke-width: 1.6; fill: none; marker-end: url(#arrow-soft); stroke-dasharray: 6 5; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#4b6868"/>
+    </marker>
+    <marker id="arrow-soft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#8aa4a0"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1240" height="780"/>
+  <text class="title" x="40" y="44">黎明教育课程系统金额数据流向</text>
+  <text class="small" x="40" y="68">核心口径：课程按学生展开计费，现金优先消费，赠送余额兜底；经营概览按 allocated_revenue 认现。</text>
+
+  <rect class="lane" x="30" y="95" width="1180" height="150" rx="14"/>
+  <text class="lane-title" x="50" y="125">录入层</text>
+  <rect class="box input" x="70" y="145" width="190" height="70"/>
+  <text class="text" x="90" y="174">课程总表 lessons</text>
+  <text class="small" x="90" y="196">老师/日期/学生/状态/课时费</text>
+  <rect class="box input" x="300" y="145" width="190" height="70"/>
+  <text class="text" x="320" y="174">单价配置</text>
+  <text class="small" x="320" y="196">fee_overrides / student_pricing / standards</text>
+  <rect class="box input" x="530" y="145" width="190" height="70"/>
+  <text class="text" x="550" y="174">充值记录 recharges</text>
+  <text class="small" x="550" y="196">结转/现金充值/赠送/日期</text>
+  <rect class="box input" x="760" y="145" width="190" height="70"/>
+  <text class="text" x="780" y="174">教师与员工成本</text>
+  <text class="small" x="780" y="196">teacher_salary / transport / staff</text>
+  <rect class="box input" x="990" y="145" width="170" height="70"/>
+  <text class="text" x="1010" y="174">日常开销</text>
+  <text class="small" x="1010" y="196">operating_expenses</text>
+
+  <rect class="lane" x="30" y="275" width="1180" height="180" rx="14"/>
+  <text class="lane-title" x="50" y="305">计算层</text>
+  <rect class="box calc" x="95" y="330" width="220" height="80"/>
+  <text class="text" x="115" y="358">feeDetails(month)</text>
+  <text class="small" x="115" y="380">每节课按学生展开</text>
+  <text class="small" x="115" y="398">得到 unit_price / price_source</text>
+  <rect class="box calc" x="380" y="330" width="245" height="80"/>
+  <text class="text" x="400" y="358">studentSummary(month)</text>
+  <text class="small" x="400" y="380">total_fee / actual_consumption</text>
+  <text class="small" x="400" y="398">gift_consumption / balances</text>
+  <rect class="box calc" x="690" y="330" width="220" height="80"/>
+  <text class="text" x="710" y="358">ensureCarryOver</text>
+  <text class="small" x="710" y="380">n 月余额自动写入</text>
+  <text class="small" x="710" y="398">n+1 月 prev_actual / prev_gift</text>
+  <rect class="box money" x="975" y="330" width="180" height="80"/>
+  <text class="text" x="995" y="358">financeBase(range)</text>
+  <text class="small" x="995" y="380">allocated_revenue</text>
+  <text class="small" x="995" y="398">成本/毛利/现金流</text>
+
+  <path class="arrow" d="M260 180 C280 240, 120 260, 170 330"/>
+  <path class="arrow" d="M490 180 C520 245, 250 270, 260 330"/>
+  <path class="arrow" d="M625 215 C610 260, 530 288, 520 330"/>
+  <path class="arrow" d="M315 370 L380 370"/>
+  <path class="arrow" d="M625 370 L690 370"/>
+  <path class="soft-arrow" d="M800 410 C780 470, 450 470, 430 410"/>
+  <path class="arrow" d="M910 370 L975 370"/>
+  <path class="arrow" d="M855 215 C900 260, 1015 290, 1035 330"/>
+  <path class="arrow" d="M1075 215 C1100 255, 1100 290, 1095 330"/>
+
+  <rect class="lane" x="30" y="485" width="1180" height="190" rx="14"/>
+  <text class="lane-title" x="50" y="515">输出层</text>
+  <rect class="box money" x="70" y="540" width="210" height="88"/>
+  <text class="text" x="90" y="568">学生费用汇总</text>
+  <text class="small" x="90" y="590">上月结转/充值/课消/余额</text>
+  <text class="small" x="90" y="608">充值页和学生查询引用</text>
+  <rect class="box money" x="325" y="540" width="210" height="88"/>
+  <text class="text" x="345" y="568">教师薪资汇总</text>
+  <text class="small" x="345" y="590">有效课时费 + 四周车贴</text>
+  <text class="small" x="345" y="608">老师明细按权限过滤</text>
+  <rect class="box money" x="580" y="540" width="230" height="88"/>
+  <text class="text" x="600" y="568">经营概览</text>
+  <text class="small" x="600" y="590">收入/成本/毛利/净现金流</text>
+  <text class="small" x="600" y="608">老师/年级/科目拆分同口径</text>
+  <rect class="box risk" x="855" y="540" width="230" height="88"/>
+  <text class="text" x="875" y="568">风险与审计</text>
+  <text class="small" x="875" y="590">未缴费/账户欠款/低余额</text>
+  <text class="small" x="875" y="608">audit_events 记录关键改动</text>
+
+  <path class="arrow" d="M500 410 C420 485, 230 485, 175 540"/>
+  <path class="arrow" d="M1065 410 C970 485, 735 490, 695 540"/>
+  <path class="arrow" d="M1065 410 C1040 470, 1000 505, 970 540"/>
+  <path class="arrow" d="M845 215 C745 455, 450 500, 430 540"/>
+
+  <rect x="40" y="705" width="1160" height="42" rx="10" fill="#e9f5f3" stroke="#c5dfdb"/>
+  <text class="small" x="60" y="730">注意：资金负债表是截至区间结束日所在月的期末余额；未缴费课时与账户欠款按学生去重取较大值，避免重复计入应收。</text>
+</svg>

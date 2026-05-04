@@ -1,0 +1,16 @@
+.git
+.claude
+node_modules
+npm-debug.log*
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.sqlite-journal
+data/backups
+data/source-workbooks
+data/uploads
+scripts/__pycache__
+*.pyc
+_ Design System
+_ Design System.zip
+AUDIT-REPORT-*.md

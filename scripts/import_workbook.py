@@ -276,8 +276,8 @@ def import_recharges(conn, wb, month_key):
         payload = (
             student_name,
             text(ws.cell(row_idx, 2).value),
-            number(ws.cell(row_idx, 3).value),
-            number(ws.cell(row_idx, 4).value),
+            0,
+            0,
             number(ws.cell(row_idx, 5).value),
             number(ws.cell(row_idx, 6).value),
             iso_date(ws.cell(row_idx, 7).value),
@@ -292,9 +292,7 @@ def import_recharges(conn, wb, month_key):
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(student_name, month_key) DO UPDATE SET
-              grade = excluded.grade,
-              prev_actual = excluded.prev_actual,
-              prev_gift = excluded.prev_gift,
+              grade = COALESCE(NULLIF(excluded.grade, ''), recharge_records.grade),
               cur_recharge = excluded.cur_recharge,
               cur_gift = excluded.cur_gift,
               recharge_date = excluded.recharge_date,

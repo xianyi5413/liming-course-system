@@ -1,14 +1,17 @@
-﻿const http = require("node:http");
+const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
+const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
-const dataDir = path.join(rootDir, "data");
-const dbPath = path.join(dataDir, "liming-local.sqlite");
+const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
+const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
+const secureCookies = process.env.SESSION_COOKIE_SECURE === "1" || process.env.SESSION_COOKIE_SECURE === "true";
+const sessions = new Map();
 
 const LESSON_STATUS = ["上课", "试课", "监考", "休息", "上课（未缴费）", "待定", "请假", "考试"];
 const COURSE_STATUS = ["未上", "已上", "请假", "暂停一次", "暂停一阵"];
@@ -36,6 +39,13 @@ const ATTENDANCE_PAY_UNITS = {
   调休: 0,
   旷工: 0,
 };
+const USER_ROLES = {
+  owner: "Qing",
+  admin: "管理员",
+  academic: "教务",
+  finance: "财务",
+  teacher: "老师",
+};
 const GRADES = [
   { name: "初一", color: "#E8F5E9" },
   { name: "初二", color: "#E3F2FD" },
@@ -52,6 +62,15 @@ const PRICING = [
   ["初二", 1, 300, "1对1"], ["初二", 2, 240, "1对2"], ["初二", 4, 160, "1对多"],
   ["初一", 1, 300, "1对1"], ["初一", 2, 240, "1对2"], ["初一", 4, 160, "1对多"],
 ];
+const GRADE_ORDER = GRADES.map((grade) => grade.name);
+const NEXT_GRADE = {
+  初一: "初二",
+  初二: "初三",
+  初三: "高一",
+  高一: "高二",
+  高二: "高三",
+  高三: "高三",
+};
 
 fs.mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(dbPath);
@@ -249,6 +268,33 @@ function initDb() {
       field TEXT DEFAULT '',
       notes TEXT DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_user_id INTEGER,
+      actor_username TEXT DEFAULT '',
+      actor_role TEXT DEFAULT '',
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT DEFAULT '',
+      before_json TEXT DEFAULT '',
+      after_json TEXT DEFAULT '',
+      ip TEXT DEFAULT '',
+      user_agent TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL DEFAULT 'academic',
+      teacher_name TEXT DEFAULT '',
+      password_hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
@@ -259,6 +305,8 @@ function initDb() {
     db.prepare("ALTER TABLE audit_logs ADD COLUMN issue_key TEXT DEFAULT ''").run();
   }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_logs_issue_key ON audit_logs(issue_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_entity ON audit_events(entity_type, entity_id)").run();
 
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
@@ -345,6 +393,8 @@ function initDb() {
       VALUES (?, ?, ?, ?)
     `).run(row[0], row[1], row[2], row[3]);
   }
+  seedDefaultUsers();
+  db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
 }
 
 initDb();
@@ -362,9 +412,44 @@ function get(sql, params = []) {
   return db.prepare(sql).get(...params);
 }
 
+function passwordHash(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.pbkdf2Sync(String(password || ""), salt, 120000, 32, "sha256").toString("hex");
+  return `pbkdf2$${salt}$${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  const [method, salt, hash] = String(stored || "").split("$");
+  if (method !== "pbkdf2" || !salt || !hash) return false;
+  const actual = passwordHash(password, salt).split("$")[2];
+  if (actual.length !== hash.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(hash, "hex"));
+}
+
+function seedDefaultUsers() {
+  const count = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+  if (count) return;
+  const defaults = [
+    ["boss", "Qing", "owner"],
+    ["admin", "管理员", "admin"],
+    ["jiaowu", "教务", "academic"],
+    ["teacher", "老师", "teacher"],
+  ];
+  const stmt = db.prepare(`
+    INSERT INTO users(username, display_name, role, password_hash)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const [username, displayName, role] of defaults) {
+    stmt.run(username, displayName, role, passwordHash("123456"));
+  }
+}
+
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function moneyRound(value) {
+  return Math.round((num(value) + Number.EPSILON) * 100) / 100;
 }
 
 function text(value) {
@@ -380,6 +465,12 @@ function monthKeyFromDate(value) {
   const match = raw.match(/^(\d{4})-(\d{2})-\d{2}$/);
   if (!match) return "";
   return `${match[1]}-${match[2]}-01`;
+}
+
+function monthKeyFromFilename(filename) {
+  const match = text(filename).match(/(\d{4})年(\d{1,2})月/);
+  if (!match) return "";
+  return `${match[1]}-${match[2].padStart(2, "0")}-01`;
 }
 
 function splitStudents(value) {
@@ -405,6 +496,15 @@ function deriveStatus(row = {}) {
   if (row.lesson_status === "请假" || row.course_status === "请假") return "请假";
   if (row.course_status === "已上") return "已上";
   return "待上";
+}
+
+function gradeRank(grade) {
+  const index = GRADE_ORDER.indexOf(text(grade));
+  return index === -1 ? GRADE_ORDER.length : index;
+}
+
+function compareGradeName(a, b) {
+  return gradeRank(a) - gradeRank(b) || text(a).localeCompare(text(b), "zh-Hans-CN");
 }
 
 function legacyStatusFields(statusValue) {
@@ -590,10 +690,82 @@ function readXlsxTotalSheet(buffer, monthKey) {
     const nonTimeFields = ["teacher_name", "date", "lesson_status", "classroom", "grade", "subject", "student_names", "notes", "course_status"];
     if (!nonTimeFields.some((field) => row[field]) && (!row.time_slot || row.time_slot === "0" || row.time_slot === "0:00")) continue;
     if (![...nonTimeFields, "time_slot"].some((field) => row[field])) continue;
-    if (row.date && monthKeyFromDate(row.date) && monthKeyFromDate(row.date) !== monthKey) {
-      throw new Error(`文件 ${sheet.name} 第 ${rowIndex} 行日期为 ${row.date}，与当前月份 ${monthKey.slice(0, 7)} 不一致`);
-    }
+    if (row.date && monthKeyFromDate(row.date) && monthKeyFromDate(row.date) !== monthKey) continue;
+    row.lesson_status ||= "上课";
+    row.course_status ||= "未上";
     row.student_count = splitStudents(row.student_names).length;
+    rows.push(row);
+  }
+  return { sheet_name: sheet.name, rows };
+}
+
+function readXlsxSheetRows(buffer, sheetName) {
+  const entries = unzipXlsx(buffer);
+  const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
+  const sheets = workbookSheets(entries);
+  const sheet = sheets.find((item) => item.name === sheetName);
+  if (!sheet) return { sheet_name: sheetName, rows: [] };
+  const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
+  if (!sheetXmlText) throw new Error(`xlsx 缺少工作表内容：${sheet.name}`);
+  const rows = [];
+  for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
+    const sourceRow = Number(xmlAttr(rowTag, "r"));
+    if (!sourceRow) continue;
+    const values = [];
+    const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
+    for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const column = cellColumnIndex(xmlAttr(cellTag, "r"));
+      if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
+    }
+    rows.push({ source_row: sourceRow, values });
+  }
+  return { sheet_name: sheet.name, rows };
+}
+
+function readXlsxTotalRowsForImport(buffer, monthKey) {
+  const entries = unzipXlsx(buffer);
+  const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
+  const sheets = workbookSheets(entries);
+  const preferred = `${Number(monthKey.slice(5, 7))}月总表`;
+  const sheet = sheets.find((item) => item.name === preferred)
+    || sheets.find((item) => /^\d{1,2}月总表$/.test(item.name));
+  if (!sheet) {
+    const found = sheets.map((item) => item.name).filter(Boolean).join("、") || "无";
+    throw new Error(`未找到月度总表。当前选择 ${monthKey.slice(0, 7)}，已找到：${found}`);
+  }
+  const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
+  if (!sheetXmlText) throw new Error(`xlsx 缺少工作表内容：${sheet.name}`);
+  const rows = [];
+  for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
+    const rowIndex = Number(xmlAttr(rowTag, "r"));
+    if (!rowIndex || rowIndex < 3) continue;
+    const values = [];
+    const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
+    for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const column = cellColumnIndex(xmlAttr(cellTag, "r"));
+      if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
+    }
+    const row = {
+      source_row: rowIndex,
+      teacher_name: text(values[0]),
+      date: isoDateValue(values[1]),
+      lesson_status: text(values[2]),
+      time_slot: text(values[4]),
+      classroom: text(values[5]),
+      grade: text(values[6]),
+      subject: text(values[7]),
+      student_names: text(values[8]),
+      notes: text(values[9]),
+      course_status: text(values[10]),
+      teacher_salary: num(values[11]),
+    };
+    const fields = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "teacher_salary"];
+    if (!fields.some((field) => field === "teacher_salary" ? row[field] : text(row[field]))) continue;
+    if (!row.date) continue;
+    row.lesson_status ||= "上课";
+    row.course_status ||= "未上";
+    row.month_key = monthKeyFromDate(row.date) || monthKey;
+    row.status = deriveStatus(row);
     rows.push(row);
   }
   return { sheet_name: sheet.name, rows };
@@ -661,6 +833,42 @@ function syncTeachersFromLessons() {
   }
 }
 
+function autoPromoteStudentsForMonth(monthKey) {
+  if (!validMonthKey(monthKey)) return { promoted: 0 };
+  const year = Number(monthKey.slice(0, 4));
+  const month = Number(monthKey.slice(5, 7));
+  if (month < 9) return { promoted: 0 };
+  const settingKey = "grade_promotion_last_year";
+  if (Number(getSetting(settingKey)) >= year) return { promoted: 0, already_done: true };
+  const rows = all(`
+    SELECT id, name, grade
+    FROM students
+    WHERE status IN ('在读', '暂停')
+      AND grade IN (${GRADE_ORDER.map(() => "?").join(",")})
+  `, GRADE_ORDER);
+  let promoted = 0;
+  for (const row of rows) {
+    const next = NEXT_GRADE[row.grade] || row.grade;
+    if (next === row.grade) continue;
+    db.prepare("UPDATE students SET grade = ? WHERE id = ?").run(next, row.id);
+    promoted += 1;
+  }
+  setSetting(settingKey, String(year));
+  if (promoted) {
+    db.prepare(`
+      INSERT INTO audit_logs(run_id, source, severity, entity, field, before_value, after_value, status, notes)
+      VALUES (?, 'student_grade_promotion', 'info', ?, 'grade', ?, ?, 'fixed', ?)
+    `).run(
+      `grade_promotion_${year}`,
+      `students_${year}`,
+      `${rows.length} students checked`,
+      `${promoted} students promoted`,
+      `${year} 年 9 月自动升年级`,
+    );
+  }
+  return { promoted, year };
+}
+
 function activeTeacherNames(monthKey) {
   return new Set(all(
     "SELECT DISTINCT teacher_name FROM lessons WHERE month_key = ? AND TRIM(teacher_name) <> ''",
@@ -707,7 +915,7 @@ function studentsForMonth(monthKey, includeInactive = false) {
   }
   return rows
     .filter((row) => includeInactive || row.active_this_month)
-    .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+    .sort((a, b) => compareGradeName(a.grade, b.grade) || a.name.localeCompare(b.name, "zh-Hans-CN"));
 }
 
 function todayKey() {
@@ -726,8 +934,12 @@ function studentProfiles() {
   return all(`
     SELECT *
     FROM students
-    ORDER BY CASE status WHEN '在读' THEN 0 WHEN '已流出' THEN 2 ELSE 1 END, name
-  `);
+  `).sort((a, b) => (
+    ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3 }[a.status] ?? 1)
+    - ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3 }[b.status] ?? 1)
+    || compareGradeName(a.grade, b.grade)
+    || a.name.localeCompare(b.name, "zh-Hans-CN")
+  ));
 }
 
 function teacherHasHistory(name) {
@@ -762,6 +974,18 @@ function createTeacherProfile(body) {
   return get("SELECT * FROM teachers WHERE id = ?", [Number(result.lastInsertRowid)]);
 }
 
+function upsertTeacherProfileFromAccount(name, phone = "") {
+  if (!name) return null;
+  db.prepare(`
+    INSERT INTO teachers(name, phone, status)
+    VALUES (?, ?, '在职')
+    ON CONFLICT(name) DO UPDATE SET
+      phone = COALESCE(NULLIF(excluded.phone, ''), teachers.phone),
+      status = CASE WHEN teachers.status IS NULL OR TRIM(teachers.status) = '' THEN '在职' ELSE teachers.status END
+  `).run(text(name), text(phone));
+  return get("SELECT * FROM teachers WHERE name = ?", [text(name)]);
+}
+
 function createStudentProfile(body) {
   const name = text(body.name);
   if (!name) return { error: "name is required", status: 400 };
@@ -782,17 +1006,60 @@ function createStudentProfile(body) {
   return get("SELECT * FROM students WHERE id = ?", [Number(result.lastInsertRowid)]);
 }
 
+function disableTeacherAccountsByName(teacherName) {
+  const name = text(teacherName);
+  if (!name) return { before: [], after: [], count: 0 };
+  const before = all(`
+    SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at
+    FROM users
+    WHERE role = 'teacher' AND teacher_name = ? AND status <> 'disabled'
+    ORDER BY id
+  `, [name]);
+  if (!before.length) return { before: [], after: [], count: 0 };
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE users
+    SET status = 'disabled', updated_at = ?
+    WHERE role = 'teacher' AND teacher_name = ? AND status <> 'disabled'
+  `).run(now, name);
+  const ids = before.map((row) => Number(row.id));
+  const placeholders = ids.map(() => "?").join(",");
+  const after = all(`
+    SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at
+    FROM users
+    WHERE id IN (${placeholders})
+    ORDER BY id
+  `, ids);
+  return { before, after, count: after.length };
+}
+
 function deleteTeacherProfile(id) {
   const row = get("SELECT * FROM teachers WHERE id = ?", [Number(id)]);
   if (!row) return null;
-  if (teacherHasHistory(row.name)) {
-    db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
-    return { deleted: false, soft_deleted: true, row: get("SELECT * FROM teachers WHERE id = ?", [Number(id)]) };
-  }
-  db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
-  db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
-  db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
-  return { deleted: true, soft_deleted: false };
+  return withTransaction(() => {
+    const disabledAccounts = disableTeacherAccountsByName(row.name);
+    if (teacherHasHistory(row.name)) {
+      db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
+      return {
+        deleted: false,
+        soft_deleted: true,
+        row: get("SELECT * FROM teachers WHERE id = ?", [Number(id)]),
+        disabled_accounts_before: disabledAccounts.before,
+        disabled_accounts: disabledAccounts.after,
+        disabled_account_count: disabledAccounts.count,
+      };
+    }
+    db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
+    db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
+    db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
+    return {
+      deleted: true,
+      soft_deleted: false,
+      disabled_accounts_before: disabledAccounts.before,
+      disabled_accounts: disabledAccounts.after,
+      disabled_account_count: disabledAccounts.count,
+    };
+  });
 }
 
 function deleteStudentProfile(id) {
@@ -920,13 +1187,13 @@ function staffAttendanceSummary(monthKey) {
 }
 
 function staffBasePay(row, attendanceSummary = null) {
-  if (!attendanceSummary || !attendanceSummary.attendance_days) return num(row.base_salary);
+  if (!attendanceSummary || !attendanceSummary.attendance_days) return moneyRound(row.base_salary);
   if (row.pay_type === "日薪") {
     const rate = num(row.daily_rate) || num(row.base_salary);
-    return rate * num(attendanceSummary.pay_units);
+    return moneyRound(rate * num(attendanceSummary.pay_units));
   }
   const standardDays = Math.max(1, num(row.standard_work_days) || 26);
-  return num(row.base_salary) / standardDays * num(attendanceSummary.pay_units);
+  return moneyRound(num(row.base_salary) / standardDays * num(attendanceSummary.pay_units));
 }
 
 function staffSalaryRows(monthKey) {
@@ -938,7 +1205,7 @@ function staffSalaryRows(monthKey) {
     JOIN staff s ON s.id = ssm.staff_id
     WHERE ssm.month_key = ?
   `, [monthKey])) {
-    upsertStaffSalaryRow(row, monthKey, row.bonus, row.deduction, row.notes);
+    upsertStaffSalaryRow(row, monthKey, row.bonus, row.deduction, row.notes, attendance);
   }
   return all(`
     SELECT
@@ -970,14 +1237,14 @@ function staffSalaryRows(monthKey) {
       attendance_days: summary.attendance_days,
       pay_units: summary.pay_units,
       attendance_by_status: summary.by_status,
-      expected_salary: basePay + num(row.bonus) - num(row.deduction),
+      expected_salary: moneyRound(basePay + num(row.bonus) - num(row.deduction)),
     };
   });
 }
 
-function upsertStaffSalaryRow(staff, monthKey, bonus, deduction, notes) {
-  const attendance = staffAttendanceSummary(monthKey).get(staff.id);
-  const salaryActual = staffBasePay(staff, attendance) + num(bonus) - num(deduction);
+function upsertStaffSalaryRow(staff, monthKey, bonus, deduction, notes, attendanceSummary = null) {
+  const attendance = (attendanceSummary || staffAttendanceSummary(monthKey)).get(staff.id);
+  const salaryActual = moneyRound(staffBasePay(staff, attendance) + num(bonus) - num(deduction));
   db.prepare(`
     INSERT INTO staff_salary_monthly(staff_id, month_key, salary_actual, bonus, deduction, notes)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -1205,14 +1472,37 @@ function feeDetails(monthKey) {
   return details;
 }
 
-function studentSummary(details, monthKey, includeInactive = false) {
+function previousCarryOverBalances(monthKey, cache = new Map()) {
+  if (!validMonthKey(monthKey)) return new Map();
+  if (cache.has(monthKey)) return cache.get(monthKey);
+  const fromMonth = previousDataMonth(monthKey);
+  if (!fromMonth) {
+    const empty = new Map();
+    cache.set(monthKey, empty);
+    return empty;
+  }
+  const rows = studentSummary(feeDetails(fromMonth), fromMonth, true, cache);
+  const balances = new Map(rows.map((row) => [row.student_name, {
+    month_key: fromMonth,
+    actual_balance: num(row.actual_balance),
+    gift_balance: num(row.gift_balance),
+  }]));
+  cache.set(monthKey, balances);
+  return balances;
+}
+
+function studentSummary(details, monthKey, includeInactive = false, carryOverCache = new Map()) {
   const byStudent = new Map();
   const active = activeStudentNames(monthKey);
+  const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [row.name, row]));
+  const carryOverBalances = previousCarryOverBalances(monthKey, carryOverCache);
   for (const detail of details) {
+    const profile = profiles.get(detail.student_name) || {};
     if (!byStudent.has(detail.student_name)) {
       byStudent.set(detail.student_name, {
         student_name: detail.student_name,
-        grade: detail.grade,
+        grade: detail.grade || profile.grade || "",
+        status: profile.status || "在读",
         lesson_count: 0,
         total_fee: 0,
         active_this_month: active.has(detail.student_name),
@@ -1222,14 +1512,16 @@ function studentSummary(details, monthKey, includeInactive = false) {
     if (!row.grade && detail.grade) row.grade = detail.grade;
     if (detail.effective) {
       row.lesson_count += 1;
-      row.total_fee += num(detail.unit_price);
+      row.total_fee = moneyRound(row.total_fee + num(detail.unit_price));
     }
   }
   for (const recharge of all("SELECT * FROM recharge_records WHERE month_key = ?", [monthKey])) {
+    const profile = profiles.get(recharge.student_name) || {};
     if (!byStudent.has(recharge.student_name)) {
       byStudent.set(recharge.student_name, {
         student_name: recharge.student_name,
-        grade: recharge.grade,
+        grade: recharge.grade || profile.grade || "",
+        status: profile.status || "在读",
         lesson_count: 0,
         total_fee: 0,
         active_this_month: active.has(recharge.student_name),
@@ -1242,6 +1534,7 @@ function studentSummary(details, monthKey, includeInactive = false) {
         byStudent.set(student.name, {
           student_name: student.name,
           grade: student.grade || "",
+          status: student.status || "在读",
           lesson_count: 0,
           total_fee: 0,
           active_this_month: active.has(student.name),
@@ -1251,33 +1544,41 @@ function studentSummary(details, monthKey, includeInactive = false) {
   }
 
   const rows = [...byStudent.values()]
-    .filter((row) => includeInactive || row.active_this_month)
+    .filter((row) => includeInactive || row.active_this_month || inactiveStudentStatus(row.status))
     .sort((a, b) => a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
   return rows.map((row) => {
     const recharge = get(
       "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
       [row.student_name, monthKey],
     ) || {};
-    const prevActual = num(recharge.prev_actual);
-    const prevGift = num(recharge.prev_gift);
-    const curRecharge = num(recharge.cur_recharge);
-    const curGift = num(recharge.cur_gift);
-    const totalFee = num(row.total_fee);
-    const actualBase = prevActual + curRecharge + Math.min(prevGift, 0);
-    const allFunds = prevActual + curRecharge + prevGift + curGift;
-    const actualConsumption = Math.min(totalFee, Math.max(0, actualBase));
-    const giftConsumption = Math.min(Math.max(0, totalFee - actualConsumption), Math.max(0, prevGift) + curGift);
-    const actualBalance = actualBase >= totalFee
+    const carryOver = carryOverBalances.get(row.student_name);
+    const storedPrevActual = num(recharge.prev_actual);
+    const storedPrevGift = num(recharge.prev_gift);
+    const prevActual = carryOver ? num(carryOver.actual_balance) : storedPrevActual;
+    const prevGift = carryOver ? num(carryOver.gift_balance) : storedPrevGift;
+    const curRecharge = moneyRound(recharge.cur_recharge);
+    const curGift = moneyRound(recharge.cur_gift);
+    const totalFee = moneyRound(row.total_fee);
+    const actualBase = moneyRound(prevActual + curRecharge + Math.min(prevGift, 0));
+    const allFunds = moneyRound(prevActual + curRecharge + prevGift + curGift);
+    const actualConsumption = moneyRound(Math.min(totalFee, Math.max(0, actualBase)));
+    const giftConsumption = moneyRound(Math.min(Math.max(0, totalFee - actualConsumption), Math.max(0, prevGift) + curGift));
+    const actualBalance = moneyRound(actualBase >= totalFee
       ? actualBase - totalFee
-      : Math.min(0, allFunds - totalFee);
-    const giftBalance = actualBase >= totalFee
+      : Math.min(0, allFunds - totalFee));
+    const giftBalance = moneyRound(actualBase >= totalFee
       ? Math.max(prevGift, 0) + curGift
-      : Math.max(0, allFunds - totalFee);
+      : Math.max(0, allFunds - totalFee));
     return {
       ...row,
-      grade: row.grade || recharge.grade || "",
-      prev_actual: prevActual,
-      prev_gift: prevGift,
+      total_fee: totalFee,
+      grade: row.grade || recharge.grade || profiles.get(row.student_name)?.grade || "",
+      status: row.status || profiles.get(row.student_name)?.status || "在读",
+      prev_actual: moneyRound(prevActual),
+      prev_gift: moneyRound(prevGift),
+      prev_actual_stored: storedPrevActual,
+      prev_gift_stored: storedPrevGift,
+      prev_source_month: carryOver?.month_key || "",
       cur_recharge: curRecharge,
       cur_gift: curGift,
       recharge_date: recharge.recharge_date || "",
@@ -1287,7 +1588,76 @@ function studentSummary(details, monthKey, includeInactive = false) {
       actual_balance: actualBalance,
       gift_balance: giftBalance,
     };
-  });
+  }).filter((row) => shouldShowStudentSummaryRow(row, includeInactive));
+}
+
+function studentSummaryHasSignal(row) {
+  return row.active_this_month
+    || num(row.lesson_count) !== 0
+    || num(row.total_fee) !== 0
+    || num(row.prev_actual) !== 0
+    || num(row.prev_gift) !== 0
+    || num(row.cur_recharge) !== 0
+    || num(row.cur_gift) !== 0
+    || num(row.actual_balance) !== 0
+    || num(row.gift_balance) !== 0
+    || !!text(row.recharge_date)
+    || !!text(row.recharge_notes);
+}
+
+function studentSummaryToDate(monthKey, includeInactive = false) {
+  if (!validMonthKey(monthKey)) return [];
+  const months = allPartitionedMonths()
+    .filter((item) => item <= monthKey)
+    .sort((a, b) => a.localeCompare(b));
+  const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [row.name, row]));
+  const active = activeStudentNames(monthKey);
+  const byStudent = new Map();
+
+  for (const itemMonth of months) {
+    const monthRows = studentSummary(feeDetails(itemMonth), itemMonth, true);
+    for (const row of monthRows) {
+      if (!studentSummaryHasSignal(row)) continue;
+      const profile = profiles.get(row.student_name) || {};
+      if (!byStudent.has(row.student_name)) {
+        byStudent.set(row.student_name, {
+          student_name: row.student_name,
+          grade: row.grade || profile.grade || "",
+          status: profile.status || row.status || "在读",
+          lesson_count: 0,
+          total_fee: 0,
+          prev_actual: 0,
+          prev_gift: 0,
+          cur_recharge: 0,
+          cur_gift: 0,
+          actual_consumption: 0,
+          gift_consumption: 0,
+          actual_balance: 0,
+          gift_balance: 0,
+          active_this_month: active.has(row.student_name),
+          first_month: itemMonth,
+          latest_month: itemMonth,
+          summary_scope: "to_date",
+        });
+      }
+      const target = byStudent.get(row.student_name);
+      if (!target.grade && row.grade) target.grade = row.grade;
+      target.status = profile.status || row.status || target.status;
+      target.lesson_count += num(row.lesson_count);
+      target.total_fee = moneyRound(target.total_fee + num(row.total_fee));
+      target.cur_recharge = moneyRound(target.cur_recharge + num(row.cur_recharge));
+      target.cur_gift = moneyRound(target.cur_gift + num(row.cur_gift));
+      target.actual_consumption = moneyRound(target.actual_consumption + num(row.actual_consumption));
+      target.gift_consumption = moneyRound(target.gift_consumption + num(row.gift_consumption));
+      target.actual_balance = moneyRound(row.actual_balance);
+      target.gift_balance = moneyRound(row.gift_balance);
+      target.latest_month = itemMonth;
+    }
+  }
+
+  return [...byStudent.values()]
+    .filter((row) => shouldShowStudentSummaryRow(row, includeInactive))
+    .sort((a, b) => compareGradeName(a.grade, b.grade) || a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
 }
 
 function teacherSummary(monthKey, includeInactive = false) {
@@ -1316,7 +1686,7 @@ function teacherSummary(monthKey, includeInactive = false) {
     const row = byTeacher.get(name);
     if (isEffective(lesson)) {
       row.lesson_count += 1;
-      row.salary_total += num(lesson.teacher_salary);
+      row.salary_total = moneyRound(row.salary_total + num(lesson.teacher_salary));
     }
   }
   return [...byTeacher.values()].filter((row) => includeInactive || row.active_this_month).map((row) => {
@@ -1334,7 +1704,8 @@ function teacherSummary(monthKey, includeInactive = false) {
       week2_transport: week2,
       week3_transport: week3,
       week4_transport: week4,
-      total_salary: row.salary_total + week1 + week2 + week3 + week4,
+      salary_total: moneyRound(row.salary_total),
+      total_salary: moneyRound(row.salary_total + week1 + week2 + week3 + week4),
       notes: adj.notes || "",
     };
   }).sort((a, b) => a.teacher_name.localeCompare(b.teacher_name, "zh-Hans-CN"));
@@ -1790,9 +2161,9 @@ function weightedTeacherTransport(range) {
       const amount = (
         num(row.week1_transport) + num(row.week2_transport) + num(row.week3_transport) + num(row.week4_transport)
       ) * overlap.weight;
-      total += amount;
+      total = moneyRound(total + amount);
       const name = row.teacher_name || "未填写";
-      byTeacher.set(name, (byTeacher.get(name) || 0) + amount);
+      byTeacher.set(name, moneyRound((byTeacher.get(name) || 0) + amount));
     }
   }
   return { total, by_teacher: byTeacher };
@@ -1812,8 +2183,8 @@ function weightedStaffSalary(range) {
     `, [monthKey])) {
       const role = row.role || "其他";
       const amount = num(row.salary_actual) * overlap.weight;
-      total += amount;
-      byStaffRole[role] = (byStaffRole[role] || 0) + amount;
+      total = moneyRound(total + amount);
+      byStaffRole[role] = moneyRound((byStaffRole[role] || 0) + amount);
     }
   }
   return { total, by_staff_role: byStaffRole };
@@ -1830,8 +2201,8 @@ function operatingExpenseSummary(range) {
   for (const row of rows) {
     const category = row.category || "其他";
     const amount = num(row.amount);
-    total += amount;
-    byCategory[category] = (byCategory[category] || 0) + amount;
+    total = moneyRound(total + amount);
+    byCategory[category] = moneyRound((byCategory[category] || 0) + amount);
   }
   return { rows, total, by_category: byCategory };
 }
@@ -1870,10 +2241,16 @@ function financeBase(range) {
     const totalFee = num(summary?.total_fee);
     const price = num(detail.unit_price);
     if (totalFee > 0) {
-      revenue += price * (num(summary.actual_consumption) / totalFee);
-      giftConsumption += price * (num(summary.gift_consumption) / totalFee);
+      const allocatedRevenue = moneyRound(price * (num(summary.actual_consumption) / totalFee));
+      const allocatedGiftConsumption = moneyRound(price * (num(summary.gift_consumption) / totalFee));
+      detail.allocated_revenue = allocatedRevenue;
+      detail.allocated_gift_consumption = allocatedGiftConsumption;
+      revenue = moneyRound(revenue + allocatedRevenue);
+      giftConsumption = moneyRound(giftConsumption + allocatedGiftConsumption);
     } else {
-      revenue += price;
+      detail.allocated_revenue = moneyRound(price);
+      detail.allocated_gift_consumption = 0;
+      revenue = moneyRound(revenue + detail.allocated_revenue);
     }
   }
 
@@ -1884,9 +2261,9 @@ function financeBase(range) {
     const salary = num(detail.teacher_salary);
     lessonSalary.set(detail.lesson_id, salary);
     const teacherName = detail.teacher_name || "未填写";
-    teacherSalary.set(teacherName, (teacherSalary.get(teacherName) || 0) + salary);
+    teacherSalary.set(teacherName, moneyRound((teacherSalary.get(teacherName) || 0) + salary));
   }
-  const teacherCost = [...lessonSalary.values()].reduce((sum, value) => sum + value, 0);
+  const teacherCost = moneyRound([...lessonSalary.values()].reduce((sum, value) => sum + value, 0));
   const lessonSalaryValues = [...lessonSalary.values()];
   const teacherSalaryMissingLessons = lessonSalaryValues.filter((value) => num(value) <= 0).length;
   const transport = weightedTeacherTransport(range);
@@ -1895,14 +2272,14 @@ function financeBase(range) {
   const operatingCost = {
     staff_salary_total: staffSalary.total,
     operating_expense_total: expenses.total,
-    total: staffSalary.total + expenses.total,
+    total: moneyRound(staffSalary.total + expenses.total),
     by_staff_role: staffSalary.by_staff_role,
     by_category: expenses.by_category,
   };
   const recharges = rechargesInRange(range);
-  const cashIn = recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0);
-  const giftIssued = recharges.reduce((sum, row) => sum + num(row.cur_gift), 0);
-  const grossProfit = revenue - teacherCost - transport.total - operatingCost.total;
+  const cashIn = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0));
+  const giftIssued = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_gift), 0));
+  const grossProfit = moneyRound(revenue - teacherCost - transport.total - operatingCost.total);
 
   return {
     range,
@@ -1929,7 +2306,7 @@ function financeBase(range) {
       gross_margin: revenue ? grossProfit / revenue : 0,
       cash_in: cashIn,
       gift_issued: giftIssued,
-      net_cash_flow: cashIn - (teacherCost + transport.total + operatingCost.total),
+      net_cash_flow: moneyRound(cashIn - (teacherCost + transport.total + operatingCost.total)),
     },
   };
 }
@@ -1966,10 +2343,11 @@ function metricOverview(current, previous) {
 function financeBreakdowns(current) {
   const effectiveDetails = current.effective_details;
   const summaries = current.end_month_summaries || [];
+  const detailRevenue = (row) => moneyRound(row.allocated_revenue ?? row.unit_price);
   const unpaidByStudent = new Map();
   for (const row of current.details.filter(isUnpaid)) {
     const name = row.student_name || row.student || "未填写";
-    unpaidByStudent.set(name, (unpaidByStudent.get(name) || 0) + num(row.unit_price));
+    unpaidByStudent.set(name, moneyRound((unpaidByStudent.get(name) || 0) + num(row.unit_price)));
   }
   const debtByStudent = new Map();
   for (const row of summaries) {
@@ -1977,17 +2355,17 @@ function financeBreakdowns(current) {
     if (debt > 0) debtByStudent.set(row.student_name, debt);
   }
   const receivableNames = new Set([...unpaidByStudent.keys(), ...debtByStudent.keys()]);
-  const accountDebtReceivable = [...debtByStudent.values()].reduce((sum, value) => sum + value, 0);
-  const unpaidLessonReceivable = [...unpaidByStudent.values()].reduce((sum, value) => sum + value, 0);
+  const accountDebtReceivable = moneyRound([...debtByStudent.values()].reduce((sum, value) => sum + value, 0));
+  const unpaidLessonReceivable = moneyRound([...unpaidByStudent.values()].reduce((sum, value) => sum + value, 0));
   const balanceSheet = {
-    total_actual_balance: summaries.reduce((sum, row) => sum + Math.max(0, num(row.actual_balance)), 0),
-    raw_actual_balance: summaries.reduce((sum, row) => sum + num(row.actual_balance), 0),
-    total_gift_balance: summaries.reduce((sum, row) => sum + num(row.gift_balance), 0),
+    total_actual_balance: moneyRound(summaries.reduce((sum, row) => sum + Math.max(0, num(row.actual_balance)), 0)),
+    raw_actual_balance: moneyRound(summaries.reduce((sum, row) => sum + num(row.actual_balance), 0)),
+    total_gift_balance: moneyRound(summaries.reduce((sum, row) => sum + num(row.gift_balance), 0)),
     account_debt_receivable: accountDebtReceivable,
     unpaid_lesson_receivable: unpaidLessonReceivable,
-    accounts_receivable: [...receivableNames].reduce((sum, name) => (
+    accounts_receivable: moneyRound([...receivableNames].reduce((sum, name) => (
       sum + Math.max(num(unpaidByStudent.get(name)), num(debtByStudent.get(name)))
-    ), 0),
+    ), 0)),
   };
 
   const teacherMap = new Map();
@@ -2002,19 +2380,19 @@ function financeBreakdowns(current) {
   for (const row of effectiveDetails) {
     const name = row.teacher_name || "未填写";
     if (!teacherMap.has(name)) teacherMap.set(name, { teacher_name: name, revenue_contribution: 0, salary_total: 0, roi: null });
-    teacherMap.get(name).revenue_contribution += num(row.unit_price);
+    teacherMap.get(name).revenue_contribution = moneyRound(teacherMap.get(name).revenue_contribution + detailRevenue(row));
   }
   const byTeacher = [...teacherMap.values()].map((row) => ({
     ...row,
     roi: row.salary_total ? row.revenue_contribution / row.salary_total : null,
   })).sort((a, b) => (num(b.roi) - num(a.roi)) || (b.revenue_contribution - a.revenue_contribution));
 
-  const totalBreakdownRevenue = effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0);
+  const totalBreakdownRevenue = moneyRound(effectiveDetails.reduce((sum, row) => sum + detailRevenue(row), 0));
   const groupedRevenue = (field) => {
     const map = new Map();
     for (const row of effectiveDetails) {
       const key = row[field] || "未填写";
-      map.set(key, (map.get(key) || 0) + num(row.unit_price));
+      map.set(key, moneyRound((map.get(key) || 0) + detailRevenue(row)));
     }
     return [...map.entries()].map(([name, revenue]) => ({
       name,
@@ -2028,10 +2406,10 @@ function financeBreakdowns(current) {
     const type = classType(row.student_count);
     if (!classMap.has(type)) classMap.set(type, { class_type: type, revenue: 0, teacher_cost: 0, _lesson_ids: new Set() });
     const item = classMap.get(type);
-    item.revenue += num(row.unit_price);
+    item.revenue = moneyRound(item.revenue + detailRevenue(row));
     if (!item._lesson_ids.has(row.lesson_id)) {
       item._lesson_ids.add(row.lesson_id);
-      item.teacher_cost += num(row.teacher_salary);
+      item.teacher_cost = moneyRound(item.teacher_cost + num(row.teacher_salary));
     }
   }
   const byClassType = [...classMap.values()].map((row) => ({
@@ -2046,7 +2424,7 @@ function financeBreakdowns(current) {
     if (!studentMap.has(row.student_name)) studentMap.set(row.student_name, { student_name: row.student_name, lesson_count: 0, total_fee: 0 });
     const item = studentMap.get(row.student_name);
     item.lesson_count += 1;
-    item.total_fee += num(row.unit_price);
+    item.total_fee = moneyRound(item.total_fee + detailRevenue(row));
   }
   const topStudents = [...studentMap.values()]
     .sort((a, b) => num(b.total_fee) - num(a.total_fee))
@@ -2277,6 +2655,16 @@ function inactiveStudentStatus(status) {
   return ["离校", "已流出"].includes(text(status));
 }
 
+function studentBalanceOpen(row) {
+  return num(row?.actual_balance) !== 0 || num(row?.gift_balance) !== 0;
+}
+
+function shouldShowStudentSummaryRow(row, includeInactive = false) {
+  if (includeInactive) return true;
+  if (!inactiveStudentStatus(row.status)) return true;
+  return studentBalanceOpen(row);
+}
+
 function activeStudentProfile(name) {
   const student = get("SELECT * FROM students WHERE name = ?", [name]);
   return !student || !inactiveStudentStatus(student.status);
@@ -2490,6 +2878,20 @@ function internalAudit(monthKey, { log = true } = {}) {
         before_value: 0,
         message: `${detail.student_name} 的有效课时单价为 0`,
         data: { lesson_id: detail.lesson_id, student_name: detail.student_name, date: detail.date },
+      }));
+    }
+  }
+
+  for (const row of studentSummary(feeDetails(monthKey), monthKey, true)) {
+    if (inactiveStudentStatus(row.status) && studentBalanceOpen(row)) {
+      issues.push(auditIssue({
+        severity: "HIGH",
+        type: "inactive_student_open_balance",
+        entity: `student_${row.student_name}`,
+        field: "balance",
+        before_value: `${row.status} / 现金 ${row.actual_balance} / 赠送 ${row.gift_balance}`,
+        message: `${row.student_name} 已标为${row.status}，但余额未清零；确认结清前仍会显示在费用汇总中`,
+        data: { student_name: row.student_name, actual_balance: row.actual_balance, gift_balance: row.gift_balance },
       }));
     }
   }
@@ -2807,33 +3209,91 @@ function financeCsvRows(summary) {
   return rows;
 }
 
-function studentStatementRows(monthKey, studentName) {
-  const details = feeDetails(monthKey);
-  const summaries = studentSummary(details, monthKey);
-  const summary = summaries.find((row) => row.student_name === studentName);
-  const studentDetails = details.filter((row) => row.student_name === studentName);
-  if (!summary && !studentDetails.length) return null;
+function defaultStudentStatementRange() {
+  const months = allPartitionedMonths().sort((a, b) => a.localeCompare(b));
+  if (!months.length) return monthRange(getSetting("month_key"));
+  return normalizeRange(months[0], monthEndKey(months[months.length - 1]));
+}
+
+function studentStatementRangeFromUrl(url) {
+  const start = text(url.searchParams.get("start"));
+  const end = text(url.searchParams.get("end"));
+  if (start || end) return normalizeRange(start, end);
+  return defaultStudentStatementRange();
+}
+
+function studentStatementData(studentName, range) {
+  const name = text(studentName);
+  if (!name || !range) return null;
+  const details = [];
+  const monthRows = [];
+  const recharges = rechargesInRange(range).filter((row) => row.student_name === name);
+  for (const monthKey of monthsCovered(range.start, range.end)) {
+    const monthDetails = feeDetails(monthKey);
+    const studentDetails = monthDetails.filter((row) => row.student_name === name && row.date >= range.start && row.date <= range.end);
+    details.push(...studentDetails);
+    const effectiveDetails = studentDetails.filter((row) => row.effective);
+    const monthRecharge = recharges.filter((row) => (row.event_date || row.month_key) >= monthKey && (row.event_date || row.month_key) <= monthEndKey(monthKey));
+    if (effectiveDetails.length || monthRecharge.length) {
+      monthRows.push({
+        month_key: monthKey,
+        lesson_count: effectiveDetails.length,
+        total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
+        cur_recharge: monthRecharge.reduce((sum, row) => sum + num(row.cur_recharge), 0),
+        cur_gift: monthRecharge.reduce((sum, row) => sum + num(row.cur_gift), 0),
+      });
+    }
+  }
+  const latestMonth = monthsCovered(range.start, range.end).filter((monthKey) => monthKey <= range.end).sort((a, b) => b.localeCompare(a))[0] || "";
+  const latestSummary = latestMonth
+    ? studentSummary(feeDetails(latestMonth), latestMonth, true).find((row) => row.student_name === name)
+    : null;
+  if (!details.length && !recharges.length && !latestSummary) return null;
+  const effectiveDetails = details.filter((row) => row.effective);
+  return {
+    student_name: name,
+    range,
+    summary: {
+      grade: latestSummary?.grade || details.find((row) => row.grade)?.grade || "",
+      lesson_count: effectiveDetails.length,
+      total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
+      cur_recharge: recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0),
+      cur_gift: recharges.reduce((sum, row) => sum + num(row.cur_gift), 0),
+      actual_balance: num(latestSummary?.actual_balance),
+      gift_balance: num(latestSummary?.gift_balance),
+      latest_month: latestMonth,
+    },
+    month_rows: monthRows.sort((a, b) => a.month_key.localeCompare(b.month_key)),
+    details: details.sort((a, b) => `${a.date}|${a.time_slot}|${a.teacher_name}|${a.id}`.localeCompare(`${b.date}|${b.time_slot}|${b.teacher_name}|${b.id}`, "zh-Hans-CN")),
+    recharges,
+  };
+}
+
+function studentStatementRows(monthKey, studentName, range = null) {
+  const report = studentStatementData(studentName, range || monthRange(monthKey));
+  if (!report) return null;
+  const { summary, details, recharges } = report;
   return [
-    [`${monthKey} 学生账单`, studentName],
-    ["学生姓名", "年级", "上课次数", "课程总费用", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "本月实际消费", "本月赠送消费", "实际余额", "赠送余额"],
+    [`${report.range.start} 至 ${report.range.end} 学生账单`, report.student_name],
+    ["学生姓名", "年级", "上课次数", "课程总费用", "期间实际充值", "期间赠送学费", "最新实际余额", "最新赠送余额"],
     [
-      studentName,
-      summary?.grade || "",
-      summary?.lesson_count || 0,
-      summary?.total_fee || 0,
-      summary?.prev_actual || 0,
-      summary?.prev_gift || 0,
-      summary?.cur_recharge || 0,
-      summary?.cur_gift || 0,
-      summary?.actual_consumption || 0,
-      summary?.gift_consumption || 0,
-      summary?.actual_balance || 0,
-      summary?.gift_balance || 0,
+      report.student_name,
+      summary.grade || "",
+      summary.lesson_count || 0,
+      summary.total_fee || 0,
+      summary.cur_recharge || 0,
+      summary.cur_gift || 0,
+      summary.actual_balance || 0,
+      summary.gift_balance || 0,
     ],
+    [],
+    ["充值明细"],
+    ["日期", "现金充值", "赠送学费", "备注"],
+    ...recharges.map((row) => [row.event_date || row.month_key, row.cur_recharge, row.cur_gift, row.notes]),
     [],
     ["课程明细"],
     ["日期", "星期", "时间", "授课老师", "状态", "教室", "年级", "科目", "备注", "单人费用", "费用来源"],
-    ...studentDetails.map((row) => [
+    ...details.map((row) => [
       row.date,
       row.weekday,
       row.time_slot,
@@ -2963,7 +3423,10 @@ function recomputePricing(body) {
 function bootstrap(monthKey, includeInactive = false) {
   syncStudentsFromLessons();
   syncTeachersFromLessons();
-  withTransaction(() => ensureCarryOverChain(monthKey));
+  withTransaction(() => {
+    autoPromoteStudentsForMonth(monthKey);
+    ensureCarryOverChain(monthKey);
+  });
   const details = feeDetails(monthKey);
   const settings = Object.fromEntries(all("SELECT key, value FROM settings").map((row) => [row.key, row.value]));
   settings.month_key = monthKey;
@@ -2990,6 +3453,7 @@ function bootstrap(monthKey, includeInactive = false) {
     derived: {
       fee_details: details,
       student_summary: studentSummary(details, monthKey, includeInactive),
+      student_summary_to_date: studentSummaryToDate(monthKey, includeInactive),
       teacher_summary: teacherSummary(monthKey, includeInactive),
     },
   };
@@ -3041,6 +3505,363 @@ function sendText(res, content, filename) {
 
 function sendError(res, status, message) {
   sendJson(res, { error: message }, status);
+}
+
+function auditJson(value) {
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ error: "unserializable" });
+  }
+}
+
+function requestIp(req) {
+  return text(String(req.headers["x-forwarded-for"] || "").split(",")[0]) || text(req.socket?.remoteAddress);
+}
+
+function recordAuditEvent(req, actor, { action, entity_type, entity_id = "", before = null, after = null }) {
+  if (!actor || !action || !entity_type) return;
+  db.prepare(`
+    INSERT INTO audit_events(
+      actor_user_id, actor_username, actor_role, action, entity_type, entity_id,
+      before_json, after_json, ip, user_agent
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(actor.id) || null,
+    text(actor.username),
+    text(actor.role),
+    text(action),
+    text(entity_type),
+    text(entity_id),
+    auditJson(before),
+    auditJson(after),
+    requestIp(req),
+    text(req.headers["user-agent"]),
+  );
+}
+
+function auditedPatchTable(req, actor, table, idField, idValue, allowedFields, data, entityType = table) {
+  const before = get(`SELECT * FROM ${table} WHERE ${idField} = ?`, [idValue]);
+  patchTable(table, idField, idValue, allowedFields, data);
+  const after = get(`SELECT * FROM ${table} WHERE ${idField} = ?`, [idValue]);
+  recordAuditEvent(req, actor, { action: "update", entity_type: entityType, entity_id: String(idValue), before, after });
+  return after;
+}
+
+function auditedDelete(req, actor, table, idField, idValue, entityType = table) {
+  const before = get(`SELECT * FROM ${table} WHERE ${idField} = ?`, [idValue]);
+  const result = db.prepare(`DELETE FROM ${table} WHERE ${idField} = ?`).run(idValue);
+  recordAuditEvent(req, actor, { action: "delete", entity_type: entityType, entity_id: String(idValue), before, after: { deleted: (result.changes || 0) > 0 } });
+  return result;
+}
+
+function parseCookies(req) {
+  const cookies = {};
+  for (const part of String(req.headers.cookie || "").split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) continue;
+    cookies[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim());
+  }
+  return cookies;
+}
+
+function publicUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    display_name: row.display_name || row.username,
+    role: row.role,
+    role_label: USER_ROLES[row.role] || row.role,
+    teacher_name: row.teacher_name || "",
+  };
+}
+
+function currentUser(req) {
+  const sid = parseCookies(req).liming_session;
+  const session = sid ? sessions.get(sid) : null;
+  if (!session || session.expires_at < Date.now()) {
+    if (sid) sessions.delete(sid);
+    return null;
+  }
+  const row = get("SELECT * FROM users WHERE id = ? AND status = 'active'", [session.user_id]);
+  if (!row) {
+    sessions.delete(sid);
+    return null;
+  }
+  return publicUser(row);
+}
+
+function setSessionCookie(res, sid) {
+  const secure = secureCookies ? "; Secure" : "";
+  res.setHeader("set-cookie", `liming_session=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${secure}`);
+}
+
+function clearSessionCookie(res) {
+  const secure = secureCookies ? "; Secure" : "";
+  res.setHeader("set-cookie", `liming_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`);
+}
+
+function loginUser(username, password) {
+  const row = get("SELECT * FROM users WHERE username = ? AND status = 'active'", [text(username)]);
+  if (!row || !verifyPassword(password, row.password_hash)) return null;
+  return row;
+}
+
+function actorCanManageUser(actor, targetRole = "") {
+  if (!actor) return false;
+  if (actor.role === "owner") return true;
+  if (actor.role === "admin") return targetRole !== "owner";
+  if (actor.role === "academic") return targetRole === "teacher";
+  return false;
+}
+
+function userRows(actor) {
+  const rows = all(`
+    SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at
+    FROM users
+    ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'academic' THEN 2 WHEN 'finance' THEN 3 ELSE 4 END, display_name, username
+  `);
+  return actor.role === "academic" ? rows.filter((row) => row.role === "teacher") : rows;
+}
+
+function ensureValidUserRole(role) {
+  const value = text(role || "teacher");
+  return Object.prototype.hasOwnProperty.call(USER_ROLES, value) ? value : "";
+}
+
+function createUser(actor, body) {
+  const role = ensureValidUserRole(body.role);
+  if (!role) return { error: "role is invalid", status: 400 };
+  if (!actorCanManageUser(actor, role)) return { error: "当前角色不能任命该权限", status: 403 };
+  const username = text(body.username);
+  const displayName = text(body.display_name) || username;
+  const teacherName = role === "teacher" ? text(body.teacher_name || displayName) : text(body.teacher_name);
+  const password = String(body.password || "123456");
+  if (!username || password.length < 6) return { error: "username and password(>=6) are required", status: 400 };
+  if (get("SELECT id FROM users WHERE username = ?", [username])) return { error: "username already exists", status: 409 };
+  if (role === "teacher") upsertTeacherProfileFromAccount(teacherName, username);
+  const result = db.prepare(`
+    INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(username, displayName, role, teacherName, passwordHash(password), text(body.status || "active"));
+  return publicUser(get("SELECT * FROM users WHERE id = ?", [Number(result.lastInsertRowid)]));
+}
+
+function patchUser(actor, id, body) {
+  const current = get("SELECT * FROM users WHERE id = ?", [Number(id)]);
+  if (!current) return { error: "user not found", status: 404 };
+  const nextRole = Object.prototype.hasOwnProperty.call(body, "role") ? ensureValidUserRole(body.role) : current.role;
+  if (!nextRole) return { error: "role is invalid", status: 400 };
+  if (!actorCanManageUser(actor, current.role) || !actorCanManageUser(actor, nextRole)) {
+    return { error: "当前角色不能修改该账号权限", status: 403 };
+  }
+  if (Number(actor.id) === Number(id) && text(body.status) && text(body.status) !== "active") {
+    return { error: "不能停用当前登录账号", status: 400 };
+  }
+  const payload = {};
+  for (const field of ["username", "display_name", "role", "teacher_name", "status"]) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
+  }
+  if (payload.role === "teacher" || (!payload.role && nextRole === "teacher")) {
+    payload.teacher_name ||= text(body.teacher_name || current.teacher_name || payload.display_name || current.display_name);
+    upsertTeacherProfileFromAccount(payload.teacher_name, payload.username || current.username);
+  }
+  payload.updated_at = new Date().toISOString();
+  patchTable("users", "id", Number(id), ["username", "display_name", "role", "teacher_name", "status", "updated_at"], payload);
+  return publicUser(get("SELECT * FROM users WHERE id = ?", [Number(id)]));
+}
+
+function resetUserPassword(actor, id, password) {
+  const current = get("SELECT * FROM users WHERE id = ?", [Number(id)]);
+  if (!current) return { error: "user not found", status: 404 };
+  if (!actorCanManageUser(actor, current.role)) return { error: "当前角色不能重置该账号密码", status: 403 };
+  const next = String(password || "");
+  if (next.length < 6) return { error: "password must be at least 6 chars", status: 400 };
+  db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash(next), new Date().toISOString(), Number(id));
+  return { ok: true };
+}
+
+function changeOwnPassword(user, currentPassword, nextPassword) {
+  const row = get("SELECT * FROM users WHERE id = ? AND status = 'active'", [Number(user.id)]);
+  if (!row || !verifyPassword(currentPassword, row.password_hash)) return { error: "当前密码不正确", status: 400 };
+  const next = String(nextPassword || "");
+  if (next.length < 6) return { error: "新密码至少 6 位", status: 400 };
+  db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash(next), new Date().toISOString(), Number(user.id));
+  return { ok: true };
+}
+
+function teacherTemplateRows() {
+  const templatePath = path.join(dataDir, "templates", "teacher_template.xlsx");
+  if (!fs.existsSync(templatePath)) return [];
+  const buffer = fs.readFileSync(templatePath);
+  const entries = unzipXlsx(buffer);
+  const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
+  const rows = [];
+  for (const sheet of workbookSheets(entries)) {
+    const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
+    if (!sheetXmlText) continue;
+    let nameColumn = 0;
+    let phoneColumn = 1;
+    for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
+      const sourceRow = Number(xmlAttr(rowTag, "r"));
+      const values = [];
+      const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
+      for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+        const column = cellColumnIndex(xmlAttr(cellTag, "r"));
+        if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
+      }
+      if (sourceRow === 1) {
+        const nameIndex = values.findIndex((value) => /教师姓名|姓名/.test(text(value)));
+        const phoneIndex = values.findIndex((value) => /手机号|电话|手机/.test(text(value)));
+        if (nameIndex >= 0) nameColumn = nameIndex;
+        if (phoneIndex >= 0) phoneColumn = phoneIndex;
+        continue;
+      }
+      const name = text(values[nameColumn]);
+      const phone = text(values[phoneColumn]).replace(/\D/g, "");
+      if (name && phone) rows.push({ name, phone, sheet: sheet.name, source_row: sourceRow });
+    }
+  }
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = row.phone || row.name;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function importTeacherUsersFromTemplate(actor, options = {}) {
+  if (!actorCanManageUser(actor, "teacher")) return { error: "当前角色不能创建老师账号", status: 403 };
+  const resetPassword = options.reset_password === true;
+  const rows = teacherTemplateRows();
+  const backup = backupDb("pre_teacher_accounts");
+  let created = 0;
+  let updated = 0;
+  const accounts = [];
+  for (const row of rows) {
+    upsertTeacherProfileFromAccount(row.name, row.phone);
+    const username = row.phone;
+    const initialPassword = row.phone.slice(-6);
+    const existing = get("SELECT * FROM users WHERE username = ?", [username]);
+    if (existing) {
+      const payload = {
+        display_name: row.name,
+        role: "teacher",
+        teacher_name: row.name,
+        status: "active",
+        updated_at: new Date().toISOString(),
+      };
+      if (resetPassword) payload.password_hash = passwordHash(initialPassword);
+      patchTable("users", "id", existing.id, ["display_name", "role", "teacher_name", "status", "updated_at", "password_hash"], payload);
+      updated += 1;
+    } else {
+      db.prepare(`
+        INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
+        VALUES (?, ?, 'teacher', ?, ?, 'active')
+      `).run(username, row.name, row.name, passwordHash(initialPassword));
+      created += 1;
+    }
+    accounts.push({ username, display_name: row.name, teacher_name: row.name, initial_password: initialPassword });
+  }
+  return { ok: true, created, updated, total: rows.length, accounts, backup };
+}
+
+function roleCan(user, area, action = "read") {
+  if (!user) return false;
+  if (user.role === "owner") return true;
+  if (user.role === "admin") return true;
+  const grants = {
+    academic: new Set(["schedule", "students", "profiles", "pricing", "teacherTransport", "users"]),
+    finance: new Set(["finance", "expenses", "recharges", "studentBilling", "students"]),
+    teacher: new Set(["teacherSelf", "scheduleRead"]),
+  };
+  if (user.role === "academic") return grants.academic.has(area) && area !== "audit";
+  if (user.role === "finance") {
+    if (action !== "read" && !["expenses", "recharges"].includes(area)) return false;
+    return grants.finance.has(area);
+  }
+  if (user.role === "teacher") {
+    if (action !== "read" && area !== "teacherSelf") return false;
+    return grants.teacher.has(area);
+  }
+  return false;
+}
+
+function apiArea(req, url) {
+  const p = url.pathname;
+  if (p.startsWith("/api/users")) return "users";
+  if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
+  if (p === "/api/teacher-adjustments") return "teacherTransport";
+  if (p.includes("teacher-salary")) return "teacherSalary";
+  if (p.startsWith("/api/operating-expenses")) return "expenses";
+  if (p.startsWith("/api/staff")) return "staff";
+  if (p.startsWith("/api/audit") || p === "/api/source-workbooks" || p === "/api/import/source-workbook") return "audit";
+  if (p === "/api/recharges" || p === "/api/recharges/rollover") return "recharges";
+  if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
+  if (p.includes("pricing")) return "pricing";
+  if (p.includes("student") || p === "/api/fee-overrides") return "students";
+  if (p.includes("lessons") || p.includes("months") || p.includes("schedule-conflicts") || p === "/api/settings") return "schedule";
+  if (p === "/api/teachers") return "profiles";
+  return "schedule";
+}
+
+function authorizeApi(user, req, url) {
+  const area = apiArea(req, url);
+  const method = req.method;
+  if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
+  if (user.role === "owner" || user.role === "admin") return true;
+  if (user.role === "teacher") {
+    return method === "GET" && (area === "schedule" || area === "profiles");
+  }
+  if (user.role === "finance") return roleCan(user, area, method === "GET" ? "read" : "write");
+  if (["finance", "teacherSalary", "staff", "expenses", "audit"].includes(area)) return false;
+  return roleCan(user, area, method === "GET" ? "read" : "write");
+}
+
+function sanitizeLessonRows(rows, user) {
+  let output = rows || [];
+  if (user.role === "teacher") {
+    output = output.filter((row) => text(row.teacher_name) === text(user.teacher_name));
+  }
+  if (user.role === "owner" || user.role === "admin") return output;
+  return output.map((row) => ({ ...row, teacher_salary: 0 }));
+}
+
+function sanitizeBootstrap(data, user) {
+  if (user.role === "owner" || user.role === "admin") return { ...data, user };
+  const sanitized = {
+    ...data,
+    user,
+    lessons: sanitizeLessonRows(data.lessons, user),
+    teachers: user.role === "teacher" && user.teacher_name
+      ? [{ id: null, name: user.teacher_name, active_this_month: true }]
+      : data.teachers,
+    recharges: user.role === "teacher" ? [] : data.recharges,
+    student_pricing: user.role === "teacher" ? [] : data.student_pricing,
+    derived: {
+      ...data.derived,
+      teacher_summary: user.role === "academic"
+        ? (data.derived.teacher_summary || []).map((row) => ({
+          ...row,
+          salary_total: 0,
+          total_salary: num(row.week1_transport) + num(row.week2_transport) + num(row.week3_transport) + num(row.week4_transport),
+        }))
+        : [],
+    },
+  };
+  if (user.role === "teacher") {
+    sanitized.derived = {
+      ...sanitized.derived,
+      fee_details: [],
+      student_summary: [],
+      student_summary_to_date: [],
+    };
+  }
+  return sanitized;
 }
 
 function readBody(req) {
@@ -3384,6 +4205,224 @@ function runXlsxAuditFromUpload(req, url) {
   });
 }
 
+function sourceWorkbookDir() {
+  return path.join(dataDir, "source-workbooks");
+}
+
+function safeSourceWorkbookPath(filename) {
+  const base = path.basename(text(filename));
+  if (!base || base !== text(filename) || !base.toLowerCase().endsWith(".xlsx")) {
+    throw new Error("请选择 data/source-workbooks 下的 xlsx 文件");
+  }
+  const fullPath = path.resolve(sourceWorkbookDir(), base);
+  const root = path.resolve(sourceWorkbookDir());
+  if (!fullPath.startsWith(root + path.sep)) throw new Error("source workbook path is outside data/source-workbooks");
+  if (!fs.existsSync(fullPath)) throw new Error(`未找到源工作簿：${base}`);
+  return fullPath;
+}
+
+function sourceWorkbooks() {
+  const dir = sourceWorkbookDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((filename) => filename.toLowerCase().endsWith(".xlsx") && !filename.startsWith("~$"))
+    .map((filename) => {
+      const fullPath = path.join(dir, filename);
+      const stat = fs.statSync(fullPath);
+      return {
+        filename,
+        month_key: monthKeyFromFilename(filename),
+        size: stat.size,
+        updated_at: stat.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => text(b.month_key).localeCompare(text(a.month_key)) || a.filename.localeCompare(b.filename, "zh-Hans-CN"));
+}
+
+function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
+  const studentName = text(row.values[0]);
+  if (!studentName) return false;
+  const grade = text(row.values[1]);
+  db.prepare(`
+    INSERT INTO recharge_records(
+      student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
+      recharge_date, notes, source, month_key
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(student_name, month_key) DO UPDATE SET
+      grade = COALESCE(NULLIF(excluded.grade, ''), recharge_records.grade),
+      cur_recharge = excluded.cur_recharge,
+      cur_gift = excluded.cur_gift,
+      recharge_date = excluded.recharge_date,
+      notes = excluded.notes,
+      source = excluded.source
+  `).run(
+    studentName,
+    grade,
+    0,
+    0,
+    num(row.values[4]),
+    num(row.values[5]),
+    isoDateValue(row.values[6]),
+    text(row.values[7]),
+    sourceLabel,
+    monthKey,
+  );
+  upsertStudent(studentName, grade);
+  return true;
+}
+
+function importRechargesFromWorkbook(buffer, monthKey, sourceLabel) {
+  const sheet = readXlsxSheetRows(buffer, "充值记录");
+  let count = 0;
+  for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
+    if (upsertRechargeFromWorkbook(row, monthKey, sourceLabel)) count += 1;
+  }
+  return count;
+}
+
+function importStudentPricingFromWorkbook(buffer) {
+  const sheet = readXlsxSheetRows(buffer, "学生单价表");
+  let count = 0;
+  for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
+    let studentName = text(row.values[0]);
+    let subject = text(row.values[1]);
+    const helper = text(row.values[7]);
+    if ((!studentName || !subject) && helper.includes("|")) {
+      const [helperName, helperSubject] = helper.split("|", 2);
+      studentName = studentName || text(helperName);
+      subject = subject || text(helperSubject);
+    }
+    if (!studentName || !subject || row.values[2] == null || row.values[2] === "") continue;
+    db.prepare(`
+      INSERT INTO student_pricing(student_name, subject, custom_price, notes)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(student_name, subject) DO UPDATE SET
+        custom_price = excluded.custom_price,
+        notes = excluded.notes
+    `).run(studentName, subject, num(row.values[2]), text(row.values[5]));
+    count += 1;
+  }
+  return count;
+}
+
+function importPricingStandardsFromWorkbook(buffer) {
+  const sheet = readXlsxSheetRows(buffer, "费用标准");
+  let count = 0;
+  for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
+    const grade = text(row.values[0]);
+    const studentCount = Math.trunc(num(row.values[1]));
+    if (!grade || !studentCount || row.values[2] == null || row.values[2] === "") continue;
+    db.prepare(`
+      INSERT INTO pricing_standards(grade, student_count, unit_price, description)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(grade, student_count) DO UPDATE SET
+        unit_price = excluded.unit_price,
+        description = excluded.description
+    `).run(grade, studentCount, num(row.values[2]), text(row.values[4]));
+    count += 1;
+  }
+  return count;
+}
+
+function validTeacherName(value) {
+  const name = text(value);
+  if (!name || name === "合计" || name.startsWith("#")) return "";
+  if (/^\d{1,2}\.\d{1,2}[-－~～]\d{1,2}\.\d{1,2}$/.test(name)) return "";
+  if (/^\d+月/.test(name) || /学生费用汇总$/.test(name)) return "";
+  return name;
+}
+
+function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true) {
+  const sheet = readXlsxSheetRows(buffer, "教师薪资汇总");
+  if (replace) db.prepare("DELETE FROM teacher_adjustments_monthly WHERE month_key = ?").run(monthKey);
+  let count = 0;
+  for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
+    const teacherName = validTeacherName(row.values[0]);
+    const transports = [num(row.values[3]), num(row.values[4]), num(row.values[5]), num(row.values[6])];
+    const notes = text(row.values[8]);
+    if (!teacherName) {
+      if (!transports.some(Boolean) && !notes) continue;
+      throw new Error(`教师薪资汇总第 ${row.source_row} 行有数据，但无法识别教师姓名`);
+    }
+    if (!transports.some(Boolean) && !notes) continue;
+    upsertTeacher(teacherName);
+    db.prepare(`
+      INSERT INTO teacher_adjustments_monthly(
+        teacher_name, month_key, week1_transport, week2_transport, week3_transport, week4_transport, notes
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(teacher_name, month_key) DO UPDATE SET
+        week1_transport = excluded.week1_transport,
+        week2_transport = excluded.week2_transport,
+        week3_transport = excluded.week3_transport,
+        week4_transport = excluded.week4_transport,
+        notes = excluded.notes
+    `).run(teacherName, monthKey, transports[0], transports[1], transports[2], transports[3], notes);
+    count += 1;
+  }
+  return count;
+}
+
+function importLessonsFromWorkbook(buffer, monthKey, replace = true) {
+  const { sheet_name: sheetName, rows } = readXlsxTotalRowsForImport(buffer, monthKey);
+  if (replace) {
+    const dates = [...new Set(rows.map((row) => row.date).filter(Boolean))];
+    if (dates.length) {
+      const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ?");
+      for (const date of dates) deleteByDate.run(date);
+    } else {
+      db.prepare("DELETE FROM lessons WHERE month_key = ?").run(monthKey);
+    }
+  }
+  let count = 0;
+  for (const row of rows) {
+    upsertTeacher(row.teacher_name);
+    for (const name of splitStudents(row.student_names)) upsertStudent(name, row.grade);
+    insertLesson({
+      ...row,
+      month_key: row.month_key,
+      sort_order: row.source_row,
+    });
+    count += 1;
+  }
+  return { sheet_name: sheetName, lessons: count, rows };
+}
+
+function importSourceWorkbook(filename, monthKey = "", options = {}) {
+  const sourcePath = safeSourceWorkbookPath(filename);
+  const resolvedMonthKey = text(monthKey) || monthKeyFromFilename(sourcePath);
+  if (!validMonthKey(resolvedMonthKey)) throw new Error("month_key must be YYYY-MM-01");
+  const buffer = fs.readFileSync(sourcePath);
+  const sourceLabel = `source-workbook:${path.basename(sourcePath)}`;
+  const backup = backupDb("pre_import");
+  const summary = withTransaction(() => {
+    setSetting("month_key", resolvedMonthKey);
+    const lessonResult = importLessonsFromWorkbook(buffer, resolvedMonthKey, options.append !== true);
+    const recharges = importRechargesFromWorkbook(buffer, resolvedMonthKey, sourceLabel);
+    const studentPrices = importStudentPricingFromWorkbook(buffer);
+    const standards = importPricingStandardsFromWorkbook(buffer);
+    const teacherAdjustments = options.skip_teacher_adjustments
+      ? 0
+      : importTeacherAdjustmentsFromWorkbook(buffer, resolvedMonthKey, options.append !== true);
+    const carryOver = refreshCarryOverAfter(resolvedMonthKey);
+    return {
+      source_file: sourcePath,
+      month_key: resolvedMonthKey,
+      backup,
+      sheet_name: lessonResult.sheet_name,
+      lessons: lessonResult.lessons,
+      recharges,
+      student_prices: studentPrices,
+      pricing_standards: standards,
+      teacher_adjustments: teacherAdjustments,
+      carry_over: carryOver,
+    };
+  });
+  const audit = runNodeXlsxAudit(sourcePath, resolvedMonthKey);
+  return { ...summary, audit };
+}
+
 function spawnSafeReadRaw(req) {
   return readRawBody(req);
 }
@@ -3620,298 +4659,6 @@ function weeklyScheduleRows(monthKey, weekIndex, audience = "teacher") {
   };
 }
 
-function weeklyScheduleText(monthKey, weekIndex, audience) {
-  const schedule = weeklyScheduleRows(monthKey, weekIndex, audience);
-  const targetLabel = schedule.audience === "student" ? "学生" : "老师";
-  const counterpartLabel = schedule.audience === "student" ? "老师" : "学生";
-  const groups = new Map();
-  for (const row of schedule.rows) {
-    if (!groups.has(row.recipient)) groups.set(row.recipient, []);
-    groups.get(row.recipient).push(row);
-  }
-  const lines = [`${schedule.week.label} ${targetLabel}周课表`];
-  if (!schedule.rows.length) {
-    lines.push("暂无课程");
-    return lines.join("\n");
-  }
-  for (const [recipient, rows] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"))) {
-    lines.push("", `${recipient}：`);
-    for (const row of rows) {
-      const place = row.classroom ? ` ${row.classroom}` : "";
-      const course = row.course || "课程";
-      const counterpart = row.counterpart ? ` ${counterpartLabel}：${row.counterpart}` : "";
-      const notes = row.notes ? ` 备注：${row.notes}` : "";
-      lines.push(`- ${row.date} ${row.weekday} ${row.time_slot || "未填时间"}${place} ${course}${counterpart}${notes}`);
-    }
-  }
-  return lines.join("\n");
-}
-
-function safeArchiveName(value) {
-  return text(value)
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
-    .replace(/\s+/g, " ")
-    .slice(0, 90) || "未命名";
-}
-
-function canonicalStudentGroup(students) {
-  return splitStudents(students.join("、")).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).join("、");
-}
-
-function scheduleCardRowsFromLessons(lessons, mode = "student") {
-  return lessons.map((lesson) => ({
-    date: lesson.date || "",
-    weekday: weekdayCn(lesson.date),
-    time_slot: lesson.time_slot || "",
-    classroom: lesson.classroom || "",
-    teacher_name: lesson.teacher_name || "",
-    course: `${lesson.grade || ""}${lesson.subject || ""}` || "课程",
-    students: splitStudents(lesson.student_names).join("、"),
-    status: deriveStatus(lesson),
-    notes: lesson.notes || "",
-    mode,
-  }));
-}
-
-function visualLength(value) {
-  return [...String(value || "")].reduce((total, char) => total + (char.charCodeAt(0) > 255 ? 1.7 : 1), 0);
-}
-
-function wrapVisualText(value, maxWidth = 48, maxLines = 3) {
-  const textValue = text(value);
-  if (!textValue) return [];
-  const lines = [];
-  let current = "";
-  let currentWidth = 0;
-  for (const char of [...textValue]) {
-    const charWidth = char.charCodeAt(0) > 255 ? 1.7 : 1;
-    if (current && currentWidth + charWidth > maxWidth) {
-      lines.push(current);
-      current = char;
-      currentWidth = charWidth;
-      if (lines.length >= maxLines) break;
-    } else {
-      current += char;
-      currentWidth += charWidth;
-    }
-  }
-  if (current && lines.length < maxLines) lines.push(current);
-  if (visualLength(textValue) > maxWidth * maxLines && lines.length) {
-    lines[lines.length - 1] = `${lines[lines.length - 1].replace(/.{1,2}$/u, "")}…`;
-  }
-  return lines;
-}
-
-function svgTextLines({ x, y, lines, size = 26, weight = 500, fill = "#1f2937", lineHeight = 34, anchor = "start" }) {
-  return lines.map((line, index) => (
-    `<text x="${x}" y="${y + index * lineHeight}" text-anchor="${anchor}" font-size="${size}" font-weight="${weight}" fill="${fill}">${xmlEscape(line)}</text>`
-  )).join("");
-}
-
-function scheduleCardSvg({ title, subtitle, rows, badge = "黎明教育" }) {
-  const safeRows = rows.length ? rows : [{
-    date: "",
-    weekday: "",
-    time_slot: "本周暂无课程",
-    classroom: "",
-    teacher_name: "",
-    course: "",
-    students: "",
-    status: "",
-    notes: "",
-  }];
-  const width = 1080;
-  const headerHeight = 236;
-  const footerHeight = 76;
-  const preparedRows = safeRows.map((row) => {
-    const dateLine = [row.date, row.weekday, row.time_slot || "未填时间"].filter(Boolean).join("  ");
-    const meta = [
-      row.teacher_name ? `老师：${row.teacher_name}` : "",
-      row.classroom ? `教室：${row.classroom}` : "",
-      row.status ? `状态：${row.status}` : "",
-    ].filter(Boolean).join(" · ");
-    const students = row.students ? `学生：${row.students}` : "";
-    const notes = row.notes ? `备注：${row.notes}` : "";
-    const detailLines = wrapVisualText([students, notes].filter(Boolean).join(" · "), 50, 3);
-    return {
-      row,
-      dateLine,
-      metaLines: wrapVisualText(meta, 34, 2),
-      detailLines,
-      height: detailLines.length ? 160 + Math.max(0, detailLines.length - 1) * 26 : 122,
-    };
-  });
-  const height = headerHeight + preparedRows.reduce((total, row) => total + row.height, 0) + footerHeight;
-  let yCursor = headerHeight;
-  const rowSvg = preparedRows.map((item, index) => {
-    const y = yCursor;
-    yCursor += item.height;
-    const courseText = item.row.course || "课程";
-    const accent = ["#0f766e", "#175cd3", "#b54708", "#7c3aed"][index % 4];
-    return `
-      <g transform="translate(52 ${y})">
-        <rect width="976" height="${item.height - 18}" rx="24" fill="#ffffff" stroke="#dce7ea"/>
-        <rect width="8" height="${item.height - 18}" rx="4" fill="${accent}"/>
-        <text x="28" y="40" font-size="26" font-weight="800" fill="#12232f">${xmlEscape(item.dateLine)}</text>
-        <rect x="28" y="58" width="${Math.min(230, Math.max(126, visualLength(courseText) * 15))}" height="38" rx="19" fill="#e7f6f3"/>
-        <text x="46" y="84" font-size="21" font-weight="800" fill="#0f766e">${xmlEscape(courseText)}</text>
-        ${svgTextLines({ x: 308, y: 84, lines: item.metaLines, size: 20, weight: 650, fill: "#344454", lineHeight: 27 })}
-        ${svgTextLines({ x: 28, y: 126, lines: item.detailLines, size: 19, weight: 500, fill: "#667780", lineHeight: 26 })}
-      </g>
-    `;
-  }).join("");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${xmlEscape(title)}" font-family="'Noto Sans SC','HarmonyOS Sans SC','Microsoft YaHei UI','PingFang SC',Arial,sans-serif">
-  <defs>
-    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0%" stop-color="#eef7f5"/>
-      <stop offset="100%" stop-color="#edf3ff"/>
-    </linearGradient>
-    <linearGradient id="head" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0%" stop-color="#082032"/>
-      <stop offset="58%" stop-color="#0b3040"/>
-      <stop offset="100%" stop-color="#0f766e"/>
-    </linearGradient>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
-      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#123143" flood-opacity="0.14"/>
-    </filter>
-  </defs>
-  <rect width="${width}" height="${height}" rx="34" fill="url(#bg)"/>
-  <rect x="26" y="26" width="${width - 52}" height="${height - 52}" rx="30" fill="#fbfdfc" filter="url(#shadow)"/>
-  <rect x="26" y="26" width="${width - 52}" height="184" rx="30" fill="url(#head)"/>
-  <rect x="26" y="156" width="${width - 52}" height="70" fill="#fbfdfc"/>
-  <g transform="translate(58 58)">
-    <rect x="0" y="0" width="132" height="40" rx="20" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.32"/>
-    <text x="66" y="27" text-anchor="middle" font-size="17" font-weight="800" fill="#d9fff7">${xmlEscape(badge)}</text>
-    <text x="0" y="93" font-size="42" font-weight="900" fill="#ffffff">${xmlEscape(title)}</text>
-    <text x="0" y="132" font-size="22" font-weight="600" fill="#c8dae2">${xmlEscape(subtitle)}</text>
-    <text x="920" y="38" text-anchor="end" font-size="20" font-weight="800" fill="#d9fff7">${xmlEscape(new Date().toLocaleDateString("zh-CN"))}</text>
-  </g>
-  ${rowSvg}
-  <text x="58" y="${height - 36}" font-size="17" fill="#82929d">按 日期 - 老师 - 时间 排序 · 由黎明教育课程管理系统生成</text>
-</svg>`;
-}
-
-function weeklyScheduleImageFiles(monthKey, weekIndex, audience = "all") {
-  if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
-  const normalizedAudience = ["teacher", "student", "all"].includes(audience) ? audience : "all";
-  const { week, lessons } = weeklyScheduleLessons(monthKey, weekIndex);
-  const files = [{
-    name: "README.txt",
-    data: [
-      `${monthKey} ${week.label} 周课表图片包`,
-      "图片格式为 SVG，可直接在浏览器打开；如需发送 PNG，可用浏览器打开后另存或截图。",
-      "学生规则：有一对一课程的学生生成个人课表；2 人及以上班课按班课生成一张共享图片。",
-    ].join("\r\n"),
-  }];
-
-  if (normalizedAudience === "teacher" || normalizedAudience === "all") {
-    const byTeacher = new Map();
-    for (const lesson of lessons) {
-      const teacher = lesson.teacher_name || "未填老师";
-      if (!byTeacher.has(teacher)) byTeacher.set(teacher, []);
-      byTeacher.get(teacher).push(lesson);
-    }
-    for (const [teacher, teacherLessons] of [...byTeacher.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"))) {
-      files.push({
-        name: `老师课表/${safeArchiveName(teacher)}老师_${week.label}.svg`,
-        data: scheduleCardSvg({
-          title: `${teacher}老师本周课表`,
-          subtitle: `${monthKey.slice(0, 7)} ${week.label} · 共 ${teacherLessons.length} 节课`,
-          rows: scheduleCardRowsFromLessons(teacherLessons, "teacher"),
-          badge: "老师课表",
-        }),
-      });
-    }
-  }
-
-  if (normalizedAudience === "student" || normalizedAudience === "all") {
-    const byStudent = new Map();
-    const personalStudents = new Set();
-    const groupClasses = new Map();
-    for (const lesson of lessons) {
-      const students = splitStudents(lesson.student_names);
-      for (const student of students) {
-        if (!byStudent.has(student)) byStudent.set(student, []);
-        byStudent.get(student).push(lesson);
-      }
-      if (students.length === 1) {
-        personalStudents.add(students[0]);
-      } else if (students.length >= 2) {
-        const groupKey = [
-          lesson.teacher_name || "未填老师",
-          lesson.grade || "",
-          lesson.subject || "",
-          canonicalStudentGroup(students),
-        ].join("|");
-        if (!groupClasses.has(groupKey)) {
-          groupClasses.set(groupKey, {
-            teacher: lesson.teacher_name || "未填老师",
-            grade: lesson.grade || "",
-            subject: lesson.subject || "",
-            students,
-            lessons: [],
-          });
-        }
-        groupClasses.get(groupKey).lessons.push(lesson);
-      }
-    }
-    for (const student of [...personalStudents].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"))) {
-      const studentLessons = byStudent.get(student) || [];
-      files.push({
-        name: `学生个人课表/${safeArchiveName(student)}_${week.label}.svg`,
-        data: scheduleCardSvg({
-          title: `${student}本周课表`,
-          subtitle: `${monthKey.slice(0, 7)} ${week.label} · 共 ${studentLessons.length} 节课`,
-          rows: scheduleCardRowsFromLessons(studentLessons, "student"),
-          badge: "学生课表",
-        }),
-      });
-    }
-    for (const group of [...groupClasses.values()].sort((a, b) => `${a.teacher}|${a.grade}|${a.subject}|${a.students.join("、")}`.localeCompare(`${b.teacher}|${b.grade}|${b.subject}|${b.students.join("、")}`, "zh-Hans-CN"))) {
-      const title = `${group.grade}${group.subject}班课周课表`;
-      const subtitle = `${group.teacher}老师 · ${group.students.join("、")} · 共 ${group.lessons.length} 节课`;
-      files.push({
-        name: `班课共享课表/${safeArchiveName(`${group.grade}${group.subject}_${group.teacher}_${group.students.join("、")}`)}_${week.label}.svg`,
-        data: scheduleCardSvg({
-          title,
-          subtitle,
-          rows: scheduleCardRowsFromLessons(group.lessons, "class"),
-          badge: "班课共享",
-        }),
-      });
-    }
-  }
-
-  return { week, files };
-}
-
-function weeklySchedulePngManifest(monthKey, weekIndex, audience = "all") {
-  const result = weeklyScheduleImageFiles(monthKey, weekIndex, audience);
-  const files = [{
-    name: "README.txt",
-    type: "text",
-    text: [
-      `${monthKey} ${result.week.label} 周课表 PNG 图片包`,
-      "包内图片均为 PNG，可直接预览、转发或发送给老师和学生。",
-      "学生规则：有一对一课程的学生生成个人课表；2 人及以上班课按班课生成一张共享图片。",
-    ].join("\r\n"),
-  }];
-  for (const file of result.files) {
-    if (!String(file.name).toLowerCase().endsWith(".svg")) continue;
-    files.push({
-      name: file.name.replace(/\.svg$/i, ".png"),
-      type: "svg",
-      svg: file.data,
-    });
-  }
-  return {
-    month_key: monthKey,
-    week: result.week,
-    files,
-  };
-}
-
 function applyAuditPatch(issue) {
   const patch = issue.patch || {};
   if (patch.type === "insert_lesson" && patch.lesson) {
@@ -4133,6 +4880,67 @@ function copyLessons(body) {
 }
 
 async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/auth/me") {
+    return sendJson(res, { user: currentUser(req), roles: USER_ROLES });
+  }
+  if (req.method === "POST" && url.pathname === "/api/auth/login") {
+    const body = await readBody(req);
+    const row = loginUser(body.username, body.password);
+    if (!row) return sendError(res, 401, "用户名或密码错误");
+    const sid = crypto.randomBytes(32).toString("hex");
+    sessions.set(sid, { user_id: row.id, expires_at: Date.now() + 7 * 86400000 });
+    setSessionCookie(res, sid);
+    return sendJson(res, { user: publicUser(row) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+    const sid = parseCookies(req).liming_session;
+    if (sid) sessions.delete(sid);
+    clearSessionCookie(res);
+    return sendJson(res, { ok: true });
+  }
+  const user = currentUser(req);
+  if (!user) return sendError(res, 401, "请先登录");
+  if (req.method === "POST" && url.pathname === "/api/auth/change-password") {
+    const body = await readBody(req);
+    const result = changeOwnPassword(user, body.current_password, body.new_password);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "change_password", entity_type: "users", entity_id: String(user.id), before: null, after: { id: user.id, username: user.username } });
+    return sendJson(res, result);
+  }
+  if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
+
+  if (req.method === "GET" && url.pathname === "/api/users") {
+    return sendJson(res, { users: userRows(user), roles: USER_ROLES });
+  }
+  if (req.method === "POST" && url.pathname === "/api/users") {
+    const result = createUser(user, await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "users", entity_id: String(result.id), before: null, after: result });
+    return sendJson(res, result, 201);
+  }
+  if (req.method === "POST" && url.pathname === "/api/users/import-teachers-template") {
+    const result = importTeacherUsersFromTemplate(user, await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "import_teacher_users", entity_type: "users", entity_id: "teacher_template", before: null, after: { created: result.created, updated: result.updated, total: result.total, backup: result.backup } });
+    return sendJson(res, result);
+  }
+  const userMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
+  if (userMatch && req.method === "PATCH") {
+    const before = get("SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at FROM users WHERE id = ?", [Number(userMatch[1])]);
+    const result = patchUser(user, Number(userMatch[1]), await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "update", entity_type: "users", entity_id: String(userMatch[1]), before, after: result });
+    return sendJson(res, result);
+  }
+  const userPasswordMatch = url.pathname.match(/^\/api\/users\/(\d+)\/password$/);
+  if (userPasswordMatch && req.method === "POST") {
+    const body = await readBody(req);
+    const result = resetUserPassword(user, Number(userPasswordMatch[1]), body.password);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "reset_password", entity_type: "users", entity_id: String(userPasswordMatch[1]), before: null, after: { ok: true } });
+    return sendJson(res, result);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/months") return sendJson(res, availableMonths());
   if (req.method === "POST" && url.pathname === "/api/months") {
     const body = await readBody(req);
@@ -4152,8 +4960,27 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/audit/logs") {
     return sendJson(res, { logs: recentAuditLogs(Number(url.searchParams.get("limit") || 200)) });
   }
-  if (req.method === "GET" && url.pathname === "/api/audit-logs") {
-    return sendJson(res, { logs: recentAuditLogs(Number(url.searchParams.get("limit") || 200)) });
+  if (req.method === "GET" && url.pathname === "/api/audit/events") {
+    return sendJson(res, {
+      events: all(`
+        SELECT *
+        FROM audit_events
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+      `, [Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 200)))]),
+    });
+  }
+  if (req.method === "GET" && url.pathname === "/api/source-workbooks") {
+    return sendJson(res, { workbooks: sourceWorkbooks() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/import/source-workbook") {
+    const body = await readBody(req);
+    const result = importSourceWorkbook(body.filename, text(body.month_key) || text(url.searchParams.get("month")), {
+      append: body.append === true,
+      skip_teacher_adjustments: body.skip_teacher_adjustments === true,
+    });
+    recordAuditEvent(req, user, { action: "import", entity_type: "source_workbook", entity_id: text(body.filename), before: null, after: result });
+    return sendJson(res, result);
   }
   if (req.method === "GET" && url.pathname === "/api/audit/internal-checks") {
     return sendJson(res, internalAudit(resolveMonthKey(url), { log: url.searchParams.get("log") !== "0" }));
@@ -4163,22 +4990,26 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/audit/apply") {
     const body = await readBody(req);
-    return sendJson(res, applyAuditIssues(body.issues || [], body.confirm_critical === true));
+    const result = applyAuditIssues(body.issues || [], body.confirm_critical === true);
+    recordAuditEvent(req, user, { action: "audit_apply", entity_type: "audit_logs", entity_id: "batch", before: { issues: (body.issues || []).length }, after: result });
+    return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/audit/ignore") {
     const body = await readBody(req);
     return sendJson(res, ignoreAuditIssues(body.ids || [], body.issue_keys || []));
   }
   if (req.method === "GET" && url.pathname === "/api/schedule-conflicts") {
-    return sendJson(res, scheduleConflicts(resolveMonthKey(url)));
+    const report = scheduleConflicts(resolveMonthKey(url));
+    if (user.role === "teacher") return sendJson(res, { ...report, issue_count: 0, counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 }, issues: [] });
+    return sendJson(res, report);
   }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
-    return sendJson(res, bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"));
+    return sendJson(res, sanitizeBootstrap(bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"), user));
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
     const lessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
     if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
-    return sendJson(res, { lessons });
+    return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
   }
   if (req.method === "GET" && url.pathname === "/api/finance-summary") {
     const range = financeRangeFromUrl(url);
@@ -4190,16 +5021,23 @@ async function handleApi(req, res, url) {
     const includeInactive = url.searchParams.get("include_inactive") === "1";
     const details = feeDetails(monthKey);
     return sendJson(res, {
-      fee_details: details,
-      student_summary: studentSummary(details, monthKey, includeInactive),
-      teacher_summary: teacherSummary(monthKey, includeInactive),
+      fee_details: user.role === "teacher" ? [] : details,
+      student_summary: user.role === "teacher" ? [] : studentSummary(details, monthKey, includeInactive),
+      student_summary_to_date: user.role === "teacher" ? [] : studentSummaryToDate(monthKey, includeInactive),
+      teacher_summary: user.role === "owner" ? teacherSummary(monthKey, includeInactive) : [],
     });
   }
 
-  if (req.method === "GET" && url.pathname === "/api/teachers") return sendJson(res, { teachers: teacherProfiles() });
+  if (req.method === "GET" && url.pathname === "/api/teachers") {
+    const teachers = user.role === "teacher" && user.teacher_name
+      ? teacherProfiles().filter((row) => row.name === user.teacher_name)
+      : teacherProfiles();
+    return sendJson(res, { teachers });
+  }
   if (req.method === "POST" && url.pathname === "/api/teachers") {
     const result = createTeacherProfile(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "teachers", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, result, 201);
   }
 
@@ -4213,6 +5051,7 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/students") {
     const result = createStudentProfile(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "students", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, { ...result, warnings: studentWarnings(result.name, result.grade) }, 201);
   }
 
@@ -4220,18 +5059,23 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/staff") {
     const result = createStaff(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "staff", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, result, 201);
   }
   const staffMatch = url.pathname.match(/^\/api\/staff\/(\d+)$/);
   if (staffMatch && req.method === "PATCH") {
+    const before = get("SELECT * FROM staff WHERE id = ?", [Number(staffMatch[1])]);
     const result = patchStaff(Number(staffMatch[1]), await readBody(req));
     if (!result) return sendError(res, 404, "staff not found");
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "update", entity_type: "staff", entity_id: String(staffMatch[1]), before, after: result });
     return sendJson(res, result);
   }
   if (staffMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM staff WHERE id = ?", [Number(staffMatch[1])]);
     const result = deleteStaff(Number(staffMatch[1]));
     if (!result) return sendError(res, 404, "staff not found");
+    recordAuditEvent(req, user, { action: "delete", entity_type: "staff", entity_id: String(staffMatch[1]), before, after: result });
     return sendJson(res, result);
   }
 
@@ -4241,13 +5085,16 @@ async function handleApi(req, res, url) {
     return sendJson(res, { rows: staffSalaryRows(monthKey) });
   }
   if (req.method === "POST" && url.pathname === "/api/staff-salary") {
-    const result = upsertStaffSalary(await readBody(req));
+    const body = await readBody(req);
+    const before = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [Number(body.staff_id), text(body.month_key || getSetting("month_key"))]);
+    const result = upsertStaffSalary(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "staff_salary", entity_id: `${body.staff_id}|${text(body.month_key || getSetting("month_key"))}`, before, after: result });
     return sendJson(res, result);
   }
   const staffSalaryMatch = url.pathname.match(/^\/api\/staff-salary\/(\d+)$/);
   if (staffSalaryMatch && req.method === "DELETE") {
-    const result = withTransaction(() => db.prepare("DELETE FROM staff_salary_monthly WHERE id = ?").run(Number(staffSalaryMatch[1])));
+    const result = auditedDelete(req, user, "staff_salary_monthly", "id", Number(staffSalaryMatch[1]), "staff_salary");
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
   }
 
@@ -4257,13 +5104,18 @@ async function handleApi(req, res, url) {
     return sendJson(res, { rows: staffAttendanceRows(monthKey) });
   }
   if (req.method === "POST" && url.pathname === "/api/staff-attendance") {
-    const result = upsertStaffAttendance(await readBody(req));
+    const body = await readBody(req);
+    const before = get("SELECT * FROM staff_attendance WHERE staff_id = ? AND attendance_date = ?", [Number(body.staff_id), text(body.attendance_date)]);
+    const result = upsertStaffAttendance(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "staff_attendance", entity_id: `${body.staff_id}|${text(body.attendance_date)}`, before, after: result });
     return sendJson(res, result, 201);
   }
   if (req.method === "DELETE" && url.pathname === "/api/staff-attendance") {
+    const before = get("SELECT * FROM staff_attendance WHERE staff_id = ? AND attendance_date = ?", [Number(url.searchParams.get("staff_id")), text(url.searchParams.get("date"))]);
     const result = deleteStaffAttendance(Number(url.searchParams.get("staff_id")), url.searchParams.get("date"));
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "delete", entity_type: "staff_attendance", entity_id: `${url.searchParams.get("staff_id")}|${url.searchParams.get("date")}`, before, after: result });
     return sendJson(res, result);
   }
 
@@ -4271,17 +5123,20 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/operating-expenses") {
     const result = createExpense(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "operating_expenses", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, result, 201);
   }
   const expenseMatch = url.pathname.match(/^\/api\/operating-expenses\/(\d+)$/);
   if (expenseMatch && req.method === "PATCH") {
+    const before = get("SELECT * FROM operating_expenses WHERE id = ?", [Number(expenseMatch[1])]);
     const result = patchExpense(Number(expenseMatch[1]), await readBody(req));
     if (!result) return sendError(res, 404, "expense not found");
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "update", entity_type: "operating_expenses", entity_id: String(expenseMatch[1]), before, after: result });
     return sendJson(res, result);
   }
   if (expenseMatch && req.method === "DELETE") {
-    const result = withTransaction(() => db.prepare("DELETE FROM operating_expenses WHERE id = ?").run(Number(expenseMatch[1])));
+    const result = auditedDelete(req, user, "operating_expenses", "id", Number(expenseMatch[1]), "operating_expenses");
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
   }
 
@@ -4299,14 +5154,26 @@ async function handleApi(req, res, url) {
     const monthKey = resolveMonthKey(url);
     const studentName = text(url.searchParams.get("student"));
     if (!studentName) return sendError(res, 400, "student is required");
-    const rows = studentStatementRows(monthKey, studentName);
+    const range = studentStatementRangeFromUrl(url);
+    if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    const rows = studentStatementRows(monthKey, studentName, range);
     if (!rows) return sendError(res, 404, "student statement not found");
     return sendBuffer(
       res,
       xlsxBuffer("学生账单", rows),
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      `student-statement-${studentName}-${monthKey}.xlsx`,
+      `student-statement-${studentName}-${range.start}_${range.end}.xlsx`,
     );
+  }
+
+  const studentStatementMatch = url.pathname.match(/^\/api\/student\/(.+)\/statement$/);
+  if (studentStatementMatch && req.method === "GET") {
+    const studentName = decodeURIComponent(studentStatementMatch[1]);
+    const range = studentStatementRangeFromUrl(url);
+    if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    const report = studentStatementData(studentName, range);
+    if (!report) return sendJson(res, { student_name: studentName, range, summary: null, details: [], month_rows: [], recharges: [] });
+    return sendJson(res, report);
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/finance-summary.csv") {
@@ -4316,63 +5183,35 @@ async function handleApi(req, res, url) {
     return sendCsv(res, financeCsvRows(summary), `经营概览_${summary.range.start}_至_${summary.range.end}.csv`);
   }
 
-  if (req.method === "GET" && url.pathname === "/api/export/weekly-schedule.txt") {
-    const monthKey = resolveMonthKey(url);
-    const week = Number(url.searchParams.get("week") || 0);
-    const audience = url.searchParams.get("audience") === "student" ? "student" : "teacher";
-    const label = audience === "student" ? "学生" : "老师";
-    return sendText(res, weeklyScheduleText(monthKey, week, audience), `${label}周课表_${monthKey}_第${week + 1}周.txt`);
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/export/weekly-schedule-images.json") {
-    const monthKey = resolveMonthKey(url);
-    const week = Number(url.searchParams.get("week") || 0);
-    const audienceParam = url.searchParams.get("audience");
-    const audience = ["teacher", "student", "all"].includes(audienceParam) ? audienceParam : "all";
-    const label = audience === "teacher" ? "老师" : audience === "student" ? "学生与班课" : "全部";
-    return sendJson(res, {
-      ...weeklySchedulePngManifest(monthKey, week, audience),
-      filename: `${label}周课表PNG_${monthKey}_第${week + 1}周.zip`,
-    });
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/export/weekly-schedule-images.zip") {
-    const monthKey = resolveMonthKey(url);
-    const week = Number(url.searchParams.get("week") || 0);
-    const audienceParam = url.searchParams.get("audience");
-    const audience = ["teacher", "student", "all"].includes(audienceParam) ? audienceParam : "all";
-    const label = audience === "teacher" ? "老师" : audience === "student" ? "学生与班课" : "全部";
-    const result = weeklyScheduleImageFiles(monthKey, week, audience);
-    return sendBuffer(
-      res,
-      zipStore(result.files),
-      "application/zip",
-      `${label}周课表图片_${monthKey}_第${week + 1}周.zip`,
-    );
-  }
-
   if (req.method === "POST" && url.pathname === "/api/recharges/rollover") {
     const fromMonth = text(url.searchParams.get("from"));
     const toMonth = text(url.searchParams.get("to"));
     const force = url.searchParams.get("force") === "1";
-    return sendJson(res, rolloverRecharges(fromMonth, toMonth, force));
+    const before = all("SELECT * FROM recharge_records WHERE month_key IN (?, ?) ORDER BY month_key, student_name", [fromMonth, toMonth]);
+    const result = rolloverRecharges(fromMonth, toMonth, force);
+    const after = all("SELECT * FROM recharge_records WHERE month_key IN (?, ?) ORDER BY month_key, student_name", [fromMonth, toMonth]);
+    recordAuditEvent(req, user, { action: "rollover", entity_type: "recharge_records", entity_id: `${fromMonth}->${toMonth}`, before, after: { result, rows: after } });
+    return sendJson(res, result);
   }
 
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
     for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
-    return sendJson(res, bootstrap(text(body.month_key) || getSetting("month_key"), url.searchParams.get("include_inactive") === "1"));
+    return sendJson(res, sanitizeBootstrap(bootstrap(text(body.month_key) || getSetting("month_key"), url.searchParams.get("include_inactive") === "1"), user));
   }
 
   if (req.method === "POST" && url.pathname === "/api/lessons/copy") {
-    const result = copyLessons(await readBody(req));
+    const body = await readBody(req);
+    const result = copyLessons(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "copy", entity_type: "lessons", entity_id: "batch", before: body, after: result });
     return sendJson(res, result, 201);
   }
 
   if (req.method === "POST" && url.pathname === "/api/lessons") {
     const body = await readBody(req);
     const lesson = insertLesson(body);
+    recordAuditEvent(req, user, { action: "create", entity_type: "lessons", entity_id: String(lesson.id), before: null, after: lesson });
     return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson) }, 201);
   }
 
@@ -4386,15 +5225,15 @@ async function handleApi(req, res, url) {
     } else if (Object.prototype.hasOwnProperty.call(body, "lesson_status") || Object.prototype.hasOwnProperty.call(body, "course_status")) {
       payload.status = deriveStatus({ ...current, ...body });
     }
-    patchTable("lessons", "id", Number(lessonMatch[1]), [
+    auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
       "student_names", "notes", "course_status", "status", "teacher_salary", "month_key", "sort_order",
-    ], payload);
+    ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     return sendJson(res, { ...updated, warnings: lessonWarnings(updated) });
   }
   if (lessonMatch && req.method === "DELETE") {
-    db.prepare("DELETE FROM lessons WHERE id = ?").run(Number(lessonMatch[1]));
+    auditedDelete(req, user, "lessons", "id", Number(lessonMatch[1]), "lessons");
     return sendJson(res, { ok: true });
   }
 
@@ -4408,12 +5247,14 @@ async function handleApi(req, res, url) {
     for (const field of ["name", "phone", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
-    patchTable("teachers", "id", Number(teacherIdMatch[1]), ["name", "phone", "notes", "status", "joined_at", "left_at"], payload);
-    return sendJson(res, get("SELECT * FROM teachers WHERE id = ?", [Number(teacherIdMatch[1])]));
+    const after = auditedPatchTable(req, user, "teachers", "id", Number(teacherIdMatch[1]), ["name", "phone", "notes", "status", "joined_at", "left_at"], payload, "teachers");
+    return sendJson(res, after);
   }
   if (teacherIdMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM teachers WHERE id = ?", [Number(teacherIdMatch[1])]);
     const result = deleteTeacherProfile(Number(teacherIdMatch[1]));
     if (!result) return sendError(res, 404, "teacher not found");
+    recordAuditEvent(req, user, { action: "delete", entity_type: "teachers", entity_id: String(teacherIdMatch[1]), before, after: result });
     return sendJson(res, result);
   }
 
@@ -4427,15 +5268,17 @@ async function handleApi(req, res, url) {
     for (const field of ["name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
-    patchTable("students", "id", Number(studentIdMatch[1]), [
+    auditedPatchTable(req, user, "students", "id", Number(studentIdMatch[1]), [
       "name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at",
-    ], payload);
+    ], payload, "students");
     const row = get("SELECT * FROM students WHERE id = ?", [Number(studentIdMatch[1])]);
     return sendJson(res, { ...row, warnings: studentWarnings(row.name, row.grade) });
   }
   if (studentIdMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM students WHERE id = ?", [Number(studentIdMatch[1])]);
     const result = deleteStudentProfile(Number(studentIdMatch[1]));
     if (!result) return sendError(res, 404, "student not found");
+    recordAuditEvent(req, user, { action: "delete", entity_type: "students", entity_id: String(studentIdMatch[1]), before, after: result });
     return sendJson(res, result);
   }
 
@@ -4445,23 +5288,28 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const grade = text(body.grade);
     backupDb();
+    const before = get("SELECT * FROM students WHERE name = ?", [studentName]);
     db.prepare(`
       INSERT INTO students(name, grade) VALUES (?, ?)
       ON CONFLICT(name) DO UPDATE SET grade = excluded.grade
     `).run(studentName, grade);
+    const after = get("SELECT * FROM students WHERE name = ?", [studentName]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "students", entity_id: studentName, before, after });
     return sendJson(res, { ok: true, student_name: studentName, grade, warnings: studentWarnings(studentName, grade) });
   }
 
   const pricingMatch = url.pathname.match(/^\/api\/pricing-standards\/(\d+)$/);
   if (pricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
-    patchTable("pricing_standards", "id", Number(pricingMatch[1]), ["unit_price", "description"], body);
-    return sendJson(res, get("SELECT * FROM pricing_standards WHERE id = ?", [Number(pricingMatch[1])]));
+    const row = auditedPatchTable(req, user, "pricing_standards", "id", Number(pricingMatch[1]), ["unit_price", "description"], body, "pricing_standards");
+    return sendJson(res, row);
   }
 
   if (req.method === "POST" && url.pathname === "/api/pricing-recompute") {
-    const result = recomputePricing(await readBody(req));
+    const body = await readBody(req);
+    const result = recomputePricing(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "recompute", entity_type: "pricing", entity_id: "batch", before: body, after: result });
     return sendJson(res, result);
   }
 
@@ -4478,6 +5326,8 @@ async function handleApi(req, res, url) {
         custom_price = excluded.custom_price,
         notes = excluded.notes
     `).run(text(body.student_name), text(body.subject), num(body.custom_price), text(body.notes));
+    const row = get("SELECT * FROM student_pricing WHERE student_name = ? AND subject = ?", [text(body.student_name), text(body.subject)]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "student_pricing", entity_id: `${text(body.student_name)}|${text(body.subject)}`, before: null, after: row });
     return sendJson(res, { id: Number(result.lastInsertRowid), ok: true, warnings: pricingWarnings(body) }, 201);
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
@@ -4486,18 +5336,19 @@ async function handleApi(req, res, url) {
     if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) <= 0) {
       return sendError(res, 400, "学生专享价必须大于 0；试课请设置课程状态为「试课」，退费/减免请在费用明细中做单节手动覆盖");
     }
-    patchTable("student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "subject", "custom_price", "notes"], body);
-    const row = get("SELECT * FROM student_pricing WHERE id = ?", [Number(studentPricingMatch[1])]);
+    const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "subject", "custom_price", "notes"], body, "student_pricing");
     return sendJson(res, { ...row, warnings: pricingWarnings(row) });
   }
   if (studentPricingMatch && req.method === "DELETE") {
-    db.prepare("DELETE FROM student_pricing WHERE id = ?").run(Number(studentPricingMatch[1]));
+    auditedDelete(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), "student_pricing");
     return sendJson(res, { ok: true });
   }
 
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
+    const canEditOpeningBalance = !previousDataMonth(monthKey);
+    const before = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [text(body.student_name), monthKey]);
     const result = withTransaction(() => {
       db.prepare(`
         INSERT INTO recharge_records(
@@ -4506,8 +5357,8 @@ async function handleApi(req, res, url) {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(student_name, month_key) DO UPDATE SET
           grade = excluded.grade,
-          prev_actual = excluded.prev_actual,
-          prev_gift = excluded.prev_gift,
+          prev_actual = CASE WHEN ? THEN excluded.prev_actual ELSE recharge_records.prev_actual END,
+          prev_gift = CASE WHEN ? THEN excluded.prev_gift ELSE recharge_records.prev_gift END,
           cur_recharge = excluded.cur_recharge,
           cur_gift = excluded.cur_gift,
           recharge_date = excluded.recharge_date,
@@ -4516,17 +5367,21 @@ async function handleApi(req, res, url) {
       `).run(
         text(body.student_name),
         text(body.grade),
-        num(body.prev_actual),
-        num(body.prev_gift),
+        canEditOpeningBalance ? num(body.prev_actual) : 0,
+        canEditOpeningBalance ? num(body.prev_gift) : 0,
         num(body.cur_recharge),
         num(body.cur_gift),
         text(body.recharge_date),
         text(body.notes),
         text(body.source),
         monthKey,
+        canEditOpeningBalance ? 1 : 0,
+        canEditOpeningBalance ? 1 : 0,
       );
       return refreshCarryOverAfter(monthKey);
     });
+    const after = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [text(body.student_name), monthKey]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "recharge_records", entity_id: `${text(body.student_name)}|${monthKey}`, before, after: { row: after, carry_over: result } });
     return sendJson(res, { ok: true, carry_over: result });
   }
 
@@ -4535,6 +5390,7 @@ async function handleApi(req, res, url) {
     const lessonId = Number(body.lesson_id);
     const studentName = text(body.student_name);
     if (!lessonId || !studentName) return sendError(res, 400, "lesson_id and student_name are required");
+    const before = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     if (body.unit_price === "" || body.unit_price == null) {
       db.prepare("DELETE FROM fee_overrides WHERE lesson_id = ? AND student_name = ?").run(lessonId, studentName);
     } else {
@@ -4546,12 +5402,15 @@ async function handleApi(req, res, url) {
           updated_at = CURRENT_TIMESTAMP
       `).run(lessonId, studentName, num(body.unit_price));
     }
+    const after = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
+    recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
     return sendJson(res, { ok: true });
   }
 
   if (req.method === "POST" && url.pathname === "/api/teacher-adjustments") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
+    const before = get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [text(body.teacher_name), monthKey]);
     db.prepare(`
       INSERT INTO teacher_adjustments_monthly(
         teacher_name, month_key, week1_transport, week2_transport, week3_transport, week4_transport, notes
@@ -4572,6 +5431,8 @@ async function handleApi(req, res, url) {
       num(body.week4_transport),
       text(body.notes),
     );
+    const after = get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [text(body.teacher_name), monthKey]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "teacher_adjustments", entity_id: `${text(body.teacher_name)}|${monthKey}`, before, after });
     return sendJson(res, { ok: true });
   }
 

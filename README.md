@@ -1,8 +1,8 @@
 # 黎明教育课程管理系统
 
-面向单店教培机构的本地后台 MVP。`node src/server.js` 单进程跑起，`http://localhost:5177` 直接用。
+面向单店教培机构的课程、学生、充值、教师薪资和经营核对后台。`node src/server.js` 可本地单进程运行，也可以用 Docker 部署到云服务器。
 
-技术栈：Node.js 24 内置 `http` + `node:sqlite` + 单文件 `public/app.js` + 单文件 `public/styles.css`。无前端框架，无构建步骤，无第三方运行时依赖。数据全部落 `data/liming-local.sqlite`。
+技术栈：Node.js 24 内置 `http` + `node:sqlite` + 单文件 `public/app.js` + 单文件 `public/styles.css`。无前端框架，无构建步骤，无第三方运行时依赖。默认数据落 `data/liming-local.sqlite`，云端部署时通过 Docker volume 挂载到 `/app/data`。
 
 ## 运行
 
@@ -12,6 +12,15 @@ npm run init           # 仅初始化数据库后退出（不开服务）
 python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总表、充值、学生单价、费用标准、教师车票
 ```
 
+Docker 试用部署：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+详细服务器、域名、HTTPS 和数据库迁移说明见 [docs/deployment.md](docs/deployment.md)。
+
 如果「教师薪资汇总」页 A 列是未计算出来的动态公式（导入时报无法识别教师姓名），先用 Excel/WPS 打开并保存一次；或临时用 `--teacher-order 老师1,老师2,...` 指定第 3 行起的老师顺序。
 
 数据库文件、上传文件、备份都在 `data/` 下：
@@ -19,6 +28,15 @@ python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总�
 - `data/liming-local.sqlite`：主库（WAL 模式）
 - `data/backups/`：每次审计/月份强删/审计修复前自动留底的快照
 - `data/uploads/`：xlsx 对账时上传的文件
+
+运行时可用环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `5177` | HTTP 服务端口 |
+| `DATA_DIR` | `data/` | 数据目录，Docker 中为 `/app/data` |
+| `DB_PATH` | `DATA_DIR/liming-local.sqlite` | SQLite 主库路径 |
+| `SESSION_COOKIE_SECURE` | `false` | HTTPS 正式部署后改为 `true`；纯 HTTP 试用必须保持 `false` |
 
 ## 数据模型
 
@@ -34,9 +52,13 @@ python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总�
 | `teacher_adjustments_monthly` | 教师每月四周车贴，参与教师薪资合计 |
 | `operating_expenses` | 房租/水电/食材等运营开销 |
 | `audit_logs` / `audit_ignores` | 审计问题流水与忽略名单 |
+| `audit_events` | 操作审计日志，记录谁改了课程、充值、价格、薪资、账号等关键数据 |
+| `users` | 登录账号、角色、绑定老师姓名和账号状态 |
 | `settings` | 当前选定月份等系统配置 |
 
 所有按月数据用 `month_key='YYYY-MM-01'` 分区，月份切换不影响历史数据。
+
+权限角色：`Qing(owner)` 和管理员有全量权限；教务主要负责排课、学生费用、充值、档案和老师账号；财务看经营概览、充值、学生查询和日常开销；老师只能看自己的矩阵课表与教师明细。老师档案删除时会自动停用绑定的老师登录账号，但账号权限表保留 `disabled` 记录，便于恢复、重置密码和审计追溯。
 
 ## 已完成功能与对应逻辑
 
@@ -63,7 +85,7 @@ python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总�
 | 状态机 | 权威字段 `status` | 取值：待上 / 已上 / 请假 / 试课 / 考试 / 未缴费；`legacyStatusFields` + `deriveStatus` 与旧 xlsx 的 `lesson_status` / `course_status` 双向同步 |
 | 批量复制课程 | `POST /api/lessons/copy` | 接受 `pairs:[{source_id, target_date}]` 或 `(source_lesson_ids[] × target_dates[])` 笛卡尔积；单次 ≤ 200 行；目标日期按 `MAX(sort_order)+1` 追加，状态重置为「待上」 |
 | 冲突检测 | `scheduleConflicts(monthKey)` | 同日同时段同老师 / 教室 / 共同学生 → `teacher` / `classroom` / `student` 三类；时间段无法解析 → `invalid_time` |
-| 周课表导出 | 月份切 4 周（`[1,8] [9,15] [16,22] [23,月末]`） | 按老师 / 学生两种受众生成可读视图；支持文本下载、SVG 图片包、PNG manifest 三种导出 |
+| 周课表 / 矩阵课表 | 前端按自然周和日期范围展示 | 当前用于查看和冲突排查；服务端仍保留旧周课表导出辅助函数，但未暴露 API |
 
 ---
 
@@ -146,7 +168,7 @@ python scripts/import_workbook.py <xlsx-path>  # 自动识别月份并导入总�
 | 板块 | 实现 | 说明 |
 | --- | --- | --- |
 | 环比 | `previousEqualRange(range)` | 取相邻等长区间 |
-| 分布 | `financeBreakdowns` | 年级×收入、科目×收入、班型×收入×毛利率、Top 10 学生消费、老师 ROI（贡献/课时费）、低余额名单（实际余额 < 平均单次课费）、未缴费课时清单 |
+| 分布 | `financeBreakdowns` | 年级×收入、科目×收入、班型×收入×毛利率、Top 10 学生消费、老师 ROI（贡献/课时费）、低余额名单（实际余额 < 平均单次课费）、未缴费课时清单；收入拆分统一引用 `allocated_revenue`，与顶部收入口径一致 |
 | 6 月趋势 | `financeTrend6m` | 以 `range.end` 所在月为锚，往前 6 个月，每月独立跑一次 `financeBase(monthRange)` |
 | 资产负债 | `balance_sheet` | 四档拆分：`total_actual_balance`（月末沉淀正现金）/ `total_gift_balance`（月末赠送余额）/ `unpaid_lesson_receivable`（`状态=未缴费` 的课时金额）/ `account_debt_receivable`（学生 `actual_balance` 负值合计，即已上但欠款）；`accounts_receivable` = 按学生取 `unpaid` 与 `debt` 的最大值后求和，避免双重计入 |
 | CSV 导出 | `GET /api/export/finance-summary.csv` | 当期快照 |
@@ -216,7 +238,14 @@ else:
 - **现金优先消费，赠送兜底**：实际现金（含上月结转 + 本月充值）先消耗课程费用，不足部分用赠送余额顶。
 - **负的上月赠送结转会扣减实际余额**（`+ min(prevGift, 0)`），避免赠送账户成为永久"负债悬空"。
 - **总资金不足时**实际余额变负、赠送余额清零；正常情况下两边的余额拆分都保证 `actual + gift == 总充值 - 总费用`。
-- **finance.revenue 是收入认现口径**：`revenue += unit_price × (actual_consumption / total_fee)`，按「学生当月实际消费占学生当月应付」的比例把每节课计入收入。学生没付钱的课时不计收入，仅在余额上体现为负数或在 `accounts_receivable` 体现（限 `状态=未缴费` 的课）。
+- **finance.revenue 是收入认现口径**：每条有效课时先算 `allocated_revenue = unit_price × (actual_consumption / total_fee)`、`allocated_gift_consumption = unit_price × (gift_consumption / total_fee)`，再汇总到经营概览。学生没付钱的课时不计现金收入，仅在余额上体现为负数或在 `accounts_receivable` 体现（限 `状态=未缴费` 的课）。
+- **经营拆分同口径**：老师人效、年级/科目/班型收入、Top 学生贡献均使用 `allocated_revenue`，避免顶部收入按现金认现、底部排行按课程标价的口径混用。
+
+## 数据流向图与审计
+
+金额相关数据流向图见 [docs/money-data-flow.svg](docs/money-data-flow.svg)。
+
+本轮代码和金额口径审计记录见 [docs/financial-data-flow-audit.md](docs/financial-data-flow-audit.md)，其中列明了已修复的口径问题、仍保留的低风险冗余项、服务器清理边界和后续建议。
 
 ## 已知 bug / 风险（重点关注金额相关）
 
