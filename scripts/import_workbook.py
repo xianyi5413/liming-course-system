@@ -185,6 +185,8 @@ def lesson_rows(ws, fallback_month_key):
         if not date:
             continue
         row_month_key = month_key_from_date(date) or fallback_month_key
+        if row_month_key != fallback_month_key:
+            continue
         rows.append({
             "row_idx": row_idx,
             "teacher": teacher,
@@ -210,7 +212,7 @@ def import_lessons(conn, wb, total_sheet_name, month_key, replace):
     if replace:
         dates = sorted({row["date"] for row in rows if row["date"]})
         if dates:
-            conn.executemany("DELETE FROM lessons WHERE date = ?", [(date,) for date in dates])
+            conn.executemany("DELETE FROM lessons WHERE date = ? AND month_key = ?", [(date, month_key) for date in dates])
         else:
             conn.execute("DELETE FROM lessons WHERE month_key = ?", (month_key,))
     inserted = 0

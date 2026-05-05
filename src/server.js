@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const secureCookies = process.env.SESSION_COOKIE_SECURE === "1" || process.env.SESSION_COOKIE_SECURE === "true";
+const secureCookies = process.env.SESSION_COOKIE_SECURE !== "0" && process.env.SESSION_COOKIE_SECURE !== "false";
 const sessions = new Map();
 
 const LESSON_STATUS = ["上课", "试课", "监考", "休息", "上课（未缴费）", "待定", "请假", "考试"];
@@ -762,9 +762,11 @@ function readXlsxTotalRowsForImport(buffer, monthKey) {
     const fields = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "teacher_salary"];
     if (!fields.some((field) => field === "teacher_salary" ? row[field] : text(row[field]))) continue;
     if (!row.date) continue;
+    const rowMonthKey = monthKeyFromDate(row.date);
+    if (rowMonthKey && rowMonthKey !== monthKey) continue;
     row.lesson_status ||= "上课";
     row.course_status ||= "未上";
-    row.month_key = monthKeyFromDate(row.date) || monthKey;
+    row.month_key = rowMonthKey || monthKey;
     row.status = deriveStatus(row);
     rows.push(row);
   }
@@ -1301,6 +1303,10 @@ function staffAttendanceRows(monthKey) {
 }
 
 function upsertStaffAttendance(body) {
+  return withTransaction(() => upsertStaffAttendanceRow(body));
+}
+
+function upsertStaffAttendanceRow(body) {
   const staffId = Number(body.staff_id);
   const date = isoDateValue(body.attendance_date || body.date);
   const monthKey = monthKeyFromDate(date);
@@ -1309,50 +1315,50 @@ function upsertStaffAttendance(body) {
   if (!staff) return { error: "staff not found", status: 404 };
   const status = ATTENDANCE_STATUS.includes(text(body.status)) ? text(body.status) : "上班";
   const payUnits = Object.prototype.hasOwnProperty.call(body, "pay_units") ? num(body.pay_units) : attendancePayUnit(status);
-  return withTransaction(() => {
-    db.prepare(`
-      INSERT INTO staff_attendance(staff_id, attendance_date, month_key, status, pay_units, hours, reason, notes, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(staff_id, attendance_date) DO UPDATE SET
-        status = excluded.status,
-        pay_units = excluded.pay_units,
-        hours = excluded.hours,
-        reason = excluded.reason,
-        notes = excluded.notes,
-        updated_at = CURRENT_TIMESTAMP
-    `).run(
-      staffId,
-      date,
-      monthKey,
-      status,
-      payUnits,
-      num(body.hours),
-      text(body.reason),
-      text(body.notes),
-    );
-    // Keep the monthly payroll row in sync once attendance starts driving pay.
-    const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [staffId, monthKey]);
-    if (salary) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
-    return get(`
-      SELECT sa.*, s.name, s.role, s.status AS staff_status
-      FROM staff_attendance sa
-      JOIN staff s ON s.id = sa.staff_id
-      WHERE sa.staff_id = ? AND sa.attendance_date = ?
-    `, [staffId, date]);
-  });
+  db.prepare(`
+    INSERT INTO staff_attendance(staff_id, attendance_date, month_key, status, pay_units, hours, reason, notes, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(staff_id, attendance_date) DO UPDATE SET
+      status = excluded.status,
+      pay_units = excluded.pay_units,
+      hours = excluded.hours,
+      reason = excluded.reason,
+      notes = excluded.notes,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    staffId,
+    date,
+    monthKey,
+    status,
+    payUnits,
+    num(body.hours),
+    text(body.reason),
+    text(body.notes),
+  );
+  // Keep the monthly payroll row in sync once attendance starts driving pay.
+  const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [staffId, monthKey]);
+  if (salary) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
+  return get(`
+    SELECT sa.*, s.name, s.role, s.status AS staff_status
+    FROM staff_attendance sa
+    JOIN staff s ON s.id = sa.staff_id
+    WHERE sa.staff_id = ? AND sa.attendance_date = ?
+  `, [staffId, date]);
 }
 
 function deleteStaffAttendance(staffId, date) {
+  return withTransaction(() => deleteStaffAttendanceRow(staffId, date));
+}
+
+function deleteStaffAttendanceRow(staffId, date) {
   const dateValue = isoDateValue(date);
   if (!staffId || !dateValue) return { error: "staff_id and attendance_date are required", status: 400 };
   const monthKey = monthKeyFromDate(dateValue);
-  return withTransaction(() => {
-    const staff = get("SELECT * FROM staff WHERE id = ?", [Number(staffId)]);
-    const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [Number(staffId), monthKey]);
-    const result = db.prepare("DELETE FROM staff_attendance WHERE staff_id = ? AND attendance_date = ?").run(Number(staffId), dateValue);
-    if (salary && staff) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
-    return { deleted: (result.changes || 0) > 0 };
-  });
+  const staff = get("SELECT * FROM staff WHERE id = ?", [Number(staffId)]);
+  const salary = get("SELECT * FROM staff_salary_monthly WHERE staff_id = ? AND month_key = ?", [Number(staffId), monthKey]);
+  const result = db.prepare("DELETE FROM staff_attendance WHERE staff_id = ? AND attendance_date = ?").run(Number(staffId), dateValue);
+  if (salary && staff) upsertStaffSalaryRow(staff, monthKey, salary.bonus, salary.deduction, salary.notes);
+  return { deleted: (result.changes || 0) > 0 };
 }
 
 function expenseRows(url) {
@@ -2597,26 +2603,47 @@ function visibleAuditIssues(issues, source = "internal") {
 }
 
 function recordAuditIssues(runId, issues, source = "internal") {
-  for (const issue of issues) {
-    const issueKey = issue.issue_key || auditIssueKey(issue, source);
-    issue.issue_key = issueKey;
-    if (get("SELECT 1 FROM audit_ignores WHERE issue_key = ?", [issueKey])) continue;
-    const existing = get("SELECT id FROM audit_logs WHERE issue_key = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [issueKey]);
-    if (existing) {
+  return withTransaction(() => {
+    let recorded = 0;
+    for (const issue of issues) {
+      const issueKey = issue.issue_key || auditIssueKey(issue, source);
+      issue.issue_key = issueKey;
+      if (get("SELECT 1 FROM audit_ignores WHERE issue_key = ?", [issueKey])) continue;
+      const existing = get("SELECT id FROM audit_logs WHERE issue_key = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [issueKey]);
+      if (existing) {
+        db.prepare(`
+          UPDATE audit_logs
+          SET run_at = CURRENT_TIMESTAMP,
+              run_id = ?,
+              source = ?,
+              severity = ?,
+              entity = ?,
+              field = ?,
+              before_value = ?,
+              after_value = ?,
+              notes = ?
+          WHERE id = ?
+        `).run(
+          runId,
+          issue.source || source,
+          issue.severity || "",
+          issue.entity || "",
+          issue.field || "",
+          issue.before_value ?? issue.db_value ?? "",
+          issue.after_value ?? issue.xlsx_value ?? "",
+          issue.message || issue.notes || "",
+          existing.id,
+        );
+        issue.audit_log_id = existing.id;
+        recorded += 1;
+        continue;
+      }
       db.prepare(`
-        UPDATE audit_logs
-        SET run_at = CURRENT_TIMESTAMP,
-            run_id = ?,
-            source = ?,
-            severity = ?,
-            entity = ?,
-            field = ?,
-            before_value = ?,
-            after_value = ?,
-            notes = ?
-        WHERE id = ?
+        INSERT INTO audit_logs(run_id, issue_key, source, severity, entity, field, before_value, after_value, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
       `).run(
         runId,
+        issueKey,
         issue.source || source,
         issue.severity || "",
         issue.entity || "",
@@ -2624,27 +2651,12 @@ function recordAuditIssues(runId, issues, source = "internal") {
         issue.before_value ?? issue.db_value ?? "",
         issue.after_value ?? issue.xlsx_value ?? "",
         issue.message || issue.notes || "",
-        existing.id,
       );
-      issue.audit_log_id = existing.id;
-      continue;
+      issue.audit_log_id = get("SELECT last_insert_rowid() AS id").id;
+      recorded += 1;
     }
-    db.prepare(`
-      INSERT INTO audit_logs(run_id, issue_key, source, severity, entity, field, before_value, after_value, status, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-    `).run(
-      runId,
-      issueKey,
-      issue.source || source,
-      issue.severity || "",
-      issue.entity || "",
-      issue.field || "",
-      issue.before_value ?? issue.db_value ?? "",
-      issue.after_value ?? issue.xlsx_value ?? "",
-      issue.message || issue.notes || "",
-    );
-    issue.audit_log_id = get("SELECT last_insert_rowid() AS id").id;
-  }
+    return { recorded };
+  });
 }
 
 function normalizeAuditName(value) {
@@ -3507,6 +3519,11 @@ function sendError(res, status, message) {
   sendJson(res, { error: message }, status);
 }
 
+function setSecurityHeaders(res) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+}
+
 function auditJson(value) {
   if (value == null) return "";
   try {
@@ -3596,12 +3613,12 @@ function currentUser(req) {
 
 function setSessionCookie(res, sid) {
   const secure = secureCookies ? "; Secure" : "";
-  res.setHeader("set-cookie", `liming_session=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${secure}`);
+  res.setHeader("set-cookie", `liming_session=${encodeURIComponent(sid)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${secure}`);
 }
 
 function clearSessionCookie(res) {
   const secure = secureCookies ? "; Secure" : "";
-  res.setHeader("set-cookie", `liming_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`);
+  res.setHeader("set-cookie", `liming_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
 }
 
 function loginUser(username, password) {
@@ -4057,6 +4074,21 @@ function compareXlsxLessons(monthKey, xlsxRows) {
         });
       }
     }
+    const xSalary = moneyRound(num(xrow.teacher_salary));
+    const dbSalary = moneyRound(num(dbRow.teacher_salary));
+    if (xSalary !== dbSalary) {
+      addXlsxIssue(issues, {
+        severity: "MEDIUM",
+        entity: `lesson_${dbRow.id}`,
+        field: "teacher_salary",
+        xlsx_value: xSalary,
+        db_value: dbSalary,
+        lesson_id: dbRow.id,
+        xlsx_row: xrow.source_row,
+        message: "教师薪资与 xlsx 权威源不一致",
+        patch: { type: "lesson", id: dbRow.id, teacher_salary: xSalary },
+      });
+    }
     const xstudents = canonicalStudents(xrow.student_names);
     const dstudents = canonicalStudents(dbRow.student_names);
     if (xstudents !== dstudents) {
@@ -4369,8 +4401,8 @@ function importLessonsFromWorkbook(buffer, monthKey, replace = true) {
   if (replace) {
     const dates = [...new Set(rows.map((row) => row.date).filter(Boolean))];
     if (dates.length) {
-      const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ?");
-      for (const date of dates) deleteByDate.run(date);
+      const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ? AND month_key = ?");
+      for (const date of dates) deleteByDate.run(date, monthKey);
     } else {
       db.prepare("DELETE FROM lessons WHERE month_key = ?").run(monthKey);
     }
@@ -4424,7 +4456,7 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
 }
 
 function spawnSafeReadRaw(req) {
-  return readRawBody(req);
+  return readRawBody(req, 10_000_000);
 }
 
 function timeTokenToMinutes(value) {
@@ -4583,90 +4615,16 @@ function scheduleConflicts(monthKey) {
   return { month_key: monthKey, issue_count: issues.length, counts, issues };
 }
 
-function dateKeyFromDay(monthKey, day) {
-  const [year, month] = text(monthKey).split("-");
-  return `${year}-${month}-${String(day).padStart(2, "0")}`;
-}
-
-function monthWeekRanges(monthKey) {
-  if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
-  const monthStart = parseDateKey(monthKey);
-  const monthEnd = parseDateKey(monthEndKey(monthKey));
-  const cursor = new Date(monthStart);
-  const day = cursor.getDay() || 7;
-  cursor.setDate(cursor.getDate() - day + 1);
-  const ranges = [];
-  while (cursor <= monthEnd) {
-    const start = new Date(cursor);
-    const end = new Date(cursor);
-    end.setDate(end.getDate() + 6);
-    ranges.push({
-      start: start.getDate(),
-      end: end.getDate(),
-      start_date: dateKey(start),
-      end_date: dateKey(end),
-      label: `${start.getMonth() + 1}.${start.getDate()}-${end.getMonth() + 1}.${end.getDate()}`,
-    });
-    cursor.setDate(cursor.getDate() + 7);
-  }
-  return ranges;
-}
-
-function weekRangeByIndex(monthKey, index) {
-  const ranges = monthWeekRanges(monthKey);
-  return ranges[Math.max(0, Math.min(ranges.length - 1, Number(index) || 0))];
-}
-
-function weeklyScheduleLessons(monthKey, weekIndex) {
-  const week = weekRangeByIndex(monthKey, weekIndex);
-  const lessons = (lessonsInDateRange(week.start_date, week.end_date) || []).filter(isScheduleActive)
-    .sort((a, b) => `${a.date || ""}|${a.teacher_name || ""}|${a.time_slot || ""}|${String(a.id).padStart(8, "0")}`
-      .localeCompare(`${b.date || ""}|${b.teacher_name || ""}|${b.time_slot || ""}|${String(b.id).padStart(8, "0")}`, "zh-Hans-CN"));
-  return { week, lessons };
-}
-
-function weeklyScheduleRows(monthKey, weekIndex, audience = "teacher") {
-  if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
-  const normalizedAudience = audience === "student" ? "student" : "teacher";
-  const { week, lessons } = weeklyScheduleLessons(monthKey, weekIndex);
-  const rows = [];
-  for (const lesson of lessons) {
-    const students = splitStudents(lesson.student_names);
-    const base = {
-      date: lesson.date,
-      weekday: weekdayCn(lesson.date),
-      time_slot: lesson.time_slot,
-      classroom: lesson.classroom,
-      course: `${lesson.grade || ""}${lesson.subject || ""}`,
-      grade: lesson.grade,
-      subject: lesson.subject,
-      status: deriveStatus(lesson),
-      notes: lesson.notes,
-    };
-    if (normalizedAudience === "student") {
-      for (const student of students) {
-        rows.push({ ...base, recipient: student, counterpart: lesson.teacher_name });
-      }
-    } else {
-      rows.push({ ...base, recipient: lesson.teacher_name || "未填老师", counterpart: students.join("、") });
-    }
-  }
-  return {
-    month_key: monthKey,
-    week,
-    audience: normalizedAudience,
-    rows,
-  };
-}
-
 function applyAuditPatch(issue) {
   const patch = issue.patch || {};
   if (patch.type === "insert_lesson" && patch.lesson) {
+    if (patch.lesson.teacher_name) upsertTeacher(patch.lesson.teacher_name);
+    for (const name of splitStudents(patch.lesson.student_names)) upsertStudent(name, patch.lesson.grade || "");
     insertLesson(patch.lesson);
     return true;
   }
   if (patch.type === "lesson" && patch.id) {
-    const allowed = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "status"];
+    const allowed = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "status", "teacher_salary"];
     const payload = {};
     for (const field of allowed) {
       if (Object.prototype.hasOwnProperty.call(patch, field)) payload[field] = patch[field];
@@ -4689,56 +4647,74 @@ function applyAuditPatch(issue) {
 
 function applyAuditIssues(issues, confirmCritical = false) {
   const backup = backupDb();
-  let fixed = 0;
-  let skipped = 0;
-  for (const issue of issues) {
-    if (issue.severity === "CRITICAL" && !confirmCritical) {
-      skipped += 1;
-      continue;
+  const result = withTransaction(() => {
+    let fixed = 0;
+    let skipped = 0;
+    const affectedMonths = new Set();
+    for (const issue of issues) {
+      if (issue.severity === "CRITICAL" && !confirmCritical) {
+        skipped += 1;
+        continue;
+      }
+      const patch = issue.patch || {};
+      const lesson = patch.lesson || {};
+      if (lesson.month_key) affectedMonths.add(lesson.month_key);
+      if (patch.id && (patch.student_names || patch.date || patch.course_status || patch.lesson_status)) {
+        const row = get("SELECT month_key FROM lessons WHERE id = ?", [Number(patch.id)]);
+        if (row?.month_key) affectedMonths.add(row.month_key);
+      }
+      if (applyAuditPatch(issue)) {
+        fixed += 1;
+        if (issue.audit_log_id) db.prepare("UPDATE audit_logs SET status = 'fixed' WHERE id = ?").run(Number(issue.audit_log_id));
+      } else {
+        skipped += 1;
+      }
     }
-    if (applyAuditPatch(issue)) {
-      fixed += 1;
-      if (issue.audit_log_id) db.prepare("UPDATE audit_logs SET status = 'fixed' WHERE id = ?").run(Number(issue.audit_log_id));
-    } else {
-      skipped += 1;
+    const carryOver = [];
+    for (const monthKey of affectedMonths) {
+      if (validMonthKey(monthKey)) carryOver.push(refreshCarryOverAfter(monthKey));
     }
-  }
-  return { ok: true, fixed, skipped, backup };
+    return { fixed, skipped, carry_over: carryOver };
+  });
+  return { ok: true, ...result, backup };
 }
 
 function ignoreAuditIssues(ids, issueKeys = []) {
   const backup = backupDb();
-  let ignored = 0;
-  const keys = new Set(issueKeys.map(text).filter(Boolean));
-  for (const id of ids.map(Number).filter(Boolean)) {
-    const log = get("SELECT * FROM audit_logs WHERE id = ?", [id]);
-    if (!log) continue;
-    const issueKey = text(log.issue_key) || auditLogFallbackKey(log);
-    keys.add(issueKey);
-    const result = db.prepare("UPDATE audit_logs SET status = 'ignored', issue_key = ? WHERE id = ?").run(issueKey, id);
-    ignored += result.changes || 0;
-  }
-  for (const issueKey of keys) {
-    const log = get("SELECT * FROM audit_logs WHERE issue_key = ? ORDER BY id DESC LIMIT 1", [issueKey]) || {};
-    db.prepare(`
-      INSERT INTO audit_ignores(issue_key, source, entity, field, notes)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(issue_key) DO UPDATE SET
-        ignored_at = CURRENT_TIMESTAMP,
-        source = excluded.source,
-        entity = excluded.entity,
-        field = excluded.field,
-        notes = excluded.notes
-    `).run(
-      issueKey,
-      log.source || "",
-      log.entity || "",
-      log.field || "",
-      log.notes || "",
-    );
-    db.prepare("UPDATE audit_logs SET status = 'ignored' WHERE issue_key = ?").run(issueKey);
-  }
-  return { ok: true, ignored, ignored_keys: keys.size, backup };
+  const result = withTransaction(() => {
+    let ignored = 0;
+    const keys = new Set(issueKeys.map(text).filter(Boolean));
+    for (const id of ids.map(Number).filter(Boolean)) {
+      const log = get("SELECT * FROM audit_logs WHERE id = ?", [id]);
+      if (!log) continue;
+      const issueKey = text(log.issue_key) || auditLogFallbackKey(log);
+      keys.add(issueKey);
+      const update = db.prepare("UPDATE audit_logs SET status = 'ignored', issue_key = ? WHERE id = ?").run(issueKey, id);
+      ignored += update.changes || 0;
+    }
+    for (const issueKey of keys) {
+      const log = get("SELECT * FROM audit_logs WHERE issue_key = ? ORDER BY id DESC LIMIT 1", [issueKey]) || {};
+      db.prepare(`
+        INSERT INTO audit_ignores(issue_key, source, entity, field, notes)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(issue_key) DO UPDATE SET
+          ignored_at = CURRENT_TIMESTAMP,
+          source = excluded.source,
+          entity = excluded.entity,
+          field = excluded.field,
+          notes = excluded.notes
+      `).run(
+        issueKey,
+        log.source || "",
+        log.entity || "",
+        log.field || "",
+        log.notes || "",
+      );
+      db.prepare("UPDATE audit_logs SET status = 'ignored' WHERE issue_key = ?").run(issueKey);
+    }
+    return { ignored, ignored_keys: keys.size };
+  });
+  return { ok: true, ...result, backup };
 }
 
 function lessonWarnings(lesson) {
@@ -5016,18 +4992,6 @@ async function handleApi(req, res, url) {
     if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, financeSummary(range));
   }
-  if (req.method === "GET" && url.pathname === "/api/derived") {
-    const monthKey = resolveMonthKey(url);
-    const includeInactive = url.searchParams.get("include_inactive") === "1";
-    const details = feeDetails(monthKey);
-    return sendJson(res, {
-      fee_details: user.role === "teacher" ? [] : details,
-      student_summary: user.role === "teacher" ? [] : studentSummary(details, monthKey, includeInactive),
-      student_summary_to_date: user.role === "teacher" ? [] : studentSummaryToDate(monthKey, includeInactive),
-      teacher_summary: user.role === "owner" ? teacherSummary(monthKey, includeInactive) : [],
-    });
-  }
-
   if (req.method === "GET" && url.pathname === "/api/teachers") {
     const teachers = user.role === "teacher" && user.teacher_name
       ? teacherProfiles().filter((row) => row.name === user.teacher_name)
@@ -5116,6 +5080,30 @@ async function handleApi(req, res, url) {
     const result = deleteStaffAttendance(Number(url.searchParams.get("staff_id")), url.searchParams.get("date"));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "delete", entity_type: "staff_attendance", entity_id: `${url.searchParams.get("staff_id")}|${url.searchParams.get("date")}`, before, after: result });
+    return sendJson(res, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/staff-attendance-batch") {
+    const body = await readBody(req);
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length || items.length > 1000) return sendError(res, 400, "items must contain 1-1000 records");
+    const result = withTransaction(() => {
+      let upserted = 0;
+      let deleted = 0;
+      const errors = [];
+      items.forEach((item, index) => {
+        if (item && item._delete) {
+          const outcome = deleteStaffAttendanceRow(Number(item.staff_id), item.attendance_date || item.date);
+          if (outcome.error) errors.push({ index, error: outcome.error });
+          else if (outcome.deleted) deleted += 1;
+          return;
+        }
+        const outcome = upsertStaffAttendanceRow(item || {});
+        if (outcome.error) errors.push({ index, error: outcome.error });
+        else upserted += 1;
+      });
+      return { upserted, deleted, errors };
+    });
+    recordAuditEvent(req, user, { action: "batch_attendance", entity_type: "staff_attendance", entity_id: "batch", before: { count: items.length }, after: result });
     return sendJson(res, result);
   }
 
@@ -5347,6 +5335,10 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
+    const curRecharge = num(body.cur_recharge);
+    const curGift = num(body.cur_gift);
+    if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
+    if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
     const canEditOpeningBalance = !previousDataMonth(monthKey);
     const before = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [text(body.student_name), monthKey]);
     const result = withTransaction(() => {
@@ -5369,8 +5361,8 @@ async function handleApi(req, res, url) {
         text(body.grade),
         canEditOpeningBalance ? num(body.prev_actual) : 0,
         canEditOpeningBalance ? num(body.prev_gift) : 0,
-        num(body.cur_recharge),
-        num(body.cur_gift),
+        curRecharge,
+        curGift,
         text(body.recharge_date),
         text(body.notes),
         text(body.source),
@@ -5390,6 +5382,9 @@ async function handleApi(req, res, url) {
     const lessonId = Number(body.lesson_id);
     const studentName = text(body.student_name);
     if (!lessonId || !studentName) return sendError(res, 400, "lesson_id and student_name are required");
+    const unitPrice = num(body.unit_price);
+    if (body.unit_price !== "" && body.unit_price != null && unitPrice < 0) return sendError(res, 400, "单价不能为负数");
+    if (body.unit_price !== "" && body.unit_price != null && unitPrice > 10000) return sendError(res, 400, "单价超出合理范围");
     const before = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     if (body.unit_price === "" || body.unit_price == null) {
       db.prepare("DELETE FROM fee_overrides WHERE lesson_id = ? AND student_name = ?").run(lessonId, studentName);
@@ -5400,7 +5395,7 @@ async function handleApi(req, res, url) {
         ON CONFLICT(lesson_id, student_name) DO UPDATE SET
           unit_price = excluded.unit_price,
           updated_at = CURRENT_TIMESTAMP
-      `).run(lessonId, studentName, num(body.unit_price));
+      `).run(lessonId, studentName, unitPrice);
     }
     const after = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
@@ -5462,6 +5457,7 @@ function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    setSecurityHeaders(res);
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
     return serveStatic(req, res, url);

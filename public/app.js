@@ -32,6 +32,7 @@ const ROLE_VIEWS = {
 };
 let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
+let loadGeneration = 0;
 let view = localStorage.getItem("liming:view") || "lessons";
 if (view === "staffProfiles") view = "staffPayroll";
 let activeWeek = Number(localStorage.getItem("liming:week") || 0);
@@ -541,40 +542,56 @@ function enhanceCustomDateInputs() {
 }
 
 async function load() {
+  const thisGeneration = ++loadGeneration;
   const authResult = await request("/api/auth/me");
+  if (loadGeneration !== thisGeneration) return;
   auth = { ...auth, ...authResult };
   if (!auth.user) return renderLogin();
   if (!canView(view)) view = firstAllowedView();
   months = await request("/api/months");
+  if (loadGeneration !== thisGeneration) return;
   const params = new URLSearchParams();
   if (activeMonth) params.set("month", activeMonth);
   if (includeInactive) params.set("include_inactive", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
   state = await request(`/api/bootstrap${query}`);
+  if (loadGeneration !== thisGeneration) return;
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
   ensureLessonFilterDates();
   const lessonRange = lessonLoadRange();
   if (lessonRange) {
-    state.lessons = ((await request(`/api/lessons-range?start=${encodeURIComponent(lessonRange.start)}&end=${encodeURIComponent(lessonRange.end)}`)).lessons || []);
+    const lessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(lessonRange.start)}&end=${encodeURIComponent(lessonRange.end)}`);
+    if (loadGeneration !== thisGeneration) return;
+    state.lessons = (lessonsResult.lessons || []);
     state.lesson_loaded_range = lessonRange;
   }
   const weekSpan = naturalWeekSpan(activeMonth);
   ensureMatrixRange();
   const matrixStart = matrixRange.start && (!weekSpan || matrixRange.start < weekSpan.start) ? matrixRange.start : weekSpan?.start;
   const matrixEnd = matrixRange.end && (!weekSpan || matrixRange.end > weekSpan.end) ? matrixRange.end : weekSpan?.end;
-  state.week_lessons = matrixStart && matrixEnd
-    ? ((await request(`/api/lessons-range?start=${encodeURIComponent(matrixStart)}&end=${encodeURIComponent(matrixEnd)}`)).lessons || [])
-    : state.lessons;
+  if (matrixStart && matrixEnd) {
+    const weekLessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(matrixStart)}&end=${encodeURIComponent(matrixEnd)}`);
+    if (loadGeneration !== thisGeneration) return;
+    state.week_lessons = weekLessonsResult.lessons || [];
+  } else {
+    state.week_lessons = state.lessons;
+  }
   ensureFinanceRangeDates();
   state.finance = canArea("finance") ? await request(`/api/finance-summary?${financeRangeQuery()}`) : null;
+  if (loadGeneration !== thisGeneration) return;
   state.profile_teachers = canArea("profiles") || canArea("scheduleRead") ? ((await request("/api/teachers")).teachers || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.profile_students = canArea("students") ? ((await request("/api/students")).students || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.users = canArea("users") ? ((await request("/api/users")).users || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   if (canArea("audit")) {
     await refreshAuditEvents();
+    if (loadGeneration !== thisGeneration) return;
   } else {
     auditState.events = [];
   }
@@ -583,8 +600,11 @@ async function load() {
       || state.source_workbooks[0].filename;
   }
   state.staff = canArea("staff") ? ((await request("/api/staff")).staff || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.staff_salary = canArea("staff") ? ((await request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.staff_attendance = canArea("staff") ? ((await request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   ensureExpenseFilterDates();
   const expenseParams = new URLSearchParams();
   if (expenseFilter.start) expenseParams.set("start", expenseFilter.start);
@@ -592,8 +612,10 @@ async function load() {
   if (expenseFilter.category) expenseParams.set("category", expenseFilter.category);
   if (expenseFilter.q) expenseParams.set("q", expenseFilter.q);
   state.expenses = canArea("expenses") ? ((await request(`/api/operating-expenses?${expenseParams.toString()}`)).expenses || []) : [];
+  if (loadGeneration !== thisGeneration) return;
   state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}`)
     .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }));
+  if (loadGeneration !== thisGeneration) return;
   const students = uniqueSorted([
     ...state.derived.student_summary.map((row) => row.student_name),
     ...(state.profile_students || []).map((row) => row.name),
@@ -603,7 +625,9 @@ async function load() {
   state.student_history = selectedStudent
     ? ((await request(`/api/student/${encodeURIComponent(selectedStudent)}/history`)).history || [])
     : [];
+  if (loadGeneration !== thisGeneration) return;
   await loadStudentStatement();
+  if (loadGeneration !== thisGeneration) return;
   const teachers = state.teachers.map((row) => row.name);
   if (auth.user.role === "teacher") {
     selectedTeacher = auth.user.teacher_name || teachers[0] || "";
@@ -1460,7 +1484,7 @@ function editablePriceCell(row) {
   const locked = row.price_source === "trial";
   return `
     <td class="price-cell-wrap" title="${title}">
-      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" value="${money(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
+      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" min="0" value="${money(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
       ${priceSourceBadge(row)}
     </td>
   `;
@@ -4134,19 +4158,6 @@ function renderStudentProfiles() {
   renderProfileDirectory("students");
 }
 
-function renderProfiles() {
-  renderProfileDirectory(profileTab === "students" ? "students" : "teachers");
-}
-
-function renderStaffProfiles() {
-  const rows = filteredStaffRows();
-  renderTopbar("员工档案", `${rows.length} 名员工`, historyToggleAction());
-  contentEl.innerHTML = `
-    ${staffProfilesPanelMarkup()}
-    ${staffModalMarkup()}
-  `;
-}
-
 function renderStaffAttendance() {
   const monthKey = state.settings.month_key;
   const dates = attendanceDates(monthKey);
@@ -4511,12 +4522,10 @@ function render() {
     recharges: renderRecharges,
     studentQuery: renderStudentQuery,
     audit: renderAudit,
-    profiles: renderProfiles,
     teacherProfiles: renderTeacherProfiles,
     studentProfiles: renderStudentProfiles,
     staffPayroll: renderStaffPayroll,
     staffAttendance: renderStaffAttendance,
-    staffProfiles: renderStaffProfiles,
     expenses: renderExpenses,
     pricing: renderPricing,
     userAdmin: renderUserAdmin,
@@ -4597,9 +4606,16 @@ async function applyAttendanceBulk({ weekday = "all", status = "上班", mode = 
     if (!existingTargets.length) return alert("当前筛选下没有可清空的考勤。");
     if (!confirm(`清空当前员工列表中 ${existingTargets.length} 条考勤记录？`)) return;
     try {
-      for (const item of existingTargets) {
-        await request(`/api/staff-attendance?staff_id=${encodeURIComponent(item.staffId)}&date=${encodeURIComponent(item.date)}`, { method: "DELETE" });
-      }
+      await request("/api/staff-attendance-batch", {
+        method: "POST",
+        body: {
+          items: existingTargets.map((item) => ({
+            staff_id: Number(item.staffId),
+            date: item.date,
+            _delete: true,
+          })),
+        },
+      });
       await loadWithAttendanceScroll();
     } catch (error) {
       alert(error.message);
@@ -4611,16 +4627,16 @@ async function applyAttendanceBulk({ weekday = "all", status = "上班", mode = 
   const modeLabel = mode === "overwrite" ? "覆盖" : "填充空白";
   if (!confirm(`${modeLabel} ${createTargets.length} 个考勤格为“${status}”？`)) return;
   try {
-    for (const item of createTargets) {
-      await request("/api/staff-attendance", {
-        method: "POST",
-        body: {
+    await request("/api/staff-attendance-batch", {
+      method: "POST",
+      body: {
+        items: createTargets.map((item) => ({
           staff_id: Number(item.staffId),
           attendance_date: item.date,
           status,
-        },
-      });
-    }
+        })),
+      },
+    });
     await loadWithAttendanceScroll();
   } catch (error) {
     alert(error.message);
@@ -5791,6 +5807,10 @@ function wireEvents() {
       const row = input.closest(".recharge-row");
       const summary = state.derived.student_summary.find((item) => item.student_name === row.dataset.studentName) || {};
       const payload = collectRowPayload(row, ".recharge-field");
+      if (numberValue(payload.cur_recharge) < 0 && !confirm(`充值金额为负数(${money(payload.cur_recharge)})，确认这是退费操作？`)) {
+        load();
+        return;
+      }
       refreshAfter(() => request("/api/recharges", {
         method: "POST",
         body: {

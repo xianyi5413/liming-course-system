@@ -75,6 +75,55 @@ SESSION_COOKIE_SECURE=true
 
 如果只是用公网 IP 或纯 HTTP 临时试用，必须改成 `false`，否则登录 Cookie 不会在 HTTP 下保存。
 
+## 更新脚本
+
+服务器目录应保持为 Git 仓库：
+
+```text
+/root/liming-course-system
+```
+
+之后每次上线修复可以执行：
+
+```bash
+cd /root/liming-course-system
+sh scripts/server-update.sh
+```
+
+脚本会按顺序执行：备份 SQLite、拉取 `origin/main`、重建 Docker、检查 HTTPS、检查数据库月份/课程/学生/充值数量和 owner 账号。
+
+如果服务器目录不是 Git 仓库，脚本会主动停止，避免用不确定来源覆盖线上代码。
+
+## 服务器文件清点
+
+先只读清点，不直接删除：
+
+```bash
+cd /root/liming-course-system
+sh scripts/server-inventory.sh
+```
+
+重点保留：
+
+```text
+/root/liming-course-system
+/root/liming-backups
+/etc/letsencrypt
+Docker volume: *liming_data*
+```
+
+通常可以在验证后删除：
+
+```text
+/root/liming-course-system-deploy.tar.gz
+/root/liming-db*.tar.gz
+/tmp/liming-local.sqlite
+/tmp/check.sqlite
+旧的 /root/liming-course-system.pre-* 目录
+```
+
+不要执行 `docker volume prune` 或 `docker compose down -v`，除非已经确认要销毁数据库。
+
 证书放到：
 
 ```text

@@ -30,7 +30,8 @@ __pycache__/
 # 本地部署/审计临时文件
 *.tar.gz
 check-local-db.cjs
-AUDIT-REPORT-*.md
+/AUDIT-REPORT-*.md
+/AUDIT-PHASE*.md
 _ Design System/
 _ Design System.zip
 

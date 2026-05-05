@@ -20,6 +20,20 @@ docker compose up -d --build
 ```
 
 详细服务器、域名、HTTPS 和数据库迁移说明见 [docs/deployment.md](docs/deployment.md)。
+审计核实与本轮修复记录见 [docs/audit-phase2-verification.md](docs/audit-phase2-verification.md)。
+
+服务器更新：
+
+```bash
+cd /root/liming-course-system
+sh scripts/server-update.sh
+```
+
+该脚本会自动执行“备份 SQLite -> 拉取 GitHub -> 重建 Docker -> 检查 HTTPS -> 检查数据库计数”。服务器文件清点使用：
+
+```bash
+sh scripts/server-inventory.sh
+```
 
 如果「教师薪资汇总」页 A 列是未计算出来的动态公式（导入时报无法识别教师姓名），先用 Excel/WPS 打开并保存一次；或临时用 `--teacher-order 老师1,老师2,...` 指定第 3 行起的老师顺序。
 
@@ -37,6 +51,8 @@ docker compose up -d --build
 | `DATA_DIR` | `data/` | 数据目录，Docker 中为 `/app/data` |
 | `DB_PATH` | `DATA_DIR/liming-local.sqlite` | SQLite 主库路径 |
 | `SESSION_COOKIE_SECURE` | `true` | HTTPS 正式部署保持 `true`；纯 HTTP 临时试用才改为 `false` |
+
+Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通过 Docker 数据卷挂载到容器内的 `/app/data/liming-local.sqlite`。更新代码不会覆盖数据卷，但不要执行 `docker compose down -v` 或 `docker volume prune`，除非已经确认要销毁数据库。
 
 ## 数据模型
 
