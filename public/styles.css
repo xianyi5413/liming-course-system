@@ -3319,6 +3319,15 @@ tr.risk-debt:hover td {
   text-align: inherit;
 }
 
+.recharge-table .cell-input.number,
+.pricing-table .cell-input.number,
+.student-pricing-table .cell-input.number,
+.teacher-salary-table .cell-input.number,
+.staff-table .cell-input.number,
+.expense-table .cell-input.number {
+  text-align: right;
+}
+
 .wide {
   min-width: 180px;
 }

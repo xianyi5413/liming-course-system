@@ -653,6 +653,11 @@ function money(value) {
   });
 }
 
+function moneyInput(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n.toFixed(2) : "0.00";
+}
+
 function money2(value) {
   return Number(value || 0).toLocaleString("zh-CN", {
     minimumFractionDigits: 2,
@@ -1057,10 +1062,10 @@ function rechargeSourceTag(source) {
 
 function rechargePrevCell(row, field) {
   const value = field === "prev_gift" ? row.prev_gift : row.prev_actual;
-  if (row.prev_source_month) {
-    return `<td class="readonly right" title="自动取 ${escapeHtml(formatMonthOption(row.prev_source_month))} 的月末结余">${money(value)}</td>`;
-  }
-  return `<td><input class="cell-input number recharge-field" data-field="${field}" type="number" value="${money(value)}"></td>`;
+  const title = row.prev_source_month
+    ? `自动取 ${formatMonthOption(row.prev_source_month)} 的月末结余`
+    : "源表期初结转";
+  return `<td class="readonly right" title="${escapeHtml(title)}">${money(value)}</td>`;
 }
 
 function monthDeleteModal() {
@@ -1484,7 +1489,7 @@ function editablePriceCell(row) {
   const locked = row.price_source === "trial";
   return `
     <td class="price-cell-wrap" title="${title}">
-      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" min="0" value="${money(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
+      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" min="0" value="${moneyInput(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
       ${priceSourceBadge(row)}
     </td>
   `;
@@ -1791,9 +1796,10 @@ function bindSafeTextInput(input, applyValue, renderAction, delay = 650) {
 }
 
 function inputCell({ className, id, field, value, type = "text", extra = "" }) {
+  const inputValue = type === "number" ? moneyInput(value) : (value ?? "");
   return `
     <td>
-      <input class="cell-input ${className} ${type === "number" ? "number" : ""}" data-id="${id}" data-field="${field}" type="${type}" value="${escapeHtml(value ?? "")}" ${extra}>
+      <input class="cell-input ${className} ${type === "number" ? "number" : ""}" data-id="${id}" data-field="${field}" type="${type}" value="${escapeHtml(inputValue)}" ${extra}>
     </td>
   `;
 }
@@ -3280,8 +3286,8 @@ function renderRecharges() {
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 ${rechargePrevCell(row, "prev_actual")}
                 ${rechargePrevCell(row, "prev_gift")}
-                <td><input class="cell-input number recharge-field" data-field="cur_recharge" type="number" value="${money(row.cur_recharge)}"></td>
-                <td><input class="cell-input number recharge-field" data-field="cur_gift" type="number" value="${money(row.cur_gift)}"></td>
+                <td><input class="cell-input number recharge-field" data-field="cur_recharge" type="number" value="${moneyInput(row.cur_recharge)}"></td>
+                <td><input class="cell-input number recharge-field" data-field="cur_gift" type="number" value="${moneyInput(row.cur_gift)}"></td>
                 <td><input class="cell-input recharge-field" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
@@ -3694,7 +3700,7 @@ function renderPricing() {
               <tr>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 <td class="text-cell right">${row.student_count}</td>
-                <td><input class="cell-input number pricing-field" data-id="${row.id}" data-field="unit_price" type="number" value="${money(row.unit_price)}"></td>
+                <td><input class="cell-input number pricing-field" data-id="${row.id}" data-field="unit_price" type="number" value="${moneyInput(row.unit_price)}"></td>
                 <td class="text-cell">${escapeHtml(`${row.grade}-${row.student_count}`)}</td>
                 <td><input class="cell-input pricing-field wide" data-id="${row.id}" data-field="description" value="${escapeHtml(row.description)}"></td>
               </tr>
@@ -3846,7 +3852,7 @@ function renderStudentPricing() {
               <tr>
                 <td><input class="cell-input student-pricing-field" data-id="${row.id}" data-field="student_name" value="${escapeHtml(row.student_name)}"></td>
                 <td><select class="cell-select student-pricing-field" data-id="${row.id}" data-field="subject">${options(state.lookups.subjects, row.subject)}</select></td>
-                <td><input class="cell-input number student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}" data-id="${row.id}" data-field="custom_price" type="number" min="0.01" step="0.01" value="${money(row.custom_price)}"></td>
+                <td><input class="cell-input number student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}" data-id="${row.id}" data-field="custom_price" type="number" min="0.01" step="0.01" value="${moneyInput(row.custom_price)}"></td>
                 <td class="text-cell right">
                   <button class="btn ghost pricing-impact-btn" type="button" data-name="${escapeHtml(row.student_name)}" data-subject="${escapeHtml(row.subject)}">${row.current_month_lessons || 0} 次</button>
                   <span class="muted-tip">/ 累计 ${row.total_lessons || 0}</span>
@@ -4131,9 +4137,9 @@ function staffProfilesPanelMarkup() {
                 <td><input class="cell-input staff-field" data-field="name" value="${escapeHtml(row.name)}"></td>
                 <td><input class="cell-input staff-field" data-field="role" list="staff-role-options" value="${escapeHtml(row.role)}"></td>
                 <td><select class="cell-select staff-field" data-field="pay_type">${options(["月薪", "日薪"], row.pay_type || "月薪")}</select></td>
-                <td><input class="cell-input number staff-field" data-field="base_salary" type="number" value="${money(row.base_salary)}"></td>
-                <td><input class="cell-input number staff-field" data-field="daily_rate" type="number" value="${money(row.daily_rate)}"></td>
-                <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${money(row.standard_work_days || 26)}"></td>
+                <td><input class="cell-input number staff-field" data-field="base_salary" type="number" value="${moneyInput(row.base_salary)}"></td>
+                <td><input class="cell-input number staff-field" data-field="daily_rate" type="number" value="${moneyInput(row.daily_rate)}"></td>
+                <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${moneyInput(row.standard_work_days || 26)}"></td>
                 <td><input class="cell-input staff-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
                 <td><select class="cell-select staff-field" data-field="status">${options(["在职", "暂停", "离职"], row.status || "在职")}</select></td>
                 <td><input class="cell-input staff-field" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
@@ -4316,8 +4322,8 @@ function renderStaffPayroll() {
                   <td class="text-cell">${escapeHtml(row.pay_type || "月薪")}</td>
                   <td class="text-cell right">${row.pay_type === "日薪" ? money(row.daily_rate || row.base_salary) : money(row.base_salary)}</td>
                   <td class="text-cell right" title="${row.attendance_days ? `已登记 ${row.attendance_days} 天考勤` : "未登记考勤，按整月基础工资"}">${row.attendance_days ? money(row.pay_units) : "整月"}</td>
-                  <td><input class="cell-input number staff-salary-field" data-field="bonus" type="number" value="${money(row.bonus)}" ${disabled}></td>
-                  <td><input class="cell-input number staff-salary-field" data-field="deduction" type="number" value="${money(row.deduction)}" ${disabled}></td>
+                  <td><input class="cell-input number staff-salary-field" data-field="bonus" type="number" value="${moneyInput(row.bonus)}" ${disabled}></td>
+                  <td><input class="cell-input number staff-salary-field" data-field="deduction" type="number" value="${moneyInput(row.deduction)}" ${disabled}></td>
                   <td class="text-cell right ${mismatch ? "warning-cell" : ""}" title="${mismatch ? `按基础+奖金-扣款应为 ${money(row.expected_salary)}` : ""}">${mismatch ? "⚠ " : ""}${money(row.salary_actual)}</td>
                   <td><input class="cell-input wide staff-salary-field" data-field="notes" value="${escapeHtml(row.notes === "auto" ? "" : row.notes || "")}" placeholder="${row.notes === "auto" ? "auto" : ""}" ${disabled}></td>
                   <td class="readonly"><button class="btn danger delete-staff-salary" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
@@ -4416,7 +4422,7 @@ function renderExpenses() {
               <tr class="expense-row" data-id="${row.id}">
                 <td><input class="cell-input expense-field" data-field="expense_date" type="date" value="${escapeHtml(row.expense_date)}"></td>
                 <td><input class="cell-input expense-field" data-field="category" list="expense-category-options" value="${escapeHtml(row.category)}"></td>
-                <td><input class="cell-input number expense-field" data-field="amount" type="number" value="${money(row.amount)}"></td>
+                <td><input class="cell-input number expense-field" data-field="amount" type="number" value="${moneyInput(row.amount)}"></td>
                 <td><input class="cell-input expense-field" data-field="vendor" value="${escapeHtml(row.vendor || "")}"></td>
                 <td><input class="cell-input wide expense-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
                 <td class="readonly"><button class="btn danger delete-expense" data-id="${row.id}">删除</button></td>
@@ -4452,10 +4458,10 @@ function renderTeacherSalary() {
               <tr class="teacher-adjustment-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 ${showSalary ? `<td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">${money(row.salary_total)}</td>` : ""}
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week1_transport" type="number" value="${money(row.week1_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week2_transport" type="number" value="${money(row.week2_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week3_transport" type="number" value="${money(row.week3_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week4_transport" type="number" value="${money(row.week4_transport)}"></td>
+                <td><input class="cell-input number teacher-adjustment-field" data-field="week1_transport" type="number" value="${moneyInput(row.week1_transport)}"></td>
+                <td><input class="cell-input number teacher-adjustment-field" data-field="week2_transport" type="number" value="${moneyInput(row.week2_transport)}"></td>
+                <td><input class="cell-input number teacher-adjustment-field" data-field="week3_transport" type="number" value="${moneyInput(row.week3_transport)}"></td>
+                <td><input class="cell-input number teacher-adjustment-field" data-field="week4_transport" type="number" value="${moneyInput(row.week4_transport)}"></td>
                 <td class="text-cell right">${money(showSalary ? row.total_salary : numberValue(row.week1_transport) + numberValue(row.week2_transport) + numberValue(row.week3_transport) + numberValue(row.week4_transport))}</td>
                 <td><input class="cell-input wide teacher-adjustment-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
