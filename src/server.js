@@ -1488,7 +1488,7 @@ function previousCarryOverBalances(monthKey, cache = new Map()) {
     return empty;
   }
   const rows = studentSummary(feeDetails(fromMonth), fromMonth, true, cache);
-  const balances = new Map(rows.map((row) => [row.student_name, {
+  const balances = new Map(rows.filter(studentSummaryHasSignal).map((row) => [row.student_name, {
     month_key: fromMonth,
     actual_balance: num(row.actual_balance),
     gift_balance: num(row.gift_balance),
