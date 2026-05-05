@@ -22,6 +22,21 @@ docker compose up -d --build
 详细服务器、域名、HTTPS 和数据库迁移说明见 [docs/deployment.md](docs/deployment.md)。
 审计核实与本轮修复记录见 [docs/audit-phase2-verification.md](docs/audit-phase2-verification.md)。
 
+Excel 工作簿权威同步：
+
+```bash
+# 把 data/source-workbooks/ 下的多个月一次性同步进数据库（含同步前整体备份 + 每月单独备份）
+node scripts/sync_source_workbooks.js --months=2026-02-01,2026-03-01,2026-04-01,2026-05-01
+
+# 复核源表 vs 系统：默认输出到 data/audit_source_vs_summary.md
+node scripts/audit_source_vs_summary.js
+
+# 在临时 SQLite 副本里模拟重放，不动正式库
+node scripts/audit_source_vs_summary.js --simulate-sync=2026-02-01,2026-03-01,2026-04-01,2026-05-01
+```
+
+跨月课程（例如 2026年5月.xlsx 5月总表中日期为 4-30 的行）会被识别为 `month_key=2026-04-01`，归入 4 月费用汇总。审计脚本同时按行的实际日期月份做跨工作簿去重。
+
 服务器更新：
 
 ```bash
@@ -273,6 +288,11 @@ else:
 
 | 历史问题 | 修复方式 | 相关代码 |
 | --- | --- | --- |
+| 跨月课程被丢弃或被错误归入工作簿月份 | 改为按「课程实际日期」决定 `month_key`，跨月行不再被丢弃；导入时按 (date, month_key) 精确删除，不会误覆盖其他月份 | `readXlsxTotalRowsForImport` / `importLessonsFromWorkbook` / `import_workbook.py:lesson_rows` |
+| Excel 充值表的「上月实际/赠送结转」被硬编码为 0 | 导入时读取 C/D 列写入 `prev_actual` / `prev_gift`，并标记 `source='source-workbook:*'`；含 source-workbook 充值的月份不再被自动结转覆盖 | `upsertRechargeFromWorkbook` / `monthUsesSourceWorkbookOpening` / `import_recharges` |
+| Excel「学生费用明细」手填单价不会回写到系统 | 导入工作簿时按 (lesson_id, student_name) 写入 `fee_overrides`，让历史 Excel 单价成为系统计费的权威值；`findLessonForFeeOverride` 按行实际日期月份匹配，跨月课也能命中 | `importFeeOverridesFromWorkbook` / `findLessonForFeeOverride` |
+| Excel 充值/费用核对脚本只能比对单月，无法跨工作簿 | 新增 `scripts/sync_source_workbooks.js` 一键同步多月 + 整体备份；审计脚本支持 `--simulate-sync=YYYY-MM-01,...` 临时库重放；新增「相邻 Excel 结转核对」与跨月汇总去重 | `scripts/sync_source_workbooks.js` / `scripts/audit_source_vs_summary.js` |
+| 中文姓名输入框每输入一个字符就整页刷新 | `bindSafeTextInput` 改为输入时只更新草稿，按 Enter / 失焦 / change 才提交并重渲染；增加 IME composition 状态判断，不在合成中触发 | `public/app.js` `bindSafeTextInput` |
 | 应收账款口径只统计「状态=未缴费」 | 拆出 `account_debt_receivable` + `unpaid_lesson_receivable`，`accounts_receivable` 按学生取最大值合并去重 | `financeBreakdowns` |
 | 专享价 `custom_price = 0` 会强制覆盖课时价为 0 | POST/PATCH 拒绝 `≤ 0`；存量 0 显式归为 `price_source='waiver'`，备注含「试」字时回退至标准价 | `unitPriceFor` / `/api/student-pricing` |
 | `recomputePricing` 静默删除手填覆盖 | UI 弹窗显式显示「将清除 N 条手填价格、重算 M 节课」 | `app.js` `.pricing-recompute` |

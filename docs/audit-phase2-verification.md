@@ -6,8 +6,10 @@
 
 | 问题 | 处理 |
 | --- | --- |
-| 导入按日期删除课程，可能误删其他月份 | 已把 Node 导入和 Python 导入脚本改为 `date + month_key` 双条件删除；同时导入时跳过不属于目标月份的课程行 |
-| 审计读取和导入读取行集不一致 | 已统一为只导入目标月份行，避免跨月课程绕过审计 |
+| 导入按日期删除课程，可能误删其他月份 | 已把 Node 导入和 Python 导入脚本改为 `date + month_key` 双条件删除；导入时按行实际日期分别 DELETE，不会误删其他月份；跨月行（如 2026年5月.xlsx 5月总表中日期为 4-30 的行）按真实日期写入 `month_key=2026-04-01`，不再被丢弃 |
+| 审计读取和导入读取行集不一致 | 审计端按学生×(日期+老师+时段+教室+科目) 去重跨工作簿汇总，源表与系统在 student_summary 层面 0 差异 |
+| Excel 充值「上月结转」被硬编码为 0 | 导入读取 C/D 列写入 `prev_actual` / `prev_gift`，标记 `source='source-workbook:*'`；含源表的月份不再被系统自动结转覆盖 |
+| 中文姓名输入框每打一个字就整页刷新 | `bindSafeTextInput` 改为输入只更新草稿，按 Enter / blur / change 才 commit 并重渲染；compositionstart/end 期间不触发 commit |
 | `applyAuditIssues` / `recordAuditIssues` / `ignoreAuditIssues` 无事务 | 已用 `withTransaction()` 包裹批量写入和批量应用 |
 | 审计插入课程不创建学生/教师 | 已在 `insert_lesson` patch 前补建老师与学生档案 |
 | 审计修复影响结转后不刷新 | 已收集受影响月份并在批量修复后刷新后续结转 |

@@ -1768,17 +1768,20 @@ function restoreInputFocus(selector, value) {
   });
 }
 
-function bindSafeTextInput(input, applyValue, renderAction, delay = 650) {
+function bindSafeTextInput(input, applyValue, renderAction, _delay = 650) {
   let composing = false;
   const selector = inputFocusSelector(input);
-  const commit = debounce(async () => {
+  let lastCommittedValue = input.value;
+  const commit = async (restoreFocus = false) => {
     const value = input.value;
+    applyValue(value);
+    if (value === lastCommittedValue) return;
+    lastCommittedValue = value;
     await renderAction();
-    restoreInputFocus(selector, value);
-  }, delay);
+    if (restoreFocus) restoreInputFocus(selector, value);
+  };
   const apply = () => {
     applyValue(input.value);
-    commit();
   };
   input.addEventListener("compositionstart", () => {
     composing = true;
@@ -1790,8 +1793,17 @@ function bindSafeTextInput(input, applyValue, renderAction, delay = 650) {
   input.addEventListener("input", () => {
     if (!composing) apply();
   });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !composing) {
+      event.preventDefault();
+      commit(true);
+    }
+  });
   input.addEventListener("change", () => {
-    if (!composing) apply();
+    if (!composing) commit(false);
+  });
+  input.addEventListener("blur", () => {
+    if (!composing) commit(false);
   });
 }
 

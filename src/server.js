@@ -690,10 +690,10 @@ function readXlsxTotalSheet(buffer, monthKey) {
     const nonTimeFields = ["teacher_name", "date", "lesson_status", "classroom", "grade", "subject", "student_names", "notes", "course_status"];
     if (!nonTimeFields.some((field) => row[field]) && (!row.time_slot || row.time_slot === "0" || row.time_slot === "0:00")) continue;
     if (![...nonTimeFields, "time_slot"].some((field) => row[field])) continue;
-    if (row.date && monthKeyFromDate(row.date) && monthKeyFromDate(row.date) !== monthKey) continue;
     row.lesson_status ||= "上课";
     row.course_status ||= "未上";
     row.student_count = splitStudents(row.student_names).length;
+    row.month_key = monthKeyFromDate(row.date) || monthKey;
     rows.push(row);
   }
   return { sheet_name: sheet.name, rows };
@@ -762,11 +762,9 @@ function readXlsxTotalRowsForImport(buffer, monthKey) {
     const fields = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "teacher_salary"];
     if (!fields.some((field) => field === "teacher_salary" ? row[field] : text(row[field]))) continue;
     if (!row.date) continue;
-    const rowMonthKey = monthKeyFromDate(row.date);
-    if (rowMonthKey && rowMonthKey !== monthKey) continue;
     row.lesson_status ||= "上课";
     row.course_status ||= "未上";
-    row.month_key = rowMonthKey || monthKey;
+    row.month_key = monthKeyFromDate(row.date) || monthKey;
     row.status = deriveStatus(row);
     rows.push(row);
   }
@@ -1481,6 +1479,11 @@ function feeDetails(monthKey) {
 function previousCarryOverBalances(monthKey, cache = new Map()) {
   if (!validMonthKey(monthKey)) return new Map();
   if (cache.has(monthKey)) return cache.get(monthKey);
+  if (monthUsesSourceWorkbookOpening(monthKey)) {
+    const empty = new Map();
+    cache.set(monthKey, empty);
+    return empty;
+  }
   const fromMonth = previousDataMonth(monthKey);
   if (!fromMonth) {
     const empty = new Map();
@@ -1833,6 +1836,18 @@ function hasEmptyCarryOverFields(row) {
   return row && num(row.prev_actual) === 0 && num(row.prev_gift) === 0;
 }
 
+function sourceWorkbookRechargeCount(monthKey) {
+  if (!validMonthKey(monthKey)) return 0;
+  return num(get(
+    "SELECT COUNT(*) AS count FROM recharge_records WHERE month_key = ? AND source LIKE 'source-workbook:%'",
+    [monthKey],
+  )?.count);
+}
+
+function monthUsesSourceWorkbookOpening(monthKey) {
+  return sourceWorkbookRechargeCount(monthKey) > 0;
+}
+
 function shouldRefreshCarryOver(row, force = false) {
   if (!row) return true;
   if (force) return true;
@@ -1860,6 +1875,10 @@ function carryOverCandidates(fromMonth, includeZero = false) {
 function ensureCarryOver(monthKey) {
   if (!validMonthKey(monthKey)) throw new Error("month_key must be YYYY-MM-01");
   const fromMonth = previousDataMonth(monthKey);
+  const sourceRows = sourceWorkbookRechargeCount(monthKey);
+  if (sourceRows > 0) {
+    return { month_key: monthKey, from_month: fromMonth, ensured: 0, updated: 0, skipped: sourceRows, carried_actual: 0, carried_gift: 0, source_opening: true };
+  }
   if (!fromMonth) {
     return { month_key: monthKey, from_month: "", ensured: 0, updated: 0, skipped: 0, carried_actual: 0, carried_gift: 0 };
   }
@@ -4283,6 +4302,8 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(student_name, month_key) DO UPDATE SET
       grade = COALESCE(NULLIF(excluded.grade, ''), recharge_records.grade),
+      prev_actual = excluded.prev_actual,
+      prev_gift = excluded.prev_gift,
       cur_recharge = excluded.cur_recharge,
       cur_gift = excluded.cur_gift,
       recharge_date = excluded.recharge_date,
@@ -4291,8 +4312,8 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
   `).run(
     studentName,
     grade,
-    0,
-    0,
+    num(row.values[2]),
+    num(row.values[3]),
     num(row.values[4]),
     num(row.values[5]),
     isoDateValue(row.values[6]),
@@ -4304,13 +4325,72 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
   return true;
 }
 
-function importRechargesFromWorkbook(buffer, monthKey, sourceLabel) {
+function importRechargesFromWorkbook(buffer, monthKey, sourceLabel, replace = true) {
   const sheet = readXlsxSheetRows(buffer, "充值记录");
+  if (replace && sheet.rows.length) db.prepare("DELETE FROM recharge_records WHERE month_key = ?").run(monthKey);
   let count = 0;
   for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
     if (upsertRechargeFromWorkbook(row, monthKey, sourceLabel)) count += 1;
   }
   return count;
+}
+
+function sourceFeeRowCountsForBilling(lessonStatus, courseStatus) {
+  if (lessonStatus === "试课" || lessonStatus === "考试" || lessonStatus === "请假") return false;
+  if (courseStatus === "已上" || courseStatus === "未缴费") return true;
+  return lessonStatus === "上课（未缴费）";
+}
+
+function findLessonForFeeOverride(row, monthKey) {
+  const studentName = text(row.values[0]);
+  const date = isoDateValue(row.values[2]);
+  const teacherName = text(row.values[1]);
+  const timeSlot = text(row.values[5]);
+  const classroom = text(row.values[6]);
+  const grade = text(row.values[7]);
+  const subject = text(row.values[8]);
+  if (!studentName || !date || !teacherName || !timeSlot) return null;
+  const lessonMonthKey = monthKeyFromDate(date) || monthKey;
+  const candidates = all(`
+    SELECT id, student_names
+    FROM lessons
+    WHERE month_key = ?
+      AND date = ?
+      AND teacher_name = ?
+      AND time_slot = ?
+      AND classroom = ?
+      AND grade = ?
+      AND subject = ?
+    ORDER BY sort_order, id
+  `, [lessonMonthKey, date, teacherName, timeSlot, classroom, grade, subject]);
+  return candidates.find((lesson) => splitStudents(lesson.student_names).includes(studentName)) || null;
+}
+
+function importFeeOverridesFromWorkbook(buffer, monthKey) {
+  const sheet = readXlsxSheetRows(buffer, "学生费用明细");
+  let count = 0;
+  let unmatched = 0;
+  const upsert = db.prepare(`
+    INSERT INTO fee_overrides(lesson_id, student_name, unit_price, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(lesson_id, student_name) DO UPDATE SET
+      unit_price = excluded.unit_price,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
+    const studentName = text(row.values[0]);
+    const hasFeeCell = row.values[10] != null && row.values[10] !== "";
+    if (!studentName || !hasFeeCell) continue;
+    if (!sourceFeeRowCountsForBilling(text(row.values[3]), text(row.values[11]))) continue;
+    const lesson = findLessonForFeeOverride(row, monthKey);
+    if (!lesson) {
+      unmatched += 1;
+      continue;
+    }
+    upsert.run(lesson.id, studentName, num(row.values[10]));
+    count += 1;
+  }
+  return { count, unmatched };
 }
 
 function importStudentPricingFromWorkbook(buffer) {
@@ -4399,13 +4479,16 @@ function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true) 
 function importLessonsFromWorkbook(buffer, monthKey, replace = true) {
   const { sheet_name: sheetName, rows } = readXlsxTotalRowsForImport(buffer, monthKey);
   if (replace) {
-    const dates = [...new Set(rows.map((row) => row.date).filter(Boolean))];
-    if (dates.length) {
-      const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ? AND month_key = ?");
-      for (const date of dates) deleteByDate.run(date, monthKey);
-    } else {
-      db.prepare("DELETE FROM lessons WHERE month_key = ?").run(monthKey);
+    const seen = new Set();
+    const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ? AND month_key = ?");
+    for (const row of rows) {
+      if (!row.date) continue;
+      const key = `${row.date}|${row.month_key}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deleteByDate.run(row.date, row.month_key);
     }
+    if (!seen.size) db.prepare("DELETE FROM lessons WHERE month_key = ?").run(monthKey);
   }
   let count = 0;
   for (const row of rows) {
@@ -4431,7 +4514,8 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
   const summary = withTransaction(() => {
     setSetting("month_key", resolvedMonthKey);
     const lessonResult = importLessonsFromWorkbook(buffer, resolvedMonthKey, options.append !== true);
-    const recharges = importRechargesFromWorkbook(buffer, resolvedMonthKey, sourceLabel);
+    const recharges = importRechargesFromWorkbook(buffer, resolvedMonthKey, sourceLabel, options.append !== true);
+    const feeOverrides = importFeeOverridesFromWorkbook(buffer, resolvedMonthKey);
     const studentPrices = importStudentPricingFromWorkbook(buffer);
     const standards = importPricingStandardsFromWorkbook(buffer);
     const teacherAdjustments = options.skip_teacher_adjustments
@@ -4445,6 +4529,8 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
       sheet_name: lessonResult.sheet_name,
       lessons: lessonResult.lessons,
       recharges,
+      fee_overrides: feeOverrides.count,
+      fee_override_unmatched: feeOverrides.unmatched,
       student_prices: studentPrices,
       pricing_standards: standards,
       teacher_adjustments: teacherAdjustments,

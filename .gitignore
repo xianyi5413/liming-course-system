@@ -16,6 +16,8 @@ data/source-workbooks/
 data/backups/
 data/audit_report_*
 data/audit_source_vs_summary.md
+data/audit_source_sync_simulation.md
+data/audit_extended.md
 data/.audit-temp/
 
 # 服务器日志

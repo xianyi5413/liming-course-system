@@ -185,8 +185,6 @@ def lesson_rows(ws, fallback_month_key):
         if not date:
             continue
         row_month_key = month_key_from_date(date) or fallback_month_key
-        if row_month_key != fallback_month_key:
-            continue
         rows.append({
             "row_idx": row_idx,
             "teacher": teacher,
@@ -210,9 +208,9 @@ def import_lessons(conn, wb, total_sheet_name, month_key, replace):
     ws = wb[total_sheet_name]
     rows = lesson_rows(ws, month_key)
     if replace:
-        dates = sorted({row["date"] for row in rows if row["date"]})
-        if dates:
-            conn.executemany("DELETE FROM lessons WHERE date = ? AND month_key = ?", [(date, month_key) for date in dates])
+        pairs = sorted({(row["date"], row["month_key"]) for row in rows if row["date"]})
+        if pairs:
+            conn.executemany("DELETE FROM lessons WHERE date = ? AND month_key = ?", pairs)
         else:
             conn.execute("DELETE FROM lessons WHERE month_key = ?", (month_key,))
     inserted = 0
@@ -266,10 +264,12 @@ def backup_database(conn, db_path):
     return backup_path
 
 
-def import_recharges(conn, wb, month_key):
+def import_recharges(conn, wb, month_key, replace=True):
     if "充值记录" not in wb.sheetnames:
         return 0
     ws = wb["充值记录"]
+    if replace:
+        conn.execute("DELETE FROM recharge_records WHERE month_key = ?", (month_key,))
     count = 0
     for row_idx in range(3, ws.max_row + 1):
         student_name = text(ws.cell(row_idx, 1).value)
@@ -278,8 +278,8 @@ def import_recharges(conn, wb, month_key):
         payload = (
             student_name,
             text(ws.cell(row_idx, 2).value),
-            0,
-            0,
+            number(ws.cell(row_idx, 3).value),
+            number(ws.cell(row_idx, 4).value),
             number(ws.cell(row_idx, 5).value),
             number(ws.cell(row_idx, 6).value),
             iso_date(ws.cell(row_idx, 7).value),
@@ -290,15 +290,18 @@ def import_recharges(conn, wb, month_key):
             """
             INSERT INTO recharge_records(
               student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
-              recharge_date, notes, month_key
+              recharge_date, notes, source, month_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'source-workbook', ?)
             ON CONFLICT(student_name, month_key) DO UPDATE SET
               grade = COALESCE(NULLIF(excluded.grade, ''), recharge_records.grade),
+              prev_actual = excluded.prev_actual,
+              prev_gift = excluded.prev_gift,
               cur_recharge = excluded.cur_recharge,
               cur_gift = excluded.cur_gift,
               recharge_date = excluded.recharge_date,
-              notes = excluded.notes
+              notes = excluded.notes,
+              source = excluded.source
             """,
             payload,
         )
@@ -448,7 +451,7 @@ def main():
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE settings SET value = ? WHERE key = 'month_key'", (month_key,))
         lessons, lesson_payload = import_lessons(conn, wb, total_sheet_name, month_key, replace=not args.append)
-        recharges = import_recharges(conn, wb, month_key)
+        recharges = import_recharges(conn, wb, month_key, replace=not args.append)
         student_prices = import_student_pricing(conn, wb)
         standards = import_pricing_standards(conn, wb)
         adjustment_teachers = parse_teacher_order(args.teacher_order)
