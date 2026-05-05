@@ -8,7 +8,7 @@ services:
     environment:
       PORT: 5177
       DATA_DIR: /app/data
-      SESSION_COOKIE_SECURE: "false"
+      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-true}"
     volumes:
       - liming_data:/app/data
     expose:
@@ -25,7 +25,7 @@ services:
       - "443:443"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./deploy/certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 
 volumes:
   liming_data:

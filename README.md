@@ -36,7 +36,7 @@ docker compose up -d --build
 | `PORT` | `5177` | HTTP 服务端口 |
 | `DATA_DIR` | `data/` | 数据目录，Docker 中为 `/app/data` |
 | `DB_PATH` | `DATA_DIR/liming-local.sqlite` | SQLite 主库路径 |
-| `SESSION_COOKIE_SECURE` | `false` | HTTPS 正式部署后改为 `true`；纯 HTTP 试用必须保持 `false` |
+| `SESSION_COOKIE_SECURE` | `true` | HTTPS 正式部署保持 `true`；纯 HTTP 临时试用才改为 `false` |
 
 ## 数据模型
 

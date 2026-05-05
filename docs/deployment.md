@@ -44,7 +44,36 @@ docker compose restart app
 
 ## HTTPS
 
-生产环境必须启用 HTTPS。可以用云厂商证书、宝塔/Nginx 面板，或在服务器上用 Certbot 申请 Let's Encrypt 证书。
+生产环境必须启用 HTTPS。当前 Docker/Nginx 配置默认使用 `www.limingedu.fun` 和 Let's Encrypt 证书：
+
+```text
+/etc/letsencrypt/live/www.limingedu.fun/fullchain.pem
+/etc/letsencrypt/live/www.limingedu.fun/privkey.pem
+```
+
+首次申请证书时，需要先停止占用 80 端口的 Nginx 容器：
+
+```bash
+cd /root/liming-course-system
+docker compose stop nginx
+docker run --rm -p 80:80 \
+  -v /etc/letsencrypt:/etc/letsencrypt \
+  -v /var/lib/letsencrypt:/var/lib/letsencrypt \
+  certbot/certbot certonly --standalone \
+  -d www.limingedu.fun \
+  --agree-tos \
+  --email your-email@example.com \
+  --no-eff-email
+docker compose start nginx
+```
+
+正式部署时 `.env` 中应保持：
+
+```env
+SESSION_COOKIE_SECURE=true
+```
+
+如果只是用公网 IP 或纯 HTTP 临时试用，必须改成 `false`，否则登录 Cookie 不会在 HTTP 下保存。
 
 证书放到：
 
