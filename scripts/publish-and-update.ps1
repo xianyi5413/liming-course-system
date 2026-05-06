@@ -5,6 +5,7 @@ param(
   [string]$Server = "root@121.41.197.129",
   [string]$AppDir = "/root/liming-course-system",
   [string]$Domain = "https://www.limingedu.fun",
+  [string]$KeyPath = "",
   [switch]$SkipCommit,
   [switch]$SkipChecks
 )
@@ -38,6 +39,17 @@ if (-not (Test-Path $ssh)) {
     throw "Missing OpenSSH client. Install Windows OpenSSH Client or add ssh.exe to PATH."
   }
   $ssh = $sshCommand.Source
+}
+
+$defaultKeyPath = Join-Path $PSScriptRoot "黎明教育.pem"
+$sshArgs = @()
+if ([string]::IsNullOrWhiteSpace($KeyPath) -and (Test-Path -LiteralPath $defaultKeyPath)) {
+  $KeyPath = $defaultKeyPath
+}
+if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
+  $resolvedKeyPath = (Resolve-Path -LiteralPath $KeyPath).Path
+  $sshArgs += @("-i", $resolvedKeyPath, "-o", "IdentitiesOnly=yes")
+  Write-Host "Using SSH key: $resolvedKeyPath" -ForegroundColor Cyan
 }
 
 if (-not $SkipChecks) {
@@ -77,7 +89,7 @@ Run git @("push", $Remote, $Branch)
 $remoteCommand = "cd $AppDir && DOMAIN=$Domain sh scripts/server-update.sh"
 Write-Host "==> Updating server $Server" -ForegroundColor Cyan
 Write-Host "If SSH key login is not configured, enter the server password when OpenSSH prompts." -ForegroundColor Yellow
-& $ssh $Server $remoteCommand
+& $ssh @sshArgs $Server $remoteCommand
 if ($LASTEXITCODE -ne 0) {
   throw "Server update failed with exit code $LASTEXITCODE."
 }

@@ -55,7 +55,7 @@ node scripts/audit_source_vs_summary.js --simulate-sync=2026-02-01,2026-03-01,20
 .\scripts\publish-and-update.ps1 -Message "本次更新说明"
 ```
 
-脚本会先运行基础语法检查，再提交本地变更、推送 `origin/main`，最后通过 SSH 进入服务器执行 `scripts/server-update.sh`。推荐配置 SSH 密钥免密登录；如果未配置，OpenSSH 会提示输入服务器密码。不要把服务器密码写进脚本或提交到 GitHub。
+脚本会先运行基础语法检查，再提交本地变更、推送 `origin/main`，最后通过 SSH 进入服务器执行 `scripts/server-update.sh`。如果本地存在 `scripts\黎明教育.pem`，脚本会自动用它登录；也可以用 `-KeyPath <pem路径>` 指定其他密钥。`*.pem` 已加入忽略规则，不要把服务器密码或私钥内容提交到 GitHub。
 
 也可以在服务器上手动更新：
 

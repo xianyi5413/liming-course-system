@@ -33,6 +33,8 @@ __pycache__/
 
 # 本地部署/审计临时文件
 *.tar.gz
+*.pem
+*.key
 check-local-db.cjs
 /AUDIT-REPORT-*.md
 /AUDIT-PHASE*.md

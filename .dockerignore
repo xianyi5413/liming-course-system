@@ -18,3 +18,5 @@ _ Design System.zip
 AUDIT-REPORT-*.md
 AUDIT-PHASE*.md
 *.tar.gz
+*.pem
+*.key
