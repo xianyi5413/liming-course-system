@@ -50,6 +50,15 @@ node scripts/audit_source_vs_summary.js --simulate-sync=2026-02-01,2026-03-01,20
 
 服务器更新：
 
+```powershell
+# 在本机 PowerShell 一键提交、推送 GitHub，并让服务器拉取重建
+.\scripts\publish-and-update.ps1 -Message "本次更新说明"
+```
+
+脚本会先运行基础语法检查，再提交本地变更、推送 `origin/main`，最后通过 SSH 进入服务器执行 `scripts/server-update.sh`。推荐配置 SSH 密钥免密登录；如果未配置，OpenSSH 会提示输入服务器密码。不要把服务器密码写进脚本或提交到 GitHub。
+
+也可以在服务器上手动更新：
+
 ```bash
 cd /root/liming-course-system
 sh scripts/server-update.sh
