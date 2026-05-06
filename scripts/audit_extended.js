@@ -265,13 +265,13 @@ function extendedAudit(api) {
       const sysGiftBalance = money(sys.gift_balance);
 
       const sysActualBase = money(sysPrevActual + sysCurRecharge + Math.min(sysPrevGift, 0));
-      const sysAllFunds = money(sysPrevActual + sysCurRecharge + sysPrevGift + sysCurGift);
-      const expectedActualBalance = money(sysActualBase >= sysTotalFee
-        ? sysActualBase - sysTotalFee
-        : Math.min(0, sysAllFunds - sysTotalFee));
-      const expectedGiftBalance = money(sysActualBase >= sysTotalFee
-        ? Math.max(sysPrevGift, 0) + sysCurGift
-        : Math.max(0, sysAllFunds - sysTotalFee));
+      const sysGiftBase = money(Math.max(sysPrevGift, 0) + sysCurGift);
+      const sysActualConsumption = money(Math.min(sysTotalFee, Math.max(0, sysActualBase)));
+      const sysRemainingFee = money(sysTotalFee - sysActualConsumption);
+      const sysGiftConsumption = money(Math.min(sysRemainingFee, Math.max(0, sysGiftBase)));
+      const sysUnpaidFee = money(sysRemainingFee - sysGiftConsumption);
+      const expectedActualBalance = money(sysActualBase - sysActualConsumption - sysUnpaidFee);
+      const expectedGiftBalance = money(sysGiftBase - sysGiftConsumption);
 
       const actualMatch = sameMoney(sysActualBalance, expectedActualBalance);
       const giftMatch = sameMoney(sysGiftBalance, expectedGiftBalance);

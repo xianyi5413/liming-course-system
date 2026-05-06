@@ -1569,15 +1569,13 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
     const curGift = moneyRound(recharge.cur_gift);
     const totalFee = moneyRound(row.total_fee);
     const actualBase = moneyRound(prevActual + curRecharge + Math.min(prevGift, 0));
-    const allFunds = moneyRound(prevActual + curRecharge + prevGift + curGift);
+    const giftBase = moneyRound(Math.max(prevGift, 0) + curGift);
     const actualConsumption = moneyRound(Math.min(totalFee, Math.max(0, actualBase)));
-    const giftConsumption = moneyRound(Math.min(Math.max(0, totalFee - actualConsumption), Math.max(0, prevGift) + curGift));
-    const actualBalance = moneyRound(actualBase >= totalFee
-      ? actualBase - totalFee
-      : Math.min(0, allFunds - totalFee));
-    const giftBalance = moneyRound(actualBase >= totalFee
-      ? Math.max(prevGift, 0) + curGift
-      : Math.max(0, allFunds - totalFee));
+    const remainingFee = moneyRound(totalFee - actualConsumption);
+    const giftConsumption = moneyRound(Math.min(remainingFee, Math.max(0, giftBase)));
+    const unpaidFee = moneyRound(remainingFee - giftConsumption);
+    const actualBalance = moneyRound(actualBase - actualConsumption - unpaidFee);
+    const giftBalance = moneyRound(giftBase - giftConsumption);
     return {
       ...row,
       total_fee: totalFee,
@@ -2382,8 +2380,9 @@ function financeBreakdowns(current) {
   const receivableNames = new Set([...unpaidByStudent.keys(), ...debtByStudent.keys()]);
   const accountDebtReceivable = moneyRound([...debtByStudent.values()].reduce((sum, value) => sum + value, 0));
   const unpaidLessonReceivable = moneyRound([...unpaidByStudent.values()].reduce((sum, value) => sum + value, 0));
+  const totalActualBalance = moneyRound(summaries.reduce((sum, row) => sum + Math.max(0, num(row.actual_balance)), 0));
   const balanceSheet = {
-    total_actual_balance: moneyRound(summaries.reduce((sum, row) => sum + Math.max(0, num(row.actual_balance)), 0)),
+    total_actual_balance: totalActualBalance,
     raw_actual_balance: moneyRound(summaries.reduce((sum, row) => sum + num(row.actual_balance), 0)),
     total_gift_balance: moneyRound(summaries.reduce((sum, row) => sum + num(row.gift_balance), 0)),
     account_debt_receivable: accountDebtReceivable,
@@ -2391,6 +2390,7 @@ function financeBreakdowns(current) {
     accounts_receivable: moneyRound([...receivableNames].reduce((sum, name) => (
       sum + Math.max(num(unpaidByStudent.get(name)), num(debtByStudent.get(name)))
     ), 0)),
+    burn_rate_months: current.overview_raw.revenue > 0 ? totalActualBalance / current.overview_raw.revenue : 0,
   };
 
   const teacherMap = new Map();
@@ -2417,12 +2417,21 @@ function financeBreakdowns(current) {
     const map = new Map();
     for (const row of effectiveDetails) {
       const key = row[field] || "未填写";
-      map.set(key, moneyRound((map.get(key) || 0) + detailRevenue(row)));
+      if (!map.has(key)) map.set(key, { revenue: 0, _lesson_ids: new Set(), teacher_cost: 0 });
+      const item = map.get(key);
+      item.revenue = moneyRound(item.revenue + detailRevenue(row));
+      if (!item._lesson_ids.has(row.lesson_id)) {
+        item._lesson_ids.add(row.lesson_id);
+        item.teacher_cost = moneyRound(item.teacher_cost + num(row.teacher_salary));
+      }
     }
-    return [...map.entries()].map(([name, revenue]) => ({
+    return [...map.entries()].map(([name, data]) => ({
       name,
-      revenue,
-      share: totalBreakdownRevenue ? revenue / totalBreakdownRevenue : 0,
+      revenue: data.revenue,
+      teacher_cost: data.teacher_cost,
+      gross_profit: moneyRound(data.revenue - data.teacher_cost),
+      gross_margin: data.revenue ? (data.revenue - data.teacher_cost) / data.revenue : 0,
+      share: totalBreakdownRevenue ? data.revenue / totalBreakdownRevenue : 0,
     })).sort((a, b) => b.revenue - a.revenue);
   };
 

@@ -1,5 +1,7 @@
 .git
 .claude
+.impeccable.md
+CLAUDE.md
 node_modules
 npm-debug.log*
 data/*.sqlite
@@ -14,3 +16,5 @@ scripts/__pycache__
 _ Design System
 _ Design System.zip
 AUDIT-REPORT-*.md
+AUDIT-PHASE*.md
+*.tar.gz

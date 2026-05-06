@@ -762,6 +762,7 @@ td {
   line-height: 1.5;
   vertical-align: middle;
   white-space: nowrap;
+  transition: background-color 0.15s var(--ease-out);
 }
 
 th:last-child,
@@ -1866,6 +1867,7 @@ select.control,
 .staff-attendance-table td {
   min-width: 42px;
   padding: 0;
+  text-align: center;
 }
 
 .staff-attendance-table th.sticky-name,
@@ -3198,10 +3200,49 @@ tr.risk-debt:hover td {
 }
 
 .loading {
-  padding: 28px;
+  padding: 40px;
   color: var(--muted);
   font-size: var(--text-ui);
-  line-height: var(--leading-body);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.loading::before {
+  content: "";
+  display: block;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--line);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+
+.shake {
+  animation: shake 0.4s var(--ease-out);
 }
 
 .right {
@@ -4196,4 +4237,77 @@ tr.risk-debt:hover td {
   .donut-legend {
     width: 100%;
   }
+}
+
+.toast-container {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 280px;
+  max-width: 420px;
+  padding: 14px 18px;
+  background: var(--panel-raised);
+  border-left: 4px solid var(--brand);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 32px rgba(17, 27, 37, 0.12), 0 2px 8px rgba(17, 27, 37, 0.06);
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  font-weight: 700;
+  line-height: 1.4;
+  animation: toast-slide-in 0.3s var(--ease-out) forwards;
+  pointer-events: auto;
+}
+
+.toast.toast-error {
+  border-left-color: var(--danger);
+}
+
+.toast.toast-success {
+  border-left-color: var(--success);
+}
+
+.toast.toast-hiding {
+  animation: toast-slide-out 0.25s var(--ease-out) forwards;
+}
+
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes toast-slide-out {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%) scale(0.95);
+  }
+}
+
+.mobile-menu-btn {
+  display: none;
+}
+
+.card-body:has(table), .table-container, .table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }

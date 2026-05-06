@@ -230,15 +230,13 @@ function sourceWorkbookData(api, workbook, feeTotals) {
     const curGift = money(row.cur_gift);
     const totalFee = money(row.total_fee);
     const actualBase = money(prevActual + curRecharge + Math.min(prevGift, 0));
-    const allFunds = money(prevActual + curRecharge + prevGift + curGift);
+    const giftBase = money(Math.max(prevGift, 0) + curGift);
     const actualConsumption = money(Math.min(totalFee, Math.max(0, actualBase)));
-    const giftConsumption = money(Math.min(Math.max(0, totalFee - actualConsumption), Math.max(0, prevGift) + curGift));
-    const actualBalance = money(actualBase >= totalFee
-      ? actualBase - totalFee
-      : Math.min(0, allFunds - totalFee));
-    const giftBalance = money(actualBase >= totalFee
-      ? Math.max(prevGift, 0) + curGift
-      : Math.max(0, allFunds - totalFee));
+    const remainingFee = money(totalFee - actualConsumption);
+    const giftConsumption = money(Math.min(remainingFee, Math.max(0, giftBase)));
+    const unpaidFee = money(remainingFee - giftConsumption);
+    const actualBalance = money(actualBase - actualConsumption - unpaidFee);
+    const giftBalance = money(giftBase - giftConsumption);
     summaries.set(name, {
       ...row,
       total_fee: totalFee,

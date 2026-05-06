@@ -2,7 +2,7 @@
 
 面向单店教培机构的课程、学生、充值、教师薪资和经营核对后台。`node src/server.js` 可本地单进程运行，也可以用 Docker 部署到云服务器。
 
-技术栈：Node.js 24 内置 `http` + `node:sqlite` + 单文件 `public/app.js` + 单文件 `public/styles.css`。无前端框架，无构建步骤，无第三方运行时依赖。默认数据落 `data/liming-local.sqlite`，云端部署时通过 Docker volume 挂载到 `/app/data`。
+技术栈：Node.js 24 内置 `http` + `node:sqlite` + 单文件 `public/app.js` + 单文件 `public/styles.css`。无前端框架，无构建步骤；服务端无第三方运行时依赖。前端经营图表通过 ECharts CDN 加载。默认数据落 `data/liming-local.sqlite`，云端部署时通过 Docker volume 挂载到 `/app/data`。
 
 ## 运行
 
@@ -21,6 +21,17 @@ docker compose up -d --build
 
 详细服务器、域名、HTTPS 和数据库迁移说明见 [docs/deployment.md](docs/deployment.md)。
 审计核实与本轮修复记录见 [docs/audit-phase2-verification.md](docs/audit-phase2-verification.md)。
+
+## 仓库与本地文件边界
+
+GitHub 只保留系统运行、部署和维护所必需的源码、脚本、配置模板和文档：
+
+- 应上传：`src/`、`public/`、`scripts/`、`docs/`、`deploy/`、`Dockerfile`、`docker-compose.yml`、`package.json`、`.env.example`、`.gitignore`、`.dockerignore`。
+- 不上传：`data/*.sqlite*`、`data/backups/`、`data/source-workbooks/`、`data/uploads/`、`data/.audit-temp/`、压缩包、Python 缓存、设计系统原始目录、本地 AI/设计工具上下文。
+- 本地保留但不提交：`AUDIT-REPORT-*.md`、`AUDIT-PHASE*.md`、`data/audit_*.md`。这些报告可能包含业务数据或审计线索，只用于本地排查。
+- `.impeccable.md`、`CLAUDE.md` 属于本地工具说明，不再跟随 GitHub 发布。
+
+数据库和源 Excel 是业务数据，不走 GitHub。上线代码通过 `git push` / `git pull` 更新；线上数据库通过 Docker volume 和备份脚本维护。
 
 Excel 工作簿权威同步：
 
@@ -252,23 +263,20 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ```
 actualBase       = prevActual + curRecharge + min(prevGift, 0)
-allFunds         = prevActual + curRecharge + prevGift + curGift
+giftBase         = max(prevGift, 0) + curGift
 actualConsumption = min(totalFee, max(0, actualBase))
-giftConsumption   = min(max(0, totalFee - actualConsumption), max(0, prevGift) + curGift)
-
-if actualBase ≥ totalFee:
-   actualBalance = actualBase - totalFee
-   giftBalance   = max(prevGift, 0) + curGift
-else:
-   actualBalance = min(0, allFunds - totalFee)   # 总资金不够时为负
-   giftBalance   = max(0, allFunds - totalFee)
+remainingFee      = totalFee - actualConsumption
+giftConsumption   = min(remainingFee, max(0, giftBase))
+unpaidFee         = remainingFee - giftConsumption
+actualBalance     = actualBase - actualConsumption - unpaidFee
+giftBalance       = giftBase - giftConsumption
 ```
 
 口径要点：
 
 - **现金优先消费，赠送兜底**：实际现金（含上月结转 + 本月充值）先消耗课程费用，不足部分用赠送余额顶。
 - **负的上月赠送结转会扣减实际余额**（`+ min(prevGift, 0)`），避免赠送账户成为永久"负债悬空"。
-- **总资金不足时**实际余额变负、赠送余额清零；正常情况下两边的余额拆分都保证 `actual + gift == 总充值 - 总费用`。
+- **总资金不足时**未覆盖的课费写入 `actualBalance` 负数，赠送余额清零；正常情况下两边的余额拆分都保证 `actual + gift == 总充值 - 总费用`。
 - **finance.revenue 是收入认现口径**：每条有效课时先算 `allocated_revenue = unit_price × (actual_consumption / total_fee)`、`allocated_gift_consumption = unit_price × (gift_consumption / total_fee)`，再汇总到经营概览。学生没付钱的课时不计现金收入，仅在余额上体现为负数或在 `accounts_receivable` 体现（限 `状态=未缴费` 的课）。
 - **经营拆分同口径**：老师人效、年级/科目/班型收入、Top 学生贡献均使用 `allocated_revenue`，避免顶部收入按现金认现、底部排行按课程标价的口径混用。
 

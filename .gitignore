@@ -39,6 +39,10 @@ check-local-db.cjs
 _ Design System/
 _ Design System.zip
 
+# 本地 AI/设计工具上下文（不上传 GitHub）
+.impeccable.md
+CLAUDE.md
+
 # 编辑器/系统
 .vscode/
 .idea/

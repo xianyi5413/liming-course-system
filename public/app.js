@@ -114,10 +114,37 @@ function isDarkThemeActive() {
   return Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches);
 }
 
+function ensureToastContainer() {
+  let container = document.querySelector('.toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  return container;
+}
+
+function showToast(message, type = 'success') {
+  const container = ensureToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.classList.add('toast-hiding');
+    toast.addEventListener('animationend', () => {
+      toast.remove();
+    });
+  }, 3000);
+}
+
 async function request(path, options = {}) {
   const config = {
     method: options.method || "GET",
     headers: { "content-type": "application/json" },
+    cache: "no-store",
   };
   if (options.body !== undefined) config.body = JSON.stringify(options.body);
   const res = await fetch(path, config);
@@ -1889,6 +1916,13 @@ function renderLogin(error = "") {
       await load();
     } catch (err) {
       renderLogin(err.message);
+      const loginPanel = document.querySelector(".login-panel");
+      if (loginPanel) {
+        loginPanel.classList.remove('shake');
+        // Force reflow
+        void loginPanel.offsetWidth;
+        loginPanel.classList.add('shake');
+      }
     }
   });
 }
@@ -1975,9 +2009,12 @@ function renderNav() {
 
 function renderTopbar(title, meta = "", actions = "") {
   topbarEl.innerHTML = `
-    <div class="title-block">
-      <div class="page-title">${escapeHtml(title)}</div>
-      <div class="page-meta">${escapeHtml(meta)}</div>
+    <div style="display: flex; align-items: center;">
+      <button class="mobile-menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="菜单">☰</button>
+      <div class="title-block">
+        <div class="page-title">${escapeHtml(title)}</div>
+        <div class="page-meta">${escapeHtml(meta)}</div>
+      </div>
     </div>
     <div class="toolbar">
       ${actions}
@@ -3184,16 +3221,22 @@ function renderFinance() {
     </div>
 
     <div class="finance-visual-grid">
-      <div class="band finance-chart-panel">
+      <div class="band finance-chart-panel" style="display: flex; flex-direction: column;">
         <div class="section-head">
           <div class="section-title">利润走势</div>
           <div class="section-subtitle">截至 ${escapeHtml(summary.trend_as_of || todayDate())}</div>
         </div>
-        ${financeTrendChart(summary.trend_6m || [])}
+        <div id="trendChart" style="width: 100%; height: 560px; padding: 10px 20px 0;"></div>
       </div>
       <div class="band finance-stack-panel">
-        ${compositionDonut("收入构成", incomeSegments)}
-        ${compositionDonut("成本构成", costSegments)}
+        <div class="composition-card">
+          <div class="composition-title">收入构成</div>
+          <div id="incomeChart" style="width: 100%; height: 260px;"></div>
+        </div>
+        <div class="composition-card">
+          <div class="composition-title">成本构成</div>
+          <div id="costChart" style="width: 100%; height: 260px;"></div>
+        </div>
       </div>
     </div>
 
@@ -3226,12 +3269,12 @@ function renderFinance() {
 
     <div class="finance-panels">
       <div class="band finance-panel">
-        <div class="section-head"><div class="section-title">Top 10 学生贡献</div></div>
+        <div class="section-head"><div class="section-title">各科目利润贡献度</div></div>
         <div class="table-wrap">
-          <table class="finance-table top-students-table">
-            <thead><tr><th>学生</th><th>课次</th><th>消费</th></tr></thead>
+          <table class="finance-table">
+            <thead><tr><th>科目</th><th>毛利贡献</th><th>毛利率</th><th>收入占比</th></tr></thead>
             <tbody>
-              ${summary.top_lists.top_students.map((row) => `<tr><td class="text-cell">${escapeHtml(row.student_name)}</td><td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">¥${money2(row.total_fee)}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">暂无数据</td></tr>`}
+              ${(summary.breakdowns?.by_subject || []).slice(0, 8).map((row) => `<tr><td class="text-cell">${escapeHtml(row.name)}</td><td class="text-cell right">¥${money2(row.gross_profit)}</td><td class="text-cell right">${percent(row.gross_margin)}</td><td class="text-cell right">${percent(row.share)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无数据</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -3260,6 +3303,43 @@ function renderFinance() {
       </div>
     </div>
   `;
+
+  // Initialize ECharts
+  if (window.echarts) {
+    const trendData = (summary.trend_6m || []).slice(-12);
+    if (trendData.length && document.getElementById('trendChart')) {
+      const trendChart = echarts.init(document.getElementById('trendChart'));
+      trendChart.setOption({
+        tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+        legend: { data: ['毛利', '毛利率'], bottom: 0 },
+        grid: { left: '3%', right: '4%', bottom: '15%', top: '5%', containLabel: true },
+        xAxis: [{ type: 'category', data: trendData.map(d => `${String(d.month || "").slice(5, 7)}月`), axisPointer: { type: 'shadow' } }],
+        yAxis: [
+          { type: 'value', name: '毛利 (¥)', alignTicks: true },
+          { type: 'value', name: '毛利率', alignTicks: true, min: 0, max: 1, axisLabel: { formatter: value => `${(value * 100).toFixed(0)}%` } }
+        ],
+        series: [
+          { name: '毛利', type: 'line', smooth: true, data: trendData.map(d => numberValue(d.gross_profit)), itemStyle: { color: '#2d9e8f' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(45,158,143,0.3)' }, { offset: 1, color: 'rgba(45,158,143,0)' }]) } },
+          { name: '毛利率', type: 'line', yAxisIndex: 1, smooth: true, data: trendData.map(d => numberValue(d.gross_margin)), itemStyle: { color: '#175cd3' } }
+        ]
+      });
+      window.addEventListener('resize', () => trendChart.resize());
+    }
+
+    const renderDonut = (id, data) => {
+      const el = document.getElementById(id);
+      if (!el || !data.reduce((acc, v) => acc + v.value, 0)) return;
+      const chart = echarts.init(el);
+      chart.setOption({
+        tooltip: { trigger: 'item', formatter: '{b}: ¥{c} ({d}%)' },
+        legend: { top: 'bottom', icon: 'circle', itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 12 } },
+        series: [{ type: 'pie', radius: ['45%', '70%'], avoidLabelOverlap: true, label: { show: false, position: 'center' }, emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } }, labelLine: { show: false }, data: data.map(d => ({ name: d.label, value: d.value, itemStyle: { color: d.color } })) }]
+      });
+      window.addEventListener('resize', () => chart.resize());
+    };
+    renderDonut('incomeChart', incomeSegments.map(s => ({ ...s, color: s.label === '现金消费' ? '#087443' : '#175cd3' })));
+    renderDonut('costChart', costSegments.map(s => ({ ...s, color: s.label === '课时费' ? '#175cd3' : s.label === '员工工资' ? '#b54708' : s.label === '日常开销' ? '#b42318' : '#2d9e8f' })));
+  }
 }
 
 function renderRecharges() {
@@ -3372,29 +3452,31 @@ function studentQueryControls(studentNames) {
 
 function studentQueryComparisonPanel(report) {
   if (!selectedStudent || !report?.summary) return "";
+  const summary = report.summary;
+  const netCash = Number(summary.cur_recharge) - Number(summary.total_fee);
   return `
     <div class="band student-comparison-panel">
       <div class="section-head">
         <div>
-          <div class="section-title">期间汇总与历史对比</div>
+          <div class="section-title">期间消费情况</div>
           <div class="section-subtitle">${escapeHtml(studentStatementRangeLabel(report))}</div>
         </div>
       </div>
-      <div class="student-comparison-grid">
-        <div class="student-history-block">
-          <div class="section-title small-title">期间汇总</div>
-          <div class="table-wrap">
-            <table class="student-history-table">
-              <thead><tr><th>月份</th><th>有效课次</th><th>课程费用</th><th>现金充值</th><th>赠送学费</th></tr></thead>
-              <tbody>
-                ${(report.month_rows || []).map((row) => `
-                  <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">${money(row.total_fee)}</td><td class="text-cell right">${money(row.cur_recharge)}</td><td class="text-cell right">${money(row.cur_gift)}</td></tr>
-                `).join("") || `<tr><td colspan="5" class="empty">暂无期间汇总</td></tr>`}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        ${studentHistoryPanel()}
+      <div class="query-head" style="margin-bottom: var(--space-4);">
+        <div class="metric"><div class="metric-label">期间现金充值</div><div class="metric-value">¥${money2(summary.cur_recharge)}</div></div>
+        <div class="metric"><div class="metric-label">期间赠送充值</div><div class="metric-value">¥${money2(summary.cur_gift)}</div></div>
+        <div class="metric"><div class="metric-label">期间消费课费</div><div class="metric-value">¥${money2(summary.total_fee)}</div></div>
+        <div class="metric"><div class="metric-label">期间净现金流变动</div><div class="metric-value ${netCash < 0 ? "negative" : ""}">${netCash > 0 ? "+" : ""}¥${money2(netCash)}</div></div>
+      </div>
+      <div class="table-wrap">
+        <table class="student-history-table">
+          <thead><tr><th>月份</th><th>有效课次</th><th>当月课费</th><th>现金充值</th><th>赠送充值</th></tr></thead>
+          <tbody>
+            ${(report.month_rows || []).map((row) => `
+              <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">¥${money2(row.total_fee)}</td><td class="text-cell right">¥${money2(row.cur_recharge)}</td><td class="text-cell right">¥${money2(row.cur_gift)}</td></tr>
+            `).join("") || `<tr><td colspan="5" class="empty">暂无期间明细</td></tr>`}
+          </tbody>
+        </table>
       </div>
     </div>
   `;
@@ -4251,7 +4333,7 @@ function renderStaffAttendance() {
                       return `
                         <td class="attendance-cell ${date.weekend ? "weekend" : ""}">
                           <select class="attendance-select status-${escapeHtml(status || "blank")}" data-staff-id="${staff.id}" data-date="${date.value}" title="${escapeHtml(item?.reason || item?.notes || "")}">
-                            <option value="">-</option>
+                            <option value=""></option>
                             ${attendanceStatusOptions(status)}
                           </select>
                           <span class="attendance-label">${escapeHtml(meta.label)}</span>
