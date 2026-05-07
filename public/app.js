@@ -3202,15 +3202,24 @@ function renderFinance() {
   ];
   const op = summary.overview.operating_cost || {};
   const incomeSegments = [
-    { label: "现金消费", value: summary.overview.revenue.current, color: "var(--success)" },
-    { label: "赠送消费", value: summary.overview.gift_consumption.current, color: "var(--accent)" },
+    { label: "现金消费", value: summary.overview.revenue.current, color: "#10b981" },
+    { label: "赠送消费", value: summary.overview.gift_consumption.current, color: "#60a5fa" },
   ];
   const costSegments = [
-    { label: "课时费", value: summary.overview.teacher_cost.current, color: "var(--info)" },
-    { label: "员工工资", value: op.staff_salary_total, color: "var(--warning)" },
-    { label: "日常开销", value: op.operating_expense_total, color: "var(--danger)" },
-    { label: "交通补贴", value: summary.overview.transport_cost.current, color: "var(--brand)" },
+    { label: "课时费", value: summary.overview.teacher_cost.current, color: "#38bdf8" },
+    { label: "员工工资", value: op.staff_salary_total, color: "#fbbf24" },
+    { label: "日常开销", value: op.operating_expense_total, color: "#fb7185" },
+    { label: "交通补贴", value: summary.overview.transport_cost.current, color: "#a78bfa" },
   ];
+  const subjectColors = ["#14b8a6", "#38bdf8", "#a78bfa", "#fbbf24", "#fb7185", "#34d399", "#60a5fa", "#f472b6", "#22c55e"];
+  const subjectRows = summary.breakdowns?.by_subject || [];
+  const subjectSegments = subjectRows.slice(0, 8).map((row, index) => ({
+    label: row.name,
+    value: Math.max(0, numberValue(row.gross_profit)),
+    color: subjectColors[index % subjectColors.length],
+  }));
+  const otherSubjectProfit = subjectRows.slice(8).reduce((sum, row) => sum + Math.max(0, numberValue(row.gross_profit)), 0);
+  if (otherSubjectProfit > 0) subjectSegments.push({ label: "其他", value: otherSubjectProfit, color: "#94a3b8" });
   const presets = [
     ["month", "本月"],
     ["prev-month", "上月"],
@@ -3255,31 +3264,30 @@ function renderFinance() {
     </div>
 
     <div class="finance-visual-grid">
-      <div class="band finance-chart-panel" style="display: flex; flex-direction: column;">
+      <div class="band finance-chart-panel">
         <div class="section-head">
           <div class="section-title">利润走势</div>
           <div class="section-subtitle">截至 ${escapeHtml(summary.trend_as_of || todayDate())}</div>
         </div>
         <div id="trendChart" class="finance-trend-chart"></div>
       </div>
-      <div class="band finance-stack-panel">
-        <div class="composition-card">
-          <div class="composition-title">收入构成</div>
-          <div id="incomeChart" style="width: 100%; height: 260px;"></div>
-        </div>
-        <div class="composition-card">
-          <div class="composition-title">成本构成</div>
-          <div id="costChart" style="width: 100%; height: 260px;"></div>
-        </div>
+      <div class="band finance-composition-panel">
+        ${compositionDonut("收入构成", incomeSegments)}
+        ${compositionDonut("成本构成", costSegments)}
       </div>
     </div>
 
-    <div class="band finance-chart-panel grade-trend-panel">
-      <div class="section-head">
-        <div class="section-title">各年级消费金额走势</div>
-        <div class="section-subtitle">按实际消费收入统计 · ${gradeOrder.join(" / ")}</div>
+    <div class="finance-grade-grid">
+      <div class="band finance-chart-panel grade-trend-panel">
+        <div class="section-head">
+          <div class="section-title">各年级消费金额走势</div>
+          <div class="section-subtitle">按实际消费收入统计 · ${gradeOrder.join(" / ")}</div>
+        </div>
+        <div id="gradeTrendChart" class="finance-trend-chart grade-trend-chart"></div>
       </div>
-      <div id="gradeTrendChart" class="finance-trend-chart grade-trend-chart"></div>
+      <div class="band finance-subject-donut-panel">
+        ${compositionDonut("各科目利润贡献度", subjectSegments)}
+      </div>
     </div>
 
     <div class="finance-two">
@@ -3309,18 +3317,7 @@ function renderFinance() {
       </div>
     </div>
 
-    <div class="finance-panels">
-      <div class="band finance-panel">
-        <div class="section-head"><div class="section-title">各科目利润贡献度</div></div>
-        <div class="table-wrap">
-          <table class="finance-table">
-            <thead><tr><th>科目</th><th>毛利贡献</th><th>毛利率</th><th>收入占比</th></tr></thead>
-            <tbody>
-              ${(summary.breakdowns?.by_subject || []).slice(0, 8).map((row) => `<tr><td class="text-cell">${escapeHtml(row.name)}</td><td class="text-cell right">¥${money2(row.gross_profit)}</td><td class="text-cell right">${percent(row.gross_margin)}</td><td class="text-cell right">${percent(row.share)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无数据</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>
+    <div class="finance-panels finance-panels-two">
       <div class="band finance-panel">
         <div class="section-head"><div class="section-title">老师人效排行</div></div>
         <div class="table-wrap">
@@ -3404,19 +3401,6 @@ function renderFinance() {
       window.addEventListener('resize', () => gradeTrendChart.resize());
     }
 
-    const renderDonut = (id, data) => {
-      const el = document.getElementById(id);
-      if (!el || !data.reduce((acc, v) => acc + v.value, 0)) return;
-      const chart = echarts.init(el);
-      chart.setOption({
-        tooltip: { trigger: 'item', formatter: '{b}: ¥{c} ({d}%)' },
-        legend: { top: 'bottom', icon: 'circle', itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 12 } },
-        series: [{ type: 'pie', radius: ['45%', '70%'], avoidLabelOverlap: true, label: { show: false, position: 'center' }, emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } }, labelLine: { show: false }, data: data.map(d => ({ name: d.label, value: d.value, itemStyle: { color: d.color } })) }]
-      });
-      window.addEventListener('resize', () => chart.resize());
-    };
-    renderDonut('incomeChart', incomeSegments.map(s => ({ ...s, color: s.label === '现金消费' ? '#087443' : '#175cd3' })));
-    renderDonut('costChart', costSegments.map(s => ({ ...s, color: s.label === '课时费' ? '#175cd3' : s.label === '员工工资' ? '#b54708' : s.label === '日常开销' ? '#b42318' : '#2d9e8f' })));
   }
 }
 
