@@ -3351,12 +3351,12 @@ function renderFinance() {
       const trendChart = echarts.init(trendEl);
       trendChart.setOption({
         tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-        legend: { data: ['毛利', '毛利率'], bottom: 0 },
-        grid: { left: '3%', right: '4%', bottom: '15%', top: '5%', containLabel: true },
+        legend: { data: ['毛利', '毛利率'], bottom: 6 },
+        grid: { left: 44, right: 54, bottom: 58, top: 48, containLabel: true },
         xAxis: [{ type: 'category', data: trendData.map(d => `${String(d.month || "").slice(5, 7)}月`), axisPointer: { type: 'shadow' } }],
         yAxis: [
-          { type: 'value', name: '毛利 (¥)', alignTicks: true },
-          { type: 'value', name: '毛利率', alignTicks: true, min: 0, max: 1, axisLabel: { formatter: value => `${(value * 100).toFixed(0)}%` } }
+          { type: 'value', name: '毛利 (¥)', alignTicks: true, nameGap: 18 },
+          { type: 'value', name: '毛利率', alignTicks: true, nameGap: 18, min: 0, max: 1, axisLabel: { formatter: value => `${(value * 100).toFixed(0)}%` } }
         ],
         series: [
           { name: '毛利', type: 'line', smooth: true, data: trendData.map(d => numberValue(d.gross_profit)), itemStyle: { color: '#2d9e8f' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(45,158,143,0.3)' }, { offset: 1, color: 'rgba(45,158,143,0)' }]) } },
@@ -3378,12 +3378,12 @@ function renderFinance() {
         },
         legend: {
           data: [...gradeOrder],
-          bottom: 0,
+          bottom: 6,
           icon: "circle",
           itemWidth: 10,
           itemHeight: 10,
         },
-        grid: { left: "3%", right: "3%", top: 20, bottom: 58, containLabel: true },
+        grid: { left: 44, right: 24, top: 50, bottom: 62, containLabel: true },
         xAxis: [{
           type: "category",
           boundaryGap: false,
@@ -3393,6 +3393,7 @@ function renderFinance() {
         yAxis: [{
           type: "value",
           name: "消费金额 (¥)",
+          nameGap: 18,
           axisLabel: { formatter: (value) => compactMoney(value) },
           splitLine: { lineStyle: { type: "dashed" } },
         }],

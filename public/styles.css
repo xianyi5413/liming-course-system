@@ -2814,7 +2814,7 @@ select.control {
 
 .finance-visual-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.75fr);
+  grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr);
   gap: var(--space-5);
   margin-bottom: var(--space-5);
   align-items: start;
@@ -2869,10 +2869,10 @@ select.control {
 
 .finance-grade-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.36fr) minmax(320px, 0.64fr);
+  grid-template-columns: minmax(0, 1.24fr) minmax(360px, 0.76fr);
   gap: var(--space-5);
   margin-bottom: var(--space-5);
-  align-items: stretch;
+  align-items: start;
 }
 
 .finance-subject-donut-panel {
@@ -2882,7 +2882,7 @@ select.control {
 }
 
 .finance-subject-donut-panel .composition-card {
-  flex: 1;
+  flex: 0 1 auto;
 }
 
 .finance-subject-donut-panel .composition-body {
@@ -2934,12 +2934,12 @@ select.control {
 
 .finance-trend-chart {
   width: 100%;
-  min-height: 380px;
-  padding: 10px 20px 0;
+  min-height: 340px;
+  padding: 0 var(--space-3);
 }
 
 .grade-trend-chart {
-  min-height: 420px;
+  min-height: 360px;
 }
 .donut-svg {
   width: 132px;
