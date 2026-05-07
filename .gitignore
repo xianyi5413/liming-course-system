@@ -40,6 +40,7 @@ __pycache__/
 *.tar.gz
 *.pem
 *.key
+*.fixed.js
 check-local-db.cjs
 /AUDIT-REPORT-*.md
 /AUDIT-PHASE*.md

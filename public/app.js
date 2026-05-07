@@ -13,6 +13,14 @@ const navGroups = [
 ];
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
+const gradeTrendColors = {
+  "初一": "#10b981",
+  "初二": "#06b6d4",
+  "初三": "#3b82f6",
+  "高一": "#8b5cf6",
+  "高二": "#f59e0b",
+  "高三": "#f43f5e",
+};
 const LESSON_FILTER_KEY = "liming:lesson-filter";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
@@ -3125,6 +3133,32 @@ function financeTrendChart(rows) {
   `;
 }
 
+function gradeTrendSeries(trendData) {
+  return gradeOrder.map((grade) => ({
+    name: grade,
+    type: "line",
+    smooth: true,
+    showSymbol: true,
+    symbolSize: 5,
+    lineStyle: {
+      width: 2.4,
+      shadowBlur: 8,
+      shadowColor: `${gradeTrendColors[grade]}2a`,
+    },
+    itemStyle: { color: gradeTrendColors[grade] },
+    emphasis: { focus: "series" },
+    areaStyle: {
+      opacity: 0.07,
+      color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+        { offset: 0, color: `${gradeTrendColors[grade]}38` },
+        { offset: 0.62, color: `${gradeTrendColors[grade]}12` },
+        { offset: 1, color: `${gradeTrendColors[grade]}00` },
+      ]),
+    },
+    data: trendData.map((row) => numberValue(row.grade_revenue?.[grade])),
+  }));
+}
+
 function renderFinance() {
   const summary = state.finance;
   const balanceSheet = summary.balance_sheet || {};
@@ -3226,7 +3260,7 @@ function renderFinance() {
           <div class="section-title">利润走势</div>
           <div class="section-subtitle">截至 ${escapeHtml(summary.trend_as_of || todayDate())}</div>
         </div>
-        <div id="trendChart" style="width: 100%; height: 560px; padding: 10px 20px 0;"></div>
+        <div id="trendChart" class="finance-trend-chart"></div>
       </div>
       <div class="band finance-stack-panel">
         <div class="composition-card">
@@ -3238,6 +3272,14 @@ function renderFinance() {
           <div id="costChart" style="width: 100%; height: 260px;"></div>
         </div>
       </div>
+    </div>
+
+    <div class="band finance-chart-panel grade-trend-panel">
+      <div class="section-head">
+        <div class="section-title">各年级消费金额走势</div>
+        <div class="section-subtitle">按实际消费收入统计 · ${gradeOrder.join(" / ")}</div>
+      </div>
+      <div id="gradeTrendChart" class="finance-trend-chart grade-trend-chart"></div>
     </div>
 
     <div class="finance-two">
@@ -3307,8 +3349,9 @@ function renderFinance() {
   // Initialize ECharts
   if (window.echarts) {
     const trendData = (summary.trend_6m || []).slice(-12);
-    if (trendData.length && document.getElementById('trendChart')) {
-      const trendChart = echarts.init(document.getElementById('trendChart'));
+    const trendEl = document.getElementById('trendChart');
+    if (trendData.length && trendEl) {
+      const trendChart = echarts.init(trendEl);
       trendChart.setOption({
         tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
         legend: { data: ['毛利', '毛利率'], bottom: 0 },
@@ -3324,6 +3367,41 @@ function renderFinance() {
         ]
       });
       window.addEventListener('resize', () => trendChart.resize());
+    }
+
+    const gradeTrendEl = document.getElementById('gradeTrendChart');
+    if (trendData.length && gradeTrendEl) {
+      const gradeTrendChart = echarts.init(gradeTrendEl);
+      gradeTrendChart.setOption({
+        color: gradeOrder.map((grade) => gradeTrendColors[grade]),
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "line" },
+          valueFormatter: (value) => `¥${money2(value)}`,
+        },
+        legend: {
+          data: [...gradeOrder],
+          bottom: 0,
+          icon: "circle",
+          itemWidth: 10,
+          itemHeight: 10,
+        },
+        grid: { left: "3%", right: "3%", top: 20, bottom: 58, containLabel: true },
+        xAxis: [{
+          type: "category",
+          boundaryGap: false,
+          data: trendData.map((row) => `${String(row.month || "").slice(5, 7)}月`),
+          axisPointer: { type: "line" },
+        }],
+        yAxis: [{
+          type: "value",
+          name: "消费金额 (¥)",
+          axisLabel: { formatter: (value) => compactMoney(value) },
+          splitLine: { lineStyle: { type: "dashed" } },
+        }],
+        series: gradeTrendSeries(trendData),
+      });
+      window.addEventListener('resize', () => gradeTrendChart.resize());
     }
 
     const renderDonut = (id, data) => {

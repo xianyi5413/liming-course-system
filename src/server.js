@@ -2537,6 +2537,14 @@ function financeTrend6m(asOfDateKey = todayKey()) {
     const totalCost = num(base.overview_raw.teacher_cost)
       + num(base.overview_raw.transport_cost)
       + num(base.overview_raw.operating_cost?.total);
+
+    const gradeRevenue = {};
+    for (const detail of base.effective_details) {
+      const grade = detail.grade || "未填写";
+      const rev = moneyRound(detail.allocated_revenue ?? num(detail.unit_price));
+      gradeRevenue[grade] = moneyRound((gradeRevenue[grade] || 0) + rev);
+    }
+
     rows.push({
       month,
       range,
@@ -2544,6 +2552,7 @@ function financeTrend6m(asOfDateKey = todayKey()) {
       total_cost: totalCost,
       gross_profit: base.overview_raw.gross_profit,
       gross_margin: base.overview_raw.gross_margin,
+      grade_revenue: gradeRevenue,
     });
   }
   return rows;
@@ -5566,4 +5575,3 @@ server.listen(port, () => {
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
 });
-
