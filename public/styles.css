@@ -2812,7 +2812,8 @@ select.control {
   background: var(--brand-soft);
 }
 
-.finance-visual-grid {
+.finance-visual-grid,
+.finance-grade-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.22fr) minmax(360px, 0.78fr);
   gap: var(--space-5);
@@ -2865,14 +2866,6 @@ select.control {
 
 .finance-composition-panel .composition-card {
   min-height: 218px;
-}
-
-.finance-grade-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.24fr) minmax(360px, 0.76fr);
-  gap: var(--space-5);
-  margin-bottom: var(--space-5);
-  align-items: start;
 }
 
 .finance-subject-donut-panel {
