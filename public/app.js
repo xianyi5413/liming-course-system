@@ -4784,6 +4784,7 @@ function renderCourseNotice() {
   const shouldLoad = !courseNoticeState.busy && courseNoticeState.loadedQuery !== courseNoticeQuery();
   if (shouldLoad) setTimeout(() => loadCourseNoticeData(), 0);
   const objects = data?.send_objects || [];
+  const completedObjects = objects.filter((item) => item.completed).length;
   contentEl.innerHTML = `
     <div class="filter-bar notice-filter-bar">
       <div class="filter-controls">
@@ -4807,7 +4808,7 @@ function renderCourseNotice() {
         <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
       </div>
       <div class="filter-summary">
-        <span>发送对象 <b>${objects.length}</b></span>
+        <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
       </div>
     </div>
     ${courseNoticeState.error ? `<div class="empty">${escapeHtml(courseNoticeState.error)}</div>` : ""}
@@ -4898,9 +4899,10 @@ function courseNoticeCanvas(item) {
   const font = "16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
   const headFont = "700 16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
   ctx.font = font;
-  const paddingX = 16;
-  const rowHeight = 42;
-  const titleHeight = 54;
+  const paddingX = 18;
+  const rowHeight = 44;
+  const outerPadding = 30;
+  const titleHeight = 58;
   const colWidths = columns.map(([key, label]) => {
     const maxText = Math.max(
       ctx.measureText(label).width,
@@ -4908,8 +4910,15 @@ function courseNoticeCanvas(item) {
     );
     return Math.ceil(Math.max(82, maxText + paddingX * 2));
   });
-  const width = Math.max(720, colWidths.reduce((sum, value) => sum + value, 0));
-  const height = titleHeight + rowHeight * (rows.length + 1) + 2;
+  const minimumTableWidth = 760;
+  const naturalTableWidth = colWidths.reduce((sum, value) => sum + value, 0);
+  if (naturalTableWidth < minimumTableWidth) colWidths[colWidths.length - 1] += minimumTableWidth - naturalTableWidth;
+  const tableWidth = colWidths.reduce((sum, value) => sum + value, 0);
+  const tableHeight = rowHeight * (rows.length + 1);
+  const width = tableWidth + outerPadding * 2;
+  const height = titleHeight + tableHeight + outerPadding * 2;
+  const tableX = outerPadding;
+  const tableY = outerPadding + titleHeight;
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = width * ratio;
   canvas.height = height * ratio;
@@ -4918,32 +4927,43 @@ function courseNoticeCanvas(item) {
   ctx.scale(ratio, ratio);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "#fbfdfc";
+  ctx.fillRect(outerPadding / 2, outerPadding / 2, width - outerPadding, height - outerPadding);
   ctx.fillStyle = "#102a2a";
   ctx.font = "700 20px Microsoft YaHei, PingFang SC, Arial, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("课程通知", width / 2, 34);
+  ctx.fillText("课程通知", width / 2, outerPadding + 26);
   ctx.textAlign = "left";
-  let x = 0;
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 42, 42, 0.08)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(tableX, tableY, tableWidth, tableHeight);
+  ctx.restore();
+  ctx.strokeStyle = "#d9e9e8";
+  ctx.strokeRect(tableX, tableY, tableWidth, tableHeight);
+  let x = tableX;
   ctx.font = headFont;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   columns.forEach(([, label], index) => {
-    ctx.fillStyle = "#edf7f6";
-    ctx.fillRect(x, titleHeight, colWidths[index], rowHeight);
-    ctx.strokeStyle = "#cfe0df";
-    ctx.strokeRect(x, titleHeight, colWidths[index], rowHeight);
+    ctx.fillStyle = "#eef8f6";
+    ctx.fillRect(x, tableY, colWidths[index], rowHeight);
+    ctx.strokeStyle = "#d9e9e8";
+    ctx.strokeRect(x, tableY, colWidths[index], rowHeight);
     ctx.fillStyle = "#24524f";
-    ctx.fillText(label, x + colWidths[index] / 2, titleHeight + rowHeight / 2);
+    ctx.fillText(label, x + colWidths[index] / 2, tableY + rowHeight / 2);
     x += colWidths[index];
   });
   ctx.font = font;
   rows.forEach((row, rowIndex) => {
-    x = 0;
-    const y = titleHeight + rowHeight * (rowIndex + 1);
+    x = tableX;
+    const y = tableY + rowHeight * (rowIndex + 1);
     columns.forEach(([key], index) => {
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = rowIndex % 2 ? "#fbfdfc" : "#ffffff";
       ctx.fillRect(x, y, colWidths[index], rowHeight);
-      ctx.strokeStyle = "#e2ecec";
+      ctx.strokeStyle = "#e7f0ef";
       ctx.strokeRect(x, y, colWidths[index], rowHeight);
       ctx.fillStyle = "#17212b";
       const value = String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""));

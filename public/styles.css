@@ -4460,6 +4460,7 @@ tr.risk-debt:hover td {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   background: #fff;
+  padding: 12px;
 }
 
 .notice-shot-table {
@@ -4468,6 +4469,8 @@ tr.risk-debt:hover td {
   table-layout: auto;
   background: #fff;
   color: #17212b;
+  border: 1px solid #d9e9e8;
+  box-shadow: 0 4px 14px rgba(16, 42, 42, 0.06);
 }
 
 .notice-shot-table th,
@@ -4482,7 +4485,7 @@ tr.risk-debt:hover td {
 
 .notice-shot-table th {
   position: static;
-  background: #edf7f6;
+  background: #eef8f6;
   color: #24524f;
 }
 
