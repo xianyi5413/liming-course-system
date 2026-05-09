@@ -42,6 +42,7 @@ let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
 let view = localStorage.getItem("liming:view") || "lessons";
+let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
 let activeWeek = Number(localStorage.getItem("liming:week") || 0);
 let matrixRange = readMatrixRange();
@@ -713,17 +714,19 @@ function todayDate() {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+function currentWeekRange() {
+  const today = new Date(`${todayDate()}T00:00:00`);
+  const day = today.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() + mondayOffset);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return { start: dateKey(monday), end: dateKey(sunday) };
+}
+
 function readCourseNoticeFilter() {
-  try {
-    return {
-      start: todayDate(),
-      end: addDays(todayDate(), 6),
-      onlyTeaching: true,
-      ...JSON.parse(localStorage.getItem(COURSE_NOTICE_FILTER_KEY) || "{}"),
-    };
-  } catch {
-    return { start: todayDate(), end: addDays(todayDate(), 6), onlyTeaching: true };
-  }
+  return { ...currentWeekRange(), onlyTeaching: true };
 }
 
 function saveCourseNoticeFilter() {
@@ -739,9 +742,16 @@ function courseNoticeQuery() {
 }
 
 function ensureCourseNoticeFilterDates() {
-  if (!isDateValue(courseNoticeFilter.start)) courseNoticeFilter.start = todayDate();
-  if (!isDateValue(courseNoticeFilter.end)) courseNoticeFilter.end = addDays(courseNoticeFilter.start, 6);
+  const fallback = currentWeekRange();
+  if (!isDateValue(courseNoticeFilter.start)) courseNoticeFilter.start = fallback.start;
+  if (!isDateValue(courseNoticeFilter.end)) courseNoticeFilter.end = fallback.end;
   if (courseNoticeFilter.start > courseNoticeFilter.end) courseNoticeFilter.end = courseNoticeFilter.start;
+}
+
+function resetCourseNoticeFilterToThisWeek() {
+  courseNoticeFilter = readCourseNoticeFilter();
+  saveCourseNoticeFilter();
+  courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
 }
 
 async function loadCourseNoticeData(force = false) {
@@ -4837,7 +4847,7 @@ function renderCourseNotice() {
                 <button class="btn primary notice-copy-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">${item.completed ? "已复制截图" : "复制课程截图"}</button>
                 <button class="btn notice-download-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">下载课程截图</button>
               </div>
-              <div class="notice-state">${item.completed ? "√ 该发送对象已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
+              <div class="notice-state">${item.completed ? "✓ 该发送对象已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
             </div>
           </div>
         `).join("") || `<div class="empty">当前日期范围暂无可发送课程</div>`}
@@ -4989,6 +4999,8 @@ async function copyCourseNoticeImage(item) {
 }
 
 function render() {
+  const viewChanged = lastRenderedView && lastRenderedView !== view;
+  lastRenderedView = view;
   renderNav();
   const renderers = {
     lessons: renderLessons,
@@ -5014,6 +5026,13 @@ function render() {
   };
   (renderers[view] || renderLessons)();
   wireEvents();
+  if (viewChanged) {
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0 });
+      document.querySelector(".main")?.scrollTo?.({ top: 0, left: 0 });
+      contentEl.scrollTo?.({ top: 0, left: 0 });
+    });
+  }
 }
 
 async function refreshAfter(action) {
@@ -5182,6 +5201,7 @@ function wireEvents() {
       const allowedViews = groupViews(group).filter(([key]) => canView(key));
       if (!allowedViews.some(([key]) => key === view)) {
         view = allowedViews[0]?.[0] || firstAllowedView();
+        if (view === "courseNotice") resetCourseNoticeFilterToThisWeek();
       }
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
@@ -5191,7 +5211,9 @@ function wireEvents() {
 
   document.querySelectorAll(".nav-sub-btn").forEach((button) => {
     button.addEventListener("click", () => {
-      view = button.dataset.view;
+      const nextView = button.dataset.view;
+      if (nextView === "courseNotice" && view !== "courseNotice") resetCourseNoticeFilterToThisWeek();
+      view = nextView;
       activeNavGroup = button.dataset.group || groupForView(view).key;
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
