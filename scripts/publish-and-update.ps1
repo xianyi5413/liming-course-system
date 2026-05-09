@@ -7,7 +7,9 @@ param(
   [string]$Domain = "https://www.limingedu.fun",
   [string]$KeyPath = "",
   [switch]$SkipCommit,
-  [switch]$SkipChecks
+  [switch]$SkipChecks,
+  [switch]$Yes,
+  [switch]$NoRebase
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,11 +28,41 @@ function Require-Command($Name) {
   }
 }
 
+function Get-AheadBehind($Remote, $Branch) {
+  $aheadBehind = git rev-list --left-right --count "$Remote/$Branch...HEAD"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to compare local HEAD with $Remote/$Branch."
+  }
+  $parts = $aheadBehind -split "\s+"
+  return @{
+    Behind = [int]$parts[0]
+    Ahead = [int]$parts[1]
+  }
+}
+
+function Confirm-Step($Prompt) {
+  if ($Yes) {
+    return
+  }
+  $answer = Read-Host "$Prompt Type Y to continue"
+  if ($answer -notin @("Y", "y", "YES", "Yes", "yes")) {
+    throw "Cancelled by user."
+  }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 
 Require-Command git
 Require-Command node
+
+$currentBranch = git branch --show-current
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to determine current Git branch."
+}
+if ($currentBranch -ne $Branch) {
+  throw "Current branch is '$currentBranch', but this script is configured to publish '$Branch'. Switch branches or pass -Branch $currentBranch intentionally."
+}
 
 $ssh = "C:\Windows\System32\OpenSSH\ssh.exe"
 if (-not (Test-Path $ssh)) {
@@ -52,13 +84,7 @@ if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
   Write-Host "Using SSH key: $resolvedKeyPath" -ForegroundColor Cyan
 }
 
-if (-not $SkipChecks) {
-  Run node @("--check", "public/app.js")
-  Run node @("--check", "src/server.js")
-  Run node @("--check", "scripts/audit_extended.js")
-  Run node @("--check", "scripts/audit_source_vs_summary.js")
-  Run git @("diff", "--check")
-}
+Run git @("fetch", $Remote, $Branch)
 
 $status = git status --short
 if ($status -and -not $SkipCommit) {
@@ -75,13 +101,26 @@ if ($status -and -not $SkipCommit) {
   throw "Working tree has local changes, but -SkipCommit was set. Commit or discard them first."
 }
 
-Run git @("fetch", $Remote, $Branch)
+$syncState = Get-AheadBehind $Remote $Branch
+if ($syncState.Behind -gt 0 -and $syncState.Ahead -eq 0) {
+  Write-Host "Local branch is behind $Remote/$Branch. Fast-forwarding before publish." -ForegroundColor Yellow
+  Confirm-Step "GitHub has $($syncState.Behind) new commit(s). Update local code from $Remote/$Branch and then publish to server?"
+  Run git @("merge", "--ff-only", "$Remote/$Branch")
+} elseif ($syncState.Behind -gt 0 -and $syncState.Ahead -gt 0) {
+  if ($NoRebase) {
+    throw "Local and remote branches have diverged. Rerun without -NoRebase, or manually rebase/merge first."
+  }
+  Write-Host "Local and remote branches have diverged. Rebasing local commits onto $Remote/$Branch." -ForegroundColor Yellow
+  Confirm-Step "GitHub has $($syncState.Behind) new commit(s), and local has $($syncState.Ahead) unpublished commit(s). Rebase local commits onto $Remote/$Branch and then publish to server?"
+  Run git @("rebase", "$Remote/$Branch")
+}
 
-$aheadBehind = git rev-list --left-right --count "$Remote/$Branch...HEAD"
-$parts = $aheadBehind -split "\s+"
-$behind = [int]$parts[0]
-if ($behind -gt 0) {
-  throw "Local branch is behind $Remote/$Branch. Pull/rebase first, then rerun."
+if (-not $SkipChecks) {
+  Run node @("--check", "public/app.js")
+  Run node @("--check", "src/server.js")
+  Run node @("--check", "scripts/audit_extended.js")
+  Run node @("--check", "scripts/audit_source_vs_summary.js")
+  Run git @("diff", "--check")
 }
 
 Run git @("push", $Remote, $Branch)
