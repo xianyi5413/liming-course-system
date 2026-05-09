@@ -295,6 +295,36 @@ function initDb() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS parent_message_greetings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      send_object_key TEXT NOT NULL UNIQUE,
+      send_object_name TEXT DEFAULT '',
+      send_object_type TEXT DEFAULT '',
+      students TEXT DEFAULT '',
+      greeting TEXT DEFAULT '',
+      global_tail TEXT DEFAULT '',
+      full_message TEXT DEFAULT '',
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS course_notice_completion_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unique_key TEXT NOT NULL UNIQUE,
+      grade TEXT DEFAULT '',
+      subject TEXT DEFAULT '',
+      students TEXT DEFAULT '',
+      teacher TEXT DEFAULT '',
+      date TEXT DEFAULT '',
+      time TEXT DEFAULT '',
+      status TEXT DEFAULT '',
+      classroom TEXT DEFAULT '',
+      send_object_key TEXT DEFAULT '',
+      send_object_name TEXT DEFAULT '',
+      send_object_type TEXT DEFAULT '',
+      completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      completed_by TEXT DEFAULT ''
+    );
   `);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
@@ -307,6 +337,9 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_logs_issue_key ON audit_logs(issue_key)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_entity ON audit_events(entity_type, entity_id)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_parent_message_greetings_key ON parent_message_greetings(send_object_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_course_notice_completion_key ON course_notice_completion_records(unique_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_course_notice_completion_object ON course_notice_completion_records(send_object_key)").run();
 
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
@@ -374,6 +407,7 @@ function initDb() {
   `).run();
 
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('month_key', '2026-04-01')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('course_notice_global_tail', '这是我们本周的上课安排哦[玫瑰]')").run();
   const currentMonth = db.prepare("SELECT value FROM settings WHERE key = 'month_key'").get().value;
   db.prepare(`
     INSERT OR IGNORE INTO teacher_adjustments_monthly(
@@ -3519,6 +3553,233 @@ function lessonsInDateRange(start, end) {
   );
 }
 
+function normalizedStudents(value) {
+  return uniqueNames(splitStudents(value)).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).join("、");
+}
+
+function uniqueNames(values) {
+  return [...new Set((values || []).map((value) => text(value).replace(/\s+/g, "")).filter(Boolean))];
+}
+
+function courseClassKey(row) {
+  return [
+    text(row.grade),
+    text(row.subject),
+    normalizedStudents(row.student_names),
+    text(row.teacher_name),
+  ].join("+");
+}
+
+function courseCompletionKey(row) {
+  return [
+    text(row.grade),
+    text(row.subject),
+    normalizedStudents(row.student_names),
+    text(row.teacher_name),
+    text(row.date),
+    text(row.time_slot),
+  ].join("+");
+}
+
+function sendObjectDefaultGreeting(item) {
+  if (item.send_object_type !== "1V1个人群") return "各位家长您们好！";
+  const student = text(item.students).replace(/\s+/g, "");
+  const shortName = student.length === 2 ? student : student.slice(-2) || student;
+  return `${shortName}妈妈您好！`;
+}
+
+function courseNoticeLesson(row) {
+  const students = normalizedStudents(row.student_names);
+  return {
+    id: row.id,
+    teacher_name: text(row.teacher_name),
+    date: text(row.date),
+    lesson_status: text(row.lesson_status),
+    status: deriveStatus(row),
+    weekday: weekdayCn(row.date),
+    time_slot: text(row.time_slot),
+    classroom: text(row.classroom),
+    grade: text(row.grade),
+    subject: text(row.subject),
+    student_names: students,
+    notes: text(row.notes),
+    class_key: courseClassKey(row),
+    completion_key: courseCompletionKey(row),
+  };
+}
+
+function courseNoticeData(start, end, onlyTeaching = false) {
+  const rows = lessonsInDateRange(start, end);
+  if (!rows) return null;
+  const lessons = rows
+    .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
+    .map(courseNoticeLesson);
+  const classMap = new Map();
+  const personalStudents = new Set();
+  for (const lesson of lessons) {
+    const students = splitStudents(lesson.student_names);
+    if (students.length === 1) personalStudents.add(students[0]);
+    if (students.length >= 2) {
+      const key = `CLASS|${lesson.class_key}`;
+      if (!classMap.has(key)) {
+        classMap.set(key, {
+          send_object_key: key,
+          send_object_name: `${lesson.grade}${lesson.subject}-${lesson.student_names}`,
+          send_object_type: "班级群",
+          students: lesson.student_names,
+          teachers: [lesson.teacher_name],
+          grades: [lesson.grade],
+          subjects: [lesson.subject],
+          lessons: [],
+        });
+      }
+      classMap.get(key).lessons.push(lesson);
+    }
+  }
+
+  const objects = [];
+  for (const student of [...personalStudents].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"))) {
+    const studentLessons = lessons.filter((lesson) => splitStudents(lesson.student_names).includes(student));
+    const teachers = uniqueNames(studentLessons.map((lesson) => lesson.teacher_name));
+    const grades = uniqueNames(studentLessons.map((lesson) => lesson.grade));
+    const subjects = uniqueNames(studentLessons.map((lesson) => lesson.subject));
+    objects.push({
+      send_object_key: `PERSONAL_ALL|${student}`,
+      send_object_name: `${student}个人课程`,
+      send_object_type: "1V1个人群",
+      students: student,
+      teachers,
+      grades,
+      subjects,
+      lessons: studentLessons,
+    });
+  }
+  objects.push(...classMap.values());
+
+  const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records").map((row) => row.unique_key));
+  const greetingRows = new Map(all("SELECT * FROM parent_message_greetings").map((row) => [row.send_object_key, row]));
+  const globalTail = getSetting("course_notice_global_tail") || "这是我们本周的上课安排哦[玫瑰]";
+
+  return {
+    range: { start, end },
+    only_teaching: Boolean(onlyTeaching),
+    global_tail: globalTail,
+    send_objects: objects
+      .map((item) => {
+        const saved = greetingRows.get(item.send_object_key);
+        const greeting = text(saved?.greeting) || sendObjectDefaultGreeting(item);
+        const lessonKeys = item.lessons.map((lesson) => lesson.completion_key);
+        const completedCount = lessonKeys.filter((key) => completionKeys.has(key)).length;
+        const completed = lessonKeys.length > 0 && completedCount === lessonKeys.length;
+        const partial_completed = completedCount > 0 && !completed;
+        return {
+          ...item,
+          teachers: uniqueNames(item.teachers),
+          grades: uniqueNames(item.grades),
+          subjects: uniqueNames(item.subjects),
+          greeting,
+          global_tail: globalTail,
+          full_message: `${greeting}\n${globalTail}`,
+          completed,
+          partial_completed,
+          completed_count: completedCount,
+          lesson_count: item.lessons.length,
+        };
+      })
+      .sort((a, b) => [
+        a.send_object_type === "1V1个人群" ? "0" : "1",
+        a.send_object_name,
+      ].join("|").localeCompare([
+        b.send_object_type === "1V1个人群" ? "0" : "1",
+        b.send_object_name,
+      ].join("|"), "zh-Hans-CN")),
+  };
+}
+
+function saveCourseNoticeGreeting(body) {
+  const sendObjectKey = text(body.send_object_key);
+  if (!sendObjectKey) return { error: "send_object_key is required", status: 400 };
+  const globalTail = text(body.global_tail) || getSetting("course_notice_global_tail") || "这是我们本周的上课安排哦[玫瑰]";
+  const greeting = text(body.greeting);
+  db.prepare(`
+    INSERT INTO parent_message_greetings(
+      send_object_key, send_object_name, send_object_type, students, greeting, global_tail, full_message, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(send_object_key) DO UPDATE SET
+      send_object_name = excluded.send_object_name,
+      send_object_type = excluded.send_object_type,
+      students = excluded.students,
+      greeting = excluded.greeting,
+      global_tail = excluded.global_tail,
+      full_message = excluded.full_message,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    sendObjectKey,
+    text(body.send_object_name),
+    text(body.send_object_type),
+    normalizedStudents(body.students),
+    greeting,
+    globalTail,
+    `${greeting}\n${globalTail}`,
+  );
+  return { ok: true };
+}
+
+function completeCourseNoticeObject(user, body) {
+  const lessons = Array.isArray(body.lessons) ? body.lessons : [];
+  if (!text(body.send_object_key) || !lessons.length) return { error: "send_object_key and lessons are required", status: 400 };
+  const stmt = db.prepare(`
+    INSERT INTO course_notice_completion_records(
+      unique_key, grade, subject, students, teacher, date, time, status, classroom,
+      send_object_key, send_object_name, send_object_type, completed_at, completed_by
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+    ON CONFLICT(unique_key) DO UPDATE SET
+      status = excluded.status,
+      classroom = excluded.classroom,
+      send_object_key = excluded.send_object_key,
+      send_object_name = excluded.send_object_name,
+      send_object_type = excluded.send_object_type,
+      completed_at = CURRENT_TIMESTAMP,
+      completed_by = excluded.completed_by
+  `);
+  let count = 0;
+  withTransaction(() => {
+    for (const lesson of lessons) {
+      const row = {
+        grade: text(lesson.grade),
+        subject: text(lesson.subject),
+        student_names: normalizedStudents(lesson.student_names || lesson.students),
+        teacher_name: text(lesson.teacher_name || lesson.teacher),
+        date: text(lesson.date),
+        time_slot: text(lesson.time_slot || lesson.time),
+        status: text(lesson.status || lesson.lesson_status),
+        classroom: text(lesson.classroom),
+      };
+      const key = text(lesson.completion_key) || courseCompletionKey(row);
+      if (!key) continue;
+      stmt.run(
+        key,
+        row.grade,
+        row.subject,
+        row.student_names,
+        row.teacher_name,
+        row.date,
+        row.time_slot,
+        row.status,
+        row.classroom,
+        text(body.send_object_key),
+        text(body.send_object_name),
+        text(body.send_object_type),
+        text(user.display_name || user.username),
+      );
+      count += 1;
+    }
+  });
+  return { ok: true, completed: count };
+}
+
 function sendJson(res, data, status = 200) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -3858,6 +4119,7 @@ function apiArea(req, url) {
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
   if (p.includes("student") || p === "/api/fee-overrides") return "students";
+  if (p.startsWith("/api/course-notice")) return "schedule";
   if (p.includes("lessons") || p.includes("months") || p.includes("schedule-conflicts") || p === "/api/settings") return "schedule";
   if (p === "/api/teachers") return "profiles";
   return "schedule";
@@ -5090,6 +5352,49 @@ async function handleApi(req, res, url) {
     const lessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
     if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
+  }
+  if (req.method === "GET" && url.pathname === "/api/course-notice") {
+    const data = courseNoticeData(
+      text(url.searchParams.get("start")),
+      text(url.searchParams.get("end")),
+      url.searchParams.get("only_teaching") === "1",
+    );
+    if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    if (user.role === "teacher") {
+      data.send_objects = data.send_objects.filter((item) => item.lessons.some((lesson) => text(lesson.teacher_name) === text(user.teacher_name)));
+    }
+    return sendJson(res, data);
+  }
+  if (req.method === "POST" && url.pathname === "/api/course-notice/greeting") {
+    const result = saveCourseNoticeGreeting(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    return sendJson(res, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/course-notice/global-tail") {
+    const body = await readBody(req);
+    const globalTail = text(body.global_tail) || "这是我们本周的上课安排哦[玫瑰]";
+    setSetting("course_notice_global_tail", globalTail);
+    db.prepare("UPDATE parent_message_greetings SET global_tail = ?, full_message = greeting || char(10) || ?, updated_at = CURRENT_TIMESTAMP").run(globalTail, globalTail);
+    return sendJson(res, { ok: true, global_tail: globalTail });
+  }
+  if (req.method === "POST" && url.pathname === "/api/course-notice/complete") {
+    const body = await readBody(req);
+    const result = completeCourseNoticeObject(user, body);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "complete", entity_type: "course_notice", entity_id: text(body.send_object_key), before: null, after: result });
+    return sendJson(res, result);
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/course-notice/completions") {
+    const before = get("SELECT COUNT(*) AS count FROM course_notice_completion_records");
+    const result = db.prepare("DELETE FROM course_notice_completion_records").run();
+    recordAuditEvent(req, user, {
+      action: "clear_completions",
+      entity_type: "course_notice",
+      entity_id: "all",
+      before,
+      after: { deleted: result.changes || 0 },
+    });
+    return sendJson(res, { ok: true, deleted: result.changes || 0 });
   }
   if (req.method === "GET" && url.pathname === "/api/finance-summary") {
     const range = financeRangeFromUrl(url);

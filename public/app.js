@@ -1,5 +1,5 @@
 const navGroups = [
-  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"]] },
+  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"]] },
   {
     key: "students",
     label: "👥 学生",
@@ -34,7 +34,7 @@ const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", fin
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "pricing", "userAdmin"]),
+  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "pricing", "userAdmin"]),
   finance: new Set(["finance", "recharges", "studentQuery", "expenses"]),
   teacher: new Set(["weekMatrix", "teacherDetail"]),
 };
@@ -42,6 +42,7 @@ let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
 let view = localStorage.getItem("liming:view") || "lessons";
+let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
 let activeWeek = Number(localStorage.getItem("liming:week") || 0);
 let matrixRange = readMatrixRange();
@@ -53,6 +54,10 @@ let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
 let studentStatementModalOpen = false;
+const COURSE_NOTICE_FILTER_KEY = "liming:course-notice-filter";
+let courseNoticeFilter = readCourseNoticeFilter();
+let courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
+let saveCourseNoticeTailDebounced = null;
 let selectedTeacher = "";
 let passwordModalOpen = false;
 let userAdminNotice = "";
@@ -707,6 +712,61 @@ function yuan2(value) {
 function todayDate() {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function currentWeekRange() {
+  const today = new Date(`${todayDate()}T00:00:00`);
+  const day = today.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() + mondayOffset);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return { start: dateKey(monday), end: dateKey(sunday) };
+}
+
+function readCourseNoticeFilter() {
+  return { ...currentWeekRange(), onlyTeaching: true };
+}
+
+function saveCourseNoticeFilter() {
+  localStorage.setItem(COURSE_NOTICE_FILTER_KEY, JSON.stringify(courseNoticeFilter));
+}
+
+function courseNoticeQuery() {
+  const params = new URLSearchParams();
+  params.set("start", courseNoticeFilter.start);
+  params.set("end", courseNoticeFilter.end);
+  if (courseNoticeFilter.onlyTeaching) params.set("only_teaching", "1");
+  return params.toString();
+}
+
+function ensureCourseNoticeFilterDates() {
+  const fallback = currentWeekRange();
+  if (!isDateValue(courseNoticeFilter.start)) courseNoticeFilter.start = fallback.start;
+  if (!isDateValue(courseNoticeFilter.end)) courseNoticeFilter.end = fallback.end;
+  if (courseNoticeFilter.start > courseNoticeFilter.end) courseNoticeFilter.end = courseNoticeFilter.start;
+}
+
+function resetCourseNoticeFilterToThisWeek() {
+  courseNoticeFilter = readCourseNoticeFilter();
+  saveCourseNoticeFilter();
+  courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
+}
+
+async function loadCourseNoticeData(force = false) {
+  ensureCourseNoticeFilterDates();
+  const query = courseNoticeQuery();
+  if (!force && courseNoticeState.loadedQuery === query && courseNoticeState.data) return;
+  courseNoticeState = { ...courseNoticeState, busy: true, error: "" };
+  render();
+  try {
+    const data = await request(`/api/course-notice?${query}`);
+    courseNoticeState = { data, busy: false, error: "", loadedQuery: query };
+  } catch (error) {
+    courseNoticeState = { data: null, busy: false, error: error.message, loadedQuery: query };
+  }
+  render();
 }
 
 function percent(value) {
@@ -4673,12 +4733,300 @@ function renderTeacherDetail() {
   `;
 }
 
+function courseNoticeFullMessage(item) {
+  return `${item.greeting || ""}\n${courseNoticeState.data?.global_tail || ""}`;
+}
+
+function courseNoticeStatusText(item) {
+  if (item.completed) return "已完成";
+  if (item.partial_completed) return `部分完成 ${item.completed_count}/${item.lesson_count}`;
+  return "待发送";
+}
+
+function renderCourseNoticePreview(item) {
+  const rows = item.lessons || [];
+  return `
+    <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
+      <table class="notice-shot-table">
+        <thead>
+          <tr>
+            <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((lesson) => `
+            <tr>
+              <td>${escapeHtml(lesson.teacher_name)}</td>
+              <td>${escapeHtml(lesson.date)}</td>
+              <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
+              <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
+              <td>${escapeHtml(lesson.time_slot)}</td>
+              <td>${escapeHtml(lesson.classroom)}</td>
+              <td>${escapeHtml(lesson.grade)}</td>
+              <td>${escapeHtml(lesson.subject)}</td>
+              <td>${escapeHtml(lesson.student_names)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderCourseNotice() {
+  ensureCourseNoticeFilterDates();
+  renderTopbar("课程通知生成", "家长群课程截图");
+  topbarEl.querySelector(".page-title")?.insertAdjacentHTML(
+    "beforeend",
+    `<span class="page-title-note">选择日期自动刷新；可修改称呼和尾句；复制截图后自动打勾；清除只清打勾记录</span>`,
+  );
+  const data = courseNoticeState.data;
+  const shouldLoad = !courseNoticeState.busy && courseNoticeState.loadedQuery !== courseNoticeQuery();
+  if (shouldLoad) setTimeout(() => loadCourseNoticeData(), 0);
+  const objects = data?.send_objects || [];
+  const completedObjects = objects.filter((item) => item.completed).length;
+  contentEl.innerHTML = `
+    <div class="filter-bar notice-filter-bar">
+      <div class="filter-controls">
+        <label class="filter-field">
+          <span>起始日期</span>
+          <input class="control custom-date-input course-notice-filter" data-field="start" type="date" value="${escapeHtml(courseNoticeFilter.start)}">
+        </label>
+        <label class="filter-field">
+          <span>终末日期</span>
+          <input class="control custom-date-input course-notice-filter" data-field="end" type="date" value="${escapeHtml(courseNoticeFilter.end)}">
+        </label>
+        <label class="history-toggle">
+          <input class="course-notice-only" type="checkbox" ${courseNoticeFilter.onlyTeaching ? "checked" : ""}>
+          <span>只选择“上课”</span>
+        </label>
+        <label class="filter-field notice-tail-field">
+          <span>全局后半句</span>
+          <input class="control course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
+        </label>
+        <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
+        <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
+      </div>
+      <div class="filter-summary">
+        <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
+      </div>
+    </div>
+    ${courseNoticeState.error ? `<div class="empty">${escapeHtml(courseNoticeState.error)}</div>` : ""}
+    ${courseNoticeState.busy ? `<div class="empty">正在生成课程通知...</div>` : ""}
+    ${!courseNoticeState.busy && data ? `
+      <div class="notice-list">
+        ${objects.map((item) => `
+          <div class="notice-item ${item.completed ? "completed" : ""} ${item.partial_completed ? "partial" : ""}" data-send-key="${escapeHtml(item.send_object_key)}">
+            <div class="notice-left">
+              ${item.completed ? `<div class="notice-checkmark">✓</div>` : ""}
+              <div class="notice-object-head">
+                <div>
+                  <div class="notice-object-name">${escapeHtml(item.send_object_name)}</div>
+                  <div class="notice-object-meta">
+                    <span>${escapeHtml(item.send_object_type)}</span>
+                    <span>老师：${escapeHtml((item.teachers || []).join("、") || "-")}</span>
+                    <span>年级：${escapeHtml((item.grades || []).join("、") || "-")}</span>
+                    <span>科目：${escapeHtml((item.subjects || []).join("、") || "-")}</span>
+                    <span>${item.lesson_count} 节课</span>
+                  </div>
+                </div>
+                <span class="status-badge ${item.completed ? "done" : item.partial_completed ? "exam" : "pending"}">${escapeHtml(courseNoticeStatusText(item))}</span>
+              </div>
+              ${renderCourseNoticePreview(item)}
+            </div>
+            <div class="notice-right">
+              <label class="filter-field">
+                <span>称呼</span>
+                <input class="control notice-greeting" data-send-key="${escapeHtml(item.send_object_key)}" value="${escapeHtml(item.greeting || "")}">
+              </label>
+              <label class="filter-field">
+                <span>自动生成文案</span>
+                <textarea class="control notice-message" data-send-key="${escapeHtml(item.send_object_key)}" rows="4" readonly>${escapeHtml(courseNoticeFullMessage(item))}</textarea>
+              </label>
+              <div class="notice-actions">
+                <button class="btn notice-copy-message" type="button" data-send-key="${escapeHtml(item.send_object_key)}">复制文案</button>
+                <button class="btn primary notice-copy-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">${item.completed ? "已复制截图" : "复制课程截图"}</button>
+                <button class="btn notice-download-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">下载课程截图</button>
+              </div>
+              <div class="notice-state">${item.completed ? "✓ 该发送对象已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
+            </div>
+          </div>
+        `).join("") || `<div class="empty">当前日期范围暂无可发送课程</div>`}
+      </div>
+    ` : ""}
+  `;
+}
+
+function findCourseNoticeObject(key) {
+  return (courseNoticeState.data?.send_objects || []).find((item) => item.send_object_key === key);
+}
+
+function updateCourseNoticeMessageDom(key) {
+  const item = findCourseNoticeObject(key);
+  const textarea = document.querySelector(`.notice-message[data-send-key="${CSS.escape(key)}"]`);
+  if (item && textarea) textarea.value = courseNoticeFullMessage(item);
+}
+
+async function saveCourseNoticeGreeting(item) {
+  await request("/api/course-notice/greeting", {
+    method: "POST",
+    body: {
+      send_object_key: item.send_object_key,
+      send_object_name: item.send_object_name,
+      send_object_type: item.send_object_type,
+      students: item.students,
+      greeting: item.greeting,
+      global_tail: courseNoticeState.data?.global_tail || "",
+    },
+  });
+}
+
+function courseNoticeCanvas(item) {
+  const columns = [
+    ["teacher_name", "授课老师"],
+    ["date", "日期"],
+    ["lesson_status", "上课情况"],
+    ["weekday", "星期"],
+    ["time_slot", "时间"],
+    ["classroom", "教室"],
+    ["grade", "年级"],
+    ["subject", "科目"],
+    ["student_names", "学生"],
+  ];
+  const rows = item.lessons || [];
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  const font = "16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  const headFont = "700 16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.font = font;
+  const paddingX = 18;
+  const rowHeight = 44;
+  const outerPadding = 30;
+  const titleHeight = 58;
+  const colWidths = columns.map(([key, label]) => {
+    const maxText = Math.max(
+      ctx.measureText(label).width,
+      ...rows.map((row) => ctx.measureText(String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""))).width),
+    );
+    return Math.ceil(Math.max(82, maxText + paddingX * 2));
+  });
+  const minimumTableWidth = 760;
+  const naturalTableWidth = colWidths.reduce((sum, value) => sum + value, 0);
+  if (naturalTableWidth < minimumTableWidth) colWidths[colWidths.length - 1] += minimumTableWidth - naturalTableWidth;
+  const tableWidth = colWidths.reduce((sum, value) => sum + value, 0);
+  const tableHeight = rowHeight * (rows.length + 1);
+  const width = tableWidth + outerPadding * 2;
+  const height = titleHeight + tableHeight + outerPadding * 2;
+  const tableX = outerPadding;
+  const tableY = outerPadding + titleHeight;
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  ctx.scale(ratio, ratio);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "#fbfdfc";
+  ctx.fillRect(outerPadding / 2, outerPadding / 2, width - outerPadding, height - outerPadding);
+  ctx.fillStyle = "#102a2a";
+  ctx.font = "700 20px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("课程通知", width / 2, outerPadding + 26);
+  ctx.textAlign = "left";
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 42, 42, 0.08)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(tableX, tableY, tableWidth, tableHeight);
+  ctx.restore();
+  ctx.strokeStyle = "#d9e9e8";
+  ctx.strokeRect(tableX, tableY, tableWidth, tableHeight);
+  let x = tableX;
+  ctx.font = headFont;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  columns.forEach(([, label], index) => {
+    ctx.fillStyle = "#eef8f6";
+    ctx.fillRect(x, tableY, colWidths[index], rowHeight);
+    ctx.strokeStyle = "#d9e9e8";
+    ctx.strokeRect(x, tableY, colWidths[index], rowHeight);
+    ctx.fillStyle = "#24524f";
+    ctx.fillText(label, x + colWidths[index] / 2, tableY + rowHeight / 2);
+    x += colWidths[index];
+  });
+  ctx.font = font;
+  rows.forEach((row, rowIndex) => {
+    x = tableX;
+    const y = tableY + rowHeight * (rowIndex + 1);
+    columns.forEach(([key], index) => {
+      ctx.fillStyle = rowIndex % 2 ? "#fbfdfc" : "#ffffff";
+      ctx.fillRect(x, y, colWidths[index], rowHeight);
+      ctx.strokeStyle = "#e7f0ef";
+      ctx.strokeRect(x, y, colWidths[index], rowHeight);
+      ctx.fillStyle = "#17212b";
+      const value = String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""));
+      ctx.fillText(value, x + colWidths[index] / 2, y + rowHeight / 2);
+      x += colWidths[index];
+    });
+  });
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  return canvas;
+}
+
+function canvasBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("图片生成失败")), "image/png");
+  });
+}
+
+async function downloadCourseNoticeImage(item) {
+  const canvas = courseNoticeCanvas(item);
+  const link = document.createElement("a");
+  link.href = canvas.toDataURL("image/png");
+  link.download = `${item.send_object_name || "课程安排"}.png`;
+  link.click();
+}
+
+async function completeCourseNoticeItem(item) {
+  await request("/api/course-notice/complete", {
+    method: "POST",
+    body: {
+      send_object_key: item.send_object_key,
+      send_object_name: item.send_object_name,
+      send_object_type: item.send_object_type,
+      lessons: item.lessons,
+    },
+  });
+  item.completed = true;
+  item.partial_completed = false;
+  item.completed_count = item.lesson_count;
+}
+
+async function copyCourseNoticeImage(item) {
+  const canvas = courseNoticeCanvas(item);
+  const blob = await canvasBlob(canvas);
+  if (!navigator.clipboard?.write || !window.ClipboardItem) {
+    await downloadCourseNoticeImage(item);
+    throw new Error("当前浏览器不支持直接复制图片，已改为下载图片");
+  }
+  await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+  await completeCourseNoticeItem(item);
+  showToast(`${item.send_object_name} 已完成`);
+  render();
+}
+
 function render() {
+  const viewChanged = lastRenderedView && lastRenderedView !== view;
+  lastRenderedView = view;
   renderNav();
   const renderers = {
     lessons: renderLessons,
     week: renderWeek,
     weekMatrix: renderWeekMatrix,
+    courseNotice: renderCourseNotice,
     feeDetails: renderFeeDetails,
     summary: renderSummary,
     finance: renderFinance,
@@ -4698,6 +5046,13 @@ function render() {
   };
   (renderers[view] || renderLessons)();
   wireEvents();
+  if (viewChanged) {
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0 });
+      document.querySelector(".main")?.scrollTo?.({ top: 0, left: 0 });
+      contentEl.scrollTo?.({ top: 0, left: 0 });
+    });
+  }
 }
 
 async function refreshAfter(action) {
@@ -4866,6 +5221,7 @@ function wireEvents() {
       const allowedViews = groupViews(group).filter(([key]) => canView(key));
       if (!allowedViews.some(([key]) => key === view)) {
         view = allowedViews[0]?.[0] || firstAllowedView();
+        if (view === "courseNotice") resetCourseNoticeFilterToThisWeek();
       }
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
@@ -4875,7 +5231,9 @@ function wireEvents() {
 
   document.querySelectorAll(".nav-sub-btn").forEach((button) => {
     button.addEventListener("click", () => {
-      view = button.dataset.view;
+      const nextView = button.dataset.view;
+      if (nextView === "courseNotice" && view !== "courseNotice") resetCourseNoticeFilterToThisWeek();
+      view = nextView;
       activeNavGroup = button.dataset.group || groupForView(view).key;
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
@@ -6170,6 +6528,121 @@ function wireEvents() {
           ...payload,
         },
       }));
+    });
+  });
+
+  document.querySelectorAll(".course-notice-filter").forEach((input) => {
+    input.addEventListener("change", () => {
+      courseNoticeFilter = { ...courseNoticeFilter, [input.dataset.field]: input.value };
+      ensureCourseNoticeFilterDates();
+      saveCourseNoticeFilter();
+      loadCourseNoticeData(true);
+    });
+  });
+
+  document.querySelectorAll(".course-notice-only").forEach((input) => {
+    input.addEventListener("change", () => {
+      courseNoticeFilter = { ...courseNoticeFilter, onlyTeaching: input.checked };
+      saveCourseNoticeFilter();
+      loadCourseNoticeData(true);
+    });
+  });
+
+  document.querySelectorAll(".course-notice-generate").forEach((button) => {
+    button.addEventListener("click", () => loadCourseNoticeData(true));
+  });
+
+  document.querySelectorAll(".course-notice-clear-completions").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("确定清除所有课程通知的打勾完成记录吗？称呼和文案不会被清除。")) return;
+      button.disabled = true;
+      try {
+        const result = await request("/api/course-notice/completions", { method: "DELETE" });
+        showToast(`已清除 ${result.deleted || 0} 条打勾记录`);
+        await loadCourseNoticeData(true);
+      } catch (error) {
+        showToast(error.message || "清除失败", "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  if (!saveCourseNoticeTailDebounced) {
+    saveCourseNoticeTailDebounced = debounce(async (value) => {
+      try {
+        await request("/api/course-notice/global-tail", { method: "POST", body: { global_tail: value } });
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    }, 500);
+  }
+
+  document.querySelectorAll(".course-notice-tail").forEach((input) => {
+    input.addEventListener("input", () => {
+      if (!courseNoticeState.data) return;
+      courseNoticeState.data.global_tail = input.value;
+      (courseNoticeState.data.send_objects || []).forEach((item) => updateCourseNoticeMessageDom(item.send_object_key));
+      saveCourseNoticeTailDebounced(input.value);
+    });
+  });
+
+  document.querySelectorAll(".notice-greeting").forEach((input) => {
+    input.addEventListener("input", () => {
+      const item = findCourseNoticeObject(input.dataset.sendKey);
+      if (!item) return;
+      item.greeting = input.value;
+      updateCourseNoticeMessageDom(item.send_object_key);
+    });
+    input.addEventListener("change", async () => {
+      const item = findCourseNoticeObject(input.dataset.sendKey);
+      if (!item) return;
+      try {
+        await saveCourseNoticeGreeting(item);
+        showToast("称呼已保存");
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  });
+
+  document.querySelectorAll(".notice-copy-message").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      try {
+        await navigator.clipboard.writeText(courseNoticeFullMessage(item));
+        showToast("文案已复制");
+      } catch (error) {
+        alert(error.message || "复制失败");
+      }
+    });
+  });
+
+  document.querySelectorAll(".notice-copy-image").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      button.disabled = true;
+      try {
+        await copyCourseNoticeImage(item);
+      } catch (error) {
+        showToast(error.message || "复制截图失败", "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".notice-download-image").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      try {
+        await downloadCourseNoticeImage(item);
+      } catch (error) {
+        showToast(error.message || "下载失败", "error");
+      }
     });
   });
 
