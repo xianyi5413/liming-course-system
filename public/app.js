@@ -78,6 +78,7 @@ let courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
 let saveCourseNoticeTailDebounced = null;
 let selectedTeacher = "";
 let passwordModalOpen = false;
+let userMenuOpen = false;
 let userAdminNotice = "";
 let lessonFilter = readLessonFilter();
 let expandedSummaryStudents = readExpandedSummaryStudents();
@@ -123,6 +124,7 @@ let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") |
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
 let filterComboEventsBound = false;
+let userMenuEventsBound = false;
 let customDatePickerEl = null;
 let activeCustomDateInput = null;
 let activeCustomDateMonth = null;
@@ -2076,6 +2078,39 @@ function renderPalettePreview() {
   `;
 }
 
+function userDisplayName() {
+  return auth.user?.display_name || auth.user?.username || "用户";
+}
+
+function userInitial() {
+  return userDisplayName().trim().slice(0, 1).toUpperCase() || "L";
+}
+
+function renderUserMenu() {
+  const name = userDisplayName();
+  const role = auth.user?.role_label || ROLE_LABELS[auth.user?.role] || "";
+  return `
+    <div class="user-menu ${userMenuOpen ? "open" : ""}">
+      <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="${userMenuOpen ? "true" : "false"}">
+        <span class="user-avatar" aria-hidden="true">${escapeHtml(userInitial())}</span>
+        <span class="user-menu-name">${escapeHtml(name)}</span>
+        <span class="user-menu-arrow" aria-hidden="true">▾</span>
+      </button>
+      ${userMenuOpen ? `
+        <div class="user-menu-dropdown" role="menu">
+          <div class="user-menu-header">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${escapeHtml(role)}</span>
+          </div>
+          <div class="user-menu-divider"></div>
+          <button class="user-menu-item open-password-modal" type="button" role="menuitem">修改密码</button>
+          <button class="user-menu-item logout-btn danger" type="button" role="menuitem">退出系统</button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
 function renderNav() {
   const currentGroup = activeGroup();
   const visibleGroups = navGroups.map((group) => ({
@@ -2096,12 +2131,6 @@ function renderNav() {
     </div>
     <div class="sidebar-tools">
       ${sidebarMonthTools()}
-      <div class="sidebar-user">
-        <strong>${escapeHtml(auth.user?.display_name || "")}</strong>
-        <span>${escapeHtml(auth.user?.role_label || ROLE_LABELS[auth.user?.role] || "")}</span>
-      </div>
-      <button class="btn open-password-modal" type="button">修改密码</button>
-      <button class="btn logout-btn" type="button">退出登录</button>
       <label class="sidebar-tool-label" for="sidebar-theme-select">主题</label>
       <select id="sidebar-theme-select" class="control theme-select" title="默认跟随系统">
         <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
@@ -2130,6 +2159,7 @@ function renderTopbar(title, meta = "", actions = "") {
     </div>
     <div class="toolbar">
       ${actions}
+      ${renderUserMenu()}
     </div>
     ${monthDeleteModal()}
     ${passwordModal()}
@@ -5345,6 +5375,27 @@ function wireEvents() {
     });
   }
 
+  if (!userMenuEventsBound) {
+    userMenuEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (!userMenuOpen || event.target.closest(".user-menu")) return;
+      userMenuOpen = false;
+      document.querySelectorAll(".user-menu").forEach((menu) => {
+        menu.classList.remove("open");
+        menu.querySelector(".user-menu-trigger")?.setAttribute("aria-expanded", "false");
+        menu.querySelector(".user-menu-dropdown")?.remove();
+      });
+    });
+  }
+
+  document.querySelectorAll(".user-menu-trigger").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      userMenuOpen = !userMenuOpen;
+      render();
+    });
+  });
+
   document.querySelectorAll(".nav-btn").forEach((button) => {
     button.addEventListener("click", () => {
       const group = navGroups.find((item) => item.key === button.dataset.group);
@@ -5436,6 +5487,7 @@ function wireEvents() {
 
   document.querySelectorAll(".logout-btn").forEach((button) => {
     button.addEventListener("click", async () => {
+      userMenuOpen = false;
       await request("/api/auth/logout", { method: "POST" });
       auth.user = null;
       renderLogin();
@@ -5444,6 +5496,7 @@ function wireEvents() {
 
   document.querySelectorAll(".open-password-modal").forEach((button) => {
     button.addEventListener("click", () => {
+      userMenuOpen = false;
       passwordModalOpen = true;
       render();
     });

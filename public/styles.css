@@ -1461,6 +1461,124 @@ button:disabled,
   display: none;
 }
 
+.user-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.user-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 10px 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--btn-bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.user-menu-trigger:hover,
+.user-menu.open .user-menu-trigger {
+  border-color: var(--brand-border);
+  background: var(--brand-soft);
+  color: var(--ink-strong);
+}
+
+.user-avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--primary-ink);
+  font-size: var(--text-caption);
+  font-weight: 850;
+  line-height: 1;
+}
+
+.user-menu-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu-arrow {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.user-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  min-width: 190px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-panel), 0 16px 32px rgba(15, 23, 42, 0.18);
+}
+
+.user-menu-header {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px 10px;
+}
+
+.user-menu-header strong {
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+  font-weight: 850;
+}
+
+.user-menu-header span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 700;
+}
+
+.user-menu-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--line-soft);
+}
+
+.user-menu-item {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: 750;
+  text-align: left;
+  cursor: pointer;
+}
+
+.user-menu-item:hover {
+  background: var(--surface-hover);
+  color: var(--ink-strong);
+}
+
+.user-menu-item.danger {
+  color: var(--danger);
+}
+
+.user-menu-item.danger:hover {
+  background: var(--danger-bg);
+}
+
 .toolbar label {
   color: var(--muted);
   font-size: var(--text-caption);
