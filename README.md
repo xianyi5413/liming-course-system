@@ -150,7 +150,8 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 筛选课程 | 每次打开默认本周一到本周日；选择起始日期、终末日期和“只选择上课”后，页面自动按当前条件刷新发送对象 |
 | 发送对象 | 1V1 学生会生成“个人群”，并展示该学生在日期范围内的所有课程；1V2 及以上仍按班级生成“班级群”，避免混入其他班级 |
 | 班级唯一标识 | 使用 `年级 + 科目 + 标准化学生完整名单 + 授课老师`，学生名单去空格、排序后用顿号拼接；老师不同会被识别为不同班级 |
-| 课程截图 | 前端 canvas 绘制简洁课程表，第一行居中显示“课程通知”，表格单元格文字居中，列宽按内容自适应，可复制到微信或下载 PNG |
+| 课程截图 | 前端 canvas 绘制简洁课程表，第一行居中显示“课程通知”，表格单元格文字居中，列宽按内容自适应，可复制到微信或下载 PNG；截图使用 `--shot-*` 专用变量跟随当前 `data-palette`，但不跟随暗色主题变黑 |
+| 截图视觉 | 课程截图仅保留标题区域 + 课程表格；不显示发送对象副标题、节数徽标和底部说明行；表头使用浅品牌底，正文仅按行隔行变色，时间 / 年级 / 科目只做文字强调 |
 | 文案生成 | 每个发送对象独立称呼 + 全局统一尾句，默认尾句为“这是我们本周的上课安排哦[玫瑰]”；修改称呼或尾句后文案即时更新 |
 | 称呼持久化 | 称呼、发送对象信息、尾句和完整文案保存到 `parent_message_greetings`，下次进入自动恢复 |
 | 完成标记 | 复制截图成功后写入 `course_notice_completion_records`，发送对象变为淡绿色并在课程区域最上层显示大对勾；右侧状态显示“✓ 该发送对象已完成”；刷新后如果该对象全部课程已完成，会自动恢复打勾状态 |
@@ -281,8 +282,9 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | xlsx / zip 自实现 | 服务端 `unzipXlsx` / `zipStore` 直接处理 ZIP 文件结构，无 `xlsx` / `archiver` 依赖；前端 `zipStoreFiles` 镜像同实现，用于客户端 PNG 打包 |
 | 审计日志去重 | 用 `issue_key` 做去重 key，相同问题再次出现时只更新 `run_at`，不新建条目 |
 | 多月结转链 | `ensureCarryOverChain`：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录齐全；上游充值或费用补录后，`refreshCarryOverAfter` 会清理已经失效的下游自动结转记录，避免旧欠款继续滚到后续月份 |
-| 设计系统 | `public/styles.css` 直接同步 `_ Design System/colors_and_type.css` 的品牌 token、暖色 system dark、语义别名与字体工具类，并采用 UI Kit 的温暖亮色侧栏导航 |
-| 主题切换 | 左侧导航底部切换亮色 / 暗色，`localStorage` 持久化，默认跟随系统 `prefers-color-scheme` |
+| 设计系统 | `public/styles.css` 维护品牌 token、语义别名、字体工具类、亮色侧栏、蓝黑暗色后台，以及课程截图专用 `--shot-*` 浅色家长版变量 |
+| 主题切换 | 左侧导航底部切换亮色 / 暗色，`localStorage` key 为 `liming:theme`，默认跟随系统 `prefers-color-scheme`；暗色模式采用近黑 / 蓝黑基底 |
+| 配色方案 | 左侧导航底部独立选择 `data-palette`，`localStorage` key 为 `liming:palette`，默认 `liming-blue`（品牌色 `#002147`）；明暗主题与配色方案互不混用，配色方案主要影响品牌色、按钮、选中态、截图强调色 |
 | 矩阵课表 | 10 天以内保留原有宽松矩阵尺寸，时间段之间有明显横向分隔；超过 10 天自动切换为按时间段分组的有课日期卡片；同日重叠时间会标记老师 / 学生 / 教室冲突 |
 
 ## 金额结算口径
@@ -338,6 +340,8 @@ giftBalance       = giftBase - giftConsumption
 | `severityCounts` 吞掉非标准 severity | 动态新增桶，`pricing_recompute` 等写入的 `info` 也会被汇总 | `severityCounts` |
 | 上游充值补录后，下游旧自动结转不会消失 | `ensureCarryOver` / `rolloverRecharges` 会删除余额已归零学生的失效自动结转；`POST /api/recharges` 保存后级联刷新后续月份，学生历史页也会先刷新结转链 | `refreshCarryOverAfter` / `isAutoCarryOverRecord` / `/api/recharges` |
 | 主题选择占用顶栏空间 | 主题下拉移到左侧导航底部，顶栏只保留月份和当前页面操作 | `renderNav` / `renderTopbar` |
+| 配色方案与课程截图未联动 | 新增 `data-palette` / `liming:palette` 和 12 套配色；课程通知截图预览、复制图片、下载 PNG 统一读取 `--shot-*` 变量，暗色模式下仍保持浅色家长版 | `public/styles.css` / `courseNoticeCanvas` |
+| 暗色模式偏绿偏脏 | 暗色基础变量改为近黑 / 蓝黑后台风格，大面积背景不再使用绿色系；配色方案在暗色下只影响局部强调 | `:root[data-theme="dark"]` / `prefers-color-scheme` |
 | 短范围矩阵课表时间段界限弱 | 保留原有宽松列宽和单元格高度，只用符合设计系统的边框色做时间段分组分隔；暗色 / 亮色都可见 | `week-grid-table` CSS |
 | 生产样式未完整应用 `_ Design System` | 同步品牌主色、`brand-pale`、语义 token、字体工具类、暖胡桃 system dark，并将亮色侧栏改为 UI Kit 的温暖纸色方案 | `public/styles.css` |
 

@@ -27,6 +27,7 @@ const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
 const THEME_KEY = "liming:theme";
+const PALETTE_KEY = "liming:palette";
 const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
@@ -38,6 +39,20 @@ const ROLE_VIEWS = {
   finance: new Set(["finance", "recharges", "studentQuery", "expenses"]),
   teacher: new Set(["weekMatrix", "teacherDetail"]),
 };
+const PALETTES = [
+  { key: "liming-blue", label: "黎明蓝", colors: ["#002147", "#00172F", "#EAF0F7", "#C8D6E5"] },
+  { key: "jade-original", label: "青绿原版", colors: ["#2D9E8F", "#1E7A6E", "#EDF8F6", "#C8E7E2"] },
+  { key: "warm-sun", label: "暖日", colors: ["#EAD6B2", "#8F5B18", "#6A471B", "#55340F"] },
+  { key: "lavender", label: "薰衣草", colors: ["#D9D0EF", "#7B61B3", "#4C3B77", "#44355F"] },
+  { key: "ink", label: "水墨", colors: ["#D9D9D9", "#7A7A7A", "#3D3D3D", "#121212"] },
+  { key: "forest", label: "密林", colors: ["#BFE2C4", "#3F764D", "#234C2E", "#1D3422"] },
+  { key: "glacier", label: "冰川", colors: ["#C7D8EA", "#2F6DB3", "#27496D", "#22364F"] },
+  { key: "coffee", label: "咖啡", colors: ["#E3D1C6", "#8A5A44", "#4B3127", "#42271D"] },
+  { key: "spice-earth", label: "香料土", colors: ["#C9AB87", "#8F562E", "#A45D3F", "#623726"] },
+  { key: "monet-garden", label: "莫奈花园", colors: ["#ADBBD2", "#A2B068", "#8B607B", "#435F89"] },
+  { key: "waterlily-pink", label: "睡莲柔粉", colors: ["#DBC8C3", "#7F96AC", "#8D586F", "#4F756A"] },
+  { key: "bauhaus", label: "Bauhaus", colors: ["#F3D74B", "#144F9E", "#C92B2B", "#202020"] },
+];
 let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
@@ -50,6 +65,7 @@ let months = [];
 let activeMonth = localStorage.getItem("liming:month") || "";
 let includeInactive = localStorage.getItem("liming:include-inactive") === "1";
 let themeMode = localStorage.getItem(THEME_KEY) || "system";
+let paletteMode = localStorage.getItem(PALETTE_KEY) || "liming-blue";
 let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
@@ -120,6 +136,16 @@ function applyTheme() {
 }
 
 applyTheme();
+
+function applyPalette() {
+  const keys = new Set(PALETTES.map((palette) => palette.key));
+  const mode = keys.has(paletteMode) ? paletteMode : "liming-blue";
+  paletteMode = mode;
+  document.documentElement.dataset.palette = mode;
+  localStorage.setItem(PALETTE_KEY, mode);
+}
+
+applyPalette();
 
 function isDarkThemeActive() {
   if (themeMode === "dark") return true;
@@ -2039,6 +2065,15 @@ function sidebarMonthTools() {
   `;
 }
 
+function renderPalettePreview() {
+  const palette = PALETTES.find((item) => item.key === paletteMode) || PALETTES[0];
+  return `
+    <div class="palette-preview" aria-hidden="true">
+      ${palette.colors.map((color) => `<span class="palette-swatch" style="background:${color}"></span>`).join("")}
+    </div>
+  `;
+}
+
 function renderNav() {
   const currentGroup = activeGroup();
   const visibleGroups = navGroups.map((group) => ({
@@ -2071,6 +2106,13 @@ function renderNav() {
         <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
         <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
       </select>
+      <label class="sidebar-tool-label" for="sidebar-palette-select">配色方案</label>
+      <select id="sidebar-palette-select" class="control palette-select" title="选择配色方案">
+        ${PALETTES.map((palette) => `
+          <option value="${palette.key}" ${paletteMode === palette.key ? "selected" : ""}>${escapeHtml(palette.label)}</option>
+        `).join("")}
+      </select>
+      ${renderPalettePreview()}
     </div>
   `;
 }
@@ -4747,28 +4789,33 @@ function renderCourseNoticePreview(item) {
   const rows = item.lessons || [];
   return `
     <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
-      <table class="notice-shot-table">
-        <thead>
-          <tr>
-            <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((lesson) => `
+      <div class="notice-shot-shell">
+        <div class="notice-shot-head">
+          <div class="notice-shot-title">课程通知</div>
+        </div>
+        <table class="notice-shot-table">
+          <thead>
             <tr>
-              <td>${escapeHtml(lesson.teacher_name)}</td>
-              <td>${escapeHtml(lesson.date)}</td>
-              <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
-              <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
-              <td>${escapeHtml(lesson.time_slot)}</td>
-              <td>${escapeHtml(lesson.classroom)}</td>
-              <td>${escapeHtml(lesson.grade)}</td>
-              <td>${escapeHtml(lesson.subject)}</td>
-              <td>${escapeHtml(lesson.student_names)}</td>
+              <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${rows.map((lesson) => `
+              <tr>
+                <td>${escapeHtml(lesson.teacher_name)}</td>
+                <td>${escapeHtml(lesson.date)}</td>
+                <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
+                <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
+                <td>${escapeHtml(lesson.time_slot)}</td>
+                <td>${escapeHtml(lesson.classroom)}</td>
+                <td>${escapeHtml(lesson.grade)}</td>
+                <td>${escapeHtml(lesson.subject)}</td>
+                <td>${escapeHtml(lesson.student_names)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -4881,7 +4928,31 @@ async function saveCourseNoticeGreeting(item) {
   });
 }
 
+function cssVar(name, fallback = "") {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function courseNoticeShotPalette() {
+  return {
+    bg: cssVar("--shot-bg", "#f7f9fc"),
+    panel: cssVar("--shot-panel", "#ffffff"),
+    card: cssVar("--shot-card", "#ffffff"),
+    title: cssVar("--shot-title", "#102033"),
+    muted: cssVar("--shot-muted", "#64748b"),
+    line: cssVar("--shot-line", "#c8d6e5"),
+    brand: cssVar("--shot-brand", "#002147"),
+    brandDark: cssVar("--shot-brand-dark", "#00172f"),
+    brandSoft: cssVar("--shot-brand-soft", "#eaf0f7"),
+    brandPale: cssVar("--shot-brand-pale", "#f5f8fc"),
+    tagBg: cssVar("--shot-tag-bg", "#eaf0f7"),
+    tagText: cssVar("--shot-tag-text", "#002147"),
+    timeBg: cssVar("--shot-time-bg", "#eaf0f7"),
+    footerBg: cssVar("--shot-footer-bg", "#eef3f9"),
+  };
+}
+
 function courseNoticeCanvas(item) {
+  const colors = courseNoticeShotPalette();
   const columns = [
     ["teacher_name", "授课老师"],
     ["date", "日期"],
@@ -4902,7 +4973,7 @@ function courseNoticeCanvas(item) {
   const paddingX = 18;
   const rowHeight = 44;
   const outerPadding = 30;
-  const titleHeight = 58;
+  const titleHeight = 54;
   const colWidths = columns.map(([key, label]) => {
     const maxText = Math.max(
       ctx.measureText(label).width,
@@ -4919,40 +4990,56 @@ function courseNoticeCanvas(item) {
   const height = titleHeight + tableHeight + outerPadding * 2;
   const tableX = outerPadding;
   const tableY = outerPadding + titleHeight;
+  const panelX = outerPadding / 2;
+  const panelY = outerPadding / 2;
+  const panelWidth = width - outerPadding;
+  const panelHeight = height - outerPadding;
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = width * ratio;
   canvas.height = height * ratio;
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
   ctx.scale(ratio, ratio);
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#fbfdfc";
-  ctx.fillRect(outerPadding / 2, outerPadding / 2, width - outerPadding, height - outerPadding);
-  ctx.fillStyle = "#102a2a";
-  ctx.font = "700 20px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText("课程通知", width / 2, outerPadding + 26);
-  ctx.textAlign = "left";
   ctx.save();
-  ctx.shadowColor = "rgba(16, 42, 42, 0.08)";
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
   ctx.shadowBlur = 14;
   ctx.shadowOffsetY = 4;
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = colors.panel;
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.restore();
+  ctx.strokeStyle = colors.line;
+  ctx.strokeRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.fillStyle = colors.brand;
+  ctx.fillRect(panelX, panelY, panelWidth, 5);
+  ctx.fillStyle = colors.brandPale;
+  ctx.fillRect(panelX + 1, panelY + 5, panelWidth - 2, titleHeight - 6);
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "900 24px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("课程通知", width / 2, panelY + titleHeight / 2 + 3);
+  ctx.textAlign = "left";
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetY = 3;
+  ctx.fillStyle = colors.card;
   ctx.fillRect(tableX, tableY, tableWidth, tableHeight);
   ctx.restore();
-  ctx.strokeStyle = "#d9e9e8";
+  ctx.strokeStyle = colors.line;
   ctx.strokeRect(tableX, tableY, tableWidth, tableHeight);
   let x = tableX;
   ctx.font = headFont;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   columns.forEach(([, label], index) => {
-    ctx.fillStyle = "#eef8f6";
+    ctx.fillStyle = colors.brandSoft;
     ctx.fillRect(x, tableY, colWidths[index], rowHeight);
-    ctx.strokeStyle = "#d9e9e8";
+    ctx.strokeStyle = colors.line;
     ctx.strokeRect(x, tableY, colWidths[index], rowHeight);
-    ctx.fillStyle = "#24524f";
+    ctx.fillStyle = colors.brandDark;
     ctx.fillText(label, x + colWidths[index] / 2, tableY + rowHeight / 2);
     x += colWidths[index];
   });
@@ -4961,11 +5048,11 @@ function courseNoticeCanvas(item) {
     x = tableX;
     const y = tableY + rowHeight * (rowIndex + 1);
     columns.forEach(([key], index) => {
-      ctx.fillStyle = rowIndex % 2 ? "#fbfdfc" : "#ffffff";
+      ctx.fillStyle = rowIndex % 2 ? colors.brandPale : colors.card;
       ctx.fillRect(x, y, colWidths[index], rowHeight);
-      ctx.strokeStyle = "#e7f0ef";
+      ctx.strokeStyle = colors.line;
       ctx.strokeRect(x, y, colWidths[index], rowHeight);
-      ctx.fillStyle = "#17212b";
+      ctx.fillStyle = key === "time_slot" || key === "grade" || key === "subject" ? colors.tagText : colors.title;
       const value = String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""));
       ctx.fillText(value, x + colWidths[index] / 2, y + rowHeight / 2);
       x += colWidths[index];
@@ -5282,6 +5369,14 @@ function wireEvents() {
     select.addEventListener("change", () => {
       themeMode = select.value || "system";
       applyTheme();
+      render();
+    });
+  });
+
+  document.querySelectorAll(".palette-select").forEach((select) => {
+    select.addEventListener("change", () => {
+      paletteMode = select.value || "liming-blue";
+      applyPalette();
       render();
     });
   });
