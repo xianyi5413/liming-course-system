@@ -28,6 +28,7 @@ const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
 const THEME_KEY = "liming:theme";
 const PALETTE_KEY = "liming:palette";
+const IGNORE_ROOM_ONE_CONFLICT_KEY = "liming:ignore-room-one-conflict";
 const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
@@ -66,6 +67,7 @@ let activeMonth = localStorage.getItem("liming:month") || "";
 let includeInactive = localStorage.getItem("liming:include-inactive") === "1";
 let themeMode = localStorage.getItem(THEME_KEY) || "system";
 let paletteMode = localStorage.getItem(PALETTE_KEY) || "liming-blue";
+let ignoreRoomOneConflict = localStorage.getItem(IGNORE_ROOM_ONE_CONFLICT_KEY) === "1";
 let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
@@ -679,7 +681,7 @@ async function load() {
   if (expenseFilter.q) expenseParams.set("q", expenseFilter.q);
   state.expenses = canArea("expenses") ? ((await request(`/api/operating-expenses?${expenseParams.toString()}`)).expenses || []) : [];
   if (loadGeneration !== thisGeneration) return;
-  state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}`)
+  state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`)
     .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }));
   if (loadGeneration !== thisGeneration) return;
   const students = uniqueSorted([
@@ -2390,6 +2392,35 @@ function conflictTypeLabel(type) {
   }[type] || type || "冲突";
 }
 
+function normalizeRoom(value) {
+  return String(value ?? "").trim();
+}
+
+function isVirtualRoomOne(value) {
+  const room = normalizeRoom(value);
+  return room === "1" || room === "1.0";
+}
+
+function isIgnoredRoomOneConflict(issue) {
+  if (!ignoreRoomOneConflict || issue?.type !== "classroom") return false;
+  const details = issue.lesson_details || [];
+  if (details.length >= 2) return details.every((lesson) => isVirtualRoomOne(lesson.classroom));
+  return isVirtualRoomOne(issue.entity);
+}
+
+function visibleConflictIssues(issues = []) {
+  let ignoredRoomOneCount = 0;
+  const visible = [];
+  for (const issue of issues || []) {
+    if (isIgnoredRoomOneConflict(issue)) {
+      ignoredRoomOneCount += 1;
+    } else {
+      visible.push(issue);
+    }
+  }
+  return { issues: visible, ignoredRoomOneCount };
+}
+
 function parseLessonTimeRange(value) {
   const raw = String(value || "")
     .replaceAll("：", ":")
@@ -2493,14 +2524,16 @@ function localScheduleConflicts(rows) {
           lesson_details: lessonDetails,
         });
       }
-      if (a.row.classroom && a.row.classroom === b.row.classroom) {
+      const roomA = normalizeRoom(a.row.classroom);
+      const roomB = normalizeRoom(b.row.classroom);
+      if (roomA && roomA === roomB) {
         pushIssue({
           type: "classroom",
           date: a.row.date,
           time_slot: `${a.row.time_slot} / ${b.row.time_slot}`,
-          entity: a.row.classroom,
+          entity: roomA,
           lesson_ids: lessonIds,
-          message: `${a.row.classroom} 在重叠时间段被重复占用`,
+          message: `${roomA} 在重叠时间段被重复占用`,
           lesson_details: lessonDetails,
         });
       }
@@ -2522,7 +2555,7 @@ function localScheduleConflicts(rows) {
 
 function conflictMapByLesson(issues) {
   const map = new Map();
-  for (const issue of issues) {
+  for (const issue of visibleConflictIssues(issues).issues) {
     const label = conflictTypeLabel(issue.type);
     for (const id of issue.lesson_ids || []) {
       const key = Number(id);
@@ -2535,6 +2568,9 @@ function conflictMapByLesson(issues) {
 }
 
 function scheduleConflictPanel(issues) {
+  const conflictView = visibleConflictIssues(issues);
+  issues = conflictView.issues;
+  const ignoredRoomOneCount = conflictView.ignoredRoomOneCount;
   const counts = { teacher: 0, student: 0, classroom: 0, invalid_time: 0 };
   for (const issue of issues) counts[issue.type] = (counts[issue.type] || 0) + 1;
   const total = issues.length;
@@ -2552,6 +2588,13 @@ function scheduleConflictPanel(issues) {
           <span>教室 ${counts.classroom || 0}</span>
           <span>时间 ${counts.invalid_time || 0}</span>
         </div>
+      </div>
+      <div class="conflict-options">
+        <label class="history-toggle">
+          <input class="ignore-room-one-conflict" type="checkbox" ${ignoreRoomOneConflict ? "checked" : ""}>
+          <span>忽略教室为 1 的教室冲突</span>
+        </label>
+        ${ignoredRoomOneCount ? `<span class="muted-tip">已忽略教室为 1 的教室占用冲突 ${ignoredRoomOneCount} 条</span>` : ""}
       </div>
       ${total ? `
         <div class="conflict-list">
@@ -2777,10 +2820,11 @@ function renderMatrixDateFilter() {
 
 function renderWeek() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData();
+  const visibleConflicts = visibleConflictIssues(conflicts).issues;
   const showSalary = canArea("salary");
   renderTopbar(
     `${monthLabel()} 周课表`,
-    `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
+    `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
   );
   contentEl.innerHTML = `
     ${renderWeekTabs(ranges)}
@@ -2828,9 +2872,10 @@ function renderWeek() {
 
 function renderWeekMatrix() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
+  const visibleConflicts = visibleConflictIssues(conflicts).issues;
   renderTopbar(
     `${monthLabel()} 矩阵课表`,
-    `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
+    `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
   );
   contentEl.innerHTML = `
     ${renderWeekTabs(ranges)}
@@ -5378,6 +5423,14 @@ function wireEvents() {
       paletteMode = select.value || "liming-blue";
       applyPalette();
       render();
+    });
+  });
+
+  document.querySelectorAll(".ignore-room-one-conflict").forEach((input) => {
+    input.addEventListener("change", async () => {
+      ignoreRoomOneConflict = input.checked;
+      localStorage.setItem(IGNORE_ROOM_ONE_CONFLICT_KEY, ignoreRoomOneConflict ? "1" : "0");
+      await load();
     });
   });
 

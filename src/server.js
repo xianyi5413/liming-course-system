@@ -4887,13 +4887,23 @@ function conflictLessonDetail(row) {
   };
 }
 
-function scheduleConflicts(monthKey) {
+function normalizeRoom(value) {
+  return text(value);
+}
+
+function isVirtualRoomOne(value) {
+  const room = normalizeRoom(value);
+  return room === "1" || room === "1.0";
+}
+
+function scheduleConflicts(monthKey, options = {}) {
   if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
   const lessons = all(
     "SELECT * FROM lessons WHERE month_key = ? ORDER BY date, time_slot, teacher_name, classroom, sort_order, id",
     [monthKey],
   ).filter(isScheduleActive);
   const issues = [];
+  let ignored_room_one_count = 0;
   const parsed = [];
   const pushIssue = (issue) => issues.push({
     severity: issue.severity || "HIGH",
@@ -4949,17 +4959,23 @@ function scheduleConflicts(monthKey) {
           lesson_details: lessonDetails,
         });
       }
-      if (text(a.lesson.classroom) && text(a.lesson.classroom) === text(b.lesson.classroom)) {
-        pushIssue({
-          type: "classroom",
-          date: a.lesson.date,
-          time_slot: `${a.lesson.time_slot} / ${b.lesson.time_slot}`,
-          entity: a.lesson.classroom,
-          lesson_ids: lessonIds,
-          message: `${a.lesson.classroom} 在同一时间段被重复占用`,
-          lessons: lessonsText,
-          lesson_details: lessonDetails,
-        });
+      const roomA = normalizeRoom(a.lesson.classroom);
+      const roomB = normalizeRoom(b.lesson.classroom);
+      if (roomA && roomA === roomB) {
+        if (options.ignoreRoomOneConflict && isVirtualRoomOne(roomA) && isVirtualRoomOne(roomB)) {
+          ignored_room_one_count += 1;
+        } else {
+          pushIssue({
+            type: "classroom",
+            date: a.lesson.date,
+            time_slot: `${a.lesson.time_slot} / ${b.lesson.time_slot}`,
+            entity: roomA,
+            lesson_ids: lessonIds,
+            message: `${roomA} 在同一时间段被重复占用`,
+            lessons: lessonsText,
+            lesson_details: lessonDetails,
+          });
+        }
       }
       if (sharedStudents.length) {
         pushIssue({
@@ -4978,7 +4994,7 @@ function scheduleConflicts(monthKey) {
 
   const counts = { teacher: 0, student: 0, classroom: 0, invalid_time: 0 };
   for (const issue of issues) counts[issue.type] = (counts[issue.type] || 0) + 1;
-  return { month_key: monthKey, issue_count: issues.length, counts, issues };
+  return { month_key: monthKey, issue_count: issues.length, ignored_room_one_count, counts, issues };
 }
 
 function applyAuditPatch(issue) {
@@ -5341,8 +5357,10 @@ async function handleApi(req, res, url) {
     return sendJson(res, ignoreAuditIssues(body.ids || [], body.issue_keys || []));
   }
   if (req.method === "GET" && url.pathname === "/api/schedule-conflicts") {
-    const report = scheduleConflicts(resolveMonthKey(url));
-    if (user.role === "teacher") return sendJson(res, { ...report, issue_count: 0, counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 }, issues: [] });
+    const report = scheduleConflicts(resolveMonthKey(url), {
+      ignoreRoomOneConflict: url.searchParams.get("ignore_room_one") === "1",
+    });
+    if (user.role === "teacher") return sendJson(res, { ...report, issue_count: 0, ignored_room_one_count: 0, counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 }, issues: [] });
     return sendJson(res, report);
   }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
