@@ -104,6 +104,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | `operating_expenses` | 房租/水电/食材等运营开销 |
 | `audit_logs` / `audit_ignores` | 审计问题流水与忽略名单 |
 | `audit_events` | 操作审计日志，记录谁改了课程、充值、价格、薪资、账号等关键数据 |
+| `operation_logs` | 面向管理员的操作日志，记录课程增删改、月份新建/删除等关键操作的可读描述 |
 | `users` | 登录账号、角色、绑定老师姓名和账号状态 |
 | `parent_message_greetings` | 家长群课程通知的发送对象称呼、全局尾句和完整文案缓存 |
 | `course_notice_completion_records` | 家长群课程通知完成记录，按“年级 + 科目 + 学生名单 + 老师 + 日期 + 时间”唯一识别已发送课程 |
@@ -356,6 +357,15 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 ### Bugfix
 
 - 修复课程总表筛选栏因 `.lesson-filter-bar` sticky 定位导致悬浮在表格上方的问题，删除 sticky 属性使筛选栏重新跟随内容区滚动
+
+### 操作日志
+
+- 新增 `operation_logs` 表，独立于技术审计表 `audit_events`，面向管理员可读
+- 新增操作日志页面（设置 → 操作日志），包含筛选区、表格、分页
+- 筛选项：操作人、操作账号、操作类型、操作内容、操作时间范围
+- 分页支持 10/20/50 条/页，页码导航
+- 已接入课程增删改、月份新建/删除的日志写入
+- `writeOperationLog()` 统一写日志函数，操作内容为人可读的中文描述
 
 ## 金额结算口径
 
