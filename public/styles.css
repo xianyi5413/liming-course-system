@@ -4608,11 +4608,6 @@ tr.risk-debt:hover td {
   backdrop-filter: blur(8px);
 }
 
-.lesson-filter-bar {
-  position: sticky;
-  top: 76px;
-  z-index: 4;
-}
 
 .filter-controls {
   display: flex;
