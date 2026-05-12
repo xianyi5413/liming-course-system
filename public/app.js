@@ -2051,18 +2051,18 @@ function passwordModal() {
   `;
 }
 
-function sidebarMonthTools() {
+function monthToolbar() {
   const monthOptions = months.map((month) => `
     <option value="${escapeHtml(month)}" ${month === activeMonth ? "selected" : ""}>${escapeHtml(formatMonthOption(month))}</option>
   `).join("");
   return `
-    <div class="sidebar-month-tools">
-      <label class="sidebar-tool-label" for="sidebar-month-select">月份</label>
-      <select id="sidebar-month-select" class="control month-select">
+    <div class="month-toolbar">
+      <label class="month-toolbar-label" for="topbar-month-select">月份</label>
+      <select id="topbar-month-select" class="control month-select">
         ${monthOptions}
       </select>
-      ${canArea("schedule") ? `<div class="sidebar-month-actions">
-        <button class="btn new-month" type="button">新建</button>
+      ${canArea("schedule") ? `<div class="month-toolbar-actions">
+        <button class="btn new-month" type="button">新建月份</button>
         <button class="btn icon-btn delete-month" type="button" title="删除当前月份" aria-label="删除当前月份">🗑</button>
       </div>` : ""}
     </div>
@@ -2130,9 +2130,6 @@ function renderNav() {
         </div>
       `).join("")}
     </div>
-    <div class="sidebar-tools">
-      ${sidebarMonthTools()}
-    </div>
   `;
 }
 
@@ -2147,6 +2144,7 @@ function renderTopbar(title, meta = "", actions = "") {
     </div>
     <div class="toolbar">
       ${actions}
+      ${monthToolbar()}
       ${renderUserMenu()}
     </div>
     ${monthDeleteModal()}

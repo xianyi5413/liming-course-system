@@ -1148,32 +1148,6 @@ button:disabled,
   gap: var(--space-1);
 }
 
-.sidebar-tools {
-  display: grid;
-  gap: var(--space-2);
-  margin-top: auto;
-  padding: var(--space-4) var(--space-2) 0;
-  border-top: 1px solid var(--sidebar-line);
-}
-
-.sidebar-month-tools {
-  display: grid;
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  margin-bottom: var(--space-2);
-  border-bottom: 1px solid var(--sidebar-line);
-}
-
-.sidebar-month-actions {
-  display: grid;
-  grid-template-columns: 1fr 42px;
-  gap: var(--space-2);
-}
-
-.sidebar-month-actions .btn {
-  min-width: 0;
-}
-
 .sidebar-tool-label {
   color: var(--sidebar-muted);
   font-size: var(--text-caption);
@@ -1266,14 +1240,6 @@ button:disabled,
   display: flex;
   gap: var(--space-2);
   align-items: center;
-}
-
-.sidebar-tools .control {
-  width: 100%;
-  min-width: 0;
-  border-color: var(--sidebar-line);
-  background: var(--sidebar-hover);
-  color: var(--sidebar-ink);
 }
 
 .palette-preview {
@@ -1486,6 +1452,54 @@ button:disabled,
 
 .toolbar:empty {
   display: none;
+}
+
+.month-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+}
+
+.month-toolbar-label {
+  padding-left: 6px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.month-toolbar .control {
+  width: auto;
+  min-width: 150px;
+  height: 32px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.month-toolbar-actions {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.month-toolbar .btn {
+  min-height: 32px;
+  padding: 6px 9px;
+}
+
+.month-toolbar .icon-btn {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+
+.month-toolbar .control,
+.month-toolbar .btn {
+  flex: 0 0 auto;
 }
 
 .user-menu {
@@ -5080,11 +5094,6 @@ tr.risk-debt:hover td {
     gap: 4px;
   }
 
-  .sidebar-tools {
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-  }
-
   .topbar {
     position: static;
     align-items: flex-start;
@@ -5155,6 +5164,15 @@ tr.risk-debt:hover td {
 
   .toolbar {
     width: 100%;
+  }
+
+  .month-toolbar {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .month-toolbar .control {
+    flex: 1 1 150px;
   }
 
   .btn,
