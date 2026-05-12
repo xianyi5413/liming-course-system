@@ -9,7 +9,7 @@ const navGroups = [
   { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherProfiles", "老师档案"]] },
   { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "📊 经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "⚙️ 设置", views: [["pricing", "费用标准"], ["audit", "数据对账"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["userAdmin", "账号权限"]] },
 ];
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
@@ -36,9 +36,9 @@ const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", fin
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "pricing", "userAdmin"]),
-  finance: new Set(["finance", "recharges", "studentQuery", "expenses"]),
-  teacher: new Set(["weekMatrix", "teacherDetail"]),
+  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
+  finance: new Set(["finance", "recharges", "studentQuery", "expenses", "appearance"]),
+  teacher: new Set(["weekMatrix", "teacherDetail", "appearance"]),
 };
 const PALETTES = [
   { key: "liming-blue", label: "黎明蓝", colors: ["#002147", "#00172F", "#EAF0F7", "#C8D6E5"] },
@@ -2103,6 +2103,7 @@ function renderUserMenu() {
             <span>${escapeHtml(role)}</span>
           </div>
           <div class="user-menu-divider"></div>
+          <button class="user-menu-item appearance-settings-link" type="button" role="menuitem">外观设置</button>
           <button class="user-menu-item open-password-modal" type="button" role="menuitem">修改密码</button>
           <button class="user-menu-item logout-btn danger" type="button" role="menuitem">退出系统</button>
         </div>
@@ -2131,19 +2132,6 @@ function renderNav() {
     </div>
     <div class="sidebar-tools">
       ${sidebarMonthTools()}
-      <label class="sidebar-tool-label" for="sidebar-theme-select">主题</label>
-      <select id="sidebar-theme-select" class="control theme-select" title="默认跟随系统">
-        <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
-        <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
-        <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
-      </select>
-      <label class="sidebar-tool-label" for="sidebar-palette-select">配色方案</label>
-      <select id="sidebar-palette-select" class="control palette-select" title="选择配色方案">
-        ${PALETTES.map((palette) => `
-          <option value="${palette.key}" ${paletteMode === palette.key ? "selected" : ""}>${escapeHtml(palette.label)}</option>
-        `).join("")}
-      </select>
-      ${renderPalettePreview()}
     </div>
   `;
 }
@@ -4018,6 +4006,42 @@ function renderUserAdmin() {
   `;
 }
 
+function renderAppearance() {
+  renderTopbar("外观设置", "主题与配色方案");
+  contentEl.innerHTML = `
+    <div class="band appearance-settings">
+      <div class="section-head">
+        <div>
+          <div class="section-title">外观设置</div>
+          <div class="section-subtitle">调整系统界面的明暗主题和品牌配色，设置会保存在当前浏览器。</div>
+        </div>
+      </div>
+      <div class="appearance-settings-grid">
+        <label class="appearance-field">
+          <span>主题</span>
+          <select class="control theme-select" title="默认跟随系统">
+            <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
+            <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
+            <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
+          </select>
+        </label>
+        <label class="appearance-field">
+          <span>配色方案</span>
+          <select class="control palette-select" title="选择配色方案">
+            ${PALETTES.map((palette) => `
+              <option value="${palette.key}" ${paletteMode === palette.key ? "selected" : ""}>${escapeHtml(palette.label)}</option>
+            `).join("")}
+          </select>
+        </label>
+        <div class="appearance-preview">
+          <span>当前配色</span>
+          ${renderPalettePreview()}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderPricing() {
   const rows = [...state.pricing_standards].sort((a, b) => {
     const g = gradeOrder.indexOf(a.grade) - gradeOrder.indexOf(b.grade);
@@ -5194,6 +5218,7 @@ function render() {
     finance: renderFinance,
     recharges: renderRecharges,
     studentQuery: renderStudentQuery,
+    appearance: renderAppearance,
     audit: renderAudit,
     teacherProfiles: renderTeacherProfiles,
     studentProfiles: renderStudentProfiles,
@@ -5392,6 +5417,17 @@ function wireEvents() {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       userMenuOpen = !userMenuOpen;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".appearance-settings-link").forEach((button) => {
+    button.addEventListener("click", () => {
+      userMenuOpen = false;
+      view = "appearance";
+      activeNavGroup = "settings";
+      localStorage.setItem("liming:view", view);
+      localStorage.setItem("liming:nav-group", activeNavGroup);
       render();
     });
   });
