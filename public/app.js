@@ -32,6 +32,15 @@ const IGNORE_ROOM_ONE_CONFLICT_KEY = "liming:ignore-room-one-conflict";
 const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
+const SIDEBAR_COLLAPSED_KEY = "liming:sidebar-collapsed";
+const NAV_ICONS = {
+  schedule: "📅",
+  students: "👧",
+  teachers: "👨‍🏫",
+  operations: "💼",
+  finance: "📊",
+  settings: "⚙️",
+};
 const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", finance: "财务", teacher: "老师" };
 const ROLE_VIEWS = {
   owner: null,
@@ -68,6 +77,7 @@ let includeInactive = localStorage.getItem("liming:include-inactive") === "1";
 let themeMode = localStorage.getItem(THEME_KEY) || "system";
 let paletteMode = localStorage.getItem(PALETTE_KEY) || "liming-blue";
 let ignoreRoomOneConflict = localStorage.getItem(IGNORE_ROOM_ONE_CONFLICT_KEY) === "1";
+let sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
 let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
@@ -132,6 +142,13 @@ let activeCustomDateMonth = null;
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
 const contentEl = document.querySelector("#content");
+const appEl = document.querySelector("#app");
+
+function applySidebarState() {
+  appEl?.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+}
+
+applySidebarState();
 
 function applyTheme() {
   const mode = ["system", "light", "dark"].includes(themeMode) ? themeMode : "system";
@@ -1968,6 +1985,10 @@ function renderSecondaryNav(group) {
   return `<div class="nav-subtabs">${tabs}</div>`;
 }
 
+function navLabelText(group) {
+  return String(group.label || "").replace(/^\S+\s+/, "").trim() || group.label || "";
+}
+
 function renderLogin(error = "") {
   const remembered = loginRemember();
   navEl.innerHTML = "";
@@ -2123,8 +2144,9 @@ function renderNav() {
     <div class="nav-sections">
       ${visibleGroups.map((group) => `
         <div class="nav-group ${currentGroup.key === group.key ? "open" : ""}">
-          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}">
-            <span>${escapeHtml(group.label)}</span>
+          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}" data-tooltip="${escapeHtml(navLabelText(group))}" title="${sidebarCollapsed ? escapeHtml(navLabelText(group)) : ""}">
+            <span class="nav-icon" aria-hidden="true">${escapeHtml(NAV_ICONS[group.key] || "•")}</span>
+            <span class="nav-label">${escapeHtml(navLabelText(group))}</span>
           </button>
           ${currentGroup.key === group.key && groupViews(group).length > 1 ? renderSecondaryNav(group) : ""}
         </div>
@@ -2135,8 +2157,8 @@ function renderNav() {
 
 function renderTopbar(title, meta = "", actions = "") {
   topbarEl.innerHTML = `
-    <div style="display: flex; align-items: center;">
-      <button class="mobile-menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="菜单">☰</button>
+    <div class="topbar-title-side">
+      <button class="sidebar-toggle" type="button" aria-label="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" title="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" aria-pressed="${sidebarCollapsed ? "true" : "false"}">☰</button>
       <div class="title-block">
         <div class="page-title">${escapeHtml(title)}</div>
         <div class="page-meta">${escapeHtml(meta)}</div>
@@ -5203,6 +5225,7 @@ async function copyCourseNoticeImage(item) {
 }
 
 function render() {
+  applySidebarState();
   const viewChanged = lastRenderedView && lastRenderedView !== view;
   lastRenderedView = view;
   renderNav();
@@ -5415,6 +5438,14 @@ function wireEvents() {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       userMenuOpen = !userMenuOpen;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      sidebarCollapsed = !sidebarCollapsed;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
       render();
     });
   });
