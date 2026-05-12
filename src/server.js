@@ -325,6 +325,18 @@ function initDb() {
       completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
       completed_by TEXT DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS operation_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campus_name TEXT DEFAULT '黎明教育',
+      operator_name TEXT DEFAULT '',
+      operator_account TEXT DEFAULT '',
+      operation_type TEXT NOT NULL,
+      operation_content TEXT DEFAULT '',
+      target_type TEXT DEFAULT '',
+      target_id TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      extra_json TEXT DEFAULT ''
+    );
   `);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
@@ -340,6 +352,9 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_parent_message_greetings_key ON parent_message_greetings(send_object_key)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_course_notice_completion_key ON course_notice_completion_records(unique_key)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_course_notice_completion_object ON course_notice_completion_records(send_object_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
 
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
@@ -3857,6 +3872,21 @@ function recordAuditEvent(req, actor, { action, entity_type, entity_id = "", bef
   );
 }
 
+function writeOperationLog(operator, { operation_type, operation_content = "", target_type = "", target_id = "" }) {
+  if (!operator || !operation_type) return;
+  db.prepare(`
+    INSERT INTO operation_logs(campus_name, operator_name, operator_account, operation_type, operation_content, target_type, target_id)
+    VALUES ('黎明教育', ?, ?, ?, ?, ?, ?)
+  `).run(
+    text(operator.display_name),
+    text(operator.username),
+    text(operation_type),
+    text(operation_content),
+    text(target_type),
+    text(target_id),
+  );
+}
+
 function auditedPatchTable(req, actor, table, idField, idValue, allowedFields, data, entityType = table) {
   const before = get(`SELECT * FROM ${table} WHERE ${idField} = ?`, [idValue]);
   patchTable(table, idField, idValue, allowedFields, data);
@@ -5305,6 +5335,7 @@ async function handleApi(req, res, url) {
     const monthKey = text(body.month_key);
     if (!/^\d{4}-\d{2}-01$/.test(monthKey)) return sendError(res, 400, "month_key must be YYYY-MM-01");
     const result = createMonth(monthKey);
+    writeOperationLog(user, { operation_type: "创建月份", operation_content: `月份 ${monthKey}`, target_type: "months", target_id: monthKey });
     return sendJson(res, result, result.created ? 201 : 200);
   }
   const monthMatch = url.pathname.match(/^\/api\/months\/(\d{4}-\d{2}-01)$/);
@@ -5313,7 +5344,34 @@ async function handleApi(req, res, url) {
     const result = deleteMonth(monthKey, url.searchParams.get("force") === "1");
     if (result.blocked && result.reason === "has_data") return sendJson(res, { counts: result.counts }, 409);
     if (result.blocked) return sendJson(res, { error: result.reason, counts: result.counts }, 400);
+    writeOperationLog(user, { operation_type: "删除月份", operation_content: `月份 ${monthKey}${url.searchParams.get("force") === "1" ? " (强制)" : ""}`, target_type: "months", target_id: monthKey });
     return sendJson(res, result);
+  }
+  if (req.method === "GET" && url.pathname === "/api/operation-logs") {
+    const conditions = [];
+    const params = [];
+    const operator = text(url.searchParams.get("operator") || "");
+    const operator_account = text(url.searchParams.get("operator_account") || "");
+    const operation_type = text(url.searchParams.get("operation_type") || "");
+    const content = text(url.searchParams.get("content") || "");
+    const start_date = text(url.searchParams.get("start_date") || "");
+    const end_date = text(url.searchParams.get("end_date") || "");
+    if (operator) { conditions.push("operator_name LIKE ?"); params.push(`%${operator}%`); }
+    if (operator_account) { conditions.push("operator_account LIKE ?"); params.push(`%${operator_account}%`); }
+    if (operation_type) { conditions.push("operation_type LIKE ?"); params.push(`%${operation_type}%`); }
+    if (content) { conditions.push("operation_content LIKE ?"); params.push(`%${content}%`); }
+    if (start_date) { conditions.push("created_at >= ?"); params.push(start_date); }
+    if (end_date) { conditions.push("created_at <= ?"); params.push(end_date + " 23:59:59"); }
+    const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+    const page_size = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 10));
+    const total = Number(get(`SELECT COUNT(*) AS count FROM operation_logs ${whereClause}`, params)?.count) || 0;
+    const offset = (page - 1) * page_size;
+    const items = all(
+      `SELECT * FROM operation_logs ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      [...params, page_size, offset],
+    );
+    return sendJson(res, { items, total, page, page_size });
   }
   if (req.method === "GET" && url.pathname === "/api/audit/logs") {
     return sendJson(res, { logs: recentAuditLogs(Number(url.searchParams.get("limit") || 200)) });
@@ -5627,6 +5685,7 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const lesson = insertLesson(body);
     recordAuditEvent(req, user, { action: "create", entity_type: "lessons", entity_id: String(lesson.id), before: null, after: lesson });
+    writeOperationLog(user, { operation_type: "创建课程", operation_content: `${text(body.teacher_name)} ${text(body.date)} ${text(body.time_slot)} ${text(body.subject)} ${text(body.student_names)}`, target_type: "lessons", target_id: String(lesson.id) });
     return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson) }, 201);
   }
 
@@ -5645,10 +5704,12 @@ async function handleApi(req, res, url) {
       "student_names", "notes", "course_status", "status", "teacher_salary", "month_key", "sort_order",
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
+    writeOperationLog(user, { operation_type: "修改课程", operation_content: `${text(updated.teacher_name)} ${text(updated.date)} ${text(updated.time_slot)} ${text(updated.subject)} ${text(updated.student_names)}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
     return sendJson(res, { ...updated, warnings: lessonWarnings(updated) });
   }
   if (lessonMatch && req.method === "DELETE") {
     auditedDelete(req, user, "lessons", "id", Number(lessonMatch[1]), "lessons");
+    writeOperationLog(user, { operation_type: "删除课程", operation_content: `课程ID ${lessonMatch[1]}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
     return sendJson(res, { ok: true });
   }
 

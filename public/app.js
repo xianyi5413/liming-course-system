@@ -9,7 +9,7 @@ const navGroups = [
   { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherProfiles", "老师档案"]] },
   { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "📊 经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
@@ -118,6 +118,10 @@ let profileModal = null;
 let staffProfileSearch = "";
 let staffStatusFilter = localStorage.getItem("liming:staff-status-filter") || "";
 let staffModal = null;
+let operationLogFilter = { operator_name: "", operator_account: "", operation_type: "", content: "", start_date: "", end_date: "" };
+let operationLogPage = 1;
+let operationLogPageSize = 10;
+let operationLogData = { items: [], total: 0, page: 1, page_size: 10 };
 let staffPayrollSearch = "";
 let expenseModal = null;
 let pricingAuditModal = null;
@@ -4831,6 +4835,176 @@ function renderExpenses() {
   `;
 }
 
+async function renderOperationLogs() {
+  const params = new URLSearchParams();
+  if (operationLogFilter.operator_name) params.set("operator", operationLogFilter.operator_name);
+  if (operationLogFilter.operator_account) params.set("operator_account", operationLogFilter.operator_account);
+  if (operationLogFilter.operation_type) params.set("operation_type", operationLogFilter.operation_type);
+  if (operationLogFilter.content) params.set("content", operationLogFilter.content);
+  if (operationLogFilter.start_date) params.set("start_date", operationLogFilter.start_date);
+  if (operationLogFilter.end_date) params.set("end_date", operationLogFilter.end_date);
+  params.set("page", operationLogPage);
+  params.set("page_size", operationLogPageSize);
+
+  contentEl.innerHTML = `<div class="loading">加载中...</div>`;
+
+  try {
+    operationLogData = await request(`/api/operation-logs?${params.toString()}`);
+  } catch (error) {
+    renderTopbar("操作日志", "加载失败");
+    contentEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+    wireEvents();
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(operationLogData.total / operationLogPageSize));
+  renderTopbar("操作日志", `共 ${operationLogData.total} 条记录`);
+  wireEvents();
+
+  const OPERATION_TYPES = ["创建课程", "修改课程", "删除课程", "创建月份", "删除月份", "导入课程", "导出课程", "修改密码", "登录系统", "退出系统", "其他操作"];
+
+  contentEl.innerHTML = `
+    <div class="band">
+      <div class="filter-bar compact">
+        <div class="filter-controls">
+          <label class="filter-field">
+            <span>操作人</span>
+            <input class="control operation-log-filter" data-field="operator_name" type="text" placeholder="请输入姓名" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.operator_name)}">
+          </label>
+          <label class="filter-field">
+            <span>操作账号</span>
+            <input class="control operation-log-filter" data-field="operator_account" type="text" placeholder="请输入账号" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.operator_account)}">
+          </label>
+          <label class="filter-field">
+            <span>操作类型</span>
+            <select class="control operation-log-filter" data-field="operation_type">
+              <option value="">全部类型</option>
+              ${OPERATION_TYPES.map((type) => `<option value="${type}" ${operationLogFilter.operation_type === type ? "selected" : ""}>${type}</option>`).join("")}
+            </select>
+          </label>
+          <label class="filter-field">
+            <span>操作内容</span>
+            <input class="control operation-log-filter" data-field="content" type="text" placeholder="请输入操作内容" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.content)}">
+          </label>
+          <label class="filter-field filter-date-range">
+            <span>操作时间</span>
+            <span class="date-range-inputs">
+              <input class="control operation-log-filter" data-field="start_date" type="date" value="${escapeHtml(operationLogFilter.start_date)}">
+              <b>—</b>
+              <input class="control operation-log-filter" data-field="end_date" type="date" value="${escapeHtml(operationLogFilter.end_date)}">
+            </span>
+          </label>
+        </div>
+        <div class="filter-summary">
+          <button class="btn primary apply-operation-log-filter" type="button">查询</button>
+          <button class="btn reset-operation-log-filter" type="button">重置</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="operation-log-table">
+          <thead>
+            <tr>
+              <th>操作人</th>
+              <th>操作账号</th>
+              <th>操作类型</th>
+              <th>操作内容</th>
+              <th>操作时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${operationLogData.items.map((log) => `
+              <tr>
+                <td class="text-cell">${escapeHtml(log.operator_name)}</td>
+                <td class="text-cell">${escapeHtml(log.operator_account)}</td>
+                <td class="text-cell">${escapeHtml(log.operation_type)}</td>
+                <td class="text-cell" title="${escapeHtml(log.operation_content)}">${escapeHtml(log.operation_content)}</td>
+                <td class="text-cell">${escapeHtml(log.created_at)}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="5" class="empty">暂无操作日志</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${operationLogData.total > 0 ? `
+      <div class="pagination-bar">
+        <div class="pagination-info">
+          <span>共 <b>${operationLogData.total}</b> 条</span>
+          <select class="control pagination-page-size">
+            <option value="10" ${operationLogPageSize === 10 ? "selected" : ""}>10 条/页</option>
+            <option value="20" ${operationLogPageSize === 20 ? "selected" : ""}>20 条/页</option>
+            <option value="50" ${operationLogPageSize === 50 ? "selected" : ""}>50 条/页</option>
+          </select>
+        </div>
+        <div class="pagination-controls">
+          <button class="btn ghost pagination-btn" data-page="${operationLogPage - 1}" type="button" ${operationLogPage <= 1 ? "disabled" : ""}>上一页</button>
+          ${renderPageButtons(operationLogPage, totalPages)}
+          <button class="btn ghost pagination-btn" data-page="${operationLogPage + 1}" type="button" ${operationLogPage >= totalPages ? "disabled" : ""}>下一页</button>
+        </div>
+      </div>
+      ` : ""}
+    </div>
+  `;
+
+  bindOperationLogEvents();
+}
+
+function renderPageButtons(current, total) {
+  if (total <= 1) return "";
+  const visible = 7;
+  let start = Math.max(1, current - Math.floor(visible / 2));
+  let end = Math.min(total, start + visible - 1);
+  if (end - start < visible - 1) start = Math.max(1, end - visible + 1);
+  return Array.from({ length: end - start + 1 }, (_, i) => {
+    const pageNum = start + i;
+    return `<button class="btn ${pageNum === current ? "primary" : "ghost"} pagination-btn" data-page="${pageNum}" type="button">${pageNum}</button>`;
+  }).join("");
+}
+
+function bindOperationLogEvents() {
+  document.querySelectorAll(".operation-log-filter").forEach((input) => {
+    input.addEventListener("change", () => {
+      operationLogFilter = { ...operationLogFilter, [input.dataset.field]: input.value };
+    });
+  });
+
+  document.querySelectorAll(".operation-log-filter[type='text']").forEach((input) => {
+    bindSafeTextInput(input,
+      (value) => { operationLogFilter = { ...operationLogFilter, [input.dataset.field]: value }; },
+      () => {}, 400,
+    );
+  });
+
+  document.querySelector(".apply-operation-log-filter")?.addEventListener("click", async () => {
+    document.querySelectorAll(".operation-log-filter").forEach((input) => {
+      operationLogFilter = { ...operationLogFilter, [input.dataset.field]: input.value };
+    });
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+
+  document.querySelector(".reset-operation-log-filter")?.addEventListener("click", async () => {
+    operationLogFilter = { operator_name: "", operator_account: "", operation_type: "", content: "", start_date: "", end_date: "" };
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+
+  document.querySelectorAll(".pagination-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const targetPage = Number(button.dataset.page);
+      if (!targetPage || targetPage < 1) return;
+      const totalPages = Math.max(1, Math.ceil(operationLogData.total / operationLogPageSize));
+      if (targetPage > totalPages) return;
+      operationLogPage = targetPage;
+      await renderOperationLogs();
+    });
+  });
+
+  document.querySelector(".pagination-page-size")?.addEventListener("change", async () => {
+    operationLogPageSize = Number(document.querySelector(".pagination-page-size")?.value) || 10;
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+}
+
 function renderTeacherSalary() {
   const rows = state.derived.teacher_summary;
   const showSalary = canArea("salary");
@@ -5264,6 +5438,7 @@ function render() {
     expenses: renderExpenses,
     pricing: renderPricing,
     userAdmin: renderUserAdmin,
+    operationLogs: renderOperationLogs,
     studentPricing: renderStudentPricing,
     teacherSalary: renderTeacherSalary,
     teacherDetail: renderTeacherDetail,
