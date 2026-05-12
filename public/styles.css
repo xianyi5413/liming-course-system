@@ -526,6 +526,24 @@
   --shot-footer-bg: #f8e98d;
 }
 
+/* 课程截图配色：默认固定黎明蓝，仅当 data-shot-follow-palette="true" 时跟随当前配色方案 */
+:root:not([data-shot-follow-palette="true"]) {
+  --shot-bg: #f7f9fc;
+  --shot-panel: #ffffff;
+  --shot-card: #ffffff;
+  --shot-title: #102033;
+  --shot-muted: #64748b;
+  --shot-line: #c8d6e5;
+  --shot-brand: #002147;
+  --shot-brand-dark: #00172f;
+  --shot-brand-soft: #eaf0f7;
+  --shot-brand-pale: #f5f8fc;
+  --shot-tag-bg: #eaf0f7;
+  --shot-tag-text: #002147;
+  --shot-time-bg: #eaf0f7;
+  --shot-footer-bg: #eef3f9;
+}
+
 :root[data-theme="dark"] {
   color-scheme: dark;
   --shadow-panel: none;

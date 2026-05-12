@@ -33,6 +33,7 @@ const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
 const SIDEBAR_COLLAPSED_KEY = "liming:sidebar-collapsed";
+const SHOT_FOLLOW_PALETTE_KEY = "liming:shot-follow-palette";
 const NAV_ICONS = {
   schedule: "📅",
   students: "👧",
@@ -78,6 +79,7 @@ let themeMode = localStorage.getItem(THEME_KEY) || "system";
 let paletteMode = localStorage.getItem(PALETTE_KEY) || "liming-blue";
 let ignoreRoomOneConflict = localStorage.getItem(IGNORE_ROOM_ONE_CONFLICT_KEY) === "1";
 let sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+let shotFollowPalette = localStorage.getItem(SHOT_FOLLOW_PALETTE_KEY) === "true";
 let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
@@ -167,6 +169,12 @@ function applyPalette() {
 }
 
 applyPalette();
+
+function applyShotPalettePreference() {
+  document.documentElement.dataset.shotFollowPalette = shotFollowPalette ? "true" : "false";
+}
+
+applyShotPalettePreference();
 
 function isDarkThemeActive() {
   if (themeMode === "dark") return true;
@@ -4057,6 +4065,14 @@ function renderAppearance() {
           <span>当前配色</span>
           ${renderPalettePreview()}
         </div>
+        <label class="appearance-field shot-follow-palette-field">
+          <span>课程截图配色</span>
+          <label class="history-toggle" style="align-self:start;margin-top:2px;">
+            <input class="shot-follow-palette" type="checkbox" ${shotFollowPalette ? "checked" : ""}>
+            <span>课程截图跟随当前配色方案</span>
+          </label>
+          <span style="color:var(--muted);font-size:0.75rem;line-height:1.4;">关闭时，课程截图固定使用黎明蓝，适合发给家长保持统一品牌视觉。</span>
+        </label>
       </div>
     </div>
   `;
@@ -5547,6 +5563,15 @@ function wireEvents() {
       ignoreRoomOneConflict = input.checked;
       localStorage.setItem(IGNORE_ROOM_ONE_CONFLICT_KEY, ignoreRoomOneConflict ? "1" : "0");
       await load();
+    });
+  });
+
+  document.querySelectorAll(".shot-follow-palette").forEach((input) => {
+    input.addEventListener("change", () => {
+      shotFollowPalette = input.checked;
+      localStorage.setItem(SHOT_FOLLOW_PALETTE_KEY, shotFollowPalette ? "true" : "false");
+      applyShotPalettePreference();
+      render();
     });
   });
 
