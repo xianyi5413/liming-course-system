@@ -159,6 +159,29 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 清除记录 | 页面提供“清除所有打勾记录”，仅清空完成记录，不影响称呼和文案 |
 | 页面体验 | 切换到其他页面时会自动回到顶部，避免继承课程通知页或其他长页面的滚动位置 |
 
+#### 1.2 课程字段行级编辑
+
+课程总表字段编辑从"改一个字段 → 整页重渲染"升级为按影响范围分级局部更新，由 `FIELD_TIERS` 配置表驱动。
+
+| 档位 | 含义 | 覆盖字段 | 更新粒度 | 额外操作 |
+| --- | --- | --- | --- | --- |
+| A | 纯本行展示 | `notes`、`grade`、`subject` | 只更新当前单元格 | — |
+| B | 跨行排课 | `teacher_name`、`date`、`time_slot`、`classroom`、`student_names`、`status` | `#lessons-tbody` 局部重绘 | 乐观更新 `state.lessons`，PATCH 失败回滚 + `alert`；重跑 `GET /api/schedule-conflicts`（禁止前端复刻冲突逻辑） |
+| C | 经营/费用汇总 | `teacher_name`、`date`、`student_names`、`status`、`grade`、`subject`、`teacher_salary` | 标记 `dirtyFlags` key，不刷新当前页 | 进入经营概览 / 费用汇总 / 教师页时 `consumeDirty` 触发 `load()` 重拉 |
+
+**关键约束**：
+
+| 约束 | 实现方式 |
+| --- | --- |
+| 事件绑定 | `contentEl` 上一次性 `change` 事件委托（`lessonFieldDelegatedBound` 守卫），不再 `forEach` 逐行绑定 |
+| B 档乐观更新 | PATCH 发出时立即 `patchLessonInState`，失败回滚并 `alert` |
+| 冲突检测 | B 档只调 `GET /api/schedule-conflicts?month=`，不调 `/api/bootstrap` 和 `/api/lessons-range` |
+| 滚动位置 | 捕获 `.table-wrap` 的 `scrollTop`/`scrollLeft`，双 `requestAnimationFrame` 恢复 |
+| 未提交草稿 | `captureLessonDrafts` 快照 DOM 值与 state 不一致的单元格，渲染后 `restoreLessonDrafts` 回填 |
+| 焦点恢复 | 按 `data-row-id` + `data-field` 重新定位，不按 `rowIndex` |
+| Warnings 展示 | PATCH 返回的 `warnings` 缓存到 `lessonWarningsMap`，渲染时行尾 ⚠️ 图标 + `title` tooltip，行加 `has-warnings` 类 |
+| tbody 重绘后自定义控件 | `reRenderLessonsTbody` 末尾补调 `enhanceCustomSelects` + `enhanceCustomDateInputs`，防止下拉框和日期选择器退化为原生组件 |
+
 ---
 
 ### 2. 学生（👥）
@@ -424,6 +447,8 @@ giftBalance       = giftBase - giftConsumption
 | 暗色模式偏绿偏脏 | 暗色基础变量改为近黑 / 蓝黑后台风格，大面积背景不再使用绿色系；配色方案在暗色下只影响局部强调 | `:root[data-theme="dark"]` / `prefers-color-scheme` |
 | 短范围矩阵课表时间段界限弱 | 保留原有宽松列宽和单元格高度，只用符合设计系统的边框色做时间段分组分隔；暗色 / 亮色都可见 | `week-grid-table` CSS |
 | 生产样式未完整应用 `_ Design System` | 同步品牌主色、`brand-pale`、语义 token、字体工具类、暖胡桃 system dark，并将亮色侧栏改为 UI Kit 的温暖纸色方案 | `public/styles.css` |
+| 课程字段修改触发整页刷新，丢滚动位置和未提交草稿 | 改为 `FIELD_TIERS` 字段分档（A/B/C 三档）：A 档只更新单元格，B 档 tbody 局部重绘 + 乐观更新 + 冲突重算，C 档 `dirtyFlags` 标记；事件绑定改为 `contentEl` 一次性委托；`reRenderLessonsTbody` 末尾补调 `enhanceCustomSelects` + `enhanceCustomDateInputs` | `public/app.js:handleLessonFieldChange` / `reRenderLessonsTbody` / `FIELD_TIERS` |
+| tbody 局部重绘后自定义 `<select>` / `<input type="date">` 退化为原生组件 | 在 `reRenderLessonsTbody` 末尾补调 `enhanceCustomSelects()` + `enhanceCustomDateInputs()`，两函数均幂等（`data-custom-select` / `data-custom-date` 守卫） | `public/app.js:reRenderLessonsTbody` |
 
 ### 高（建议尽快修）
 
@@ -457,6 +482,9 @@ giftBalance       = giftBase - giftConsumption
 
 9. **`splitStudents` 不规范化中间空格**
    "小 明" 与 "小明" 被当成两个学生。审计 `student_typo` 通过 `normalizeAuditName` 去空格后做 Levenshtein 兜底，但平时录入时不会自动合并。
+
+10. **`student_names` 修改后 `fee_overrides` 留下孤儿行**
+    `fee_overrides` 主键为 `(lesson_id, student_name)`。课程总表中修改某节课的 `student_names`（移除某个学生）后，数据库里该学生的 `fee_overrides` 行不会被级联删除，成为僵尸数据。这是后端 PATCH 处理逻辑的 bug，本轮未触及修复，后续需在 `/api/lessons/:id` PATCH 中补入旧学生名清理逻辑。
 
 ## 受限范围（不在 MVP 内）
 

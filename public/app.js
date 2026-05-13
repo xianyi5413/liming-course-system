@@ -12,6 +12,39 @@ const navGroups = [
   { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
+/**
+ * FIELD_TIERS —— 按字段修改影响范围分三档（正交维度，字段可同属多档）：
+ *   A: 纯本行展示 → 只更新当前单元格，不触发跨行计算
+ *   B: 跨行排课   → 更新当前行 + 冲突涉及行，重跑 GET /api/schedule-conflicts
+ *   C: 经营/费用   → 标记 dirty key，下次进入对应页面时重算
+ *
+ * 字段归档表：
+ * | 字段            | A | B | C | dirty keys                              |
+ * |-----------------|---|---|---|------------------------------------------|
+ * | notes           | ✓ |   |   | -                                        |
+ * | teacher_name    |   | ✓ | ✓ | teacherSalary                            |
+ * | date            |   | ✓ | ✓ | finance, summary                         |
+ * | time_slot       |   | ✓ |   | -                                        |
+ * | classroom       |   | ✓ |   | -                                        |
+ * | student_names   |   | ✓ | ✓ | finance, studentSummary                  |
+ * | status          |   | ✓ | ✓ | finance, teacherSalary, studentSummary   |
+ * | grade           | ✓ |   | ✓ | studentSummary, finance                  |
+ * | subject         | ✓ |   | ✓ | studentSummary, finance                  |
+ * | teacher_salary  | ✓ |   | ✓ | teacherSalary                            |
+ */
+const FIELD_TIERS = {
+  notes:          { tiers: ["A"],       dirtyKeys: [] },
+  teacher_name:   { tiers: ["B", "C"],  dirtyKeys: ["teacherSalary"] },
+  date:           { tiers: ["B", "C"],  dirtyKeys: ["finance", "summary"] },
+  time_slot:      { tiers: ["B"],       dirtyKeys: [] },
+  classroom:      { tiers: ["B"],       dirtyKeys: [] },
+  student_names:  { tiers: ["B", "C"],  dirtyKeys: ["finance", "studentSummary"] },
+  status:         { tiers: ["B", "C"],  dirtyKeys: ["finance", "teacherSalary", "studentSummary"] },
+  grade:          { tiers: ["A", "C"],  dirtyKeys: ["studentSummary", "finance"] },
+  subject:        { tiers: ["A", "C"],  dirtyKeys: ["studentSummary", "finance"] },
+  teacher_salary: { tiers: ["A", "C"],  dirtyKeys: ["teacherSalary"] },
+};
+
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
 const gradeTrendColors = {
   "初一": "#10b981",
@@ -128,6 +161,9 @@ let pricingAuditModal = null;
 let lessonCopyDraft = null;
 let weekCopyDraft = null;
 let focusedLessonIds = [];
+let dirtyFlags = {};                /* [C档] 标记派生数据脏键，进入对应页面时消费 */
+let lessonWarningsMap = {};         /* [约束5] 缓存 PATCH 返回的 warnings，按 lesson id 索引 */
+let lessonFieldDelegatedBound = false; /* [约束2] 事件委托一次性绑定标记 */
 let expenseFilter = (() => {
   try {
     return { month_key: "", start: "", end: "", category: "", q: "", ...JSON.parse(localStorage.getItem("liming:expense-filter") || "{}") };
@@ -641,6 +677,8 @@ function enhanceCustomDateInputs() {
 }
 
 async function load() {
+  dirtyFlags = {};                   /* [C档] 全量 load 重置所有脏标记 */
+  lessonWarningsMap = {};            /* [约束5] 全量重绘时清空 warnings 缓存 */
   const thisGeneration = ++loadGeneration;
   const authResult = await request("/api/auth/me");
   if (loadGeneration !== thisGeneration) return;
@@ -2219,13 +2257,223 @@ function sortedLessons() {
   return sortLessons(state.lessons);
 }
 
+/* ── C 档 dirty 标记 ────────────────────────────────────────────── */
+function markDirty(key) { dirtyFlags[key] = true; }     /* [约束6] 设置脏标记 */
+function consumeDirty(key) { const was = dirtyFlags[key] || false; dirtyFlags[key] = false; return was; } /* [约束6] 消费并清除脏标记 */
+
+/* ── 状态层辅助 ──────────────────────────────────────────────────── */
+function patchLessonInState(updatedLesson) {             /* [约束4] 乐观更新 / 回滚 state.lessons */
+  const idx = state.lessons.findIndex((row) => String(row.id) === String(updatedLesson.id));
+  if (idx !== -1) state.lessons[idx] = { ...state.lessons[idx], ...updatedLesson };
+}
+
+/* ── scroll 捕获/恢复 ────────────────────────────────────────────── */
+function captureLessonScroll() {                         /* [边界5] 捕获 .table-wrap 滚动位置 */
+  const wrap = document.querySelector(".table-wrap");
+  return wrap ? { top: wrap.scrollTop, left: wrap.scrollLeft } : { top: 0, left: 0 };
+}
+function restoreLessonScroll(position) {                 /* [边界5] 双 RAF 确保 layout 完成 */
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const wrap = document.querySelector(".table-wrap");
+      if (!wrap) return;
+      wrap.scrollTop = position.top || 0;
+      wrap.scrollLeft = position.left || 0;
+    });
+  });
+}
+
+/* ── 草稿捕获/恢复 ────────────────────────────────────────────────── */
+function captureLessonDrafts() {                         /* [边界1] 收集所有 .lesson-field 中 DOM 值与 state 不一致的草稿 */
+  const drafts = {};
+  document.querySelectorAll(".lesson-field").forEach((input) => {
+    const id = input.dataset.id;
+    const field = input.dataset.field;
+    if (!id || !field) return;
+    const lesson = state.lessons.find((row) => String(row.id) === String(id));
+    if (!lesson) return;
+    const stateValue = input.type === "number" ? moneyInput(lesson[field]) : String(lesson[field] ?? "");
+    if (input.value !== stateValue) {
+      if (!drafts[id]) drafts[id] = {};
+      drafts[id][field] = input.value;
+    }
+  });
+  return drafts;
+}
+function restoreLessonDrafts(drafts) {                   /* [边界1] 渲染后回填未提交草稿 */
+  if (!drafts || !Object.keys(drafts).length) return;
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".lesson-field").forEach((input) => {
+      const id = input.dataset.id;
+      const field = input.dataset.field;
+      const val = drafts[id]?.[field];
+      if (val !== undefined) input.value = val;
+    });
+  });
+}
+
+/* ── warnings 展示 ────────────────────────────────────────────────── */
+function getLessonWarnings(lessonId) {                   /* [约束5] 从缓存读取 PATCH 返回的 warnings */
+  return lessonWarningsMap[String(lessonId)] || [];
+}
+function applyLessonWarnings(lessonId, warnings) {       /* [约束5] 写入缓存 + 给行打标记 */
+  lessonWarningsMap[String(lessonId)] = warnings || [];
+}
+
+/* ── 局部 DOM 更新 ────────────────────────────────────────────────── */
+function updateLessonSummaryMetrics() {                  /* [B档] 更新概要网格中的行数/有效课程数 */
+  const allRows = sortedLessons();
+  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
+  const rows = focusSet.size
+    ? allRows.filter((row) => focusSet.has(Number(row.id)))
+    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+  const effectiveCount = rows.filter(isEffective).length;
+  const metricValues = document.querySelectorAll(".summary-grid .metric-value");
+  if (metricValues.length >= 2) {
+    metricValues[0].textContent = rows.length;
+    metricValues[1].textContent = effectiveCount;
+  }
+}
+
+function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbody，不动页面其余部分 */
+  const tbody = document.querySelector("#lessons-tbody");
+  if (!tbody) return;
+  const allRows = sortedLessons();
+  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
+  const rows = focusSet.size
+    ? allRows.filter((row) => focusSet.has(Number(row.id)))
+    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+  let cumulative = 0;
+  tbody.innerHTML = rows.map((row) => {
+    cumulative += splitStudents(row.student_names).length;
+    return lessonRow(row, cumulative);
+  }).join("") || `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`;
+  /* innerHTML 替换后新 <select> 和新 <input type="date"> 都是裸原生元素，
+     必须重新包装自定义组件。两函数均幂等（分别由 data-custom-select /
+     data-custom-date 守卫），enhanceCustomSelects 还会先清理孤立 portal menu。 */
+  enhanceCustomSelects();
+  enhanceCustomDateInputs();
+}
+
+/* ── 冲突重刷 ─────────────────────────────────────────────────────── */
+async function refreshLessonConflicts() {                /* [B档] 只调 GET /api/schedule-conflicts，不调 bootstrap / lessons-range */
+  try {
+    state.schedule_conflicts = await request(
+      `/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`
+    );
+  } catch {
+    // 冲突接口失败不影响主流程
+  }
+}
+
+/* ── 主事件处理 ───────────────────────────────────────────────────── */
+async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事件委托派发入口 */
+  const lessonId = input.dataset.id;
+  const field = input.dataset.field;
+  if (!lessonId || !field) return;
+
+  const tierConfig = FIELD_TIERS[field];
+  if (!tierConfig) {                                     /* 未知字段回退旧行为 */
+    const value = input.type === "number" ? numberValue(input.value) : input.value;
+    refreshAfter(() => request(`/api/lessons/${lessonId}`, { method: "PATCH", body: { [field]: value } }));
+    return;
+  }
+
+  const { tiers, dirtyKeys } = tierConfig;
+  const isB = tiers.includes("B");
+  const isC = tiers.includes("C");
+  const value = input.type === "number" ? numberValue(input.value) : input.value;
+
+  const previousLesson = state.lessons.find((row) => String(row.id) === String(lessonId));
+  if (!previousLesson) return;
+
+  /* C 档：立即标记 dirty */
+  if (isC) {
+    for (const key of dirtyKeys) markDirty(key);
+  }
+
+  if (isB) {
+    /* ── B 档：乐观更新 + 冲突重算 + tbody 局部重绘 ──────────────── */
+    const scroll = captureLessonScroll();
+    const drafts = captureLessonDrafts();
+    const focusedId = String(document.activeElement?.dataset?.id || "");
+    const focusedField = document.activeElement?.dataset?.field || "";
+
+    /* [约束4] 乐观更新 state */
+    patchLessonInState({ ...previousLesson, [field]: value, id: previousLesson.id });
+
+    try {
+      const result = await request(`/api/lessons/${lessonId}`, {
+        method: "PATCH",
+        body: { [field]: value },
+      });
+
+      /* 用服务端返回值修正 state */
+      patchLessonInState(result);
+
+      /* [约束1] 重跑冲突检测 */
+      await refreshLessonConflicts();
+
+      /* [约束1] tbody 局部重绘 */
+      reRenderLessonsTbody();
+      updateLessonSummaryMetrics();
+      restoreLessonScroll(scroll);
+      restoreLessonDrafts(drafts);
+
+      /* [边界2] 按 data-id 恢复焦点 */
+      if (focusedId) {
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`.lesson-field[data-id="${focusedId}"][data-field="${focusedField}"]`);
+          if (el) el.focus();
+        });
+      }
+
+      /* [约束5] 展示 warnings */
+      if (result?.warnings?.length) {
+        applyLessonWarnings(lessonId, result.warnings);
+      }
+    } catch (error) {
+      /* [约束4] PATCH 失败，回滚 state */
+      patchLessonInState(previousLesson);
+      reRenderLessonsTbody();
+      restoreLessonScroll(scroll);
+      restoreLessonDrafts(drafts);
+      alert(error.message);
+    }
+  } else {
+    /* ── A 档：只更新当前单元格，不重绘整行/整表 ────────────────── */
+    try {
+      const result = await request(`/api/lessons/${lessonId}`, {
+        method: "PATCH",
+        body: { [field]: value },
+      });
+
+      /* [A档] 写入 state */
+      patchLessonInState(result);
+
+      /* [约束5] 展示 warnings */
+      if (result?.warnings?.length) {
+        applyLessonWarnings(lessonId, result.warnings);
+      }
+    } catch (error) {
+      /* [A档] 失败回滚 DOM 值 */
+      input.value = previousLesson[field] ?? "";
+      alert(error.message);
+    }
+  }
+}
+
 function lessonRow(row, cumulative) {
   const count = splitStudents(row.student_names).length;
   const teacherOptions = (state.profile_teachers || state.teachers || [])
     .filter((teacher) => (teacher.status || "在职") !== "离职")
     .map((teacher) => teacher.name);
+  const rowWarnings = getLessonWarnings(row.id);         /* [约束5] 从缓存读取该行 warnings */
+  const warningIcon = rowWarnings.length
+    ? `<span class="lesson-warning-icon" title="${escapeHtml(rowWarnings.map((w) => w.message).join("\n"))}">⚠️</span>`
+    : "";
   return `
-    <tr class="${isAbnormal(row) ? "abnormal" : ""}">
+    <tr class="${isAbnormal(row) ? "abnormal" : ""} ${rowWarnings.length ? "has-warnings" : ""}" data-row-id="${row.id}"> <!-- [约束1/边界2] data-row-id 用于行定位与焦点恢复 -->
       ${selectCell({ className: "lesson-field", id: row.id, field: "teacher_name", value: row.teacher_name, values: teacherOptions, emptyText: "未选" })}
       ${inputCell({ className: "lesson-field", id: row.id, field: "date", value: row.date, type: "date" })}
       ${statusSelectCell({ id: row.id, value: rowStatus(row) })}
@@ -2241,6 +2489,7 @@ function lessonRow(row, cumulative) {
       <td class="readonly narrow row-actions">
         <button class="btn ghost lesson-copy-btn" data-lesson-id="${row.id}" title="复制到其他日期">⎘</button>
         <button class="btn danger delete-lesson" data-id="${row.id}">删除</button>
+        ${warningIcon}                                  <!-- [约束5] 渲染 PATCH 返回的 warnings 标记 -->
       </td>
     </tr>
   `;
@@ -2409,7 +2658,7 @@ function renderLessons() {
               <th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th><th>学生人数</th><th>累计序号</th><th>操作</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="lessons-tbody"> <!-- [约束1] 固定 id 用于局部重绘定位 -->
             ${rows.map((row) => {
               cumulative += splitStudents(row.student_names).length;
               return lessonRow(row, cumulative);
@@ -5669,14 +5918,29 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".nav-sub-btn").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const nextView = button.dataset.view;
       if (nextView === "courseNotice" && view !== "courseNotice") resetCourseNoticeFilterToThisWeek();
       view = nextView;
       activeNavGroup = button.dataset.group || groupForView(view).key;
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
-      render();
+      /* [C档/约束6] 进入依赖派生数据的页面前消费 dirty 标记 */
+      const needsReload = (() => {
+        switch (nextView) {
+          case "finance":       return consumeDirty("finance");
+          case "summary":       return consumeDirty("summary") || consumeDirty("studentSummary");
+          case "feeDetails":    return consumeDirty("studentSummary");
+          case "teacherSalary":
+          case "teacherDetail": return consumeDirty("teacherSalary");
+          default:              return false;
+        }
+      })();
+      if (needsReload) {
+        await load();  // load() 会清空所有 dirtyFlags 并最终调用 render()
+      } else {
+        render();
+      }
     });
   });
 
@@ -6668,15 +6932,15 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".lesson-field").forEach((input) => {
-    input.addEventListener("change", () => {
-      const value = input.type === "number" ? numberValue(input.value) : input.value;
-      refreshAfter(() => request(`/api/lessons/${input.dataset.id}`, {
-        method: "PATCH",
-        body: { [input.dataset.field]: value },
-      }));
+  /* [约束2] 事件委托：将 .lesson-field 的 change 监听挂在 contentEl 上，绑定一次，行替换不受影响 */
+  if (!lessonFieldDelegatedBound) {
+    lessonFieldDelegatedBound = true;
+    contentEl.addEventListener("change", (event) => {
+      const input = event.target.closest(".lesson-field");
+      if (!input) return;
+      handleLessonFieldChange(input);   /* [约束3] 配置表驱动，A/B/C 三档分派 */
     });
-  });
+  }
 
   document.querySelectorAll(".teacher-detail-salary-field").forEach((input) => {
     input.addEventListener("change", () => {
