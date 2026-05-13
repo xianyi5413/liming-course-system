@@ -8,8 +8,10 @@
       (() => {
         try {
           document.documentElement.dataset.theme = localStorage.getItem("liming:theme") || "system";
+          document.documentElement.dataset.palette = localStorage.getItem("liming:palette") || "liming-blue";
         } catch {
           document.documentElement.dataset.theme = "system";
+          document.documentElement.dataset.palette = "liming-blue";
         }
       })();
     </script>

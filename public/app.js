@@ -9,7 +9,7 @@ const navGroups = [
   { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherProfiles", "老师档案"]] },
   { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "📊 经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "⚙️ 设置", views: [["pricing", "费用标准"], ["audit", "数据对账"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
@@ -27,17 +27,43 @@ const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
 const THEME_KEY = "liming:theme";
+const PALETTE_KEY = "liming:palette";
+const IGNORE_ROOM_ONE_CONFLICT_KEY = "liming:ignore-room-one-conflict";
 const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
+const SIDEBAR_COLLAPSED_KEY = "liming:sidebar-collapsed";
+const SHOT_FOLLOW_PALETTE_KEY = "liming:shot-follow-palette";
+const NAV_ICONS = {
+  schedule: "📅",
+  students: "👧",
+  teachers: "👨‍🏫",
+  operations: "💼",
+  finance: "📊",
+  settings: "⚙️",
+};
 const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", finance: "财务", teacher: "老师" };
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "pricing", "userAdmin"]),
-  finance: new Set(["finance", "recharges", "studentQuery", "expenses"]),
-  teacher: new Set(["weekMatrix", "teacherDetail"]),
+  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
+  finance: new Set(["finance", "recharges", "studentQuery", "expenses", "appearance"]),
+  teacher: new Set(["weekMatrix", "teacherDetail", "appearance"]),
 };
+const PALETTES = [
+  { key: "liming-blue", label: "黎明蓝", colors: ["#002147", "#00172F", "#EAF0F7", "#C8D6E5"] },
+  { key: "jade-original", label: "青绿原版", colors: ["#2D9E8F", "#1E7A6E", "#EDF8F6", "#C8E7E2"] },
+  { key: "warm-sun", label: "暖日", colors: ["#EAD6B2", "#8F5B18", "#6A471B", "#55340F"] },
+  { key: "lavender", label: "薰衣草", colors: ["#D9D0EF", "#7B61B3", "#4C3B77", "#44355F"] },
+  { key: "ink", label: "水墨", colors: ["#D9D9D9", "#7A7A7A", "#3D3D3D", "#121212"] },
+  { key: "forest", label: "密林", colors: ["#BFE2C4", "#3F764D", "#234C2E", "#1D3422"] },
+  { key: "glacier", label: "冰川", colors: ["#C7D8EA", "#2F6DB3", "#27496D", "#22364F"] },
+  { key: "coffee", label: "咖啡", colors: ["#E3D1C6", "#8A5A44", "#4B3127", "#42271D"] },
+  { key: "spice-earth", label: "香料土", colors: ["#C9AB87", "#8F562E", "#A45D3F", "#623726"] },
+  { key: "monet-garden", label: "莫奈花园", colors: ["#ADBBD2", "#A2B068", "#8B607B", "#435F89"] },
+  { key: "waterlily-pink", label: "睡莲柔粉", colors: ["#DBC8C3", "#7F96AC", "#8D586F", "#4F756A"] },
+  { key: "bauhaus", label: "Bauhaus", colors: ["#F3D74B", "#144F9E", "#C92B2B", "#202020"] },
+];
 let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
@@ -50,6 +76,10 @@ let months = [];
 let activeMonth = localStorage.getItem("liming:month") || "";
 let includeInactive = localStorage.getItem("liming:include-inactive") === "1";
 let themeMode = localStorage.getItem(THEME_KEY) || "system";
+let paletteMode = localStorage.getItem(PALETTE_KEY) || "liming-blue";
+let ignoreRoomOneConflict = localStorage.getItem(IGNORE_ROOM_ONE_CONFLICT_KEY) === "1";
+let sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+let shotFollowPalette = localStorage.getItem(SHOT_FOLLOW_PALETTE_KEY) === "true";
 let selectedStudent = "";
 let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
@@ -60,6 +90,7 @@ let courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
 let saveCourseNoticeTailDebounced = null;
 let selectedTeacher = "";
 let passwordModalOpen = false;
+let userMenuOpen = false;
 let userAdminNotice = "";
 let lessonFilter = readLessonFilter();
 let expandedSummaryStudents = readExpandedSummaryStudents();
@@ -87,6 +118,10 @@ let profileModal = null;
 let staffProfileSearch = "";
 let staffStatusFilter = localStorage.getItem("liming:staff-status-filter") || "";
 let staffModal = null;
+let operationLogFilter = { operator_name: "", operator_account: "", operation_type: "", content: "", start_date: "", end_date: "" };
+let operationLogPage = 1;
+let operationLogPageSize = 10;
+let operationLogData = { items: [], total: 0, page: 1, page_size: 10 };
 let staffPayrollSearch = "";
 let expenseModal = null;
 let pricingAuditModal = null;
@@ -105,6 +140,7 @@ let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") |
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
 let filterComboEventsBound = false;
+let userMenuEventsBound = false;
 let customDatePickerEl = null;
 let activeCustomDateInput = null;
 let activeCustomDateMonth = null;
@@ -112,6 +148,13 @@ let activeCustomDateMonth = null;
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
 const contentEl = document.querySelector("#content");
+const appEl = document.querySelector("#app");
+
+function applySidebarState() {
+  appEl?.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+}
+
+applySidebarState();
 
 function applyTheme() {
   const mode = ["system", "light", "dark"].includes(themeMode) ? themeMode : "system";
@@ -120,6 +163,22 @@ function applyTheme() {
 }
 
 applyTheme();
+
+function applyPalette() {
+  const keys = new Set(PALETTES.map((palette) => palette.key));
+  const mode = keys.has(paletteMode) ? paletteMode : "liming-blue";
+  paletteMode = mode;
+  document.documentElement.dataset.palette = mode;
+  localStorage.setItem(PALETTE_KEY, mode);
+}
+
+applyPalette();
+
+function applyShotPalettePreference() {
+  document.documentElement.dataset.shotFollowPalette = shotFollowPalette ? "true" : "false";
+}
+
+applyShotPalettePreference();
 
 function isDarkThemeActive() {
   if (themeMode === "dark") return true;
@@ -653,7 +712,7 @@ async function load() {
   if (expenseFilter.q) expenseParams.set("q", expenseFilter.q);
   state.expenses = canArea("expenses") ? ((await request(`/api/operating-expenses?${expenseParams.toString()}`)).expenses || []) : [];
   if (loadGeneration !== thisGeneration) return;
-  state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}`)
+  state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`)
     .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }));
   if (loadGeneration !== thisGeneration) return;
   const students = uniqueSorted([
@@ -1938,6 +1997,10 @@ function renderSecondaryNav(group) {
   return `<div class="nav-subtabs">${tabs}</div>`;
 }
 
+function navLabelText(group) {
+  return String(group.label || "").replace(/^\S+\s+/, "").trim() || group.label || "";
+}
+
 function renderLogin(error = "") {
   const remembered = loginRemember();
   navEl.innerHTML = "";
@@ -2021,20 +2084,63 @@ function passwordModal() {
   `;
 }
 
-function sidebarMonthTools() {
+function monthToolbar() {
   const monthOptions = months.map((month) => `
     <option value="${escapeHtml(month)}" ${month === activeMonth ? "selected" : ""}>${escapeHtml(formatMonthOption(month))}</option>
   `).join("");
   return `
-    <div class="sidebar-month-tools">
-      <label class="sidebar-tool-label" for="sidebar-month-select">月份</label>
-      <select id="sidebar-month-select" class="control month-select">
+    <div class="month-toolbar">
+      <label class="month-toolbar-label" for="topbar-month-select">月份</label>
+      <select id="topbar-month-select" class="control month-select">
         ${monthOptions}
       </select>
-      ${canArea("schedule") ? `<div class="sidebar-month-actions">
-        <button class="btn new-month" type="button">新建</button>
+      ${canArea("schedule") ? `<div class="month-toolbar-actions">
+        <button class="btn new-month" type="button">新建月份</button>
         <button class="btn icon-btn delete-month" type="button" title="删除当前月份" aria-label="删除当前月份">🗑</button>
       </div>` : ""}
+    </div>
+  `;
+}
+
+function renderPalettePreview() {
+  const palette = PALETTES.find((item) => item.key === paletteMode) || PALETTES[0];
+  return `
+    <div class="palette-preview" aria-hidden="true">
+      ${palette.colors.map((color) => `<span class="palette-swatch" style="background:${color}"></span>`).join("")}
+    </div>
+  `;
+}
+
+function userDisplayName() {
+  return auth.user?.display_name || auth.user?.username || "用户";
+}
+
+function userInitial() {
+  return userDisplayName().trim().slice(0, 1).toUpperCase() || "L";
+}
+
+function renderUserMenu() {
+  const name = userDisplayName();
+  const role = auth.user?.role_label || ROLE_LABELS[auth.user?.role] || "";
+  return `
+    <div class="user-menu ${userMenuOpen ? "open" : ""}">
+      <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="${userMenuOpen ? "true" : "false"}">
+        <span class="user-avatar" aria-hidden="true">${escapeHtml(userInitial())}</span>
+        <span class="user-menu-name">${escapeHtml(name)}</span>
+        <span class="user-menu-arrow" aria-hidden="true">▾</span>
+      </button>
+      ${userMenuOpen ? `
+        <div class="user-menu-dropdown" role="menu">
+          <div class="user-menu-header">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${escapeHtml(role)}</span>
+          </div>
+          <div class="user-menu-divider"></div>
+          <button class="user-menu-item appearance-settings-link" type="button" role="menuitem">外观设置</button>
+          <button class="user-menu-item open-password-modal" type="button" role="menuitem">修改密码</button>
+          <button class="user-menu-item logout-btn danger" type="button" role="menuitem">退出系统</button>
+        </div>
+      ` : ""}
     </div>
   `;
 }
@@ -2050,35 +2156,21 @@ function renderNav() {
     <div class="nav-sections">
       ${visibleGroups.map((group) => `
         <div class="nav-group ${currentGroup.key === group.key ? "open" : ""}">
-          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}">
-            <span>${escapeHtml(group.label)}</span>
+          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}" data-tooltip="${escapeHtml(navLabelText(group))}" title="${sidebarCollapsed ? escapeHtml(navLabelText(group)) : ""}">
+            <span class="nav-icon" aria-hidden="true">${escapeHtml(NAV_ICONS[group.key] || "•")}</span>
+            <span class="nav-label">${escapeHtml(navLabelText(group))}</span>
           </button>
           ${currentGroup.key === group.key && groupViews(group).length > 1 ? renderSecondaryNav(group) : ""}
         </div>
       `).join("")}
-    </div>
-    <div class="sidebar-tools">
-      ${sidebarMonthTools()}
-      <div class="sidebar-user">
-        <strong>${escapeHtml(auth.user?.display_name || "")}</strong>
-        <span>${escapeHtml(auth.user?.role_label || ROLE_LABELS[auth.user?.role] || "")}</span>
-      </div>
-      <button class="btn open-password-modal" type="button">修改密码</button>
-      <button class="btn logout-btn" type="button">退出登录</button>
-      <label class="sidebar-tool-label" for="sidebar-theme-select">主题</label>
-      <select id="sidebar-theme-select" class="control theme-select" title="默认跟随系统">
-        <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
-        <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
-        <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
-      </select>
     </div>
   `;
 }
 
 function renderTopbar(title, meta = "", actions = "") {
   topbarEl.innerHTML = `
-    <div style="display: flex; align-items: center;">
-      <button class="mobile-menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="菜单">☰</button>
+    <div class="topbar-title-side">
+      <button class="sidebar-toggle" type="button" aria-label="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" title="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" aria-pressed="${sidebarCollapsed ? "true" : "false"}">☰</button>
       <div class="title-block">
         <div class="page-title">${escapeHtml(title)}</div>
         <div class="page-meta">${escapeHtml(meta)}</div>
@@ -2086,6 +2178,8 @@ function renderTopbar(title, meta = "", actions = "") {
     </div>
     <div class="toolbar">
       ${actions}
+      ${monthToolbar()}
+      ${renderUserMenu()}
     </div>
     ${monthDeleteModal()}
     ${passwordModal()}
@@ -2348,6 +2442,35 @@ function conflictTypeLabel(type) {
   }[type] || type || "冲突";
 }
 
+function normalizeRoom(value) {
+  return String(value ?? "").trim();
+}
+
+function isVirtualRoomOne(value) {
+  const room = normalizeRoom(value);
+  return room === "1" || room === "1.0";
+}
+
+function isIgnoredRoomOneConflict(issue) {
+  if (!ignoreRoomOneConflict || issue?.type !== "classroom") return false;
+  const details = issue.lesson_details || [];
+  if (details.length >= 2) return details.every((lesson) => isVirtualRoomOne(lesson.classroom));
+  return isVirtualRoomOne(issue.entity);
+}
+
+function visibleConflictIssues(issues = []) {
+  let ignoredRoomOneCount = 0;
+  const visible = [];
+  for (const issue of issues || []) {
+    if (isIgnoredRoomOneConflict(issue)) {
+      ignoredRoomOneCount += 1;
+    } else {
+      visible.push(issue);
+    }
+  }
+  return { issues: visible, ignoredRoomOneCount };
+}
+
 function parseLessonTimeRange(value) {
   const raw = String(value || "")
     .replaceAll("：", ":")
@@ -2451,14 +2574,16 @@ function localScheduleConflicts(rows) {
           lesson_details: lessonDetails,
         });
       }
-      if (a.row.classroom && a.row.classroom === b.row.classroom) {
+      const roomA = normalizeRoom(a.row.classroom);
+      const roomB = normalizeRoom(b.row.classroom);
+      if (roomA && roomA === roomB) {
         pushIssue({
           type: "classroom",
           date: a.row.date,
           time_slot: `${a.row.time_slot} / ${b.row.time_slot}`,
-          entity: a.row.classroom,
+          entity: roomA,
           lesson_ids: lessonIds,
-          message: `${a.row.classroom} 在重叠时间段被重复占用`,
+          message: `${roomA} 在重叠时间段被重复占用`,
           lesson_details: lessonDetails,
         });
       }
@@ -2480,7 +2605,7 @@ function localScheduleConflicts(rows) {
 
 function conflictMapByLesson(issues) {
   const map = new Map();
-  for (const issue of issues) {
+  for (const issue of visibleConflictIssues(issues).issues) {
     const label = conflictTypeLabel(issue.type);
     for (const id of issue.lesson_ids || []) {
       const key = Number(id);
@@ -2493,6 +2618,9 @@ function conflictMapByLesson(issues) {
 }
 
 function scheduleConflictPanel(issues) {
+  const conflictView = visibleConflictIssues(issues);
+  issues = conflictView.issues;
+  const ignoredRoomOneCount = conflictView.ignoredRoomOneCount;
   const counts = { teacher: 0, student: 0, classroom: 0, invalid_time: 0 };
   for (const issue of issues) counts[issue.type] = (counts[issue.type] || 0) + 1;
   const total = issues.length;
@@ -2510,6 +2638,13 @@ function scheduleConflictPanel(issues) {
           <span>教室 ${counts.classroom || 0}</span>
           <span>时间 ${counts.invalid_time || 0}</span>
         </div>
+      </div>
+      <div class="conflict-options">
+        <label class="history-toggle">
+          <input class="ignore-room-one-conflict" type="checkbox" ${ignoreRoomOneConflict ? "checked" : ""}>
+          <span>忽略教室为 1 的教室冲突</span>
+        </label>
+        ${ignoredRoomOneCount ? `<span class="muted-tip">已忽略教室为 1 的教室占用冲突 ${ignoredRoomOneCount} 条</span>` : ""}
       </div>
       ${total ? `
         <div class="conflict-list">
@@ -2735,10 +2870,11 @@ function renderMatrixDateFilter() {
 
 function renderWeek() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData();
+  const visibleConflicts = visibleConflictIssues(conflicts).issues;
   const showSalary = canArea("salary");
   renderTopbar(
     `${monthLabel()} 周课表`,
-    `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
+    `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
   );
   contentEl.innerHTML = `
     ${renderWeekTabs(ranges)}
@@ -2786,9 +2922,10 @@ function renderWeek() {
 
 function renderWeekMatrix() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
+  const visibleConflicts = visibleConflictIssues(conflicts).issues;
   renderTopbar(
     `${monthLabel()} 矩阵课表`,
-    `${range.label} · ${conflicts.length ? `发现 ${conflicts.length} 条冲突` : "无时间冲突"}`,
+    `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
   );
   contentEl.innerHTML = `
     ${renderWeekTabs(ranges)}
@@ -3901,6 +4038,50 @@ function renderUserAdmin() {
   `;
 }
 
+function renderAppearance() {
+  renderTopbar("外观设置", "主题与配色方案");
+  contentEl.innerHTML = `
+    <div class="band appearance-settings">
+      <div class="section-head">
+        <div>
+          <div class="section-title">外观设置</div>
+          <div class="section-subtitle">调整系统界面的明暗主题和品牌配色，设置会保存在当前浏览器。</div>
+        </div>
+      </div>
+      <div class="appearance-settings-grid">
+        <label class="appearance-field">
+          <span>主题</span>
+          <select class="control theme-select" title="默认跟随系统">
+            <option value="system" ${themeMode === "system" ? "selected" : ""}>跟随系统</option>
+            <option value="light" ${themeMode === "light" ? "selected" : ""}>亮色</option>
+            <option value="dark" ${themeMode === "dark" ? "selected" : ""}>暗色</option>
+          </select>
+        </label>
+        <label class="appearance-field">
+          <span>配色方案</span>
+          <select class="control palette-select" title="选择配色方案">
+            ${PALETTES.map((palette) => `
+              <option value="${palette.key}" ${paletteMode === palette.key ? "selected" : ""}>${escapeHtml(palette.label)}</option>
+            `).join("")}
+          </select>
+        </label>
+        <div class="appearance-preview">
+          <span>当前配色</span>
+          ${renderPalettePreview()}
+        </div>
+        <label class="appearance-field shot-follow-palette-field">
+          <span>课程截图配色</span>
+          <label class="history-toggle" style="align-self:start;margin-top:2px;">
+            <input class="shot-follow-palette" type="checkbox" ${shotFollowPalette ? "checked" : ""}>
+            <span>课程截图跟随当前配色方案</span>
+          </label>
+          <span style="color:var(--muted);font-size:0.75rem;line-height:1.4;">关闭时，课程截图固定使用黎明蓝，适合发给家长保持统一品牌视觉。</span>
+        </label>
+      </div>
+    </div>
+  `;
+}
+
 function renderPricing() {
   const rows = [...state.pricing_standards].sort((a, b) => {
     const g = gradeOrder.indexOf(a.grade) - gradeOrder.indexOf(b.grade);
@@ -4654,6 +4835,176 @@ function renderExpenses() {
   `;
 }
 
+async function renderOperationLogs() {
+  const params = new URLSearchParams();
+  if (operationLogFilter.operator_name) params.set("operator", operationLogFilter.operator_name);
+  if (operationLogFilter.operator_account) params.set("operator_account", operationLogFilter.operator_account);
+  if (operationLogFilter.operation_type) params.set("operation_type", operationLogFilter.operation_type);
+  if (operationLogFilter.content) params.set("content", operationLogFilter.content);
+  if (operationLogFilter.start_date) params.set("start_date", operationLogFilter.start_date);
+  if (operationLogFilter.end_date) params.set("end_date", operationLogFilter.end_date);
+  params.set("page", operationLogPage);
+  params.set("page_size", operationLogPageSize);
+
+  contentEl.innerHTML = `<div class="loading">加载中...</div>`;
+
+  try {
+    operationLogData = await request(`/api/operation-logs?${params.toString()}`);
+  } catch (error) {
+    renderTopbar("操作日志", "加载失败");
+    contentEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+    wireEvents();
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(operationLogData.total / operationLogPageSize));
+  renderTopbar("操作日志", `共 ${operationLogData.total} 条记录`);
+  wireEvents();
+
+  const OPERATION_TYPES = ["创建课程", "修改课程", "删除课程", "创建月份", "删除月份", "导入课程", "导出课程", "修改密码", "登录系统", "退出系统", "其他操作"];
+
+  contentEl.innerHTML = `
+    <div class="band">
+      <div class="filter-bar compact">
+        <div class="filter-controls">
+          <label class="filter-field">
+            <span>操作人</span>
+            <input class="control operation-log-filter" data-field="operator_name" type="text" placeholder="请输入姓名" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.operator_name)}">
+          </label>
+          <label class="filter-field">
+            <span>操作账号</span>
+            <input class="control operation-log-filter" data-field="operator_account" type="text" placeholder="请输入账号" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.operator_account)}">
+          </label>
+          <label class="filter-field">
+            <span>操作类型</span>
+            <select class="control operation-log-filter" data-field="operation_type">
+              <option value="">全部类型</option>
+              ${OPERATION_TYPES.map((type) => `<option value="${type}" ${operationLogFilter.operation_type === type ? "selected" : ""}>${type}</option>`).join("")}
+            </select>
+          </label>
+          <label class="filter-field">
+            <span>操作内容</span>
+            <input class="control operation-log-filter" data-field="content" type="text" placeholder="请输入操作内容" autocomplete="off" spellcheck="false" value="${escapeHtml(operationLogFilter.content)}">
+          </label>
+          <label class="filter-field filter-date-range">
+            <span>操作时间</span>
+            <span class="date-range-inputs">
+              <input class="control operation-log-filter" data-field="start_date" type="date" value="${escapeHtml(operationLogFilter.start_date)}">
+              <b>—</b>
+              <input class="control operation-log-filter" data-field="end_date" type="date" value="${escapeHtml(operationLogFilter.end_date)}">
+            </span>
+          </label>
+        </div>
+        <div class="filter-summary">
+          <button class="btn primary apply-operation-log-filter" type="button">查询</button>
+          <button class="btn reset-operation-log-filter" type="button">重置</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="operation-log-table">
+          <thead>
+            <tr>
+              <th>操作人</th>
+              <th>操作账号</th>
+              <th>操作类型</th>
+              <th>操作内容</th>
+              <th>操作时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${operationLogData.items.map((log) => `
+              <tr>
+                <td class="text-cell">${escapeHtml(log.operator_name)}</td>
+                <td class="text-cell">${escapeHtml(log.operator_account)}</td>
+                <td class="text-cell">${escapeHtml(log.operation_type)}</td>
+                <td class="text-cell" title="${escapeHtml(log.operation_content)}">${escapeHtml(log.operation_content)}</td>
+                <td class="text-cell">${escapeHtml(log.created_at)}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="5" class="empty">暂无操作日志</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${operationLogData.total > 0 ? `
+      <div class="pagination-bar">
+        <div class="pagination-info">
+          <span>共 <b>${operationLogData.total}</b> 条</span>
+          <select class="control pagination-page-size">
+            <option value="10" ${operationLogPageSize === 10 ? "selected" : ""}>10 条/页</option>
+            <option value="20" ${operationLogPageSize === 20 ? "selected" : ""}>20 条/页</option>
+            <option value="50" ${operationLogPageSize === 50 ? "selected" : ""}>50 条/页</option>
+          </select>
+        </div>
+        <div class="pagination-controls">
+          <button class="btn ghost pagination-btn" data-page="${operationLogPage - 1}" type="button" ${operationLogPage <= 1 ? "disabled" : ""}>上一页</button>
+          ${renderPageButtons(operationLogPage, totalPages)}
+          <button class="btn ghost pagination-btn" data-page="${operationLogPage + 1}" type="button" ${operationLogPage >= totalPages ? "disabled" : ""}>下一页</button>
+        </div>
+      </div>
+      ` : ""}
+    </div>
+  `;
+
+  bindOperationLogEvents();
+}
+
+function renderPageButtons(current, total) {
+  if (total <= 1) return "";
+  const visible = 7;
+  let start = Math.max(1, current - Math.floor(visible / 2));
+  let end = Math.min(total, start + visible - 1);
+  if (end - start < visible - 1) start = Math.max(1, end - visible + 1);
+  return Array.from({ length: end - start + 1 }, (_, i) => {
+    const pageNum = start + i;
+    return `<button class="btn ${pageNum === current ? "primary" : "ghost"} pagination-btn" data-page="${pageNum}" type="button">${pageNum}</button>`;
+  }).join("");
+}
+
+function bindOperationLogEvents() {
+  document.querySelectorAll(".operation-log-filter").forEach((input) => {
+    input.addEventListener("change", () => {
+      operationLogFilter = { ...operationLogFilter, [input.dataset.field]: input.value };
+    });
+  });
+
+  document.querySelectorAll(".operation-log-filter[type='text']").forEach((input) => {
+    bindSafeTextInput(input,
+      (value) => { operationLogFilter = { ...operationLogFilter, [input.dataset.field]: value }; },
+      () => {}, 400,
+    );
+  });
+
+  document.querySelector(".apply-operation-log-filter")?.addEventListener("click", async () => {
+    document.querySelectorAll(".operation-log-filter").forEach((input) => {
+      operationLogFilter = { ...operationLogFilter, [input.dataset.field]: input.value };
+    });
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+
+  document.querySelector(".reset-operation-log-filter")?.addEventListener("click", async () => {
+    operationLogFilter = { operator_name: "", operator_account: "", operation_type: "", content: "", start_date: "", end_date: "" };
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+
+  document.querySelectorAll(".pagination-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const targetPage = Number(button.dataset.page);
+      if (!targetPage || targetPage < 1) return;
+      const totalPages = Math.max(1, Math.ceil(operationLogData.total / operationLogPageSize));
+      if (targetPage > totalPages) return;
+      operationLogPage = targetPage;
+      await renderOperationLogs();
+    });
+  });
+
+  document.querySelector(".pagination-page-size")?.addEventListener("change", async () => {
+    operationLogPageSize = Number(document.querySelector(".pagination-page-size")?.value) || 10;
+    operationLogPage = 1;
+    await renderOperationLogs();
+  });
+}
+
 function renderTeacherSalary() {
   const rows = state.derived.teacher_summary;
   const showSalary = canArea("salary");
@@ -4747,28 +5098,33 @@ function renderCourseNoticePreview(item) {
   const rows = item.lessons || [];
   return `
     <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
-      <table class="notice-shot-table">
-        <thead>
-          <tr>
-            <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((lesson) => `
+      <div class="notice-shot-shell">
+        <div class="notice-shot-head">
+          <div class="notice-shot-title">课程通知</div>
+        </div>
+        <table class="notice-shot-table">
+          <thead>
             <tr>
-              <td>${escapeHtml(lesson.teacher_name)}</td>
-              <td>${escapeHtml(lesson.date)}</td>
-              <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
-              <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
-              <td>${escapeHtml(lesson.time_slot)}</td>
-              <td>${escapeHtml(lesson.classroom)}</td>
-              <td>${escapeHtml(lesson.grade)}</td>
-              <td>${escapeHtml(lesson.subject)}</td>
-              <td>${escapeHtml(lesson.student_names)}</td>
+              <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${rows.map((lesson) => `
+              <tr>
+                <td>${escapeHtml(lesson.teacher_name)}</td>
+                <td>${escapeHtml(lesson.date)}</td>
+                <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
+                <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
+                <td>${escapeHtml(lesson.time_slot)}</td>
+                <td>${escapeHtml(lesson.classroom)}</td>
+                <td>${escapeHtml(lesson.grade)}</td>
+                <td>${escapeHtml(lesson.subject)}</td>
+                <td>${escapeHtml(lesson.student_names)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -4881,7 +5237,31 @@ async function saveCourseNoticeGreeting(item) {
   });
 }
 
+function cssVar(name, fallback = "") {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function courseNoticeShotPalette() {
+  return {
+    bg: cssVar("--shot-bg", "#f7f9fc"),
+    panel: cssVar("--shot-panel", "#ffffff"),
+    card: cssVar("--shot-card", "#ffffff"),
+    title: cssVar("--shot-title", "#102033"),
+    muted: cssVar("--shot-muted", "#64748b"),
+    line: cssVar("--shot-line", "#c8d6e5"),
+    brand: cssVar("--shot-brand", "#002147"),
+    brandDark: cssVar("--shot-brand-dark", "#00172f"),
+    brandSoft: cssVar("--shot-brand-soft", "#eaf0f7"),
+    brandPale: cssVar("--shot-brand-pale", "#f5f8fc"),
+    tagBg: cssVar("--shot-tag-bg", "#eaf0f7"),
+    tagText: cssVar("--shot-tag-text", "#002147"),
+    timeBg: cssVar("--shot-time-bg", "#eaf0f7"),
+    footerBg: cssVar("--shot-footer-bg", "#eef3f9"),
+  };
+}
+
 function courseNoticeCanvas(item) {
+  const colors = courseNoticeShotPalette();
   const columns = [
     ["teacher_name", "授课老师"],
     ["date", "日期"],
@@ -4902,7 +5282,7 @@ function courseNoticeCanvas(item) {
   const paddingX = 18;
   const rowHeight = 44;
   const outerPadding = 30;
-  const titleHeight = 58;
+  const titleHeight = 54;
   const colWidths = columns.map(([key, label]) => {
     const maxText = Math.max(
       ctx.measureText(label).width,
@@ -4919,40 +5299,56 @@ function courseNoticeCanvas(item) {
   const height = titleHeight + tableHeight + outerPadding * 2;
   const tableX = outerPadding;
   const tableY = outerPadding + titleHeight;
+  const panelX = outerPadding / 2;
+  const panelY = outerPadding / 2;
+  const panelWidth = width - outerPadding;
+  const panelHeight = height - outerPadding;
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = width * ratio;
   canvas.height = height * ratio;
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
   ctx.scale(ratio, ratio);
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#fbfdfc";
-  ctx.fillRect(outerPadding / 2, outerPadding / 2, width - outerPadding, height - outerPadding);
-  ctx.fillStyle = "#102a2a";
-  ctx.font = "700 20px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText("课程通知", width / 2, outerPadding + 26);
-  ctx.textAlign = "left";
   ctx.save();
-  ctx.shadowColor = "rgba(16, 42, 42, 0.08)";
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
   ctx.shadowBlur = 14;
   ctx.shadowOffsetY = 4;
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = colors.panel;
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.restore();
+  ctx.strokeStyle = colors.line;
+  ctx.strokeRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.fillStyle = colors.brand;
+  ctx.fillRect(panelX, panelY, panelWidth, 5);
+  ctx.fillStyle = colors.brandPale;
+  ctx.fillRect(panelX + 1, panelY + 5, panelWidth - 2, titleHeight - 6);
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "900 24px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("课程通知", width / 2, panelY + titleHeight / 2 + 3);
+  ctx.textAlign = "left";
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetY = 3;
+  ctx.fillStyle = colors.card;
   ctx.fillRect(tableX, tableY, tableWidth, tableHeight);
   ctx.restore();
-  ctx.strokeStyle = "#d9e9e8";
+  ctx.strokeStyle = colors.line;
   ctx.strokeRect(tableX, tableY, tableWidth, tableHeight);
   let x = tableX;
   ctx.font = headFont;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   columns.forEach(([, label], index) => {
-    ctx.fillStyle = "#eef8f6";
+    ctx.fillStyle = colors.brandSoft;
     ctx.fillRect(x, tableY, colWidths[index], rowHeight);
-    ctx.strokeStyle = "#d9e9e8";
+    ctx.strokeStyle = colors.line;
     ctx.strokeRect(x, tableY, colWidths[index], rowHeight);
-    ctx.fillStyle = "#24524f";
+    ctx.fillStyle = colors.brandDark;
     ctx.fillText(label, x + colWidths[index] / 2, tableY + rowHeight / 2);
     x += colWidths[index];
   });
@@ -4961,11 +5357,11 @@ function courseNoticeCanvas(item) {
     x = tableX;
     const y = tableY + rowHeight * (rowIndex + 1);
     columns.forEach(([key], index) => {
-      ctx.fillStyle = rowIndex % 2 ? "#fbfdfc" : "#ffffff";
+      ctx.fillStyle = rowIndex % 2 ? colors.brandPale : colors.card;
       ctx.fillRect(x, y, colWidths[index], rowHeight);
-      ctx.strokeStyle = "#e7f0ef";
+      ctx.strokeStyle = colors.line;
       ctx.strokeRect(x, y, colWidths[index], rowHeight);
-      ctx.fillStyle = "#17212b";
+      ctx.fillStyle = key === "time_slot" || key === "grade" || key === "subject" ? colors.tagText : colors.title;
       const value = String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""));
       ctx.fillText(value, x + colWidths[index] / 2, y + rowHeight / 2);
       x += colWidths[index];
@@ -5019,6 +5415,7 @@ async function copyCourseNoticeImage(item) {
 }
 
 function render() {
+  applySidebarState();
   const viewChanged = lastRenderedView && lastRenderedView !== view;
   lastRenderedView = view;
   renderNav();
@@ -5032,6 +5429,7 @@ function render() {
     finance: renderFinance,
     recharges: renderRecharges,
     studentQuery: renderStudentQuery,
+    appearance: renderAppearance,
     audit: renderAudit,
     teacherProfiles: renderTeacherProfiles,
     studentProfiles: renderStudentProfiles,
@@ -5040,6 +5438,7 @@ function render() {
     expenses: renderExpenses,
     pricing: renderPricing,
     userAdmin: renderUserAdmin,
+    operationLogs: renderOperationLogs,
     studentPricing: renderStudentPricing,
     teacherSalary: renderTeacherSalary,
     teacherDetail: renderTeacherDetail,
@@ -5213,6 +5612,46 @@ function wireEvents() {
     });
   }
 
+  if (!userMenuEventsBound) {
+    userMenuEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (!userMenuOpen || event.target.closest(".user-menu")) return;
+      userMenuOpen = false;
+      document.querySelectorAll(".user-menu").forEach((menu) => {
+        menu.classList.remove("open");
+        menu.querySelector(".user-menu-trigger")?.setAttribute("aria-expanded", "false");
+        menu.querySelector(".user-menu-dropdown")?.remove();
+      });
+    });
+  }
+
+  document.querySelectorAll(".user-menu-trigger").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      userMenuOpen = !userMenuOpen;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      sidebarCollapsed = !sidebarCollapsed;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
+      render();
+    });
+  });
+
+  document.querySelectorAll(".appearance-settings-link").forEach((button) => {
+    button.addEventListener("click", () => {
+      userMenuOpen = false;
+      view = "appearance";
+      activeNavGroup = "settings";
+      localStorage.setItem("liming:view", view);
+      localStorage.setItem("liming:nav-group", activeNavGroup);
+      render();
+    });
+  });
+
   document.querySelectorAll(".nav-btn").forEach((button) => {
     button.addEventListener("click", () => {
       const group = navGroups.find((item) => item.key === button.dataset.group);
@@ -5286,8 +5725,34 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".palette-select").forEach((select) => {
+    select.addEventListener("change", () => {
+      paletteMode = select.value || "liming-blue";
+      applyPalette();
+      render();
+    });
+  });
+
+  document.querySelectorAll(".ignore-room-one-conflict").forEach((input) => {
+    input.addEventListener("change", async () => {
+      ignoreRoomOneConflict = input.checked;
+      localStorage.setItem(IGNORE_ROOM_ONE_CONFLICT_KEY, ignoreRoomOneConflict ? "1" : "0");
+      await load();
+    });
+  });
+
+  document.querySelectorAll(".shot-follow-palette").forEach((input) => {
+    input.addEventListener("change", () => {
+      shotFollowPalette = input.checked;
+      localStorage.setItem(SHOT_FOLLOW_PALETTE_KEY, shotFollowPalette ? "true" : "false");
+      applyShotPalettePreference();
+      render();
+    });
+  });
+
   document.querySelectorAll(".logout-btn").forEach((button) => {
     button.addEventListener("click", async () => {
+      userMenuOpen = false;
       await request("/api/auth/logout", { method: "POST" });
       auth.user = null;
       renderLogin();
@@ -5296,6 +5761,7 @@ function wireEvents() {
 
   document.querySelectorAll(".open-password-modal").forEach((button) => {
     button.addEventListener("click", () => {
+      userMenuOpen = false;
       passwordModalOpen = true;
       render();
     });

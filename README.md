@@ -104,6 +104,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | `operating_expenses` | 房租/水电/食材等运营开销 |
 | `audit_logs` / `audit_ignores` | 审计问题流水与忽略名单 |
 | `audit_events` | 操作审计日志，记录谁改了课程、充值、价格、薪资、账号等关键数据 |
+| `operation_logs` | 面向管理员的操作日志，记录课程增删改、月份新建/删除等关键操作的可读描述 |
 | `users` | 登录账号、角色、绑定老师姓名和账号状态 |
 | `parent_message_greetings` | 家长群课程通知的发送对象称呼、全局尾句和完整文案缓存 |
 | `course_notice_completion_records` | 家长群课程通知完成记录，按“年级 + 科目 + 学生名单 + 老师 + 日期 + 时间”唯一识别已发送课程 |
@@ -150,7 +151,8 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 筛选课程 | 每次打开默认本周一到本周日；选择起始日期、终末日期和“只选择上课”后，页面自动按当前条件刷新发送对象 |
 | 发送对象 | 1V1 学生会生成“个人群”，并展示该学生在日期范围内的所有课程；1V2 及以上仍按班级生成“班级群”，避免混入其他班级 |
 | 班级唯一标识 | 使用 `年级 + 科目 + 标准化学生完整名单 + 授课老师`，学生名单去空格、排序后用顿号拼接；老师不同会被识别为不同班级 |
-| 课程截图 | 前端 canvas 绘制简洁课程表，第一行居中显示“课程通知”，表格单元格文字居中，列宽按内容自适应，可复制到微信或下载 PNG |
+| 课程截图 | 前端 canvas 绘制简洁课程表，第一行居中显示“课程通知”，表格单元格文字居中，列宽按内容自适应，可复制到微信或下载 PNG；截图使用 `--shot-*` 专用变量跟随当前 `data-palette`，但不跟随暗色主题变黑 |
+| 截图视觉 | 课程截图仅保留标题区域 + 课程表格；不显示发送对象副标题、节数徽标和底部说明行；表头使用浅品牌底，正文仅按行隔行变色，时间 / 年级 / 科目只做文字强调 |
 | 文案生成 | 每个发送对象独立称呼 + 全局统一尾句，默认尾句为“这是我们本周的上课安排哦[玫瑰]”；修改称呼或尾句后文案即时更新 |
 | 称呼持久化 | 称呼、发送对象信息、尾句和完整文案保存到 `parent_message_greetings`，下次进入自动恢复 |
 | 完成标记 | 复制截图成功后写入 `course_notice_completion_records`，发送对象变为淡绿色并在课程区域最上层显示大对勾；右侧状态显示“✓ 该发送对象已完成”；刷新后如果该对象全部课程已完成，会自动恢复打勾状态 |
@@ -281,9 +283,89 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | xlsx / zip 自实现 | 服务端 `unzipXlsx` / `zipStore` 直接处理 ZIP 文件结构，无 `xlsx` / `archiver` 依赖；前端 `zipStoreFiles` 镜像同实现，用于客户端 PNG 打包 |
 | 审计日志去重 | 用 `issue_key` 做去重 key，相同问题再次出现时只更新 `run_at`，不新建条目 |
 | 多月结转链 | `ensureCarryOverChain`：进入任何月份页面前，自动从最早数据月推导到当前月，确保中间月份的结转记录齐全；上游充值或费用补录后，`refreshCarryOverAfter` 会清理已经失效的下游自动结转记录，避免旧欠款继续滚到后续月份 |
-| 设计系统 | `public/styles.css` 直接同步 `_ Design System/colors_and_type.css` 的品牌 token、暖色 system dark、语义别名与字体工具类，并采用 UI Kit 的温暖亮色侧栏导航 |
-| 主题切换 | 左侧导航底部切换亮色 / 暗色，`localStorage` 持久化，默认跟随系统 `prefers-color-scheme` |
+| 设计系统 | `public/styles.css` 维护品牌 token、语义别名、字体工具类、亮色侧栏、蓝黑暗色后台，以及课程截图专用 `--shot-*` 浅色家长版变量 |
+| 主题切换 | 左侧导航底部切换亮色 / 暗色，`localStorage` key 为 `liming:theme`，默认跟随系统 `prefers-color-scheme`；暗色模式采用近黑 / 蓝黑基底 |
+| 配色方案 | 左侧导航底部独立选择 `data-palette`，`localStorage` key 为 `liming:palette`，默认 `liming-blue`（品牌色 `#002147`）；明暗主题与配色方案互不混用，配色方案主要影响品牌色、按钮、选中态、截图强调色 |
 | 矩阵课表 | 10 天以内保留原有宽松矩阵尺寸，时间段之间有明显横向分隔；超过 10 天自动切换为按时间段分组的有课日期卡片；同日重叠时间会标记老师 / 学生 / 教室冲突 |
+
+## 界面与交互优化（近期更新）
+
+### 配色方案
+
+- 新增 `data-palette` 配色体系，默认品牌色为黎明蓝 `#002147`
+- 支持 12 套配色方案：黎明蓝 / 青绿原版 / 暖日 / 薰衣草 / 水墨 / 密林 / 冰川 / 咖啡 / 香料土 / 莫奈花园 / 睡莲柔粉 / Bauhaus
+- 配色方案保存到 `localStorage`（key: `liming:palette`），独立于明暗主题
+- `data-theme` 继续负责亮色 / 暗色 / 跟随系统的切换
+
+### 暗色模式优化
+
+- 暗色模式从灰绿 / 墨绿调整为近黑 / 蓝黑后台风格
+- 优化背景、面板、表格、侧栏、文字、边框等暗色 CSS 变量
+- 暗色下交互色改为更克制的蓝色系
+
+### 课程通知截图优化
+
+- 截图默认固定黎明蓝 `#002147`，使用 `--shot-*` 专用变量
+- 新增「课程截图跟随当前配色方案」开关（`localStorage` key: `liming:shot-follow-palette`），默认关闭
+- 开启后截图跟随 `data-palette` 配色方案变化，关闭后始终为黎明蓝
+- 截图不跟随暗色模式，始终保持适合发给家长的浅色风格
+- 设置入口：设置 → 外观设置 → 课程截图配色
+- 简化版式：只保留居中标题"课程通知"+ 课程表格，删除底部说明行
+- 表格正文取消时间、年级、科目等字段的单独深色背景，改为统一隔行变色
+
+### 冲突检查增强
+
+- 新增「忽略教室为 1 的教室冲突」开关（`localStorage` key: `liming:ignore-room-one-conflict`）
+- 能识别 `1` / `"1"` / `" 1 "` / `"1.0"` 等教室编号变体
+- 只忽略教室都为 1 且时间重叠的教室冲突，老师冲突、学生冲突、真实教室冲突等其它问题不受影响
+
+### 周课表暗色高亮修复
+
+- 修复暗色模式下周课表老师分组结束行 `group-break` 过亮的问题
+- 暗色分组行颜色调整为更克制的深蓝灰：`--group: #132033` / `--group-hover: #172033` / `--group-fg: #cbd5e1`
+
+### 右上角用户菜单
+
+- 将用户信息、修改密码、退出登录从左侧栏迁移到右上角用户菜单
+- 右上角显示头像首字母、用户名和下拉箭头
+- 下拉菜单包含：用户名、角色、修改密码、退出系统
+- 复用原有修改密码和退出登录的业务逻辑
+
+### 外观设置迁移
+
+- 主题和配色方案选择从左侧栏迁移到「设置 → 外观设置」页面
+- 右上角用户菜单增加「外观设置」入口
+- 保持原有 `THEME_KEY` / `PALETTE_KEY` / `applyTheme()` / `applyPalette()` 逻辑不变
+
+### 月份工具栏迁移
+
+- 月份选择、新建月份、删除月份从左侧栏迁移到全局 topbar
+- 位置在页面操作按钮之后、用户菜单之前，所有页面都能看到当前月份上下文
+- 复用原有 `.month-select` / `.new-month` / `.delete-month` 事件绑定
+- `activeMonth` 和 `localStorage` 记忆逻辑保持不变
+
+### 侧栏折叠与滚动模型 🚧
+
+- 正在引入左侧栏折叠布局，使用 `#app.sidebar-collapsed` 控制折叠状态
+- 新增 `localStorage` key：`liming:sidebar-collapsed`
+- 展开时显示图标 + 文字，收缩时只显示图标
+- `navGroups` 增加 `icon` 字段
+- topbar 左侧增加折叠按钮
+- 调整 sidebar、main、content 的滚动模型
+- **该部分目前仍在继续打磨和验证，尚未完全稳定**
+
+### Bugfix
+
+- 修复课程总表筛选栏因 `.lesson-filter-bar` sticky 定位导致悬浮在表格上方的问题，删除 sticky 属性使筛选栏重新跟随内容区滚动
+
+### 操作日志
+
+- 新增 `operation_logs` 表，独立于技术审计表 `audit_events`，面向管理员可读
+- 新增操作日志页面（设置 → 操作日志），包含筛选区、表格、分页
+- 筛选项：操作人、操作账号、操作类型、操作内容、操作时间范围
+- 分页支持 10/20/50 条/页，页码导航
+- 已接入课程增删改、月份新建/删除的日志写入
+- `writeOperationLog()` 统一写日志函数，操作内容为人可读的中文描述
 
 ## 金额结算口径
 
@@ -338,6 +420,8 @@ giftBalance       = giftBase - giftConsumption
 | `severityCounts` 吞掉非标准 severity | 动态新增桶，`pricing_recompute` 等写入的 `info` 也会被汇总 | `severityCounts` |
 | 上游充值补录后，下游旧自动结转不会消失 | `ensureCarryOver` / `rolloverRecharges` 会删除余额已归零学生的失效自动结转；`POST /api/recharges` 保存后级联刷新后续月份，学生历史页也会先刷新结转链 | `refreshCarryOverAfter` / `isAutoCarryOverRecord` / `/api/recharges` |
 | 主题选择占用顶栏空间 | 主题下拉移到左侧导航底部，顶栏只保留月份和当前页面操作 | `renderNav` / `renderTopbar` |
+| 配色方案与课程截图未联动 | 新增 `data-palette` / `liming:palette` 和 12 套配色；课程通知截图预览、复制图片、下载 PNG 统一读取 `--shot-*` 变量，暗色模式下仍保持浅色家长版 | `public/styles.css` / `courseNoticeCanvas` |
+| 暗色模式偏绿偏脏 | 暗色基础变量改为近黑 / 蓝黑后台风格，大面积背景不再使用绿色系；配色方案在暗色下只影响局部强调 | `:root[data-theme="dark"]` / `prefers-color-scheme` |
 | 短范围矩阵课表时间段界限弱 | 保留原有宽松列宽和单元格高度，只用符合设计系统的边框色做时间段分组分隔；暗色 / 亮色都可见 | `week-grid-table` CSS |
 | 生产样式未完整应用 `_ Design System` | 同步品牌主色、`brand-pale`、语义 token、字体工具类、暖胡桃 system dark，并将亮色侧栏改为 UI Kit 的温暖纸色方案 | `public/styles.css` |
 
