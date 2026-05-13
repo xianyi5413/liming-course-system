@@ -1897,6 +1897,28 @@ tr.abnormal:hover td {
   background: var(--abnormal-hover);
 }
 
+/* [约束5] PATCH 返回 warnings 的行底色与图标 */
+.course-table tr.has-warnings {
+  --warn-stripe: color-mix(in srgb, var(--warning) 12%, transparent);
+  background: var(--warn-stripe);
+}
+.lesson-warning-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: var(--warning);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 tr.receivable td {
   background: var(--danger-bg);
   color: var(--danger);
