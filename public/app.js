@@ -126,6 +126,7 @@ let passwordModalOpen = false;
 let userMenuOpen = false;
 let userAdminNotice = "";
 let lessonFilter = readLessonFilter();
+let scheduleMode = false;
 let expandedSummaryStudents = readExpandedSummaryStudents();
 let activeNavGroup = localStorage.getItem("liming:nav-group") || "";
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
@@ -1210,7 +1211,7 @@ function financePresetRange(preset) {
 }
 
 function readLessonFilter() {
-  const defaults = { month_key: "", teacher: "", student: "", start_date: "", end_date: "", status: "", query: "" };
+  const defaults = { month_key: "", teacher: "", student: "", start_date: "", end_date: "", status: "", query: "", date_preset_initialized: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(LESSON_FILTER_KEY) || "{}") };
   } catch {
@@ -1292,9 +1293,9 @@ function monthDeleteModal() {
 
 function ensureLessonFilterDates() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const bounds = monthBounds(monthKey);
-  if (lessonFilter.month_key !== monthKey) {
-    lessonFilter = { ...lessonFilter, month_key: monthKey, start_date: bounds.start, end_date: bounds.end };
+  const week = currentWeekRange();
+  if (lessonFilter.month_key !== monthKey || !lessonFilter.date_preset_initialized) {
+    lessonFilter = { ...lessonFilter, month_key: monthKey, start_date: week.start, end_date: week.end, date_preset_initialized: true };
     saveLessonFilter();
     return;
   }
@@ -1302,8 +1303,9 @@ function ensureLessonFilterDates() {
     lessonFilter = {
       ...lessonFilter,
       month_key: monthKey,
-      start_date: lessonFilter.start_date || bounds.start,
-      end_date: lessonFilter.end_date || bounds.end,
+      start_date: lessonFilter.start_date || week.start,
+      end_date: lessonFilter.end_date || week.end,
+      date_preset_initialized: true,
     };
     saveLessonFilter();
   }
@@ -1329,9 +1331,39 @@ function lessonRangeLoaded() {
 
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const bounds = monthBounds(monthKey);
-  lessonFilter = { month_key: monthKey, teacher: "", student: "", start_date: bounds.start, end_date: bounds.end, status: "", query: "" };
+  const week = currentWeekRange();
+  lessonFilter = { month_key: monthKey, teacher: "", student: "", start_date: week.start, end_date: week.end, status: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
+}
+
+function lessonPresetRange(preset) {
+  if (preset === "today") {
+    const today = todayDate();
+    return { start_date: today, end_date: today };
+  }
+  if (preset === "week") {
+    const week = currentWeekRange();
+    return { start_date: week.start, end_date: week.end };
+  }
+  if (preset === "month") {
+    const bounds = monthBounds(state?.settings?.month_key || activeMonth);
+    return { start_date: bounds.start, end_date: bounds.end };
+  }
+  return null;
+}
+
+function formatLessonDateRange() {
+  const start = lessonFilter.start_date || "";
+  const end = lessonFilter.end_date || "";
+  if (!start && !end) return "";
+  if (start === end) return start;
+  return `${start || "未选"} 至 ${end || "未选"}`;
+}
+
+function formatShortDate(value) {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value || "";
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
 function uniqueSorted(values) {
@@ -1364,6 +1396,28 @@ function lessonMatchesFilter(row, filter, options = {}) {
     if (!haystack.includes(needle)) return false;
   }
   return true;
+}
+
+function lessonBelongsToMonth(row, monthKey = state?.settings?.month_key || activeMonth) {
+  if (!monthKey) return true;
+  if (row.month_key) return row.month_key === monthKey;
+  const bounds = monthBounds(monthKey);
+  return Boolean(row.date && row.date >= bounds.start && row.date <= bounds.end);
+}
+
+function monthLessonRows() {
+  const monthKey = state?.settings?.month_key || activeMonth;
+  return sortedLessons().filter((row) => lessonBelongsToMonth(row, monthKey));
+}
+
+function lessonStats(rows = []) {
+  const effectiveRows = rows.filter(isEffective);
+  return {
+    records: rows.length,
+    effective: effectiveRows.length,
+    studentTotal: effectiveRows.reduce((sum, row) => sum + splitStudents(row.student_names).length, 0),
+    teacherCount: uniqueSorted(effectiveRows.map((row) => row.teacher_name)).length,
+  };
 }
 
 function filterSelectOptions(values, current, emptyText) {
@@ -1431,6 +1485,14 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
         <input class="control lesson-filter-input" data-filter-field="end_date" type="date" value="${escapeHtml(lessonFilter.end_date)}">
       </span>
     </label>
+    <div class="filter-field lesson-quick-field">
+      <span>快捷</span>
+      <span class="lesson-quick-buttons">
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="today">今日</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="week">本周</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="month">本月</button>
+      </span>
+    </div>
     <label class="filter-field">
       <span>状态</span>
       ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: statusValues(), placeholder: "输入或选择状态" })}
@@ -2327,11 +2389,18 @@ function updateLessonSummaryMetrics() {                  /* [B档] 更新概要�
   const rows = focusSet.size
     ? allRows.filter((row) => focusSet.has(Number(row.id)))
     : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
-  const effectiveCount = rows.filter(isEffective).length;
+  const stats = lessonStats(rows);
+  const monthStats = lessonStats(monthLessonRows());
   const metricValues = document.querySelectorAll(".summary-grid .metric-value");
-  if (metricValues.length >= 2) {
-    metricValues[0].textContent = rows.length;
-    metricValues[1].textContent = effectiveCount;
+  if (metricValues.length >= 4) {
+    metricValues[0].textContent = stats.records;
+    metricValues[1].textContent = stats.effective;
+    metricValues[2].textContent = stats.studentTotal;
+    metricValues[3].textContent = stats.teacherCount;
+  }
+  const pageMeta = document.querySelector(".page-meta");
+  if (pageMeta && view === "lessons") {
+    pageMeta.textContent = `${monthLabel()} · 有效课程 ${monthStats.effective} 节，学生人次 ${monthStats.studentTotal}`;
   }
 }
 
@@ -2343,11 +2412,7 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
   const rows = focusSet.size
     ? allRows.filter((row) => focusSet.has(Number(row.id)))
     : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
-  let cumulative = 0;
-  tbody.innerHTML = rows.map((row) => {
-    cumulative += splitStudents(row.student_names).length;
-    return lessonRow(row, cumulative);
-  }).join("") || `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`;
+  tbody.innerHTML = lessonRowsHtml(rows);
   /* innerHTML 替换后新 <select> 和新 <input type="date"> 都是裸原生元素，
      必须重新包装自定义组件。两函数均幂等（分别由 data-custom-select /
      data-custom-date 守卫），enhanceCustomSelects 还会先清理孤立 portal menu。 */
@@ -2495,6 +2560,33 @@ function lessonRow(row, cumulative) {
   `;
 }
 
+function lessonScheduleAddRow(row) {
+  const teacher = row.teacher_name || "未选老师";
+  const date = row.date || lessonFilter.start_date || todayDate();
+  return `
+    <tr class="schedule-add-row" data-schedule-teacher="${escapeHtml(row.teacher_name || "")}" data-schedule-date="${escapeHtml(date)}">
+      <td colspan="13">
+        <button class="schedule-add-btn" type="button" data-teacher="${escapeHtml(row.teacher_name || "")}" data-date="${escapeHtml(date)}">
+          ＋ 给${escapeHtml(teacher)}新增 ${escapeHtml(formatShortDate(date))} 课程
+        </button>
+      </td>
+    </tr>
+  `;
+}
+
+function lessonRowsHtml(rows) {
+  if (!rows.length) return `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`;
+  let cumulative = 0;
+  return rows.map((row, index) => {
+    cumulative += splitStudents(row.student_names).length;
+    const currentGroup = `${row.date || ""}|${row.teacher_name || ""}`;
+    const next = rows[index + 1];
+    const nextGroup = next ? `${next.date || ""}|${next.teacher_name || ""}` : "";
+    const addRow = scheduleMode && currentGroup !== nextGroup ? lessonScheduleAddRow(row) : "";
+    return `${lessonRow(row, cumulative)}${addRow}`;
+  }).join("");
+}
+
 function monthKeyFromDateValue(value) {
   return isDateValue(value) ? `${value.slice(0, 7)}-01` : "";
 }
@@ -2623,9 +2715,9 @@ function renderLessons() {
   const rows = focusSet.size
     ? allRows.filter((row) => focusSet.has(Number(row.id)))
     : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
-  let cumulative = 0;
-  const effectiveCount = rows.filter(isEffective).length;
-  const studentTotal = state.derived.fee_details.length;
+  const stats = lessonStats(rows);
+  const monthStats = lessonStats(monthLessonRows());
+  const rangeText = formatLessonDateRange();
   const focusNotice = focusSet.size ? `
     <div class="band focus-lesson-panel">
       <div class="focus-lesson-body">
@@ -2637,19 +2729,26 @@ function renderLessons() {
       </div>
     </div>
   ` : renderLessonFilterBar({ rows: allRows, filteredRows: rows });
+  const scheduleNotice = scheduleMode ? `
+    <div class="schedule-mode-notice">
+      <strong>当前处于排课模式</strong>
+      <span>可在每位老师当天课程块后方点击加号，直接新增一行待上课程。</span>
+    </div>
+  ` : "";
   renderTopbar(
-    `${monthLabel()} 黎明教育课程安排`,
-    `有效课程 ${effectiveCount} 节，学生人次 ${studentTotal}`,
-    `<button class="btn week-copy-btn" type="button">整周复制…</button><button class="btn primary add-lesson">新增课程</button>`,
+    `课程总表：${rangeText}`,
+    `${monthLabel()} · 有效课程 ${monthStats.effective} 节，学生人次 ${monthStats.studentTotal}`,
+    `<button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button><button class="btn week-copy-btn" type="button">整周复制…</button><button class="btn primary add-lesson">新增课程</button>`,
   );
   contentEl.innerHTML = `
     <div class="summary-grid">
-      <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${rows.length}</div></div>
-      <div class="metric"><div class="metric-label">有效课程</div><div class="metric-value">${effectiveCount}</div></div>
-      <div class="metric"><div class="metric-label">学生人次</div><div class="metric-value">${studentTotal}</div></div>
-      <div class="metric"><div class="metric-label">教师人数</div><div class="metric-value">${state.teachers.length}</div></div>
+      <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${stats.records}</div></div>
+      <div class="metric"><div class="metric-label">有效课程</div><div class="metric-value">${stats.effective}</div></div>
+      <div class="metric"><div class="metric-label">学生人次</div><div class="metric-value">${stats.studentTotal}</div></div>
+      <div class="metric"><div class="metric-label">教师人数</div><div class="metric-value">${stats.teacherCount}</div></div>
     </div>
     ${focusNotice}
+    ${scheduleNotice}
     <div class="band">
       <div class="table-wrap">
         <table class="course-table">
@@ -2659,10 +2758,7 @@ function renderLessons() {
             </tr>
           </thead>
           <tbody id="lessons-tbody"> <!-- [约束1] 固定 id 用于局部重绘定位 -->
-            ${rows.map((row) => {
-              cumulative += splitStudents(row.student_names).length;
-              return lessonRow(row, cumulative);
-            }).join("") || `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`}
+            ${lessonRowsHtml(rows)}
           </tbody>
         </table>
       </div>
@@ -6615,6 +6711,7 @@ function wireEvents() {
         ...lessonFilter,
         month_key: monthKey,
         [field]: value,
+        date_preset_initialized: true,
       };
       saveLessonFilter();
       if (rerender) {
@@ -6640,6 +6737,26 @@ function wireEvents() {
         render();
       }
     }, 650);
+  });
+
+  document.querySelectorAll(".lesson-date-preset").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const range = lessonPresetRange(button.dataset.preset);
+      if (!range) return;
+      focusedLessonIds = [];
+      lessonFilter = {
+        ...lessonFilter,
+        month_key: state.settings.month_key,
+        ...range,
+        date_preset_initialized: true,
+      };
+      saveLessonFilter();
+      if (!lessonRangeLoaded()) {
+        await load();
+      } else {
+        render();
+      }
+    });
   });
 
   document.querySelectorAll(".fee-details-filter-input").forEach((input) => {
@@ -6932,6 +7049,13 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".schedule-mode-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      scheduleMode = !scheduleMode;
+      render();
+    });
+  });
+
   /* [约束2] 事件委托：将 .lesson-field 的 change 监听挂在 contentEl 上，绑定一次，行替换不受影响 */
   if (!lessonFieldDelegatedBound) {
     lessonFieldDelegatedBound = true;
@@ -6956,6 +7080,32 @@ function wireEvents() {
       method: "POST",
       body: { date: state.settings.month_key, month_key: state.settings.month_key, status: "待上" },
     })));
+  });
+
+  document.querySelectorAll(".schedule-add-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const date = isDateValue(button.dataset.date) ? button.dataset.date : (lessonFilter.start_date || todayDate());
+      const teacherName = button.dataset.teacher || "";
+      try {
+        const lesson = await request("/api/lessons", {
+          method: "POST",
+          body: {
+            teacher_name: teacherName,
+            date,
+            month_key: monthKeyFromDateValue(date) || state.settings.month_key,
+            status: "待上",
+          },
+        });
+        await load();
+        requestAnimationFrame(() => {
+          const target = document.querySelector(`.lesson-field[data-id="${lesson.id}"][data-field="time_slot"]`)
+            || document.querySelector(`.lesson-field[data-id="${lesson.id}"]`);
+          target?.focus();
+        });
+      } catch (error) {
+        alert(`新增课程失败：${error.message}`);
+      }
+    });
   });
 
   document.querySelectorAll(".delete-lesson").forEach((button) => {
