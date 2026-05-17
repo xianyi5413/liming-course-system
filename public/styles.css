@@ -2629,6 +2629,77 @@ select.control,
   transform: translateY(0);
 }
 
+.lesson-quick-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 38px;
+}
+
+.lesson-quick-buttons .btn {
+  min-height: 34px;
+  padding: 6px 9px;
+}
+
+.schedule-mode-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  padding: 10px 12px;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius);
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  font-size: var(--text-ui);
+  line-height: 1.45;
+}
+
+.schedule-mode-notice strong {
+  color: var(--ink-strong);
+}
+
+.schedule-mode-notice span {
+  color: var(--muted);
+}
+
+.schedule-add-row td {
+  height: 38px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--brand-soft) 42%, transparent);
+  text-align: center;
+}
+
+.course-table .schedule-add-row:hover td {
+  background: color-mix(in srgb, var(--brand-soft) 68%, transparent);
+}
+
+.schedule-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px dashed var(--brand-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  color: var(--brand-dark);
+  font: inherit;
+  font-size: var(--text-caption);
+  font-weight: 800;
+  line-height: 1.35;
+  cursor: pointer;
+  white-space: normal;
+}
+
+.schedule-add-btn:hover,
+.schedule-add-btn:focus-visible {
+  border-style: solid;
+  background: var(--btn-hover);
+}
+
 .copy-panel,
 .week-copy-panel {
   width: min(760px, 100%);
