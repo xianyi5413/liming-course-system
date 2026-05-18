@@ -1,5 +1,5 @@
 const navGroups = [
-  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"]] },
+  { key: "schedule", label: "📅 排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
     label: "👥 学生",
@@ -60,6 +60,8 @@ const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
+const MATRIX_RANGE_USER_SET_KEY = "liming:matrix-range:user-set";
+const WEEK_USER_SET_KEY = "liming:week:user-set";
 const THEME_KEY = "liming:theme";
 const PALETTE_KEY = "liming:palette";
 const IGNORE_ROOM_ONE_CONFLICT_KEY = "liming:ignore-room-one-conflict";
@@ -80,7 +82,7 @@ const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", fin
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
+  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
   finance: new Set(["finance", "recharges", "studentQuery", "expenses", "appearance"]),
   teacher: new Set(["weekMatrix", "teacherDetail", "appearance"]),
 };
@@ -104,7 +106,7 @@ let loadGeneration = 0;
 let view = localStorage.getItem("liming:view") || "lessons";
 let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
-let activeWeek = Number(localStorage.getItem("liming:week") || 0);
+let activeWeek = readActiveWeek();
 let matrixRange = readMatrixRange();
 let months = [];
 let activeMonth = localStorage.getItem("liming:month") || "";
@@ -119,9 +121,13 @@ let studentQueryNameDraft = "";
 let studentQueryRange = readStudentQueryRange();
 let studentStatementModalOpen = false;
 const COURSE_NOTICE_FILTER_KEY = "liming:course-notice-filter";
+const TEACHER_COURSE_NOTICE_FILTER_KEY = "liming:teacher-course-notice-filter";
 let courseNoticeFilter = readCourseNoticeFilter();
 let courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
 let saveCourseNoticeTailDebounced = null;
+let teacherCourseNoticeFilter = readTeacherCourseNoticeFilter();
+let teacherCourseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
+let saveTeacherCourseNoticeTailDebounced = null;
 let selectedTeacher = "";
 let passwordModalOpen = false;
 let userMenuOpen = false;
@@ -701,6 +707,7 @@ async function load() {
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
+  ensureActiveWeekDefault();
   ensureLessonFilterDates();
   const lessonRange = lessonLoadRange();
   if (lessonRange) {
@@ -827,8 +834,55 @@ function currentWeekRange() {
   return { start: dateKey(monday), end: dateKey(sunday) };
 }
 
+function storedActiveWeekValue() {
+  if (localStorage.getItem(WEEK_USER_SET_KEY) !== "1") return null;
+  const saved = localStorage.getItem("liming:week");
+  if (saved === null) return null;
+  const value = Number(saved);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function currentWeekIndexForMonth(monthKey = todayDate().slice(0, 7)) {
+  const today = todayDate();
+  const ranges = naturalWeekRanges(monthKey);
+  const index = ranges.findIndex((range) => range.includes(today));
+  return index >= 0 ? index : 0;
+}
+
+function readActiveWeek() {
+  const saved = storedActiveWeekValue();
+  if (saved !== null) return saved;
+  return currentWeekIndexForMonth(localStorage.getItem("liming:month") || todayDate().slice(0, 7));
+}
+
+function ensureActiveWeekDefault() {
+  if (storedActiveWeekValue() !== null) return;
+  activeWeek = currentWeekIndexForMonth(state?.settings?.month_key || activeMonth || todayDate().slice(0, 7));
+  localStorage.setItem("liming:week", String(activeWeek));
+}
+
+function readNoticeFilter(storageKey) {
+  const fallback = { ...currentWeekRange(), onlyTeaching: true };
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    const filter = {
+      start: isDateValue(saved.start) ? saved.start : fallback.start,
+      end: isDateValue(saved.end) ? saved.end : fallback.end,
+      onlyTeaching: typeof saved.onlyTeaching === "boolean" ? saved.onlyTeaching : fallback.onlyTeaching,
+    };
+    if (filter.start > filter.end) filter.end = filter.start;
+    return filter;
+  } catch {
+    return fallback;
+  }
+}
+
 function readCourseNoticeFilter() {
-  return { ...currentWeekRange(), onlyTeaching: true };
+  return readNoticeFilter(COURSE_NOTICE_FILTER_KEY);
+}
+
+function readTeacherCourseNoticeFilter() {
+  return readNoticeFilter(TEACHER_COURSE_NOTICE_FILTER_KEY);
 }
 
 function saveCourseNoticeFilter() {
@@ -851,7 +905,7 @@ function ensureCourseNoticeFilterDates() {
 }
 
 function resetCourseNoticeFilterToThisWeek() {
-  courseNoticeFilter = readCourseNoticeFilter();
+  courseNoticeFilter = { ...currentWeekRange(), onlyTeaching: true };
   saveCourseNoticeFilter();
   courseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
 }
@@ -867,6 +921,46 @@ async function loadCourseNoticeData(force = false) {
     courseNoticeState = { data, busy: false, error: "", loadedQuery: query };
   } catch (error) {
     courseNoticeState = { data: null, busy: false, error: error.message, loadedQuery: query };
+  }
+  render();
+}
+
+function saveTeacherCourseNoticeFilter() {
+  localStorage.setItem(TEACHER_COURSE_NOTICE_FILTER_KEY, JSON.stringify(teacherCourseNoticeFilter));
+}
+
+function teacherCourseNoticeQuery() {
+  const params = new URLSearchParams();
+  params.set("start", teacherCourseNoticeFilter.start);
+  params.set("end", teacherCourseNoticeFilter.end);
+  if (teacherCourseNoticeFilter.onlyTeaching) params.set("only_teaching", "1");
+  return params.toString();
+}
+
+function ensureTeacherCourseNoticeFilterDates() {
+  const fallback = currentWeekRange();
+  if (!isDateValue(teacherCourseNoticeFilter.start)) teacherCourseNoticeFilter.start = fallback.start;
+  if (!isDateValue(teacherCourseNoticeFilter.end)) teacherCourseNoticeFilter.end = fallback.end;
+  if (teacherCourseNoticeFilter.start > teacherCourseNoticeFilter.end) teacherCourseNoticeFilter.end = teacherCourseNoticeFilter.start;
+}
+
+function resetTeacherCourseNoticeFilterToThisWeek() {
+  teacherCourseNoticeFilter = { ...currentWeekRange(), onlyTeaching: true };
+  saveTeacherCourseNoticeFilter();
+  teacherCourseNoticeState = { data: null, busy: false, error: "", loadedQuery: "" };
+}
+
+async function loadTeacherCourseNoticeData(force = false) {
+  ensureTeacherCourseNoticeFilterDates();
+  const query = teacherCourseNoticeQuery();
+  if (!force && teacherCourseNoticeState.loadedQuery === query && teacherCourseNoticeState.data) return;
+  teacherCourseNoticeState = { ...teacherCourseNoticeState, busy: true, error: "" };
+  render();
+  try {
+    const data = await request(`/api/teacher-course-notice?${query}`);
+    teacherCourseNoticeState = { data, busy: false, error: "", loadedQuery: query };
+  } catch (error) {
+    teacherCourseNoticeState = { data: null, busy: false, error: error.message, loadedQuery: query };
   }
   render();
 }
@@ -1075,10 +1169,13 @@ async function refreshStudentQueryOnly() {
 
 function readMatrixRange() {
   try {
-    return { month_key: "", start: "", end: "", ...JSON.parse(localStorage.getItem(MATRIX_RANGE_KEY) || "{}") };
+    if (localStorage.getItem(MATRIX_RANGE_USER_SET_KEY) === "1") {
+      const saved = { month_key: "", start: "", end: "", ...JSON.parse(localStorage.getItem(MATRIX_RANGE_KEY) || "{}") };
+      if (isDateValue(saved.start) && isDateValue(saved.end) && saved.start <= saved.end) return saved;
+    }
   } catch {
-    return { month_key: "", start: "", end: "" };
   }
+  return currentMatrixRange(localStorage.getItem("liming:month") || todayDate().slice(0, 7));
 }
 
 function saveMatrixRange() {
@@ -1097,15 +1194,24 @@ function matrixDefaultRange(monthKey = activeMonth) {
   };
 }
 
+function currentMatrixRange(monthKey = activeMonth) {
+  const week = currentWeekRange();
+  return {
+    month_key: monthKey,
+    start: week.start,
+    end: week.end,
+  };
+}
+
 function ensureMatrixRange() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  if (
-    matrixRange.month_key !== monthKey
-    || !isDateValue(matrixRange.start)
-    || !isDateValue(matrixRange.end)
-    || matrixRange.start > matrixRange.end
-  ) {
-    matrixRange = matrixDefaultRange(monthKey);
+  if (!isDateValue(matrixRange.start) || !isDateValue(matrixRange.end) || matrixRange.start > matrixRange.end) {
+    matrixRange = currentMatrixRange(monthKey);
+    saveMatrixRange();
+    return;
+  }
+  if (matrixRange.month_key !== monthKey) {
+    matrixRange = { ...matrixRange, month_key: monthKey };
     saveMatrixRange();
   }
 }
@@ -5644,38 +5750,50 @@ function courseNoticeFullMessage(item) {
   return `${item.greeting || ""}\n${courseNoticeState.data?.global_tail || ""}`;
 }
 
+function teacherCourseNoticeFullMessage(item) {
+  return `${item.greeting || ""}\n${teacherCourseNoticeState.data?.global_tail || ""}`;
+}
+
 function courseNoticeStatusText(item) {
   if (item.completed) return "已完成";
   if (item.partial_completed) return `部分完成 ${item.completed_count}/${item.lesson_count}`;
   return "待发送";
 }
 
-function renderCourseNoticePreview(item) {
+function courseNoticeColumns(mode = "parent") {
+  const columns = [
+    ["teacher_name", "授课老师"],
+    ["date", "日期"],
+    ["lesson_status", "上课情况"],
+    ["weekday", "星期"],
+    ["time_slot", "时间"],
+    ["classroom", "教室"],
+    ["grade", "年级"],
+    ["subject", "科目"],
+    ["student_names", "学生"],
+  ];
+  return columns;
+}
+
+function renderCourseNoticePreview(item, mode = "parent", title = "课程通知") {
   const rows = item.lessons || [];
+  const columns = courseNoticeColumns(mode);
   return `
     <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
       <div class="notice-shot-shell">
         <div class="notice-shot-head">
-          <div class="notice-shot-title">课程通知</div>
+          <div class="notice-shot-title">${escapeHtml(title)}</div>
         </div>
         <table class="notice-shot-table">
           <thead>
             <tr>
-              <th>授课老师</th><th>日期</th><th>上课情况</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th>
+              ${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("")}
             </tr>
           </thead>
           <tbody>
             ${rows.map((lesson) => `
               <tr>
-                <td>${escapeHtml(lesson.teacher_name)}</td>
-                <td>${escapeHtml(lesson.date)}</td>
-                <td>${escapeHtml(lesson.lesson_status || lesson.status)}</td>
-                <td>${escapeHtml(lesson.weekday || weekdayCn(lesson.date))}</td>
-                <td>${escapeHtml(lesson.time_slot)}</td>
-                <td>${escapeHtml(lesson.classroom)}</td>
-                <td>${escapeHtml(lesson.grade)}</td>
-                <td>${escapeHtml(lesson.subject)}</td>
-                <td>${escapeHtml(lesson.student_names)}</td>
+                ${columns.map(([key]) => `<td>${escapeHtml(lesson[key] || (key === "weekday" ? weekdayCn(lesson.date) : ""))}</td>`).join("")}
               </tr>
             `).join("")}
           </tbody>
@@ -5769,14 +5887,107 @@ function renderCourseNotice() {
   `;
 }
 
+function renderTeacherCourseNotice() {
+  ensureTeacherCourseNoticeFilterDates();
+  renderTopbar("老师课程截图生成", "按老师生成课程安排截图");
+  topbarEl.querySelector(".page-title")?.insertAdjacentHTML(
+    "beforeend",
+    `<span class="page-title-note">选择日期自动刷新；可修改称呼和尾句；复制截图后自动打勾；清除只清老师版打勾记录</span>`,
+  );
+  const data = teacherCourseNoticeState.data;
+  const shouldLoad = !teacherCourseNoticeState.busy && teacherCourseNoticeState.loadedQuery !== teacherCourseNoticeQuery();
+  if (shouldLoad) setTimeout(() => loadTeacherCourseNoticeData(), 0);
+  const objects = data?.send_objects || [];
+  const completedObjects = objects.filter((item) => item.completed).length;
+  contentEl.innerHTML = `
+    <div class="filter-bar notice-filter-bar">
+      <div class="filter-controls">
+        <label class="filter-field">
+          <span>起始日期</span>
+          <input class="control custom-date-input teacher-course-notice-filter" data-field="start" type="date" value="${escapeHtml(teacherCourseNoticeFilter.start)}">
+        </label>
+        <label class="filter-field">
+          <span>终末日期</span>
+          <input class="control custom-date-input teacher-course-notice-filter" data-field="end" type="date" value="${escapeHtml(teacherCourseNoticeFilter.end)}">
+        </label>
+        <label class="history-toggle">
+          <input class="teacher-course-notice-only" type="checkbox" ${teacherCourseNoticeFilter.onlyTeaching ? "checked" : ""}>
+          <span>只选择“上课”</span>
+        </label>
+        <label class="filter-field notice-tail-field">
+          <span>全局后半句</span>
+          <input class="control teacher-course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
+        </label>
+        <button class="btn primary teacher-course-notice-generate" type="button">生成课程通知</button>
+        <button class="btn danger teacher-course-notice-clear-completions" type="button">清除所有打勾记录</button>
+      </div>
+      <div class="filter-summary">
+        <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
+      </div>
+    </div>
+    ${teacherCourseNoticeState.error ? `<div class="empty">${escapeHtml(teacherCourseNoticeState.error)}</div>` : ""}
+    ${teacherCourseNoticeState.busy ? `<div class="empty">正在生成老师课程通知...</div>` : ""}
+    ${!teacherCourseNoticeState.busy && data ? `
+      <div class="notice-list">
+        ${objects.map((item) => `
+          <div class="notice-item ${item.completed ? "completed" : ""} ${item.partial_completed ? "partial" : ""}" data-send-key="${escapeHtml(item.send_object_key)}">
+            <div class="notice-left">
+              ${item.completed ? `<div class="notice-checkmark">✓</div>` : ""}
+              <div class="notice-object-head">
+                <div>
+                  <div class="notice-object-name">${escapeHtml(item.send_object_name)}</div>
+                  <div class="notice-object-meta">
+                    <span>${escapeHtml(item.send_object_type)}</span>
+                    <span>年级：${escapeHtml((item.grades || []).join("、") || "-")}</span>
+                    <span>科目：${escapeHtml((item.subjects || []).join("、") || "-")}</span>
+                    <span>${item.lesson_count} 节课</span>
+                  </div>
+                </div>
+                <span class="status-badge ${item.completed ? "done" : item.partial_completed ? "exam" : "pending"}">${escapeHtml(courseNoticeStatusText(item))}</span>
+              </div>
+              ${renderCourseNoticePreview(item, "teacher", "本周课程安排")}
+            </div>
+            <div class="notice-right">
+              <label class="filter-field">
+                <span>称呼</span>
+                <input class="control teacher-notice-greeting" data-send-key="${escapeHtml(item.send_object_key)}" value="${escapeHtml(item.greeting || "")}">
+              </label>
+              <label class="filter-field">
+                <span>自动生成文案</span>
+                <textarea class="control teacher-notice-message" data-send-key="${escapeHtml(item.send_object_key)}" rows="4" readonly>${escapeHtml(teacherCourseNoticeFullMessage(item))}</textarea>
+              </label>
+              <div class="notice-actions">
+                <button class="btn teacher-notice-copy-message" type="button" data-send-key="${escapeHtml(item.send_object_key)}">复制文案</button>
+                <button class="btn primary teacher-notice-copy-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">${item.completed ? "已复制截图" : "复制课程截图"}</button>
+                <button class="btn teacher-notice-download-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">下载课程截图</button>
+              </div>
+              <div class="notice-state">${item.completed ? "✓ 该老师课程通知已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
+            </div>
+          </div>
+        `).join("") || `<div class="empty">当前日期范围暂无老师课程</div>`}
+      </div>
+    ` : ""}
+  `;
+}
+
 function findCourseNoticeObject(key) {
   return (courseNoticeState.data?.send_objects || []).find((item) => item.send_object_key === key);
+}
+
+function findTeacherCourseNoticeObject(key) {
+  return (teacherCourseNoticeState.data?.send_objects || []).find((item) => item.send_object_key === key);
 }
 
 function updateCourseNoticeMessageDom(key) {
   const item = findCourseNoticeObject(key);
   const textarea = document.querySelector(`.notice-message[data-send-key="${CSS.escape(key)}"]`);
   if (item && textarea) textarea.value = courseNoticeFullMessage(item);
+}
+
+function updateTeacherCourseNoticeMessageDom(key) {
+  const item = findTeacherCourseNoticeObject(key);
+  const textarea = document.querySelector(`.teacher-notice-message[data-send-key="${CSS.escape(key)}"]`);
+  if (item && textarea) textarea.value = teacherCourseNoticeFullMessage(item);
 }
 
 async function saveCourseNoticeGreeting(item) {
@@ -5789,6 +6000,20 @@ async function saveCourseNoticeGreeting(item) {
       students: item.students,
       greeting: item.greeting,
       global_tail: courseNoticeState.data?.global_tail || "",
+    },
+  });
+}
+
+async function saveTeacherCourseNoticeGreeting(item) {
+  await request("/api/teacher-course-notice/greeting", {
+    method: "POST",
+    body: {
+      send_object_key: item.send_object_key,
+      send_object_name: item.send_object_name,
+      send_object_type: item.send_object_type,
+      students: item.students,
+      greeting: item.greeting,
+      global_tail: teacherCourseNoticeState.data?.global_tail || "",
     },
   });
 }
@@ -5816,19 +6041,9 @@ function courseNoticeShotPalette() {
   };
 }
 
-function courseNoticeCanvas(item) {
+function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   const colors = courseNoticeShotPalette();
-  const columns = [
-    ["teacher_name", "授课老师"],
-    ["date", "日期"],
-    ["lesson_status", "上课情况"],
-    ["weekday", "星期"],
-    ["time_slot", "时间"],
-    ["classroom", "教室"],
-    ["grade", "年级"],
-    ["subject", "科目"],
-    ["student_names", "学生"],
-  ];
+  const columns = courseNoticeColumns(mode);
   const rows = item.lessons || [];
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
@@ -5884,7 +6099,7 @@ function courseNoticeCanvas(item) {
   ctx.font = "900 24px Microsoft YaHei, PingFang SC, Arial, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("课程通知", width / 2, panelY + titleHeight / 2 + 3);
+  ctx.fillText(title, width / 2, panelY + titleHeight / 2 + 3);
   ctx.textAlign = "left";
   ctx.save();
   ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
@@ -5934,16 +6149,16 @@ function canvasBlob(canvas) {
   });
 }
 
-async function downloadCourseNoticeImage(item) {
-  const canvas = courseNoticeCanvas(item);
+async function downloadCourseNoticeImage(item, mode = "parent", title = "课程通知") {
+  const canvas = courseNoticeCanvas(item, mode, title);
   const link = document.createElement("a");
   link.href = canvas.toDataURL("image/png");
   link.download = `${item.send_object_name || "课程安排"}.png`;
   link.click();
 }
 
-async function completeCourseNoticeItem(item) {
-  await request("/api/course-notice/complete", {
+async function completeCourseNoticeItem(item, endpoint = "/api/course-notice/complete") {
+  await request(endpoint, {
     method: "POST",
     body: {
       send_object_key: item.send_object_key,
@@ -5957,15 +6172,15 @@ async function completeCourseNoticeItem(item) {
   item.completed_count = item.lesson_count;
 }
 
-async function copyCourseNoticeImage(item) {
-  const canvas = courseNoticeCanvas(item);
+async function copyCourseNoticeImage(item, mode = "parent", title = "课程通知", endpoint = "/api/course-notice/complete") {
+  const canvas = courseNoticeCanvas(item, mode, title);
   const blob = await canvasBlob(canvas);
   if (!navigator.clipboard?.write || !window.ClipboardItem) {
-    await downloadCourseNoticeImage(item);
+    await downloadCourseNoticeImage(item, mode, title);
     throw new Error("当前浏览器不支持直接复制图片，已改为下载图片");
   }
   await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-  await completeCourseNoticeItem(item);
+  await completeCourseNoticeItem(item, endpoint);
   showToast(`${item.send_object_name} 已完成`);
   render();
 }
@@ -5980,6 +6195,7 @@ function render() {
     week: renderWeek,
     weekMatrix: renderWeekMatrix,
     courseNotice: renderCourseNotice,
+    teacherCourseNotice: renderTeacherCourseNotice,
     feeDetails: renderFeeDetails,
     summary: renderSummary,
     finance: renderFinance,
@@ -6216,7 +6432,6 @@ function wireEvents() {
       const allowedViews = groupViews(group).filter(([key]) => canView(key));
       if (!allowedViews.some(([key]) => key === view)) {
         view = allowedViews[0]?.[0] || firstAllowedView();
-        if (view === "courseNotice") resetCourseNoticeFilterToThisWeek();
       }
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
@@ -6227,7 +6442,6 @@ function wireEvents() {
   document.querySelectorAll(".nav-sub-btn").forEach((button) => {
     button.addEventListener("click", async () => {
       const nextView = button.dataset.view;
-      if (nextView === "courseNotice" && view !== "courseNotice") resetCourseNoticeFilterToThisWeek();
       view = nextView;
       activeNavGroup = button.dataset.group || groupForView(view).key;
       localStorage.setItem("liming:view", view);
@@ -7456,8 +7670,10 @@ function wireEvents() {
     button.addEventListener("click", () => {
       activeWeek = Number(button.dataset.week);
       localStorage.setItem("liming:week", String(activeWeek));
+      localStorage.setItem(WEEK_USER_SET_KEY, "1");
       if (view === "weekMatrix") {
         matrixRange = matrixDefaultRange(state.settings.month_key || activeMonth);
+        localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
         saveMatrixRange();
       }
       render();
@@ -7475,6 +7691,7 @@ function wireEvents() {
       if (matrixRange.start && matrixRange.end && matrixRange.start > matrixRange.end) {
         matrixRange = { ...matrixRange, [field === "start" ? "end" : "start"]: input.value };
       }
+      localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
       saveMatrixRange();
       await load();
     });
@@ -7483,6 +7700,7 @@ function wireEvents() {
   document.querySelectorAll(".matrix-range-reset").forEach((button) => {
     button.addEventListener("click", () => {
       matrixRange = matrixDefaultRange(state.settings.month_key || activeMonth);
+      localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
       saveMatrixRange();
       render();
     });
@@ -7857,6 +8075,121 @@ function wireEvents() {
       if (!item) return;
       try {
         await downloadCourseNoticeImage(item);
+      } catch (error) {
+        showToast(error.message || "下载失败", "error");
+      }
+    });
+  });
+
+  document.querySelectorAll(".teacher-course-notice-filter").forEach((input) => {
+    input.addEventListener("change", () => {
+      teacherCourseNoticeFilter = { ...teacherCourseNoticeFilter, [input.dataset.field]: input.value };
+      ensureTeacherCourseNoticeFilterDates();
+      saveTeacherCourseNoticeFilter();
+      loadTeacherCourseNoticeData(true);
+    });
+  });
+
+  document.querySelectorAll(".teacher-course-notice-only").forEach((input) => {
+    input.addEventListener("change", () => {
+      teacherCourseNoticeFilter = { ...teacherCourseNoticeFilter, onlyTeaching: input.checked };
+      saveTeacherCourseNoticeFilter();
+      loadTeacherCourseNoticeData(true);
+    });
+  });
+
+  document.querySelectorAll(".teacher-course-notice-generate").forEach((button) => {
+    button.addEventListener("click", () => loadTeacherCourseNoticeData(true));
+  });
+
+  document.querySelectorAll(".teacher-course-notice-clear-completions").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("确定清除所有老师课程通知的打勾完成记录吗？称呼和文案不会被清除。")) return;
+      button.disabled = true;
+      try {
+        const result = await request("/api/teacher-course-notice/completions", { method: "DELETE" });
+        showToast(`已清除 ${result.deleted || 0} 条老师版打勾记录`);
+        await loadTeacherCourseNoticeData(true);
+      } catch (error) {
+        showToast(error.message || "清除失败", "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  if (!saveTeacherCourseNoticeTailDebounced) {
+    saveTeacherCourseNoticeTailDebounced = debounce(async (value) => {
+      try {
+        await request("/api/teacher-course-notice/global-tail", { method: "POST", body: { global_tail: value } });
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    }, 500);
+  }
+
+  document.querySelectorAll(".teacher-course-notice-tail").forEach((input) => {
+    input.addEventListener("input", () => {
+      if (!teacherCourseNoticeState.data) return;
+      teacherCourseNoticeState.data.global_tail = input.value;
+      (teacherCourseNoticeState.data.send_objects || []).forEach((item) => updateTeacherCourseNoticeMessageDom(item.send_object_key));
+      saveTeacherCourseNoticeTailDebounced(input.value);
+    });
+  });
+
+  document.querySelectorAll(".teacher-notice-greeting").forEach((input) => {
+    input.addEventListener("input", () => {
+      const item = findTeacherCourseNoticeObject(input.dataset.sendKey);
+      if (!item) return;
+      item.greeting = input.value;
+      updateTeacherCourseNoticeMessageDom(item.send_object_key);
+    });
+    input.addEventListener("change", async () => {
+      const item = findTeacherCourseNoticeObject(input.dataset.sendKey);
+      if (!item) return;
+      try {
+        await saveTeacherCourseNoticeGreeting(item);
+        showToast("称呼已保存");
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  });
+
+  document.querySelectorAll(".teacher-notice-copy-message").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findTeacherCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      try {
+        await navigator.clipboard.writeText(teacherCourseNoticeFullMessage(item));
+        showToast("文案已复制");
+      } catch (error) {
+        alert(error.message || "复制失败");
+      }
+    });
+  });
+
+  document.querySelectorAll(".teacher-notice-copy-image").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findTeacherCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      button.disabled = true;
+      try {
+        await copyCourseNoticeImage(item, "teacher", "本周课程安排", "/api/teacher-course-notice/complete");
+      } catch (error) {
+        showToast(error.message || "复制截图失败", "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".teacher-notice-download-image").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = findTeacherCourseNoticeObject(button.dataset.sendKey);
+      if (!item) return;
+      try {
+        await downloadCourseNoticeImage(item, "teacher", "本周课程安排");
       } catch (error) {
         showToast(error.message || "下载失败", "error");
       }
