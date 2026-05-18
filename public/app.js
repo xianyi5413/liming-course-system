@@ -55,6 +55,7 @@ const gradeTrendColors = {
   "高三": "#f43f5e",
 };
 const LESSON_FILTER_KEY = "liming:lesson-filter";
+const LESSON_CREATE_MANUAL_VALUE = "__manual__";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
@@ -127,6 +128,8 @@ let userMenuOpen = false;
 let userAdminNotice = "";
 let lessonFilter = readLessonFilter();
 let scheduleMode = false;
+let selectedLessonIds = new Set();
+let lessonBatchDeleting = false;
 let expandedSummaryStudents = readExpandedSummaryStudents();
 let activeNavGroup = localStorage.getItem("liming:nav-group") || "";
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
@@ -159,6 +162,7 @@ let operationLogData = { items: [], total: 0, page: 1, page_size: 10 };
 let staffPayrollSearch = "";
 let expenseModal = null;
 let pricingAuditModal = null;
+let lessonCreateDraft = null;
 let lessonCopyDraft = null;
 let weekCopyDraft = null;
 let focusedLessonIds = [];
@@ -901,7 +905,7 @@ function numberValue(value) {
 
 function splitStudents(value) {
   return String(value || "")
-    .split(/[、,，;；]/)
+    .split(/[、,，;；\n\r]/)
     .map((name) => name.trim())
     .filter(Boolean);
 }
@@ -1341,6 +1345,13 @@ function lessonPresetRange(preset) {
     const today = todayDate();
     return { start_date: today, end_date: today };
   }
+  if (preset === "prev-week" || preset === "next-week") {
+    const base = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : todayDate();
+    const weekStart = startOfWeek(base);
+    const offset = preset === "prev-week" ? -7 : 7;
+    const start = addDays(weekStart, offset);
+    return { start_date: start, end_date: addDays(start, 6) };
+  }
   if (preset === "week") {
     const week = currentWeekRange();
     return { start_date: week.start, end_date: week.end };
@@ -1489,7 +1500,9 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       <span>快捷</span>
       <span class="lesson-quick-buttons">
         <button class="btn ghost lesson-date-preset" type="button" data-preset="today">今日</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-week">上周</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="week">本周</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="next-week">下周</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="month">本月</button>
       </span>
     </div>
@@ -2319,6 +2332,19 @@ function sortedLessons() {
   return sortLessons(state.lessons);
 }
 
+function visibleLessonRows() {
+  const allRows = sortedLessons();
+  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
+  return focusSet.size
+    ? allRows.filter((row) => focusSet.has(Number(row.id)))
+    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+}
+
+function pruneSelectedLessons(rows = visibleLessonRows()) {
+  const visibleIds = new Set(rows.map((row) => Number(row.id)).filter(Boolean));
+  selectedLessonIds = new Set([...selectedLessonIds].filter((id) => visibleIds.has(Number(id))));
+}
+
 /* ── C 档 dirty 标记 ────────────────────────────────────────────── */
 function markDirty(key) { dirtyFlags[key] = true; }     /* [约束6] 设置脏标记 */
 function consumeDirty(key) { const was = dirtyFlags[key] || false; dirtyFlags[key] = false; return was; } /* [约束6] 消费并清除脏标记 */
@@ -2384,11 +2410,8 @@ function applyLessonWarnings(lessonId, warnings) {       /* [约束5] 写入缓�
 
 /* ── 局部 DOM 更新 ────────────────────────────────────────────────── */
 function updateLessonSummaryMetrics() {                  /* [B档] 更新概要网格中的行数/有效课程数 */
-  const allRows = sortedLessons();
-  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
-  const rows = focusSet.size
-    ? allRows.filter((row) => focusSet.has(Number(row.id)))
-    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+  const rows = visibleLessonRows();
+  pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
   const monthStats = lessonStats(monthLessonRows());
   const metricValues = document.querySelectorAll(".summary-grid .metric-value");
@@ -2407,12 +2430,10 @@ function updateLessonSummaryMetrics() {                  /* [B档] 更新概要�
 function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbody，不动页面其余部分 */
   const tbody = document.querySelector("#lessons-tbody");
   if (!tbody) return;
-  const allRows = sortedLessons();
-  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
-  const rows = focusSet.size
-    ? allRows.filter((row) => focusSet.has(Number(row.id)))
-    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+  const rows = visibleLessonRows();
+  pruneSelectedLessons(rows);
   tbody.innerHTML = lessonRowsHtml(rows);
+  updateLessonSelectionControls(rows);
   /* innerHTML 替换后新 <select> 和新 <input type="date"> 都是裸原生元素，
      必须重新包装自定义组件。两函数均幂等（分别由 data-custom-select /
      data-custom-date 守卫），enhanceCustomSelects 还会先清理孤立 portal menu。 */
@@ -2530,6 +2551,8 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
 
 function lessonRow(row, cumulative) {
   const count = splitStudents(row.student_names).length;
+  const lessonId = Number(row.id);
+  const checked = selectedLessonIds.has(lessonId) ? "checked" : "";
   const teacherOptions = (state.profile_teachers || state.teachers || [])
     .filter((teacher) => (teacher.status || "在职") !== "离职")
     .map((teacher) => teacher.name);
@@ -2539,6 +2562,7 @@ function lessonRow(row, cumulative) {
     : "";
   return `
     <tr class="${isAbnormal(row) ? "abnormal" : ""} ${rowWarnings.length ? "has-warnings" : ""}" data-row-id="${row.id}"> <!-- [约束1/边界2] data-row-id 用于行定位与焦点恢复 -->
+      <td class="lesson-select-cell"><input class="lesson-select-row" type="checkbox" data-id="${row.id}" aria-label="选择课程" ${checked}></td>
       ${selectCell({ className: "lesson-field", id: row.id, field: "teacher_name", value: row.teacher_name, values: teacherOptions, emptyText: "未选" })}
       ${inputCell({ className: "lesson-field", id: row.id, field: "date", value: row.date, type: "date" })}
       ${statusSelectCell({ id: row.id, value: rowStatus(row) })}
@@ -2565,7 +2589,7 @@ function lessonScheduleAddRow(row) {
   const date = row.date || lessonFilter.start_date || todayDate();
   return `
     <tr class="schedule-add-row" data-schedule-teacher="${escapeHtml(row.teacher_name || "")}" data-schedule-date="${escapeHtml(date)}">
-      <td colspan="13">
+      <td colspan="14">
         <button class="schedule-add-btn" type="button" data-teacher="${escapeHtml(row.teacher_name || "")}" data-date="${escapeHtml(date)}">
           ＋ 给${escapeHtml(teacher)}新增 ${escapeHtml(formatShortDate(date))} 课程
         </button>
@@ -2575,7 +2599,7 @@ function lessonScheduleAddRow(row) {
 }
 
 function lessonRowsHtml(rows) {
-  if (!rows.length) return `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`;
+  if (!rows.length) return `<tr><td colspan="14" class="empty">暂无课程记录</td></tr>`;
   let cumulative = 0;
   return rows.map((row, index) => {
     cumulative += splitStudents(row.student_names).length;
@@ -2585,6 +2609,49 @@ function lessonRowsHtml(rows) {
     const addRow = scheduleMode && currentGroup !== nextGroup ? lessonScheduleAddRow(row) : "";
     return `${lessonRow(row, cumulative)}${addRow}`;
   }).join("");
+}
+
+function lessonToolbarHtml(rows) {
+  const selectedCount = selectedLessonIds.size;
+  return `
+    <div class="lesson-table-toolbar">
+      <div class="lesson-table-actions">
+        <button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button>
+        <button class="btn week-copy-btn" type="button">整周复制</button>
+        <button class="btn primary add-lesson" type="button">新增课程</button>
+        <button class="btn danger batch-delete-lessons" type="button" ${selectedCount && !lessonBatchDeleting ? "" : "disabled"}>
+          ${lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`}
+        </button>
+      </div>
+      <div class="lesson-selection-summary">
+        ${selectedCount ? `已选择 ${selectedCount} / ${rows.length} 节` : `当前可见 ${rows.length} 节`}
+      </div>
+    </div>
+  `;
+}
+
+function updateLessonSelectionControls(rows = visibleLessonRows()) {
+  pruneSelectedLessons(rows);
+  const selectedCount = selectedLessonIds.size;
+  const visibleCount = rows.length;
+  document.querySelectorAll(".lesson-select-row").forEach((input) => {
+    input.checked = selectedLessonIds.has(Number(input.dataset.id));
+  });
+  const selectAll = document.querySelector(".lesson-select-all");
+  if (selectAll) {
+    selectAll.checked = visibleCount > 0 && selectedCount === visibleCount;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < visibleCount;
+    selectAll.disabled = visibleCount === 0;
+  }
+  const batchButton = document.querySelector(".batch-delete-lessons");
+  if (batchButton) {
+    batchButton.disabled = !selectedCount || lessonBatchDeleting;
+    batchButton.textContent = lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`;
+  }
+  const summary = document.querySelector(".lesson-selection-summary");
+  if (summary) {
+    summary.textContent = selectedCount ? `已选择 ${selectedCount} / ${visibleCount} 节` : `当前可见 ${visibleCount} 节`;
+  }
 }
 
 function monthKeyFromDateValue(value) {
@@ -2604,6 +2671,151 @@ function parseDateList(value) {
     .map((item) => item.trim())
     .filter(isDateValue))
     .slice(0, 7);
+}
+
+function usedLessonLookupValues(key) {
+  return uniqueSorted(state.used_lesson_lookups?.[key] || []);
+}
+
+function lessonStudentOptions() {
+  return usedLessonLookupValues("students");
+}
+
+function manualSelectOptions(values, current, manualLabel) {
+  const normalized = uniqueSorted(values || []);
+  const extra = current && current !== LESSON_CREATE_MANUAL_VALUE && !normalized.includes(current) ? [current] : [];
+  return [
+    `<option value="">未选</option>`,
+    `<option value="${LESSON_CREATE_MANUAL_VALUE}" ${current === LESSON_CREATE_MANUAL_VALUE ? "selected" : ""}>＋ ${escapeHtml(manualLabel)}</option>`,
+    ...uniqueSorted([...normalized, ...extra]).map((value) => {
+      const selected = String(value) === String(current) ? "selected" : "";
+      return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(value)}</option>`;
+    }),
+  ].join("");
+}
+
+function parseLessonCreateStudents(value) {
+  return uniqueSorted(String(value || "")
+    .split(/[，,、\n\r]+/)
+    .map((name) => name.trim())
+    .filter(Boolean));
+}
+
+function defaultLessonCreateDraft() {
+  const date = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : todayDate();
+  return {
+    date,
+    time_slot: "",
+    teacher_name: "",
+    classroom: "",
+    grade: "",
+    subject: "",
+    selected_students: [],
+    new_student_names: "",
+    notes: "",
+    status: "待上",
+  };
+}
+
+function lessonCreateModal() {
+  if (!lessonCreateDraft) return "";
+  const draft = { ...defaultLessonCreateDraft(), ...lessonCreateDraft };
+  const date = isDateValue(draft.date) ? draft.date : todayDate();
+  const students = lessonStudentOptions();
+  const selectedStudents = new Set(draft.selected_students || []);
+  return `
+    <div class="modal-backdrop lesson-create-modal">
+      <div class="modal-panel lesson-create-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">新增课程</div>
+            <div class="modal-subtitle">填写课程信息后确认新增。</div>
+          </div>
+          <button class="btn lesson-create-cancel" type="button">取消</button>
+        </div>
+        <div class="copy-form lesson-create-form">
+          <label class="filter-field">
+            <span>日期</span>
+            <input class="control lesson-create-field lesson-create-date" data-field="date" type="date" value="${escapeHtml(date)}">
+          </label>
+          <label class="filter-field">
+            <span>星期</span>
+            <input class="control lesson-create-weekday" type="text" value="${escapeHtml(weekdayCn(date))}" readonly>
+          </label>
+          <label class="filter-field">
+            <span>时间</span>
+            <select class="control lesson-create-field" data-field="time_slot">
+              ${manualSelectOptions(usedLessonLookupValues("times"), draft.time_slot, "手动填写新时间")}
+            </select>
+            <input class="control lesson-create-manual-field hidden" data-manual-field="time_slot" type="text" placeholder="请输入新时间">
+          </label>
+          <label class="filter-field">
+            <span>授课老师</span>
+            <select class="control lesson-create-field" data-field="teacher_name">
+              ${manualSelectOptions(usedLessonLookupValues("teachers"), draft.teacher_name, "手动填写新老师")}
+            </select>
+            <input class="control lesson-create-manual-field hidden" data-manual-field="teacher_name" type="text" placeholder="请输入新老师姓名">
+          </label>
+          <label class="filter-field">
+            <span>教室</span>
+            <select class="control lesson-create-field" data-field="classroom">
+              ${manualSelectOptions(usedLessonLookupValues("classrooms"), draft.classroom, "手动填写新教室")}
+            </select>
+            <input class="control lesson-create-manual-field hidden" data-manual-field="classroom" type="text" placeholder="请输入新教室名称">
+          </label>
+          <label class="filter-field">
+            <span>年级</span>
+            <select class="control lesson-create-field" data-field="grade">
+              ${manualSelectOptions(usedLessonLookupValues("grades"), draft.grade, "手动填写新年级")}
+            </select>
+            <input class="control lesson-create-manual-field hidden" data-manual-field="grade" type="text" placeholder="请输入新年级名称">
+          </label>
+          <label class="filter-field">
+            <span>科目</span>
+            <select class="control lesson-create-field" data-field="subject">
+              ${manualSelectOptions(usedLessonLookupValues("subjects"), draft.subject, "手动填写新科目")}
+            </select>
+            <input class="control lesson-create-manual-field hidden" data-manual-field="subject" type="text" placeholder="请输入新科目名称">
+          </label>
+          <label class="filter-field lesson-create-students-field">
+            <span>学生</span>
+            <div class="lesson-create-student-list">
+              ${students.map((name) => `
+                <label class="lesson-create-student-option">
+                  <input class="lesson-create-student-existing" type="checkbox" value="${escapeHtml(name)}" ${selectedStudents.has(name) ? "checked" : ""}>
+                  <span>${escapeHtml(name)}</span>
+                </label>
+              `).join("") || `<span class="muted-tip">暂无学生档案，可在下方手动输入。</span>`}
+            </div>
+            <textarea class="control lesson-create-new-students" rows="3" placeholder="新增学生，可用逗号、顿号或换行分隔">${escapeHtml(draft.new_student_names || "")}</textarea>
+          </label>
+          <label class="filter-field">
+            <span>备注</span>
+            <input class="control lesson-create-field" data-field="notes" type="text" value="${escapeHtml(draft.notes)}">
+          </label>
+          <label class="filter-field">
+            <span>课程状态</span>
+            <select class="control lesson-create-field" data-field="status">
+              ${options(statusValues(), draft.status || "待上")}
+            </select>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn lesson-create-cancel" type="button">取消</button>
+          <button class="btn primary lesson-create-confirm" type="button">确认新增</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function lessonCreateSelectValue(modal, field, emptyMessage) {
+  const select = modal?.querySelector(`.lesson-create-field[data-field="${field}"]`);
+  const value = String(select?.value || "").trim();
+  if (value !== LESSON_CREATE_MANUAL_VALUE) return value;
+  const manual = String(modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${field}"]`)?.value || "").trim();
+  if (!manual) throw new Error(emptyMessage);
+  return manual;
 }
 
 function lessonCopyModal() {
@@ -2712,9 +2924,8 @@ function renderLessons() {
   ensureLessonFilterDates();
   const allRows = sortedLessons();
   const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
-  const rows = focusSet.size
-    ? allRows.filter((row) => focusSet.has(Number(row.id)))
-    : allRows.filter((row) => lessonMatchesFilter(row, lessonFilter));
+  const rows = visibleLessonRows();
+  pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
   const monthStats = lessonStats(monthLessonRows());
   const rangeText = formatLessonDateRange();
@@ -2729,16 +2940,9 @@ function renderLessons() {
       </div>
     </div>
   ` : renderLessonFilterBar({ rows: allRows, filteredRows: rows });
-  const scheduleNotice = scheduleMode ? `
-    <div class="schedule-mode-notice">
-      <strong>当前处于排课模式</strong>
-      <span>可在每位老师当天课程块后方点击加号，直接新增一行待上课程。</span>
-    </div>
-  ` : "";
   renderTopbar(
     `课程总表：${rangeText}`,
     `${monthLabel()} · 有效课程 ${monthStats.effective} 节，学生人次 ${monthStats.studentTotal}`,
-    `<button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button><button class="btn week-copy-btn" type="button">整周复制…</button><button class="btn primary add-lesson">新增课程</button>`,
   );
   contentEl.innerHTML = `
     <div class="summary-grid">
@@ -2748,13 +2952,13 @@ function renderLessons() {
       <div class="metric"><div class="metric-label">教师人数</div><div class="metric-value">${stats.teacherCount}</div></div>
     </div>
     ${focusNotice}
-    ${scheduleNotice}
+    ${lessonToolbarHtml(rows)}
     <div class="band">
       <div class="table-wrap">
-        <table class="course-table">
+        <table class="course-table lesson-table">
           <thead>
             <tr>
-              <th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th><th>学生人数</th><th>累计序号</th><th>操作</th>
+              <th class="lesson-select-head"><input class="lesson-select-all" type="checkbox" aria-label="全选当前可见课程" ${rows.length ? "" : "disabled"}></th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th><th>学生人数</th><th>累计序号</th><th>操作</th>
             </tr>
           </thead>
           <tbody id="lessons-tbody"> <!-- [约束1] 固定 id 用于局部重绘定位 -->
@@ -2763,9 +2967,11 @@ function renderLessons() {
         </table>
       </div>
     </div>
+    ${lessonCreateModal()}
     ${lessonCopyModal()}
     ${weekCopyModal()}
   `;
+  updateLessonSelectionControls(rows);
 }
 
 function weekRanges() {
@@ -4615,8 +4821,13 @@ function renderStudentPricing() {
 
 function profileRows(kind = profileTab) {
   const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
+  const usedTeachers = kind === "teachers" ? new Set(usedLessonLookupValues("teachers")) : null;
+  const usedStudents = kind === "students" ? new Set(usedLessonLookupValues("students")) : null;
+  const scopedRows = kind === "teachers"
+    ? rows.filter((row) => usedTeachers.has(String(row.name || "").trim()))
+    : rows.filter((row) => usedStudents.has(String(row.name || "").trim()));
   const statusFilter = profileStatusFilter[kind] || "";
-  const statusRows = statusFilter ? rows.filter((row) => textContains(row.status || "", statusFilter)) : rows;
+  const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
   const query = profileSearch.trim().toLowerCase();
   const searchFields = kind === "students"
     ? (row) => [row.name]
@@ -7056,6 +7267,61 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".lesson-select-row").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.id);
+      if (!id) return;
+      if (input.checked) selectedLessonIds.add(id);
+      else selectedLessonIds.delete(id);
+      updateLessonSelectionControls();
+    });
+  });
+
+  document.querySelectorAll(".lesson-select-all").forEach((input) => {
+    input.addEventListener("change", () => {
+      const rows = visibleLessonRows();
+      if (input.checked) {
+        rows.forEach((row) => selectedLessonIds.add(Number(row.id)));
+      } else {
+        rows.forEach((row) => selectedLessonIds.delete(Number(row.id)));
+      }
+      updateLessonSelectionControls(rows);
+    });
+  });
+
+  document.querySelectorAll(".batch-delete-lessons").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const ids = [...selectedLessonIds].map(Number).filter(Boolean);
+      if (!ids.length || lessonBatchDeleting) return;
+      if (!confirm(`确认删除已选中的 ${ids.length} 节课程吗？此操作不可撤销。`)) return;
+      lessonBatchDeleting = true;
+      updateLessonSelectionControls();
+      const failures = [];
+      try {
+        for (const id of ids) {
+          try {
+            await request(`/api/lessons/${id}`, { method: "DELETE" });
+          } catch (error) {
+            failures.push({ id, message: error.message || "删除失败" });
+          }
+        }
+        lessonBatchDeleting = false;
+        if (failures.length) {
+          selectedLessonIds = new Set(failures.map((item) => Number(item.id)));
+          await load();
+          alert(`有 ${failures.length} 节课程删除失败：\n${failures.map((item) => `课程ID ${item.id}：${item.message}`).join("\n")}`);
+        } else {
+          selectedLessonIds = new Set();
+          await load();
+        }
+      } catch (error) {
+        lessonBatchDeleting = false;
+        alert(`批量删除失败：${error.message}`);
+        updateLessonSelectionControls();
+      }
+    });
+  });
+
   /* [约束2] 事件委托：将 .lesson-field 的 change 监听挂在 contentEl 上，绑定一次，行替换不受影响 */
   if (!lessonFieldDelegatedBound) {
     lessonFieldDelegatedBound = true;
@@ -7076,10 +7342,80 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".add-lesson").forEach((button) => {
-    button.addEventListener("click", () => refreshAfter(() => request("/api/lessons", {
-      method: "POST",
-      body: { date: state.settings.month_key, month_key: state.settings.month_key, status: "待上" },
-    })));
+    button.addEventListener("click", () => {
+      lessonCreateDraft = defaultLessonCreateDraft();
+      render();
+    });
+  });
+
+  document.querySelectorAll(".lesson-create-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      lessonCreateDraft = null;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".lesson-create-date").forEach((input) => {
+    input.addEventListener("change", () => {
+      const modal = input.closest(".lesson-create-modal");
+      const weekdayInput = modal?.querySelector(".lesson-create-weekday");
+      if (weekdayInput) weekdayInput.value = weekdayCn(input.value);
+    });
+  });
+
+  document.querySelectorAll(".lesson-create-field").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (!["time_slot", "teacher_name", "classroom", "grade", "subject"].includes(input.dataset.field)) return;
+      const modal = input.closest(".lesson-create-modal");
+      const manualInput = modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${input.dataset.field}"]`);
+      if (!manualInput) return;
+      const isManual = input.value === LESSON_CREATE_MANUAL_VALUE;
+      manualInput.classList.toggle("hidden", !isManual);
+      if (isManual) manualInput.focus();
+      else manualInput.value = "";
+    });
+  });
+
+  document.querySelectorAll(".lesson-create-confirm").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const modal = button.closest(".lesson-create-modal");
+      const fieldValue = (field) => String(modal?.querySelector(`.lesson-create-field[data-field="${field}"]`)?.value || "").trim();
+      const date = fieldValue("date");
+      if (!isDateValue(date)) return alert("请选择有效的课程日期");
+      button.disabled = true;
+      try {
+        const timeSlot = lessonCreateSelectValue(modal, "time_slot", "请填写新时间");
+        const teacherName = lessonCreateSelectValue(modal, "teacher_name", "请填写新老师名称");
+        const classroom = lessonCreateSelectValue(modal, "classroom", "请填写新教室名称");
+        const grade = lessonCreateSelectValue(modal, "grade", "请填写新年级名称");
+        const subject = lessonCreateSelectValue(modal, "subject", "请填写新科目名称");
+        const selectedStudents = [...modal.querySelectorAll(".lesson-create-student-existing:checked")]
+          .map((input) => String(input.value || "").trim())
+          .filter(Boolean);
+        const newStudents = parseLessonCreateStudents(modal.querySelector(".lesson-create-new-students")?.value);
+        const studentNames = uniqueSorted([...selectedStudents, ...newStudents]);
+        const payload = {
+          date,
+          month_key: monthKeyFromDateValue(date) || state.settings.month_key,
+          time_slot: timeSlot,
+          teacher_name: teacherName,
+          classroom,
+          grade,
+          subject,
+          student_names: studentNames.join("、"),
+          notes: fieldValue("notes"),
+          status: fieldValue("status") || "待上",
+        };
+        const lesson = await request("/api/lessons", { method: "POST", body: payload });
+        lessonCreateDraft = null;
+        await load();
+        const visible = visibleLessonRows().some((row) => Number(row.id) === Number(lesson.id));
+        if (!visible) alert("新增成功，如未显示请调整日期筛选。");
+      } catch (error) {
+        button.disabled = false;
+        alert(`新增课程失败：${error.message}`);
+      }
+    });
   });
 
   document.querySelectorAll(".schedule-add-btn").forEach((button) => {
@@ -7111,6 +7447,7 @@ function wireEvents() {
   document.querySelectorAll(".delete-lesson").forEach((button) => {
     button.addEventListener("click", () => {
       if (!confirm("删除这条课程记录？")) return;
+      selectedLessonIds.delete(Number(button.dataset.id));
       refreshAfter(() => request(`/api/lessons/${button.dataset.id}`, { method: "DELETE" }));
     });
   });

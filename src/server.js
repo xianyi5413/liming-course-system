@@ -524,7 +524,7 @@ function monthKeyFromFilename(filename) {
 
 function splitStudents(value) {
   return text(value)
-    .split(/[、,，;；]/)
+    .split(/[、,，;；\n\r]/)
     .map((name) => name.trim())
     .filter(Boolean);
 }
@@ -1777,6 +1777,51 @@ function setSetting(key, value) {
     INSERT INTO settings(key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(key, value);
+}
+
+function jsonArraySetting(key) {
+  const raw = getSetting(key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(text).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function mergeLookupValues(defaults, customKey) {
+  const seen = new Set();
+  return [...(defaults || []), ...jsonArraySetting(customKey)].filter((value) => {
+    const normalized = text(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  }).map(text);
+}
+
+function usedLessonLookups() {
+  const fields = {
+    teachers: "teacher_name",
+    classrooms: "classroom",
+    grades: "grade",
+    subjects: "subject",
+    times: "time_slot",
+  };
+  const distinct = (field) => all(`
+    SELECT DISTINCT ${field} AS value
+    FROM lessons
+    WHERE ${field} IS NOT NULL AND TRIM(${field}) <> ''
+    ORDER BY value
+  `).map((row) => text(row.value)).filter(Boolean);
+  const lookups = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, distinct(field)]));
+  lookups.students = uniqueNames(all(`
+    SELECT student_names
+    FROM lessons
+    WHERE student_names IS NOT NULL AND TRIM(student_names) <> ''
+  `).flatMap((row) => splitStudents(row.student_names)))
+    .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  return lookups;
 }
 
 function resolveMonthKey(url) {
@@ -3535,8 +3580,8 @@ function bootstrap(monthKey, includeInactive = false) {
       lesson_status: LESSON_STATUS,
       course_status: COURSE_STATUS,
       status: STATUS,
-      classrooms: CLASSROOMS,
-      subjects: SUBJECTS,
+      classrooms: mergeLookupValues(CLASSROOMS, "custom_classrooms"),
+      subjects: mergeLookupValues(SUBJECTS, "custom_subjects"),
       grades: GRADES,
       staff_roles: STAFF_ROLES,
       expense_categories: EXPENSE_CATEGORIES,
@@ -3544,6 +3589,7 @@ function bootstrap(monthKey, includeInactive = false) {
     },
     teachers: teachersForMonth(monthKey, includeInactive),
     students: studentsForMonth(monthKey, includeInactive),
+    used_lesson_lookups: usedLessonLookups(),
     pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
     student_pricing: studentPricingRows(monthKey),
     lessons: all("SELECT *, ? AS weekday FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", ["", monthKey]),
