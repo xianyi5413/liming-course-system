@@ -3649,6 +3649,11 @@ function sendObjectDefaultGreeting(item) {
   return `${shortName}妈妈您好！`;
 }
 
+function teacherNoticeDefaultGreeting(item) {
+  const teacher = text(item.teachers?.[0] || item.teacher_name || item.send_object_name).replace(/老师课程$/, "");
+  return `${teacher}老师你好！`;
+}
+
 function courseNoticeLesson(row) {
   const students = normalizedStudents(row.student_names);
   return {
@@ -3754,6 +3759,73 @@ function courseNoticeData(start, end, onlyTeaching = false) {
         b.send_object_type === "1V1个人群" ? "0" : "1",
         b.send_object_name,
       ].join("|"), "zh-Hans-CN")),
+  };
+}
+
+function teacherCourseNoticeData(start, end, onlyTeaching = false) {
+  const rows = lessonsInDateRange(start, end);
+  if (!rows) return null;
+  const lessons = rows
+    .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
+    .map((row) => {
+      const lesson = courseNoticeLesson(row);
+      lesson.completion_key = `TEACHER|${lesson.teacher_name}|${lesson.completion_key}`;
+      return lesson;
+    })
+    .filter((lesson) => text(lesson.teacher_name));
+  const teacherMap = new Map();
+  for (const lesson of lessons) {
+    const teacher = text(lesson.teacher_name);
+    const key = `TEACHER|${teacher}`;
+    if (!teacherMap.has(key)) {
+      teacherMap.set(key, {
+        send_object_key: key,
+        send_object_name: `${teacher}老师课程`,
+        send_object_type: "老师课程通知",
+        students: "",
+        teachers: [teacher],
+        grades: [],
+        subjects: [],
+        lessons: [],
+      });
+    }
+    const item = teacherMap.get(key);
+    item.grades.push(lesson.grade);
+    item.subjects.push(lesson.subject);
+    item.lessons.push(lesson);
+  }
+
+  const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records WHERE send_object_key LIKE 'TEACHER|%'").map((row) => row.unique_key));
+  const greetingRows = new Map(all("SELECT * FROM parent_message_greetings WHERE send_object_key LIKE 'TEACHER|%'").map((row) => [row.send_object_key, row]));
+  const globalTail = getSetting("teacher_course_notice_global_tail") || "这是我们本周的上课安排哦[玫瑰]";
+
+  return {
+    range: { start, end },
+    only_teaching: Boolean(onlyTeaching),
+    global_tail: globalTail,
+    send_objects: [...teacherMap.values()]
+      .map((item) => {
+        item.lessons.sort((a, b) => `${a.date} ${a.time_slot} ${String(a.id).padStart(8, "0")}`.localeCompare(`${b.date} ${b.time_slot} ${String(b.id).padStart(8, "0")}`, "zh-Hans-CN"));
+        const saved = greetingRows.get(item.send_object_key);
+        const greeting = text(saved?.greeting) || teacherNoticeDefaultGreeting(item);
+        const lessonKeys = item.lessons.map((lesson) => lesson.completion_key);
+        const completedCount = lessonKeys.filter((key) => completionKeys.has(key)).length;
+        const completed = lessonKeys.length > 0 && completedCount === lessonKeys.length;
+        const partial_completed = completedCount > 0 && !completed;
+        return {
+          ...item,
+          grades: uniqueNames(item.grades),
+          subjects: uniqueNames(item.subjects),
+          greeting,
+          global_tail: globalTail,
+          full_message: `${greeting}\n${globalTail}`,
+          completed,
+          partial_completed,
+          completed_count: completedCount,
+          lesson_count: item.lessons.length,
+        };
+      })
+      .sort((a, b) => a.send_object_name.localeCompare(b.send_object_name, "zh-Hans-CN")),
   };
 }
 
@@ -4195,7 +4267,7 @@ function apiArea(req, url) {
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
   if (p.includes("student") || p === "/api/fee-overrides") return "students";
-  if (p.startsWith("/api/course-notice")) return "schedule";
+  if (p.startsWith("/api/course-notice") || p.startsWith("/api/teacher-course-notice")) return "schedule";
   if (p.includes("lessons") || p.includes("months") || p.includes("schedule-conflicts") || p === "/api/settings") return "schedule";
   if (p === "/api/teachers") return "profiles";
   return "schedule";
@@ -5496,7 +5568,7 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const globalTail = text(body.global_tail) || "这是我们本周的上课安排哦[玫瑰]";
     setSetting("course_notice_global_tail", globalTail);
-    db.prepare("UPDATE parent_message_greetings SET global_tail = ?, full_message = greeting || char(10) || ?, updated_at = CURRENT_TIMESTAMP").run(globalTail, globalTail);
+    db.prepare("UPDATE parent_message_greetings SET global_tail = ?, full_message = greeting || char(10) || ?, updated_at = CURRENT_TIMESTAMP WHERE send_object_key NOT LIKE 'TEACHER|%'").run(globalTail, globalTail);
     return sendJson(res, { ok: true, global_tail: globalTail });
   }
   if (req.method === "POST" && url.pathname === "/api/course-notice/complete") {
@@ -5507,11 +5579,54 @@ async function handleApi(req, res, url) {
     return sendJson(res, result);
   }
   if (req.method === "DELETE" && url.pathname === "/api/course-notice/completions") {
-    const before = get("SELECT COUNT(*) AS count FROM course_notice_completion_records");
-    const result = db.prepare("DELETE FROM course_notice_completion_records").run();
+    const before = get("SELECT COUNT(*) AS count FROM course_notice_completion_records WHERE send_object_key NOT LIKE 'TEACHER|%'");
+    const result = db.prepare("DELETE FROM course_notice_completion_records WHERE send_object_key NOT LIKE 'TEACHER|%'").run();
     recordAuditEvent(req, user, {
       action: "clear_completions",
       entity_type: "course_notice",
+      entity_id: "all",
+      before,
+      after: { deleted: result.changes || 0 },
+    });
+    return sendJson(res, { ok: true, deleted: result.changes || 0 });
+  }
+  if (req.method === "GET" && url.pathname === "/api/teacher-course-notice") {
+    const data = teacherCourseNoticeData(
+      text(url.searchParams.get("start")),
+      text(url.searchParams.get("end")),
+      url.searchParams.get("only_teaching") === "1",
+    );
+    if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    if (user.role === "teacher") {
+      data.send_objects = data.send_objects.filter((item) => item.lessons.some((lesson) => text(lesson.teacher_name) === text(user.teacher_name)));
+    }
+    return sendJson(res, data);
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-course-notice/greeting") {
+    const result = saveCourseNoticeGreeting(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    return sendJson(res, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-course-notice/global-tail") {
+    const body = await readBody(req);
+    const globalTail = text(body.global_tail) || "这是我们本周的上课安排哦[玫瑰]";
+    setSetting("teacher_course_notice_global_tail", globalTail);
+    db.prepare("UPDATE parent_message_greetings SET global_tail = ?, full_message = greeting || char(10) || ?, updated_at = CURRENT_TIMESTAMP WHERE send_object_key LIKE 'TEACHER|%'").run(globalTail, globalTail);
+    return sendJson(res, { ok: true, global_tail: globalTail });
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-course-notice/complete") {
+    const body = await readBody(req);
+    const result = completeCourseNoticeObject(user, body);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "complete", entity_type: "teacher_course_notice", entity_id: text(body.send_object_key), before: null, after: result });
+    return sendJson(res, result);
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/teacher-course-notice/completions") {
+    const before = get("SELECT COUNT(*) AS count FROM course_notice_completion_records WHERE send_object_key LIKE 'TEACHER|%'");
+    const result = db.prepare("DELETE FROM course_notice_completion_records WHERE send_object_key LIKE 'TEACHER|%'").run();
+    recordAuditEvent(req, user, {
+      action: "clear_completions",
+      entity_type: "teacher_course_notice",
       entity_id: "all",
       before,
       after: { deleted: result.changes || 0 },
