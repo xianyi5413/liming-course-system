@@ -661,7 +661,8 @@ function workbookSheets(entries) {
   return [...workbookXml.matchAll(/<sheet\b([^>]*)\/?>/g)].map(([, tag]) => {
     const name = xmlAttr(tag, "name");
     const relId = xmlAttr(tag, "r:id") || xmlAttr(tag, "id");
-    return { name, path: rels.get(relId) || "" };
+    const state = xmlAttr(tag, "state") || "visible";
+    return { name, path: rels.get(relId) || "", state };
   });
 }
 
@@ -700,7 +701,64 @@ function cellValue(cellTag, cellXml, sharedStrings) {
   return raw;
 }
 
-function readXlsxTotalSheet(buffer, monthKey) {
+function xlsxTotalRow(values, rowIndex, monthKey, includeTeacherSalary = false) {
+  const row = {
+    source_row: rowIndex,
+    teacher_name: text(values[0]),
+    date: isoDateValue(values[1]),
+    lesson_status: text(values[2]),
+    time_slot: text(values[4]),
+    classroom: text(values[5]),
+    grade: text(values[6]),
+    subject: text(values[7]),
+    student_names: text(values[8]),
+    notes: text(values[9]),
+    course_status: text(values[10]),
+  };
+  if (includeTeacherSalary) row.teacher_salary = num(values[11]);
+  return row;
+}
+
+function xlsxLessonHasCandidateData(row) {
+  return [
+    "teacher_name", "date", "lesson_status", "time_slot", "classroom",
+    "grade", "subject", "student_names", "notes", "course_status",
+  ].some((field) => text(row[field]))
+    || num(row.teacher_salary) !== 0;
+}
+
+function validXlsxLessonTime(value) {
+  const slot = text(value);
+  if (!slot || slot === "0" || slot === "0:00") return false;
+  return /\d/.test(slot);
+}
+
+function xlsxLessonSkipReasons(row) {
+  const reasons = [];
+  if (!row.date) reasons.push("missing-date");
+  if (!text(row.student_names)) reasons.push("missing-student");
+  if (!text(row.teacher_name)) reasons.push("missing-teacher");
+  if (!validXlsxLessonTime(row.time_slot)) reasons.push("missing-time");
+  return reasons;
+}
+
+function finalizeXlsxLessonRow(row, monthKey) {
+  row.lesson_status ||= "上课";
+  row.course_status ||= "未上";
+  row.student_count = splitStudents(row.student_names).length;
+  row.month_key = monthKeyFromDate(row.date) || monthKey;
+  row.status = deriveStatus(row);
+  return row;
+}
+
+function xlsxDebugCellSummary(cells) {
+  return cells
+    .filter((cell) => cell.value !== "" || cell.formula)
+    .map((cell) => `${cell.address}=${text(cell.value) || (cell.formula ? `formula:${cell.formula}` : "")}`)
+    .join(";");
+}
+
+function readXlsxTotalSheet(buffer, monthKey, options = {}) {
   const entries = unzipXlsx(buffer);
   const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
   const sheets = workbookSheets(entries);
@@ -714,38 +772,44 @@ function readXlsxTotalSheet(buffer, monthKey) {
   const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
   if (!sheetXmlText) throw new Error(`xlsx 缺少工作表内容：${sheet.name}`);
   const rows = [];
+  const skippedRows = [];
+  let rawCandidateRows = 0;
   for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
     const rowIndex = Number(xmlAttr(rowTag, "r"));
     if (!rowIndex || rowIndex < 3) continue;
     const values = [];
+    const cells = [];
     const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
     for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
-      const column = cellColumnIndex(xmlAttr(cellTag, "r"));
-      if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
+      const ref = xmlAttr(cellTag, "r");
+      const column = cellColumnIndex(ref);
+      if (column < 0) continue;
+      const value = cellValue(cellTag, cellXml, sharedStrings);
+      values[column] = value;
+      const formula = xmlDecode(cellXml.match(/<f\b[^>]*>([\s\S]*?)<\/f>/)?.[1] || "");
+      if (value !== "" || formula) cells.push({ address: ref, value, formula });
     }
-    const row = {
-      source_row: rowIndex,
-      teacher_name: text(values[0]),
-      date: isoDateValue(values[1]),
-      lesson_status: text(values[2]),
-      time_slot: text(values[4]),
-      classroom: text(values[5]),
-      grade: text(values[6]),
-      subject: text(values[7]),
-      student_names: text(values[8]),
-      notes: text(values[9]),
-      course_status: text(values[10]),
-    };
-    const nonTimeFields = ["teacher_name", "date", "lesson_status", "classroom", "grade", "subject", "student_names", "notes", "course_status"];
-    if (!nonTimeFields.some((field) => row[field]) && (!row.time_slot || row.time_slot === "0" || row.time_slot === "0:00")) continue;
-    if (![...nonTimeFields, "time_slot"].some((field) => row[field])) continue;
-    row.lesson_status ||= "上课";
-    row.course_status ||= "未上";
-    row.student_count = splitStudents(row.student_names).length;
-    row.month_key = monthKeyFromDate(row.date) || monthKey;
-    rows.push(row);
+    const row = xlsxTotalRow(values, rowIndex, monthKey);
+    if (!xlsxLessonHasCandidateData(row)) continue;
+    rawCandidateRows += 1;
+    const skipReasons = xlsxLessonSkipReasons(row);
+    if (skipReasons.length) {
+      skippedRows.push({
+        source_row: rowIndex,
+        cells: xlsxDebugCellSummary(cells),
+        reason: skipReasons.join("|"),
+      });
+      continue;
+    }
+    rows.push(finalizeXlsxLessonRow(row, monthKey));
   }
-  return { sheet_name: sheet.name, rows };
+  if (options.log) {
+    console.info(`[xlsx audit][lessons] month=${monthKey.slice(0, 7)} rawCandidateRows=${rawCandidateRows} validLessonRows=${rows.length} skippedRows=${skippedRows.length}`);
+    for (const skipped of skippedRows) {
+      console.info(`[xlsx audit][lessons][skip] sheet=${sheet.name} row=${skipped.source_row} cells=${skipped.cells} reason=${skipped.reason}`);
+    }
+  }
+  return { sheet_name: sheet.name, rows, raw_candidate_rows: rawCandidateRows, skipped_rows: skippedRows };
 }
 
 function readXlsxSheetRows(buffer, sheetName) {
@@ -771,6 +835,60 @@ function readXlsxSheetRows(buffer, sheetName) {
   return { sheet_name: sheet.name, rows };
 }
 
+function readXlsxSheetRowsDetailed(buffer, sheetName) {
+  const entries = unzipXlsx(buffer);
+  const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
+  const sheets = workbookSheets(entries);
+  const sheet = sheets.find((item) => item.name === sheetName);
+  if (!sheet) return { sheet_name: sheetName, sheet_state: "", sheet_path: "", dimension: "", merge_cells: [], rows: [] };
+  const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
+  if (!sheetXmlText) throw new Error(`xlsx 缺少工作表内容：${sheet.name}`);
+  const dimension = sheetXmlText.match(/<dimension\b[^>]*ref="([^"]+)"/)?.[1] || "";
+  const mergeCells = [...sheetXmlText.matchAll(/<mergeCell\b[^>]*ref="([^"]+)"/g)].map((match) => match[1]);
+  const rows = [];
+  for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
+    const sourceRow = Number(xmlAttr(rowTag, "r"));
+    if (!sourceRow) continue;
+    const values = [];
+    const cells = [];
+    const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
+    for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const ref = xmlAttr(cellTag, "r");
+      const column = cellColumnIndex(ref);
+      if (column < 0) continue;
+      const value = cellValue(cellTag, cellXml, sharedStrings);
+      values[column] = value;
+      const formula = xmlDecode(cellXml.match(/<f\b[^>]*>([\s\S]*?)<\/f>/)?.[1] || "");
+      const rawValue = xmlDecode(cellXml.match(/<v>([\s\S]*?)<\/v>/)?.[1] || "");
+      if (value !== "" || formula || rawValue !== "") {
+        cells.push({
+          column,
+          address: ref,
+          type: xmlAttr(cellTag, "t"),
+          style: xmlAttr(cellTag, "s"),
+          formula,
+          raw_value: rawValue,
+          value,
+        });
+      }
+    }
+    rows.push({
+      source_row: sourceRow,
+      hidden: xmlAttr(rowTag, "hidden") === "1" || xmlAttr(rowTag, "hidden") === "true",
+      values,
+      cells,
+    });
+  }
+  return {
+    sheet_name: sheet.name,
+    sheet_state: sheet.state || "visible",
+    sheet_path: sheet.path,
+    dimension,
+    merge_cells: mergeCells,
+    rows,
+  };
+}
+
 function readXlsxTotalRowsForImport(buffer, monthKey) {
   const entries = unzipXlsx(buffer);
   const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
@@ -794,28 +912,10 @@ function readXlsxTotalRowsForImport(buffer, monthKey) {
       const column = cellColumnIndex(xmlAttr(cellTag, "r"));
       if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
     }
-    const row = {
-      source_row: rowIndex,
-      teacher_name: text(values[0]),
-      date: isoDateValue(values[1]),
-      lesson_status: text(values[2]),
-      time_slot: text(values[4]),
-      classroom: text(values[5]),
-      grade: text(values[6]),
-      subject: text(values[7]),
-      student_names: text(values[8]),
-      notes: text(values[9]),
-      course_status: text(values[10]),
-      teacher_salary: num(values[11]),
-    };
-    const fields = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "teacher_salary"];
-    if (!fields.some((field) => field === "teacher_salary" ? row[field] : text(row[field]))) continue;
-    if (!row.date) continue;
-    row.lesson_status ||= "上课";
-    row.course_status ||= "未上";
-    row.month_key = monthKeyFromDate(row.date) || monthKey;
-    row.status = deriveStatus(row);
-    rows.push(row);
+    const row = xlsxTotalRow(values, rowIndex, monthKey, true);
+    if (!xlsxLessonHasCandidateData(row)) continue;
+    if (xlsxLessonSkipReasons(row).length) continue;
+    rows.push(finalizeXlsxLessonRow(row, monthKey));
   }
   return { sheet_name: sheet.name, rows };
 }
@@ -3201,6 +3301,7 @@ function zipStore(files) {
 
 function xmlEscape(value) {
   return String(value ?? "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -3223,12 +3324,18 @@ function sheetXml(rows) {
     const cells = row.map((value, cIndex) => {
       const ref = `${columnName(cIndex)}${rIndex + 1}`;
       if (typeof value === "number" && Number.isFinite(value)) return `<c r="${ref}"><v>${value}</v></c>`;
-      return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`;
+      const textValue = value instanceof Date ? value.toISOString().slice(0, 10) : value;
+      return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(textValue)}</t></is></c>`;
     }).join("");
     return `<row r="${rIndex + 1}">${cells}</row>`;
   }).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body}</sheetData></worksheet>`;
+}
+
+function safeWorksheetName(name, fallback = "Sheet") {
+  const base = text(name).replace(/[\\/?*\[\]:]/g, " ").trim().slice(0, 31);
+  return base || fallback;
 }
 
 function xlsxBuffer(sheetName, rows) {
@@ -3273,6 +3380,343 @@ function xlsxBuffer(sheetName, rows) {
     },
     { name: "xl/worksheets/sheet1.xml", data: sheetXml(rows) },
   ]);
+}
+
+function multiSheetXlsxBuffer(sheets) {
+  const normalized = [];
+  const used = new Set();
+  for (const [index, sheet] of sheets.entries()) {
+    const base = safeWorksheetName(sheet.name, `Sheet${index + 1}`);
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+      const tail = `_${suffix}`;
+      candidate = `${base.slice(0, 31 - tail.length)}${tail}`;
+      suffix += 1;
+    }
+    used.add(candidate);
+    normalized.push({ name: candidate, rows: Array.isArray(sheet.rows) ? sheet.rows : [] });
+  }
+
+  const worksheetOverrides = normalized.map((_, index) => (
+    `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+  )).join("");
+  const workbookSheets = normalized.map((sheet, index) => (
+    `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
+  )).join("");
+  const worksheetRels = normalized.map((_, index) => (
+    `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
+  )).join("");
+  const styleRelId = normalized.length + 1;
+  const files = [
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+${worksheetOverrides}
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`,
+    },
+    {
+      name: "xl/workbook.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>${workbookSheets}</sheets></workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+${worksheetRels}
+<Relationship Id="rId${styleRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`,
+    },
+    {
+      name: "xl/styles.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>`,
+    },
+  ];
+  normalized.forEach((sheet, index) => {
+    files.push({ name: `xl/worksheets/sheet${index + 1}.xml`, data: sheetXml(sheet.rows) });
+  });
+  return zipStore(files);
+}
+
+function monthLabelCn(monthKey) {
+  const year = monthKey.slice(0, 4);
+  const month = Number(monthKey.slice(5, 7));
+  return `${year}年${month}月`;
+}
+
+function monthNumberCn(monthKey) {
+  return `${Number(monthKey.slice(5, 7))}月`;
+}
+
+function normalizeExportMonthKey(value) {
+  const raw = text(value);
+  const match = raw.match(/^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = match[3] == null ? 1 : Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
+}
+
+function exportTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "_",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("");
+}
+
+function coreWorkbookFilename(monthKey) {
+  return `黎明教育_${monthLabelCn(monthKey)}_核心数据_${exportTimestamp()}.xlsx`;
+}
+
+function coreLessonRows(monthKey) {
+  const lessons = all(
+    "SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id",
+    [monthKey],
+  );
+  let sequence = 0;
+  const rows = lessons.map((lesson) => {
+    if (isEffective(lesson)) sequence += 1;
+    return [
+      lesson.teacher_name,
+      lesson.date,
+      lesson.lesson_status,
+      weekdayCn(lesson.date),
+      lesson.time_slot,
+      lesson.classroom,
+      lesson.grade,
+      lesson.subject,
+      lesson.student_names,
+      lesson.notes,
+      lesson.course_status,
+      num(lesson.teacher_salary),
+      splitStudents(lesson.student_names).length,
+      sequence,
+    ];
+  });
+  return [
+    [`${monthLabelCn(monthKey)}黎明教育课程安排`],
+    ["授课老师", "日期", "上课情况", "星期", "时间", "教室", "年级", "科目", "学生", "备注", "课程状态", "教师薪资", "学生人数", "累计序号"],
+    ...rows,
+  ];
+}
+
+function coreStudentSummaryRows(monthKey, details) {
+  const summaryRows = studentSummary(details, monthKey);
+  const includedStudentNames = coreStudentSummaryIncludedNames(details, summaryRows);
+  const rows = summaryRows.filter((row) => includedStudentNames.has(text(row.student_name)));
+  return [
+    [`${monthLabelCn(monthKey)} 学生费用汇总`],
+    ["学生姓名", "年级", "上课次数", "课程总费用", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "本月实际消费", "本月赠送消费", "实际余额", "赠送余额"],
+    ...rows.map((row) => [
+      row.student_name,
+      row.grade,
+      row.lesson_count,
+      row.total_fee,
+      row.prev_actual,
+      row.prev_gift,
+      row.cur_recharge,
+      row.cur_gift,
+      row.actual_consumption,
+      row.gift_consumption,
+      row.actual_balance,
+      row.gift_balance,
+    ]),
+  ];
+}
+
+function coreStudentSummaryIncludedNames(details, summaryRows) {
+  const included = new Set();
+  for (const detail of details) {
+    const studentName = text(detail.student_name);
+    if (studentName) included.add(studentName);
+  }
+  for (const row of summaryRows) {
+    const studentName = text(row.student_name);
+    if (!studentName) continue;
+    const rechargeNotes = text(row.recharge_notes);
+    const hasRechargeSignal = num(row.cur_recharge) !== 0
+      || num(row.cur_gift) !== 0
+      || !!text(row.recharge_date)
+      || (!!rechargeNotes && !rechargeNotes.startsWith("自动结转"));
+    const hasPositiveBalance = num(row.actual_balance) > 0 || num(row.gift_balance) > 0;
+    if (hasRechargeSignal || hasPositiveBalance) included.add(studentName);
+  }
+  return included;
+}
+
+function coreFeeDetailRows(monthKey, details) {
+  const sorted = [...details].sort((a, b) => [
+    text(a.student_name),
+    text(a.date),
+    text(a.time_slot),
+    String(a.lesson_id || "").padStart(8, "0"),
+    String(a.student_index || "").padStart(4, "0"),
+  ].join("|").localeCompare([
+    text(b.student_name),
+    text(b.date),
+    text(b.time_slot),
+    String(b.lesson_id || "").padStart(8, "0"),
+    String(b.student_index || "").padStart(4, "0"),
+  ].join("|"), "zh-Hans-CN"));
+  return [
+    [`${monthLabelCn(monthKey)} 黎明教育学生费用明细`],
+    ["学生姓名", "授课老师", "日期", "上课情况", "星期", "时间", "教室", "年级", "科目", "备注", "单人费用", "课程状态"],
+    ...sorted.map((row) => [
+      row.student_name,
+      row.teacher_name,
+      row.date,
+      row.lesson_status,
+      row.weekday,
+      row.time_slot,
+      row.classroom,
+      row.grade,
+      row.subject,
+      row.notes,
+      row.unit_price,
+      row.course_status,
+    ]),
+  ];
+}
+
+function unregisteredRechargeRows(details, rechargeRows) {
+  const registered = new Set(rechargeRows.map((row) => text(row.student_name)).filter(Boolean));
+  const profiles = new Map(all("SELECT name, grade FROM students").map((row) => [row.name, row]));
+  const byStudent = new Map();
+  for (const detail of details) {
+    const studentName = text(detail.student_name);
+    if (!studentName || registered.has(studentName) || byStudent.has(studentName)) continue;
+    const profile = profiles.get(studentName) || {};
+    byStudent.set(studentName, {
+      student_name: studentName,
+      grade: detail.grade || profile.grade || "",
+    });
+  }
+  return [...byStudent.values()].sort((a, b) => compareGradeName(a.grade, b.grade) || a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
+}
+
+function coreRechargeRows(monthKey, details) {
+  const recharges = all(
+    `SELECT * FROM recharge_records
+     WHERE month_key = ?
+     ORDER BY CASE WHEN recharge_date IS NULL OR TRIM(recharge_date) = '' THEN 1 ELSE 0 END,
+       recharge_date, id, student_name`,
+    [monthKey],
+  );
+  const profiles = new Map(all("SELECT name, grade FROM students").map((row) => [row.name, row]));
+  const missing = unregisteredRechargeRows(details, recharges);
+  const maxRows = Math.max(recharges.length, missing.length);
+  const rows = [];
+  for (let index = 0; index < maxRows; index += 1) {
+    const recharge = recharges[index] || {};
+    const profile = profiles.get(recharge.student_name) || {};
+    const miss = missing[index] || {};
+    rows.push([
+      recharge.student_name || "",
+      recharge.grade || profile.grade || "",
+      recharge.id ? num(recharge.prev_actual) : "",
+      recharge.id ? num(recharge.prev_gift) : "",
+      recharge.id ? num(recharge.cur_recharge) : "",
+      recharge.id ? num(recharge.cur_gift) : "",
+      recharge.recharge_date || "",
+      recharge.notes || "",
+      "",
+      miss.student_name || "",
+      miss.grade || "",
+    ]);
+  }
+  return [
+    ["充值记录（静态导出；右侧 J/K 列为未登记充值提醒）", "", "", "", "", "", "", "", "", "未登记充值提醒", ""],
+    ["学生姓名", "年级", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "充值日期", "备注", "", "未登记姓名", "未登记年级"],
+    ...rows,
+  ];
+}
+
+function coreTeacherSalaryRows(monthKey) {
+  const rows = teacherSummary(monthKey);
+  const totals = rows.reduce((acc, row) => {
+    acc.lesson_count += num(row.lesson_count);
+    acc.salary_total = moneyRound(acc.salary_total + num(row.salary_total));
+    acc.week1_transport = moneyRound(acc.week1_transport + num(row.week1_transport));
+    acc.week2_transport = moneyRound(acc.week2_transport + num(row.week2_transport));
+    acc.week3_transport = moneyRound(acc.week3_transport + num(row.week3_transport));
+    acc.week4_transport = moneyRound(acc.week4_transport + num(row.week4_transport));
+    acc.total_salary = moneyRound(acc.total_salary + num(row.total_salary));
+    return acc;
+  }, {
+    lesson_count: 0,
+    salary_total: 0,
+    week1_transport: 0,
+    week2_transport: 0,
+    week3_transport: 0,
+    week4_transport: 0,
+    total_salary: 0,
+  });
+  const output = [
+    [`${monthLabelCn(monthKey)} 教师薪资汇总`],
+    ["教师姓名", "上课课时数", "课时合计", "第一周车票", "第二周车票", "第三周车票", "第四周车票", "薪资合计", "备注"],
+    ...rows.map((row) => [
+      row.teacher_name,
+      row.lesson_count,
+      row.salary_total,
+      row.week1_transport,
+      row.week2_transport,
+      row.week3_transport,
+      row.week4_transport,
+      row.total_salary,
+      row.notes,
+    ]),
+  ];
+  if (rows.length) {
+    output.push([
+      "合计",
+      totals.lesson_count,
+      totals.salary_total,
+      totals.week1_transport,
+      totals.week2_transport,
+      totals.week3_transport,
+      totals.week4_transport,
+      totals.total_salary,
+      "",
+    ]);
+  }
+  return output;
+}
+
+function coreWorkbookSheets(monthKey) {
+  const details = feeDetails(monthKey);
+  const monthNumber = monthNumberCn(monthKey);
+  return [
+    { name: `${monthNumber}总表`, rows: coreLessonRows(monthKey) },
+    { name: `${monthNumber}学生费用汇总`, rows: coreStudentSummaryRows(monthKey, details) },
+    { name: "学生费用明细", rows: coreFeeDetailRows(monthKey, details) },
+    { name: "充值记录", rows: coreRechargeRows(monthKey, details) },
+    { name: "教师薪资汇总", rows: coreTeacherSalaryRows(monthKey) },
+  ];
 }
 
 function teacherSalaryRows(monthKey) {
@@ -4257,11 +4701,13 @@ function roleCan(user, area, action = "read") {
 function apiArea(req, url) {
   const p = url.pathname;
   if (p.startsWith("/api/users")) return "users";
+  if (p === "/api/export/core-workbook.xlsx") return "coreExport";
   if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
   if (p === "/api/teacher-adjustments") return "teacherTransport";
   if (p.includes("teacher-salary")) return "teacherSalary";
   if (p.startsWith("/api/operating-expenses")) return "expenses";
   if (p.startsWith("/api/staff")) return "staff";
+  if (p.startsWith("/api/reconcile")) return "audit";
   if (p.startsWith("/api/audit") || p === "/api/source-workbooks" || p === "/api/import/source-workbook") return "audit";
   if (p === "/api/recharges" || p === "/api/recharges/rollover") return "recharges";
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
@@ -4282,7 +4728,7 @@ function authorizeApi(user, req, url) {
     return method === "GET" && (area === "schedule" || area === "profiles");
   }
   if (user.role === "finance") return roleCan(user, area, method === "GET" ? "read" : "write");
-  if (["finance", "teacherSalary", "staff", "expenses", "audit"].includes(area)) return false;
+  if (["finance", "teacherSalary", "staff", "expenses", "audit", "coreExport"].includes(area)) return false;
   return roleCan(user, area, method === "GET" ? "read" : "write");
 }
 
@@ -4437,6 +4883,7 @@ function addXlsxIssue(issues, issue) {
   issues.push({
     source: issue.source || "xlsx",
     severity: issue.severity || "WARN",
+    type: issue.type || "",
     entity: issue.entity || "",
     field: issue.field || "",
     xlsx_value: text(issue.xlsx_value),
@@ -4445,6 +4892,7 @@ function addXlsxIssue(issues, issue) {
     xlsx_row: issue.xlsx_row || null,
     message: issue.message || "",
     patch: issue.patch || null,
+    data: issue.data || {},
   });
 }
 
@@ -4452,7 +4900,7 @@ function xlsxLessonKey(row) {
   return [text(row.date), text(row.teacher_name), text(row.time_slot)].join("\u0001");
 }
 
-function compareXlsxLessons(monthKey, xlsxRows) {
+function compareXlsxLessons(monthKey, xlsxRows, options = {}) {
   const issues = [];
   const dbRows = all("SELECT * FROM lessons WHERE month_key = ?", [monthKey]);
   const dbByKey = new Map();
@@ -4461,15 +4909,42 @@ function compareXlsxLessons(monthKey, xlsxRows) {
     if (!dbByKey.has(key)) dbByKey.set(key, []);
     dbByKey.get(key).push(row);
   }
+  const sourceKeyCounts = new Map();
+  for (const row of xlsxRows) {
+    const key = xlsxLessonKey(row);
+    sourceKeyCounts.set(key, (sourceKeyCounts.get(key) || 0) + 1);
+  }
+  const sourceDuplicateCount = [...sourceKeyCounts.values()].filter((count) => count > 1).length;
+  const dbDuplicateCount = [...dbByKey.values()].filter((rows) => rows.length > 1).length;
   const matchedDbIds = new Set();
   const xlsxKeys = new Set();
+  const stats = {
+    month: monthKey.slice(0, 7),
+    sourceCourseCount: xlsxRows.length,
+    dbCourseCountBefore: options.dbCourseCountBefore ?? dbRows.length,
+    dbCourseCountAfter: options.dbCourseCountAfter ?? dbRows.length,
+    matched: 0,
+    sourceOnly: 0,
+    internalOnly: 0,
+    changed: 0,
+    unchanged: 0,
+    skipped: 0,
+    duplicates: 0,
+    sourceDuplicateGroups: sourceDuplicateCount,
+    dbDuplicateGroups: dbDuplicateCount,
+  };
   for (const xrow of xlsxRows) {
     const key = xlsxLessonKey(xrow);
     xlsxKeys.add(key);
+    if (!text(xrow.date) || !text(xrow.teacher_name) || !text(xrow.time_slot)) {
+      stats.skipped += 1;
+    }
     const matches = dbByKey.get(key) || [];
     if (!matches.length) {
+      stats.sourceOnly += 1;
       addXlsxIssue(issues, {
         severity: "HIGH",
+        type: "source-only",
         entity: `xlsx_row_${xrow.source_row}`,
         field: "lesson",
         xlsx_value: `${xrow.date} ${xrow.teacher_name} ${xrow.time_slot}`,
@@ -4481,8 +4956,10 @@ function compareXlsxLessons(monthKey, xlsxRows) {
       continue;
     }
     if (matches.length > 1) {
+      stats.duplicates += 1;
       addXlsxIssue(issues, {
         severity: "HIGH",
+        type: "duplicate",
         entity: `xlsx_row_${xrow.source_row}`,
         field: "lesson",
         xlsx_value: `${xrow.date} ${xrow.teacher_name} ${xrow.time_slot}`,
@@ -4494,10 +4971,13 @@ function compareXlsxLessons(monthKey, xlsxRows) {
     }
     const dbRow = matches[0];
     matchedDbIds.add(dbRow.id);
+    stats.matched += 1;
+    let changed = false;
     for (const field of ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "notes", "course_status"]) {
       const xval = text(xrow[field]);
       const dval = text(dbRow[field]);
       if (xval !== dval) {
+        changed = true;
         const severity = {
           teacher_name: "CRITICAL",
           date: "HIGH",
@@ -4511,6 +4991,7 @@ function compareXlsxLessons(monthKey, xlsxRows) {
         }[field] || "WARN";
         addXlsxIssue(issues, {
           severity,
+          type: "changed",
           entity: `lesson_${dbRow.id}`,
           field,
           xlsx_value: xval,
@@ -4524,8 +5005,10 @@ function compareXlsxLessons(monthKey, xlsxRows) {
     const xSalary = moneyRound(num(xrow.teacher_salary));
     const dbSalary = moneyRound(num(dbRow.teacher_salary));
     if (xSalary !== dbSalary) {
+      changed = true;
       addXlsxIssue(issues, {
         severity: "MEDIUM",
+        type: "changed",
         entity: `lesson_${dbRow.id}`,
         field: "teacher_salary",
         xlsx_value: xSalary,
@@ -4539,8 +5022,10 @@ function compareXlsxLessons(monthKey, xlsxRows) {
     const xstudents = canonicalStudents(xrow.student_names);
     const dstudents = canonicalStudents(dbRow.student_names);
     if (xstudents !== dstudents) {
+      changed = true;
       addXlsxIssue(issues, {
         severity: "CRITICAL",
+        type: "changed",
         entity: `lesson_${dbRow.id}`,
         field: "student_names",
         xlsx_value: xstudents,
@@ -4553,8 +5038,10 @@ function compareXlsxLessons(monthKey, xlsxRows) {
     }
     const dbCount = splitStudents(dbRow.student_names).length;
     if (xrow.student_count !== dbCount) {
+      changed = true;
       addXlsxIssue(issues, {
         severity: "CRITICAL",
+        type: "changed",
         entity: `lesson_${dbRow.id}`,
         field: "student_count",
         xlsx_value: xrow.student_count,
@@ -4564,22 +5051,236 @@ function compareXlsxLessons(monthKey, xlsxRows) {
         message: "学生人数由学生名单拆分后计算",
       });
     }
+    if (changed) stats.changed += 1;
+    else stats.unchanged += 1;
   }
+  const internalOnlyRows = [];
   for (const dbRow of dbRows) {
     const key = xlsxLessonKey(dbRow);
     if (!matchedDbIds.has(dbRow.id) && !xlsxKeys.has(key)) {
+      stats.internalOnly += 1;
+      internalOnlyRows.push(dbRow);
       addXlsxIssue(issues, {
-        severity: "MEDIUM",
+        severity: "HIGH",
+        type: "internal-only",
         entity: `lesson_${dbRow.id}`,
         field: "lesson",
         xlsx_value: "xlsx 无对应课程",
         db_value: `${dbRow.date || ""} ${dbRow.teacher_name || ""} ${dbRow.time_slot || ""}`,
         lesson_id: dbRow.id,
-        message: "数据库中存在本月课程，但 xlsx 权威源中未找到；可能是事后补录，需要确认",
+        message: "系统中存在，但源文件中不存在；不会自动删除，请人工确认是否为内部多余课程",
+        data: {
+          id: dbRow.id,
+          teacher_name: dbRow.teacher_name,
+          date: dbRow.date,
+          time_slot: dbRow.time_slot,
+          classroom: dbRow.classroom,
+          grade: dbRow.grade,
+          subject: dbRow.subject,
+          student_names: dbRow.student_names,
+          course_status: dbRow.course_status,
+          created_at: dbRow.created_at,
+          updated_at: dbRow.updated_at,
+        },
       });
     }
   }
-  return issues;
+  console.info(`[reconcile][course records][summary] ${JSON.stringify(stats)}`);
+  for (const row of internalOnlyRows) {
+    console.info(`[reconcile][course records][internal-only] ${JSON.stringify({
+      courseId: row.id,
+      student: row.student_names || "",
+      teacher: row.teacher_name || "",
+      date: row.date || "",
+      time: row.time_slot || "",
+      subject: row.subject || "",
+      classroom: row.classroom || "",
+      grade: row.grade || "",
+      courseStatus: row.course_status || "",
+      teacherSalary: row.teacher_salary || 0,
+      createdAt: row.created_at || "",
+      updatedAt: row.updated_at || "",
+      reason: "exists in DB but no matching source row",
+    })}`);
+  }
+  return { issues, summary: stats };
+}
+
+function lessonCleanupSummary(row) {
+  return {
+    id: Number(row.id),
+    lessonId: Number(row.id),
+    date: row.date || "",
+    student: row.student_names || "",
+    student_names: row.student_names || "",
+    teacher: row.teacher_name || "",
+    teacher_name: row.teacher_name || "",
+    time_slot: row.time_slot || "",
+    subject: row.subject || "",
+    classroom: row.classroom || "",
+    grade: row.grade || "",
+    lesson_status: row.lesson_status || "",
+    course_status: row.course_status || "",
+    teacher_salary: num(row.teacher_salary),
+    amount: num(row.teacher_salary),
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || "",
+  };
+}
+
+function sourceRowsForInternalOnly(monthKey, filename = "") {
+  const sourcePath = filename ? safeSourceWorkbookPath(filename) : sourceWorkbookPathByMonth(monthKey);
+  if (!sourcePath) throw new Error(`未找到 ${monthKey.slice(0, 7)} 对应的源工作簿`);
+  const { sheet_name: sheetName, rows } = readXlsxTotalSheet(fs.readFileSync(sourcePath), monthKey);
+  return { sourcePath, sheetName, rows };
+}
+
+function currentInternalOnlyLessons(monthKey, sourceRows) {
+  const dbRows = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, time_slot, teacher_name, classroom, sort_order, id", [monthKey]);
+  const dbByKey = new Map();
+  for (const row of dbRows) {
+    const key = xlsxLessonKey(row);
+    if (!dbByKey.has(key)) dbByKey.set(key, []);
+    dbByKey.get(key).push(row);
+  }
+  const matchedDbIds = new Set();
+  const xlsxKeys = new Set();
+  for (const xrow of sourceRows) {
+    const key = xlsxLessonKey(xrow);
+    xlsxKeys.add(key);
+    const matches = dbByKey.get(key) || [];
+    if (matches.length === 1) matchedDbIds.add(matches[0].id);
+  }
+  return dbRows.filter((row) => {
+    const key = xlsxLessonKey(row);
+    return !matchedDbIds.has(row.id) && !xlsxKeys.has(key);
+  });
+}
+
+function internalOnlyLessonPreview(body = {}) {
+  const monthKey = normalizeExportMonthKey(body.month || body.month_key);
+  if (!monthKey) return { error: "month must be YYYY-MM or YYYY-MM-01", status: 400 };
+  const filename = text(body.filename || body.sourceWorkbookId || body.source_workbook || "");
+  const source = sourceRowsForInternalOnly(monthKey, filename);
+  const lessons = currentInternalOnlyLessons(monthKey, source.rows).map(lessonCleanupSummary);
+  console.info(`[reconcile][internal-only][preview] ${JSON.stringify({
+    month: monthKey.slice(0, 7),
+    count: lessons.length,
+    lessonIds: lessons.map((row) => `lesson_${row.id}`).join(","),
+    sourceWorkbook: path.basename(source.sourcePath),
+  })}`);
+  return {
+    month_key: monthKey,
+    source_file: path.basename(source.sourcePath),
+    sheet_name: source.sheetName,
+    internalOnlyCount: lessons.length,
+    lessons,
+    warning: lessons.length
+      ? "这些课程存在于系统数据库中，但不在当前月份源文件中。确认后将只按课程 ID 删除 lessons 表记录。"
+      : "当前没有系统多余课程。",
+    canApply: lessons.length > 0,
+  };
+}
+
+function rejectInternalOnlyApply(reason, status, details = {}) {
+  console.warn(`[reconcile][internal-only][apply][reject] ${JSON.stringify({ reason, ...details })}`);
+  return { error: reason, status, ...details };
+}
+
+function applyInternalOnlyLessonCleanup(req, user, body = {}) {
+  const monthKey = normalizeExportMonthKey(body.month || body.month_key);
+  const rawLessonIds = Array.isArray(body.lessonIds) ? body.lessonIds : body.lesson_ids;
+  const lessonIds = [...new Set((Array.isArray(rawLessonIds) ? rawLessonIds : []).map(Number).filter(Boolean))];
+  const expectedCount = body.expectedCount == null ? null : Number(body.expectedCount);
+  const filename = text(body.filename || body.sourceWorkbookId || body.source_workbook || "");
+  if (!monthKey) return rejectInternalOnlyApply("month must be YYYY-MM or YYYY-MM-01", 400, { month: text(body.month || body.month_key) });
+  if (body.confirm !== true) return rejectInternalOnlyApply("confirm must be true", 400, { month: monthKey, lessonIds });
+  if (!lessonIds.length) return rejectInternalOnlyApply("lessonIds must not be empty", 400, { month: monthKey, lessonIds });
+
+  const source = sourceRowsForInternalOnly(monthKey, filename);
+  const internalOnlyRows = currentInternalOnlyLessons(monthKey, source.rows);
+  const internalOnlyIds = new Set(internalOnlyRows.map((row) => Number(row.id)));
+  const currentCount = internalOnlyRows.length;
+  console.info(`[reconcile][internal-only][apply][before] ${JSON.stringify({
+    month: monthKey.slice(0, 7),
+    expectedCount,
+    currentCount,
+    lessonIds: lessonIds.map((id) => `lesson_${id}`).join(","),
+    sourceWorkbook: path.basename(source.sourcePath),
+  })}`);
+
+  if (expectedCount != null && expectedCount !== currentCount) {
+    return rejectInternalOnlyApply("系统多余课程数量已变化，请重新对账后再处理", 409, {
+      month: monthKey,
+      expectedCount,
+      currentCount,
+      lessonIds,
+    });
+  }
+  const requestedRows = lessonIds.map((id) => get("SELECT * FROM lessons WHERE id = ?", [id]));
+  const missingIds = lessonIds.filter((id, index) => !requestedRows[index]);
+  if (missingIds.length) return rejectInternalOnlyApply("部分课程已不存在，请重新对账", 409, { month: monthKey, lessonIds, missingIds });
+  const wrongMonthIds = requestedRows.filter((row) => row && row.month_key !== monthKey).map((row) => Number(row.id));
+  if (wrongMonthIds.length) return rejectInternalOnlyApply("部分课程不属于当前月份，拒绝删除", 400, { month: monthKey, lessonIds, wrongMonthIds });
+  const notInternalOnlyIds = lessonIds.filter((id) => !internalOnlyIds.has(id));
+  if (notInternalOnlyIds.length) {
+    return rejectInternalOnlyApply("部分课程当前不再是系统多余课程，请重新对账", 409, {
+      month: monthKey,
+      lessonIds,
+      notInternalOnlyIds,
+    });
+  }
+
+  const deleteRows = internalOnlyRows.filter((row) => lessonIds.includes(Number(row.id)));
+  const backup = backupDb("pre_internal_only_cleanup");
+  const result = withTransaction(() => {
+    const deletedLessons = [];
+    for (const row of deleteRows) {
+      const before = get("SELECT * FROM lessons WHERE id = ? AND month_key = ?", [Number(row.id), monthKey]);
+      if (!before) throw new Error(`课程 ${row.id} 已不存在或不属于 ${monthKey}`);
+      const deleted = db.prepare("DELETE FROM lessons WHERE id = ? AND month_key = ?").run(Number(row.id), monthKey);
+      if (deleted.changes !== 1) throw new Error(`课程 ${row.id} 删除失败`);
+      deletedLessons.push(lessonCleanupSummary(before));
+    }
+    recordAuditEvent(req, user, {
+      action: "delete-internal-only-lessons",
+      entity_type: "lessons",
+      entity_id: monthKey,
+      before: deletedLessons,
+      after: {
+        month_key: monthKey,
+        source_file: path.basename(source.sourcePath),
+        deletedCount: deletedLessons.length,
+        deletedLessonIds: deletedLessons.map((row) => row.id),
+      },
+    });
+    writeOperationLog(user, {
+      operation_type: "清理系统多余课程",
+      operation_content: `${monthKey.slice(0, 7)} 删除 ${deletedLessons.length} 条源文件不存在课程：${deletedLessons.map((row) => `#${row.id}`).join("、")}`,
+      target_type: "lessons",
+      target_id: monthKey,
+    });
+    return { deletedLessons };
+  });
+  console.info(`[reconcile][internal-only][apply][after] ${JSON.stringify({
+    month: monthKey.slice(0, 7),
+    deletedCount: result.deletedLessons.length,
+    deletedLessonIds: result.deletedLessons.map((row) => `lesson_${row.id}`).join(","),
+    sourceWorkbook: path.basename(source.sourcePath),
+  })}`);
+  const audit = runNodeXlsxAudit(source.sourcePath, monthKey, {
+    dbCourseCountBefore: countByMonth("lessons", monthKey) + result.deletedLessons.length,
+    dbCourseCountAfter: countByMonth("lessons", monthKey),
+  });
+  return {
+    ok: true,
+    month_key: monthKey,
+    source_file: path.basename(source.sourcePath),
+    deletedCount: result.deletedLessons.length,
+    deletedLessons: result.deletedLessons,
+    backup,
+    audit,
+  };
 }
 
 function xlsxStudentCrossChecks(xlsxRows) {
@@ -4646,12 +5347,16 @@ function xlsxStudentCrossChecks(xlsxRows) {
   return issues;
 }
 
-function runNodeXlsxAudit(uploadPath, monthKey) {
+function runNodeXlsxAudit(uploadPath, monthKey, options = {}) {
   if (!validMonthKey(monthKey)) throw new Error("month must be YYYY-MM-01");
   const runId = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  const { sheet_name: sheetName, rows } = readXlsxTotalSheet(fs.readFileSync(uploadPath), monthKey);
+  const { sheet_name: sheetName, rows } = readXlsxTotalSheet(fs.readFileSync(uploadPath), monthKey, { log: true });
+  const lessonCompare = compareXlsxLessons(monthKey, rows, {
+    dbCourseCountBefore: options.dbCourseCountBefore ?? countByMonth("lessons", monthKey),
+    dbCourseCountAfter: options.dbCourseCountAfter ?? countByMonth("lessons", monthKey),
+  });
   const issues = visibleAuditIssues([
-    ...compareXlsxLessons(monthKey, rows),
+    ...lessonCompare.issues,
     ...xlsxStudentCrossChecks(rows),
   ], "xlsx");
   const report = {
@@ -4660,6 +5365,7 @@ function runNodeXlsxAudit(uploadPath, monthKey) {
     source_file: path.resolve(uploadPath),
     sheet_name: sheetName,
     scanned_lessons: rows.length,
+    reconcile: lessonCompare.summary,
     issue_count: issues.length,
     counts: severityCounts(issues),
     issues,
@@ -4873,17 +5579,196 @@ function validTeacherName(value) {
   return name;
 }
 
-function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true) {
-  const sheet = readXlsxSheetRows(buffer, "教师薪资汇总");
+function teacherSalaryHeaderMap(sheet) {
+  const header = sheet.rows.find((row) => row.source_row === 2)
+    || sheet.rows.find((row) => row.values.some((value) => /教师.*姓名|老师.*姓名/.test(text(value))));
+  const labels = header?.values || [];
+  const teacherNameColumn = labels.findIndex((value) => /教师.*姓名|老师.*姓名/.test(text(value)));
+  if (teacherNameColumn < 0) {
+    throw new Error(`教师薪资汇总未找到「教师姓名」表头。当前表头：${labels.map(text).filter(Boolean).join("、") || "空"}`);
+  }
+  const transportColumns = labels
+    .map((value, index) => ({ label: text(value), index }))
+    .filter((item) => /(车票|交通|补贴)/.test(item.label) && !/(合计|总计|小计|薪资|工资)/.test(item.label))
+    .map((item) => item.index);
+  const notesColumn = labels.findIndex((value) => /备注/.test(text(value)));
+  const salaryTotalColumn = labels.findIndex((value) => /(薪资|工资).*合计|合计.*(薪资|工资)/.test(text(value)));
+  return {
+    header_row: header?.source_row || 0,
+    labels,
+    teacher_name_column: teacherNameColumn,
+    transport_columns: transportColumns.length ? transportColumns : [3, 4, 5, 6],
+    notes_column: notesColumn,
+    salary_total_column: salaryTotalColumn,
+  };
+}
+
+function teacherSalaryTransportValues(row, headerMap) {
+  const values = headerMap.transport_columns.map((column) => num(row.values[column]));
+  return [
+    values[0] || 0,
+    values[1] || 0,
+    values[2] || 0,
+    values.slice(3).reduce((sum, value) => moneyRound(sum + num(value)), 0),
+  ];
+}
+
+function teacherSalaryRowKind(rawTeacherName) {
+  const normalized = text(rawTeacherName).replace(/\s+/g, "");
+  if (["合计", "总计", "小计", "汇总"].includes(normalized)) return "summary";
+  if (/^(备注|说明|注[:：]?)/.test(normalized)) return "note";
+  return "";
+}
+
+function cellRefParts(ref) {
+  const letters = String(ref || "").match(/[A-Z]+/i)?.[0] || "";
+  const row = Number(String(ref || "").match(/\d+/)?.[0] || 0);
+  return { column: cellColumnIndex(letters), row };
+}
+
+function mergeInfoForCell(mergeCells, row, column) {
+  for (const range of mergeCells || []) {
+    const [startRef, endRef] = String(range).split(":");
+    if (!endRef) continue;
+    const start = cellRefParts(startRef);
+    const end = cellRefParts(endRef);
+    if (row >= start.row && row <= end.row && column >= start.column && column <= end.column) {
+      return {
+        range,
+        source_cell: startRef,
+        is_continuation: row !== start.row || column !== start.column,
+      };
+    }
+  }
+  return null;
+}
+
+function teacherSalaryRowDebug(sheet, row, headerMap, options = {}) {
+  const rawTeacherName = text(row.values[headerMap.teacher_name_column]);
+  const normalizedTeacherName = validTeacherName(rawTeacherName);
+  const transports = teacherSalaryTransportValues(row, headerMap);
+  const notes = headerMap.notes_column >= 0 ? text(row.values[headerMap.notes_column]) : "";
+  const rowKind = teacherSalaryRowKind(rawTeacherName);
+  const mergeInfo = mergeInfoForCell(sheet.merge_cells, row.source_row, headerMap.teacher_name_column);
+  const matched = normalizedTeacherName
+    ? get("SELECT id, name FROM teachers WHERE name = ?", [normalizedTeacherName])
+    : null;
+  const hasDataReasons = [];
+  headerMap.transport_columns.forEach((column, index) => {
+    if (num(row.values[column])) hasDataReasons.push(`${columnName(column)}${row.source_row}=transport${index + 1}:${num(row.values[column])}`);
+  });
+  if (notes) hasDataReasons.push(`${columnName(headerMap.notes_column)}${row.source_row}=notes`);
+  return {
+    file: options.filename || "",
+    month: options.month_key || "",
+    sheet: sheet.sheet_name,
+    sheetHidden: sheet.sheet_state && sheet.sheet_state !== "visible",
+    range: sheet.dimension,
+    excelRow: row.source_row,
+    rowHidden: row.hidden,
+    nonEmptyCells: row.cells.map((cell) => ({
+      column: columnName(cell.column),
+      address: cell.address,
+      value: cell.value,
+      formula: cell.formula,
+      type: cell.type,
+      style: cell.style,
+    })),
+    expectedTeacherNameColumn: columnName(headerMap.teacher_name_column),
+    rawTeacherName,
+    normalizedTeacherName,
+    matchedTeacherId: matched?.id || "",
+    matchedTeacherName: matched?.name || "",
+    hasDataReason: hasDataReasons.join("; ") || "no transport/notes data",
+    isSummaryRow: rowKind === "summary",
+    isNoteRow: rowKind === "note",
+    isMergedContinuation: !!mergeInfo?.is_continuation,
+    mergedSourceCell: mergeInfo?.source_cell || "",
+    inheritedTeacherName: "",
+    headerMap: {
+      headerRow: headerMap.header_row,
+      teacherNameColumn: columnName(headerMap.teacher_name_column),
+      transportColumns: headerMap.transport_columns.map(columnName),
+      salaryTotalColumn: headerMap.salary_total_column >= 0 ? columnName(headerMap.salary_total_column) : "",
+      notesColumn: headerMap.notes_column >= 0 ? columnName(headerMap.notes_column) : "",
+    },
+  };
+}
+
+function logTeacherSalarySheetSnapshot(label, sheet, headerMap, options = {}) {
+  const rows = sheet.rows
+    .filter((row) => row.source_row >= 18 && row.source_row <= 26)
+    .map((row) => teacherSalaryRowDebug(sheet, row, headerMap, options));
+  console.info(`[source import][teacher salary][${label}] ${JSON.stringify({
+    file: options.filename || "",
+    month: options.month_key || "",
+    sheet: sheet.sheet_name,
+    sheetHidden: sheet.sheet_state && sheet.sheet_state !== "visible",
+    range: sheet.dimension,
+    mergeCells: sheet.merge_cells,
+    headerMap: rows[0]?.headerMap || {
+      headerRow: headerMap.header_row,
+      teacherNameColumn: columnName(headerMap.teacher_name_column),
+      transportColumns: headerMap.transport_columns.map(columnName),
+      salaryTotalColumn: headerMap.salary_total_column >= 0 ? columnName(headerMap.salary_total_column) : "",
+      notesColumn: headerMap.notes_column >= 0 ? columnName(headerMap.notes_column) : "",
+    },
+    rows,
+  })}`);
+}
+
+function sourceWorkbookPathByMonth(monthKey) {
+  const workbook = sourceWorkbooks().find((item) => item.month_key === monthKey);
+  return workbook ? path.join(sourceWorkbookDir(), workbook.filename) : "";
+}
+
+function logTeacherSalaryPreviousMonthCompare(monthKey) {
+  const previousMonth = previousMonthKey(monthKey);
+  const previousPath = previousMonth ? sourceWorkbookPathByMonth(previousMonth) : "";
+  if (!previousPath) return;
+  try {
+    const previousSheet = readXlsxSheetRowsDetailed(fs.readFileSync(previousPath), "教师薪资汇总");
+    const previousHeaderMap = teacherSalaryHeaderMap(previousSheet);
+    logTeacherSalarySheetSnapshot("compare", previousSheet, previousHeaderMap, {
+      filename: path.basename(previousPath),
+      month_key: previousMonth,
+    });
+  } catch (error) {
+    console.warn(`[source import][teacher salary][compare] failed: ${error.message}`);
+  }
+}
+
+function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true, options = {}) {
+  const sheet = readXlsxSheetRowsDetailed(buffer, "教师薪资汇总");
+  const headerMap = teacherSalaryHeaderMap(sheet);
+  logTeacherSalarySheetSnapshot("debug", sheet, headerMap, { filename: options.filename || "", month_key: monthKey });
+  logTeacherSalaryPreviousMonthCompare(monthKey);
+  if (headerMap.transport_columns.length > 4) {
+    console.warn(`[source import][teacher salary][debug] ${JSON.stringify({
+      file: options.filename || "",
+      month: monthKey,
+      sheet: sheet.sheet_name,
+      message: "教师薪资汇总包含超过4个车票/交通补贴列；由于系统当前仅有4个周车票字段，第4列及之后会合并写入第四周车票。",
+      transportColumns: headerMap.transport_columns.map(columnName),
+    })}`);
+  }
   if (replace) db.prepare("DELETE FROM teacher_adjustments_monthly WHERE month_key = ?").run(monthKey);
   let count = 0;
   for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
-    const teacherName = validTeacherName(row.values[0]);
-    const transports = [num(row.values[3]), num(row.values[4]), num(row.values[5]), num(row.values[6])];
-    const notes = text(row.values[8]);
+    const rawTeacherName = text(row.values[headerMap.teacher_name_column]);
+    const rowKind = teacherSalaryRowKind(rawTeacherName);
+    if (rowKind === "summary" || rowKind === "note") continue;
+    const teacherName = validTeacherName(rawTeacherName);
+    const transports = teacherSalaryTransportValues(row, headerMap);
+    const notes = headerMap.notes_column >= 0 ? text(row.values[headerMap.notes_column]) : "";
     if (!teacherName) {
       if (!transports.some(Boolean) && !notes) continue;
-      throw new Error(`教师薪资汇总第 ${row.source_row} 行有数据，但无法识别教师姓名`);
+      const debug = teacherSalaryRowDebug(sheet, row, headerMap, { filename: options.filename || "", month_key: monthKey });
+      console.error(`[source import][teacher salary][error] ${JSON.stringify({ ...debug, errorLocation: "importTeacherAdjustmentsFromWorkbook" })}`);
+      throw new Error(
+        `教师薪资汇总第 ${row.source_row} 行有车票/备注数据，但教师姓名为空或不是有效姓名。`
+        + ` 教师姓名列=${columnName(headerMap.teacher_name_column)}，有数据依据=${debug.hasDataReason}。`,
+      );
     }
     if (!transports.some(Boolean) && !notes) continue;
     upsertTeacher(teacherName);
@@ -4938,6 +5823,7 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
   if (!validMonthKey(resolvedMonthKey)) throw new Error("month_key must be YYYY-MM-01");
   const buffer = fs.readFileSync(sourcePath);
   const sourceLabel = `source-workbook:${path.basename(sourcePath)}`;
+  const dbLessonCountBefore = countByMonth("lessons", resolvedMonthKey);
   const backup = backupDb("pre_import");
   const summary = withTransaction(() => {
     setSetting("month_key", resolvedMonthKey);
@@ -4948,7 +5834,7 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
     const standards = importPricingStandardsFromWorkbook(buffer);
     const teacherAdjustments = options.skip_teacher_adjustments
       ? 0
-      : importTeacherAdjustmentsFromWorkbook(buffer, resolvedMonthKey, options.append !== true);
+      : importTeacherAdjustmentsFromWorkbook(buffer, resolvedMonthKey, options.append !== true, { filename: path.basename(sourcePath) });
     const carryOver = refreshCarryOverAfter(resolvedMonthKey);
     return {
       source_file: sourcePath,
@@ -4965,7 +5851,20 @@ function importSourceWorkbook(filename, monthKey = "", options = {}) {
       carry_over: carryOver,
     };
   });
-  const audit = runNodeXlsxAudit(sourcePath, resolvedMonthKey);
+  const dbLessonCountAfter = countByMonth("lessons", resolvedMonthKey);
+  const audit = runNodeXlsxAudit(sourcePath, resolvedMonthKey, {
+    dbCourseCountBefore: dbLessonCountBefore,
+    dbCourseCountAfter: dbLessonCountAfter,
+  });
+  console.info(`[source import][course records][summary] ${JSON.stringify({
+    file: path.basename(sourcePath),
+    month: resolvedMonthKey.slice(0, 7),
+    sourceCourseCount: audit.scanned_lessons,
+    parsedCourseCount: summary.lessons,
+    dbCourseCountBefore: dbLessonCountBefore,
+    dbCourseCountAfter: dbLessonCountAfter,
+    reconcile: audit.reconcile,
+  })}`);
   return { ...summary, audit };
 }
 
@@ -5516,6 +6415,25 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: "import", entity_type: "source_workbook", entity_id: text(body.filename), before: null, after: result });
     return sendJson(res, result);
   }
+  if (req.method === "POST" && url.pathname === "/api/reconcile/internal-only-lessons/preview") {
+    try {
+      const result = internalOnlyLessonPreview(await readBody(req));
+      if (result.error) return sendError(res, result.status || 400, result.error);
+      return sendJson(res, result);
+    } catch (error) {
+      return sendError(res, 400, error.message || "预览系统多余课程失败");
+    }
+  }
+  if (req.method === "POST" && url.pathname === "/api/reconcile/internal-only-lessons/apply") {
+    try {
+      const result = applyInternalOnlyLessonCleanup(req, user, await readBody(req));
+      if (result.error) return sendError(res, result.status || 400, result.error);
+      return sendJson(res, result);
+    } catch (error) {
+      console.error("internal-only lesson cleanup failed", error);
+      return sendError(res, 500, error.message || "清理系统多余课程失败");
+    }
+  }
   if (req.method === "GET" && url.pathname === "/api/audit/internal-checks") {
     return sendJson(res, internalAudit(resolveMonthKey(url), { log: url.searchParams.get("log") !== "0" }));
   }
@@ -5772,6 +6690,22 @@ async function handleApi(req, res, url) {
   if (expenseMatch && req.method === "DELETE") {
     const result = auditedDelete(req, user, "operating_expenses", "id", Number(expenseMatch[1]), "operating_expenses");
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export/core-workbook.xlsx") {
+    const monthKey = normalizeExportMonthKey(url.searchParams.get("month"));
+    if (!monthKey) return sendError(res, 400, "month must be YYYY-MM or YYYY-MM-01");
+    try {
+      return sendBuffer(
+        res,
+        multiSheetXlsxBuffer(coreWorkbookSheets(monthKey)),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        coreWorkbookFilename(monthKey),
+      );
+    } catch (error) {
+      console.error("core workbook export failed", error);
+      return sendError(res, 500, `导出核心 Excel 失败：${error.message || "未知错误"}`);
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/teacher-salary.xlsx") {
