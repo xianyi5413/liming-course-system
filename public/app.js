@@ -293,6 +293,42 @@ async function requestWithStatus(path, options = {}) {
   return { ok: res.ok, status: res.status, data };
 }
 
+function downloadFilenameFromDisposition(header, fallback) {
+  if (!header) return fallback;
+  const utf8 = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      return fallback;
+    }
+  }
+  const ascii = header.match(/filename="?([^";]+)"?/i);
+  return ascii ? ascii[1] : fallback;
+}
+
+async function downloadBlob(path, fallbackFilename) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    const data = await res.json().catch(async () => ({ error: await res.text().catch(() => "") }));
+    if (res.status === 401) {
+      auth.user = null;
+      renderLogin(data.error || "请先登录");
+    }
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const filename = downloadFilenameFromDisposition(res.headers.get("content-disposition"), fallbackFilename);
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(href);
+}
+
 function canView(viewKey) {
   if (!auth.user) return false;
   const allowed = ROLE_VIEWS[auth.user.role];
@@ -1950,12 +1986,20 @@ function issueRows(issues, sourceKey) {
 function auditSourceMeta(report) {
   if (!report) return "";
   const fileName = String(report.source_file || "").split(/[\\/]/).pop();
+  const reconcile = report.reconcile || {};
+  const internalOnly = auditInternalOnlyCount(report);
   return `
     <div class="audit-source-meta">
       <span>月份：${escapeHtml(report.month_key || state?.settings?.month_key || "")}</span>
       <span>工作表：${escapeHtml(report.sheet_name || "-")}</span>
       <span>扫描课程：${Number(report.scanned_lessons || 0)}</span>
+      ${report.reconcile ? `<span>导入前课程：${Number(reconcile.dbCourseCountBefore || 0)}</span>` : ""}
+      ${report.reconcile ? `<span>导入后课程：${Number(reconcile.dbCourseCountAfter || 0)}</span>` : ""}
+      ${report.reconcile ? `<span>系统多余：${Number(reconcile.internalOnly || 0)}</span>` : ""}
+      ${report.reconcile ? `<span>源文件新增：${Number(reconcile.sourceOnly || 0)}</span>` : ""}
+      ${report.reconcile ? `<span>字段变更：${Number(reconcile.changed || 0)}</span>` : ""}
       ${fileName ? `<span>文件：${escapeHtml(fileName)}</span>` : ""}
+      ${internalOnly ? `<span>系统中存在 ${internalOnly} 条源文件不存在的课程记录。</span><button class="btn danger audit-clean-internal-only" type="button">处理系统多余课程</button>` : ""}
     </div>
   `;
 }
@@ -1970,7 +2014,7 @@ function groupedIssueTable(report, sourceKey) {
     bySeverity[issue.severity].push(issue);
   }
   return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "WARN"].filter((severity) => bySeverity[severity]?.length).map((severity) => `
-    <details class="audit-group" ${severity === "CRITICAL" ? "open" : ""}>
+    <details class="audit-group" ${["CRITICAL", "HIGH"].includes(severity) ? "open" : ""}>
       <summary><span class="severity-pill ${severity}">${severity}</span><strong>${bySeverity[severity].length}</strong></summary>
       <div class="table-wrap">
         <table class="audit-table">
@@ -2034,6 +2078,30 @@ function auditIssueByLogId(sourceKey, logId) {
   return (report?.issues || []).find((issue) => String(issue.audit_log_id || "") === String(logId || ""));
 }
 
+function auditInternalOnlyIssues(report) {
+  return (report?.issues || []).filter((issue) => issue.type === "internal-only");
+}
+
+function auditInternalOnlyCount(report) {
+  return Number(report?.reconcile?.internalOnly || auditInternalOnlyIssues(report).length || 0);
+}
+
+function basenameFromPath(value) {
+  return String(value || "").split(/[\\/]/).pop();
+}
+
+function auditSourceFilename(report) {
+  const reportFile = basenameFromPath(report?.source_file);
+  const monthKey = report?.month_key || state?.settings?.month_key || activeMonth;
+  const workbooks = state.source_workbooks || [];
+  const reportWorkbook = workbooks.find((item) => item.filename === reportFile && item.month_key === monthKey);
+  if (reportWorkbook) return reportWorkbook.filename;
+  const selectedWorkbook = workbooks.find((item) => item.filename === auditSourceWorkbook && item.month_key === monthKey);
+  if (selectedWorkbook) return selectedWorkbook.filename;
+  const matched = workbooks.find((item) => item.month_key === monthKey);
+  return matched?.filename || "";
+}
+
 function removeAuditIssueByLogId(sourceKey, logId) {
   const report = auditState[sourceKey];
   if (!report?.issues) return;
@@ -2077,6 +2145,60 @@ async function applyAuditIssue(issue) {
   if (issue.audit_log_id) removeAuditIssueByLogId("internalReport", issue.audit_log_id);
   await refreshAuditLogs();
   alert(`修复完成：${result.fixed} 条，跳过 ${result.skipped} 条。已备份：${result.backup}`);
+  await load();
+}
+
+function internalOnlyLessonLine(row) {
+  return [
+    `#${row.id || row.lessonId || ""}`,
+    row.date || "",
+    row.student || row.student_names || "",
+    row.teacher || row.teacher_name || "",
+    row.time_slot || "",
+    row.subject || "",
+    row.classroom || "",
+    `金额:${row.amount ?? row.teacher_salary ?? ""}`,
+    `创建:${row.created_at || ""}`,
+    `更新:${row.updated_at || ""}`,
+  ].filter(Boolean).join(" | ");
+}
+
+async function handleInternalOnlyCleanup() {
+  const report = auditState.xlsxReport;
+  if (!report) return alert("请先运行源头对账");
+  const monthKey = report.month_key || state.settings.month_key;
+  const filename = auditSourceFilename(report);
+  const preview = await request("/api/reconcile/internal-only-lessons/preview", {
+    method: "POST",
+    body: { month: monthKey, filename },
+  });
+  if (!preview.canApply || !preview.lessons?.length) {
+    auditState.xlsxReport = { ...report, reconcile: { ...(report.reconcile || {}), internalOnly: 0 } };
+    render();
+    return alert(preview.warning || "当前没有系统多余课程。");
+  }
+  const shown = preview.lessons.map(internalOnlyLessonLine).join("\n");
+  const message = [
+    `这些课程存在于系统数据库中，但不在当前月份源文件中。`,
+    `确认后将从系统课程记录中删除，仅限当前月份，共 ${preview.internalOnlyCount} 条。此操作不可撤销。是否继续？`,
+    "",
+    shown,
+  ].join("\n");
+  if (!confirm(message)) return;
+  const result = await request("/api/reconcile/internal-only-lessons/apply", {
+    method: "POST",
+    body: {
+      month: monthKey,
+      filename: preview.source_file || filename,
+      confirm: true,
+      expectedCount: preview.internalOnlyCount,
+      lessonIds: preview.lessons.map((row) => row.id || row.lessonId).filter(Boolean),
+    },
+  });
+  auditState.xlsxReport = result.audit || auditState.xlsxReport;
+  await refreshAuditLogs();
+  await refreshAuditEvents();
+  alert(`已清理 ${result.deletedCount || 0} 条系统多余课程。已备份：${result.backup || "已生成"}`);
   await load();
 }
 
@@ -4559,6 +4681,15 @@ function renderAudit() {
 
     <div class="band audit-panel">
       <div class="section-head">
+        <div class="section-title">数据导出</div>
+      </div>
+      <div class="audit-toolbar">
+        <button class="btn primary export-core-workbook" type="button" ${auditState.busy ? "disabled" : ""}>导出核心 Excel</button>
+      </div>
+    </div>
+
+    <div class="band audit-panel">
+      <div class="section-head">
         <div class="section-title">源头对账</div>
       </div>
       <div class="audit-toolbar">
@@ -7008,6 +7139,25 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".export-core-workbook").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const monthKey = state.settings.month_key;
+      auditState.busy = true;
+      render();
+      try {
+        await downloadBlob(
+          `/api/export/core-workbook.xlsx?month=${encodeURIComponent(monthKey)}`,
+          `黎明教育_${monthLabel()}_核心数据.xlsx`,
+        );
+      } catch (error) {
+        alert(error.message || "导出核心 Excel 失败");
+      } finally {
+        auditState.busy = false;
+        render();
+      }
+    });
+  });
+
   document.querySelectorAll(".audit-run-internal").forEach((button) => {
     button.addEventListener("click", async () => {
       auditState.busy = true;
@@ -7029,6 +7179,19 @@ function wireEvents() {
       await refreshAuditLogs();
       await refreshAuditEvents();
       render();
+    });
+  });
+
+  document.querySelectorAll(".audit-clean-internal-only").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await handleInternalOnlyCleanup();
+      } catch (error) {
+        alert(error.message || "处理系统多余课程失败");
+      } finally {
+        button.disabled = false;
+      }
     });
   });
 
