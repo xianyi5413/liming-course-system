@@ -2009,6 +2009,22 @@ tr.group-break:hover td {
   background: var(--group-hover);
 }
 
+.course-table.week-detail-table tbody tr.lesson-row-depth-0:not(.abnormal) > td {
+  background-color: var(--panel);
+}
+
+.course-table.week-detail-table tbody tr.lesson-row-depth-1:not(.abnormal) > td {
+  background-color: rgba(59, 130, 246, 0.10);
+}
+
+.course-table.week-detail-table tbody tr.lesson-row-depth-0:not(.abnormal):hover > td {
+  background-color: var(--surface-hover);
+}
+
+.course-table.week-detail-table tbody tr.lesson-row-depth-1:not(.abnormal):hover > td {
+  background-color: rgba(59, 130, 246, 0.16);
+}
+
 td.grade-cell {
   font-weight: 700;
 }
@@ -3023,11 +3039,14 @@ select.control,
   position: sticky;
   top: 0;
   z-index: 1;
+  padding: 12px 16px;
+  text-align: center;
   color: var(--ink-strong);
-  background: var(--section-head);
-  font-size: var(--text-caption);
+  background: var(--panel);
+  font-size: 1rem;
   font-weight: 900;
-  letter-spacing: 0;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
 }
 
 .profile-table th,

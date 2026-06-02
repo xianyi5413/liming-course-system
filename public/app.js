@@ -3647,10 +3647,26 @@ function renderMatrixDateFilter() {
   `;
 }
 
+function weekDetailGroupKey(row) {
+  const teacherName = String(row?.teacher_name ?? "").trim();
+  const date = String(row?.date ?? "").trim();
+  return `${teacherName}__${date}`;
+}
+
 function renderWeek() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData();
   const visibleConflicts = visibleConflictIssues(conflicts).issues;
   const showSalary = canArea("salary");
+  let groupIndex = -1;
+  let lastGroupKey = null;
+  const decoratedRows = rows.map((row) => {
+    const groupKey = weekDetailGroupKey(row);
+    if (groupKey !== lastGroupKey) {
+      groupIndex += 1;
+      lastGroupKey = groupKey;
+    }
+    return { row, depthClass: `lesson-row-depth-${groupIndex % 2}` };
+  });
   renderTopbar(
     `${monthLabel()} 周课表`,
     `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
@@ -3667,16 +3683,15 @@ function renderWeek() {
         </div>
       </div>
       <div class="table-wrap">
-        <table class="course-table">
+        <table class="course-table week-detail-table">
           <thead>
             <tr><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th>" : ""}<th>学生人数</th></tr>
           </thead>
           <tbody>
-            ${rows.map((row, index) => {
-              const next = rows[index + 1];
-              const groupBreak = next && next.teacher_name !== row.teacher_name;
+            ${decoratedRows.map(({ row, depthClass }) => {
+              const rowClass = [isAbnormal(row) ? "abnormal" : "", depthClass].filter(Boolean).join(" ");
               return `
-                <tr class="${isAbnormal(row) ? "abnormal" : ""} ${groupBreak ? "group-break" : ""}">
+                <tr class="${rowClass}">
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                   <td class="text-cell">${escapeHtml(row.date)}</td>
                   <td class="text-cell">${statusBadge(rowStatus(row))}</td>
