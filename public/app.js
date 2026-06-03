@@ -801,10 +801,9 @@ async function load() {
   state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`)
     .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }));
   if (loadGeneration !== thisGeneration) return;
-  const students = uniqueSorted([
-    ...state.derived.student_summary.map((row) => row.student_name),
-    ...(state.profile_students || []).map((row) => row.name),
-  ]);
+  const students = uniqueSorted((state.profile_students || [])
+    .map((row) => String(row.name || "").trim())
+    .filter(Boolean));
   if (selectedStudent && !students.includes(selectedStudent)) selectedStudent = "";
   studentQueryNameDraft = selectedStudent || studentQueryNameDraft;
   state.student_history = selectedStudent
@@ -1524,10 +1523,16 @@ function uniqueSorted(values) {
     .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
 }
 
-function lessonFilterOptions(rows) {
+function lessonRowsForOption(rows, filter, excludeField, options = {}) {
+  const optionFilter = { ...filter, [excludeField]: "" };
+  return rows.filter((row) => lessonMatchesFilter(row, optionFilter, options));
+}
+
+function dynamicLessonFilterOptions(rows, filter, options = {}) {
   return {
-    teachers: uniqueSorted(rows.map((row) => row.teacher_name)),
-    students: uniqueSorted(rows.flatMap((row) => splitStudents(row.student_names))),
+    teachers: uniqueSorted(lessonRowsForOption(rows, filter, "teacher", options).map((row) => row.teacher_name)),
+    students: uniqueSorted(lessonRowsForOption(rows, filter, "student", options).flatMap((row) => splitStudents(row.student_names))),
+    statuses: uniqueSorted(lessonRowsForOption(rows, filter, "status", options).map((row) => rowStatus(row))),
   };
 }
 
@@ -1593,6 +1598,11 @@ function filterComboControl({ className, field, value, values, placeholder = "�
   `;
 }
 
+function rowsForFilterOption(rows, filter, excludeField, matcher) {
+  const optionFilter = { ...filter, [excludeField]: "" };
+  return rows.filter((row) => matcher(row, optionFilter));
+}
+
 function textContains(value, filter) {
   const needle = String(filter || "").trim().toLowerCase();
   if (!needle) return true;
@@ -1616,7 +1626,8 @@ const priceFilterOptions = [["positive", "正常价"], ["zero", "0 元"]];
 const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
 
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
-  const opts = lessonFilterOptions(rows);
+  const matchOptions = compact ? { includeDate: false, includeStatus: false, includeQuery: false } : {};
+  const opts = dynamicLessonFilterOptions(rows, lessonFilter, matchOptions);
   const teacherSelect = `
     <label class="filter-field">
       <span>老师</span>
@@ -1650,7 +1661,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
     </div>
     <label class="filter-field">
       <span>状态</span>
-      ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: statusValues(), placeholder: "输入或选择状态" })}
+      ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
     </label>
     <label class="filter-field filter-search">
       <span>搜索</span>
@@ -1696,8 +1707,7 @@ function feeDetailStatusOptions() {
   return uniqueSorted([...statusValues(), "未上", "暂停", "调课"]);
 }
 
-function feeDetailMatchesFilter(row) {
-  const filter = feeDetailsFilter;
+function feeDetailMatchesFilter(row, filter = feeDetailsFilter) {
   if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
   if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
@@ -1718,33 +1728,41 @@ function feeDetailMatchesFilter(row) {
   return true;
 }
 
+function dynamicFeeDetailsFilterOptions(rows, filter = feeDetailsFilter) {
+  const rowsFor = (field) => rowsForFilterOption(rows, filter, field, feeDetailMatchesFilter);
+  return {
+    students: uniqueSorted(rowsFor("student").map((row) => row.student_name)),
+    teachers: uniqueSorted(rowsFor("teacher").map((row) => row.teacher_name)),
+    grades: uniqueSorted(rowsFor("grade").map((row) => row.grade)),
+    statuses: uniqueSorted(rowsFor("status").map((row) => rowStatus(row))),
+    sources: uniqueSorted(rowsFor("source").map((row) => priceSourceLabel(priceSourceFilterValue(row.price_source)))),
+  };
+}
+
 function renderFeeDetailsFilterBar(rows, filteredRows) {
-  const students = uniqueSorted(rows.map((row) => row.student_name));
-  const teachers = uniqueSorted(rows.map((row) => row.teacher_name));
-  const grades = uniqueSorted(rows.map((row) => row.grade));
-  const sourceOptions = ["标准价", "个性价", "手动", "考试手填", "试课免费", "退费/减免"];
+  const opts = dynamicFeeDetailsFilterOptions(rows);
   return `
     <div class="filter-bar">
       <div class="filter-controls">
         <label class="filter-field">
           <span>学生姓名</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: students, placeholder: "输入或选择学生" })}
+          ${filterComboControl({ className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
         </label>
         <label class="filter-field">
           <span>授课老师</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: teachers, placeholder: "输入或选择老师" })}
+          ${filterComboControl({ className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
         </label>
         <label class="filter-field">
           <span>年级</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: grades, placeholder: "输入或选择年级" })}
+          ${filterComboControl({ className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
         </label>
         <label class="filter-field">
           <span>状态</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: feeDetailStatusOptions(), placeholder: "输入或选择状态" })}
+          ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
         </label>
         <label class="filter-field">
           <span>价格来源</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: sourceOptions, placeholder: "输入或选择来源" })}
+          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "输入或选择来源" })}
         </label>
         <label class="filter-field filter-date-range">
           <span>日期</span>
@@ -1763,12 +1781,12 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
   `;
 }
 
-function summaryMatchesFilter(row) {
-  if (summaryFilter.student && !row.student_name.toLowerCase().includes(summaryFilter.student.toLowerCase())) return false;
-  if (summaryFilter.grade && !textContains(row.grade, summaryFilter.grade)) return false;
-  if (summaryFilter.balance === "actual" && numberValue(row.actual_balance) === 0) return false;
-  if (summaryFilter.balance === "gift" && numberValue(row.gift_balance) === 0) return false;
-  if (summaryFilter.balance === "zero" && (numberValue(row.actual_balance) !== 0 || numberValue(row.gift_balance) !== 0)) return false;
+function summaryMatchesFilter(row, filter = summaryFilter) {
+  if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  if (filter.balance === "actual" && numberValue(row.actual_balance) === 0) return false;
+  if (filter.balance === "gift" && numberValue(row.gift_balance) === 0) return false;
+  if (filter.balance === "zero" && (numberValue(row.actual_balance) !== 0 || numberValue(row.gift_balance) !== 0)) return false;
   return true;
 }
 
@@ -1778,9 +1796,16 @@ function summaryRows() {
     : state.derived.student_summary || [];
 }
 
+function dynamicSummaryFilterOptions(rows, filter = summaryFilter) {
+  const rowsFor = (field) => rowsForFilterOption(rows, filter, field, summaryMatchesFilter);
+  return {
+    students: uniqueSorted(rowsFor("student").map((row) => row.student_name)),
+    grades: uniqueSorted(rowsFor("grade").map((row) => row.grade)),
+  };
+}
+
 function renderSummaryFilterBar(rows, filteredRows) {
-  const students = uniqueSorted(rows.map((row) => row.student_name));
-  const grades = uniqueSorted(rows.map((row) => row.grade));
+  const opts = dynamicSummaryFilterOptions(rows);
   return `
     <div class="filter-bar compact summary-filter-bar">
       <div class="segmented summary-scope-toggle">
@@ -1788,9 +1813,9 @@ function renderSummaryFilterBar(rows, filteredRows) {
         <button class="segmented-option summary-scope-option ${summaryScope === "toDate" ? "active" : ""}" type="button" data-scope="toDate">迄今为止</button>
       </div>
       <label>学生姓名</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: students, placeholder: "输入或选择学生" })}
+      ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
       <label>年级</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: grades, placeholder: "输入或选择年级" })}
+      ${filterComboControl({ className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
       <label>余额状态</label>
       ${filterComboControl({ className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "输入或选择余额状态" })}
       <div class="filter-summary">
@@ -3647,10 +3672,26 @@ function renderMatrixDateFilter() {
   `;
 }
 
+function weekDetailGroupKey(row) {
+  const teacherName = String(row?.teacher_name ?? "").trim();
+  const date = String(row?.date ?? "").trim();
+  return `${teacherName}__${date}`;
+}
+
 function renderWeek() {
   const { ranges, range, weekRows, rows, conflicts } = weekViewData();
   const visibleConflicts = visibleConflictIssues(conflicts).issues;
   const showSalary = canArea("salary");
+  let groupIndex = -1;
+  let lastGroupKey = null;
+  const decoratedRows = rows.map((row) => {
+    const groupKey = weekDetailGroupKey(row);
+    if (groupKey !== lastGroupKey) {
+      groupIndex += 1;
+      lastGroupKey = groupKey;
+    }
+    return { row, depthClass: `lesson-row-depth-${groupIndex % 2}` };
+  });
   renderTopbar(
     `${monthLabel()} 周课表`,
     `${range.label} · ${visibleConflicts.length ? `发现 ${visibleConflicts.length} 条冲突` : "无时间冲突"}`,
@@ -3667,16 +3708,15 @@ function renderWeek() {
         </div>
       </div>
       <div class="table-wrap">
-        <table class="course-table">
+        <table class="course-table week-detail-table">
           <thead>
             <tr><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th>" : ""}<th>学生人数</th></tr>
           </thead>
           <tbody>
-            ${rows.map((row, index) => {
-              const next = rows[index + 1];
-              const groupBreak = next && next.teacher_name !== row.teacher_name;
+            ${decoratedRows.map(({ row, depthClass }) => {
+              const rowClass = [isAbnormal(row) ? "abnormal" : "", depthClass].filter(Boolean).join(" ");
               return `
-                <tr class="${isAbnormal(row) ? "abnormal" : ""} ${groupBreak ? "group-break" : ""}">
+                <tr class="${rowClass}">
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                   <td class="text-cell">${escapeHtml(row.date)}</td>
                   <td class="text-cell">${statusBadge(rowStatus(row))}</td>
@@ -3718,7 +3758,7 @@ function renderWeekMatrix() {
 function renderFeeDetails() {
   ensureFeeDetailsFilterMonth();
   const rows = state.derived.fee_details;
-  const visibleRows = rows.filter(feeDetailMatchesFilter);
+  const visibleRows = rows.filter((row) => feeDetailMatchesFilter(row));
   const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
   renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${money(total)} 元`);
   contentEl.innerHTML = `
@@ -3759,7 +3799,7 @@ function renderFeeDetails() {
 
 function renderSummary() {
   const rows = summaryRows();
-  const visibleRows = rows.filter(summaryMatchesFilter);
+  const visibleRows = rows.filter((row) => summaryMatchesFilter(row));
   const totalFee = rows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
   const totalBalance = rows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
   const filteredFee = visibleRows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
@@ -4381,18 +4421,35 @@ function renderFinance() {
   }
 }
 
+function currentRechargeFilter() {
+  return {
+    source: rechargeSourceFilter,
+    student: rechargeStudentFilter,
+    grade: rechargeGradeFilter,
+  };
+}
+
+function rechargeMatchesFilter(row, filter = currentRechargeFilter()) {
+  const source = rechargeSource(row);
+  if (filter.source === "carry_over" && source !== "carry_over") return false;
+  if (filter.source === "manual" && source === "carry_over") return false;
+  if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  return true;
+}
+
+function dynamicRechargeFilterOptions(rows, filter = currentRechargeFilter()) {
+  const rowsFor = (field) => rowsForFilterOption(rows, filter, field, rechargeMatchesFilter);
+  return {
+    students: uniqueSorted(rowsFor("student").map((row) => row.student_name)),
+    grades: uniqueSorted(rowsFor("grade").map((row) => row.grade)),
+  };
+}
+
 function renderRecharges() {
   const rows = state.derived.student_summary;
-  const students = uniqueSorted(rows.map((row) => row.student_name));
-  const grades = uniqueSorted(rows.map((row) => row.grade));
-  const visibleRows = rows.filter((row) => {
-    const source = rechargeSource(row);
-    if (rechargeSourceFilter === "carry_over" && source !== "carry_over") return false;
-    if (rechargeSourceFilter === "manual" && source === "carry_over") return false;
-    if (rechargeStudentFilter && !row.student_name.toLowerCase().includes(rechargeStudentFilter.toLowerCase())) return false;
-    if (rechargeGradeFilter && !textContains(row.grade, rechargeGradeFilter)) return false;
-    return true;
-  });
+  const opts = dynamicRechargeFilterOptions(rows);
+  const visibleRows = rows.filter((row) => rechargeMatchesFilter(row));
   renderTopbar(`${monthLabel()} 充值记录`, `已显示 ${visibleRows.length} / 共 ${rows.length} 名学生`);
   contentEl.innerHTML = `
     <div class="band">
@@ -4400,9 +4457,9 @@ function renderRecharges() {
         <label>来源</label>
         ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
         <label>学生姓名</label>
-        ${filterComboControl({ className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: uniqueSorted(rows.map((row) => row.student_name)), placeholder: "输入或选择学生", dataAttr: "field" })}
+        ${filterComboControl({ className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
         <label>年级</label>
-        ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: grades, placeholder: "输入或选择年级" })}
+        ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades, placeholder: "输入或选择年级" })}
         <button class="btn reset-recharge-filter" type="button">清空筛选</button>
       </div>
       <div class="table-wrap">
@@ -4626,7 +4683,9 @@ function studentStatementModal(report) {
 
 function renderStudentQuery() {
   const rows = state.derived.student_summary;
-  const studentNames = uniqueSorted([...rows.map((row) => row.student_name), ...(state.profile_students || []).map((row) => row.name)]);
+  const studentNames = uniqueSorted((state.profile_students || [])
+    .map((row) => String(row.name || "").trim())
+    .filter(Boolean));
   const report = studentStatementReport();
   const summary = selectedStudent ? report.summary : null;
   const details = selectedStudent ? (report.details || []) : [];
@@ -5059,10 +5118,9 @@ function renderStudentPricing() {
 function profileRows(kind = profileTab) {
   const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
   const usedTeachers = kind === "teachers" ? new Set(usedLessonLookupValues("teachers")) : null;
-  const usedStudents = kind === "students" ? new Set(usedLessonLookupValues("students")) : null;
   const scopedRows = kind === "teachers"
     ? rows.filter((row) => usedTeachers.has(String(row.name || "").trim()))
-    : rows.filter((row) => usedStudents.has(String(row.name || "").trim()));
+    : rows;
   const statusFilter = profileStatusFilter[kind] || "";
   const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
   const query = profileSearch.trim().toLowerCase();
