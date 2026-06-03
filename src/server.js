@@ -143,8 +143,24 @@ function initDb() {
       course_status TEXT DEFAULT '未上',
       status TEXT DEFAULT '待上',
       teacher_salary REAL DEFAULT 0,
+      teacher_salary_source TEXT DEFAULT '',
+      teacher_salary_rule_id INTEGER,
       month_key TEXT DEFAULT '',
       sort_order INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS teacher_salary_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacher_name TEXT NOT NULL,
+      grade TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      student_names TEXT NOT NULL,
+      salary_per_unit REAL NOT NULL DEFAULT 0,
+      unit_hours REAL NOT NULL DEFAULT 2,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      notes TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -355,6 +371,11 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
+  db.prepare(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_salary_rules_active_key
+    ON teacher_salary_rules(teacher_name, grade, subject, student_names)
+    WHERE is_active = 1
+  `).run();
 
   const rechargeColumns = db.prepare("PRAGMA table_info(recharge_records)").all().map((column) => column.name);
   if (!rechargeColumns.includes("source")) {
@@ -402,6 +423,17 @@ function initDb() {
   if (!lessonColumns.includes("status")) {
     db.prepare("ALTER TABLE lessons ADD COLUMN status TEXT DEFAULT ''").run();
   }
+  if (!lessonColumns.includes("teacher_salary_source")) {
+    db.prepare("ALTER TABLE lessons ADD COLUMN teacher_salary_source TEXT DEFAULT ''").run();
+  }
+  if (!lessonColumns.includes("teacher_salary_rule_id")) {
+    db.prepare("ALTER TABLE lessons ADD COLUMN teacher_salary_rule_id INTEGER").run();
+  }
+  db.prepare(`
+    UPDATE lessons
+    SET teacher_salary_source = 'legacy'
+    WHERE teacher_salary_source IS NULL OR TRIM(teacher_salary_source) = ''
+  `).run();
   db.prepare(`
     UPDATE lessons
     SET status = '考试'
@@ -495,6 +527,12 @@ function seedDefaultUsers() {
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function optionalNumber(value) {
+  if (value == null || (typeof value === "string" && value.trim() === "")) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function moneyRound(value) {
@@ -715,7 +753,10 @@ function xlsxTotalRow(values, rowIndex, monthKey, includeTeacherSalary = false) 
     notes: text(values[9]),
     course_status: text(values[10]),
   };
-  if (includeTeacherSalary) row.teacher_salary = num(values[11]);
+  if (includeTeacherSalary) {
+    row.teacher_salary = optionalNumber(values[11]);
+    row.teacher_salary_present = row.teacher_salary !== null;
+  }
   return row;
 }
 
@@ -789,7 +830,7 @@ function readXlsxTotalSheet(buffer, monthKey, options = {}) {
       const formula = xmlDecode(cellXml.match(/<f\b[^>]*>([\s\S]*?)<\/f>/)?.[1] || "");
       if (value !== "" || formula) cells.push({ address: ref, value, formula });
     }
-    const row = xlsxTotalRow(values, rowIndex, monthKey);
+    const row = xlsxTotalRow(values, rowIndex, monthKey, true);
     if (!xlsxLessonHasCandidateData(row)) continue;
     rawCandidateRows += 1;
     const skipReasons = xlsxLessonSkipReasons(row);
@@ -4075,6 +4116,335 @@ function courseClassKey(row) {
   ].join("+");
 }
 
+function teacherSalaryRuleKey(row) {
+  return [
+    text(row.teacher_name),
+    text(row.grade),
+    text(row.subject),
+    normalizedStudents(row.student_names),
+  ].join("\u0001");
+}
+
+function teacherSalaryRules() {
+  return all(`
+    SELECT *
+    FROM teacher_salary_rules
+    ORDER BY is_active DESC, teacher_name, grade, subject, student_names, id
+  `);
+}
+
+function activeTeacherSalaryRuleForLesson(lesson) {
+  const teacherName = text(lesson.teacher_name);
+  const grade = text(lesson.grade);
+  const subject = text(lesson.subject);
+  const studentNames = normalizedStudents(lesson.student_names);
+  if (!teacherName || !grade || !subject || !studentNames) return null;
+  return get(`
+    SELECT *
+    FROM teacher_salary_rules
+    WHERE salary_per_unit > 0
+      AND teacher_name = ?
+      AND grade = ?
+      AND subject = ?
+      AND student_names = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `, [teacherName, grade, subject, studentNames]);
+}
+
+function normalizeTeacherSalaryRuleInput(body, current = {}) {
+  const teacherName = Object.prototype.hasOwnProperty.call(body, "teacher_name") ? text(body.teacher_name) : text(current.teacher_name);
+  const grade = Object.prototype.hasOwnProperty.call(body, "grade") ? text(body.grade) : text(current.grade);
+  const subject = Object.prototype.hasOwnProperty.call(body, "subject") ? text(body.subject) : text(current.subject);
+  const studentNames = Object.prototype.hasOwnProperty.call(body, "student_names")
+    ? normalizedStudents(body.student_names)
+    : normalizedStudents(current.student_names);
+  const salaryPerUnit = Object.prototype.hasOwnProperty.call(body, "salary_per_unit")
+    ? optionalNumber(body.salary_per_unit)
+    : optionalNumber(current.salary_per_unit);
+  const unitHoursValue = Object.prototype.hasOwnProperty.call(body, "unit_hours")
+    ? optionalNumber(body.unit_hours)
+    : optionalNumber(current.unit_hours);
+  const unitHours = unitHoursValue == null ? 2 : unitHoursValue;
+  const isActive = Object.prototype.hasOwnProperty.call(body, "is_active")
+    ? (Number(body.is_active) === 0 ? 0 : 1)
+    : (Number(current.is_active) === 0 ? 0 : 1);
+  if (!teacherName || !grade || !subject || !studentNames) {
+    return { error: "老师、年级、科目和学生集合均为必填项", status: 400 };
+  }
+  if (salaryPerUnit == null || salaryPerUnit < 0) {
+    return { error: "每课时薪资必须是大于或等于 0 的有效数字", status: 400 };
+  }
+  if (!Number.isFinite(unitHours) || unitHours <= 0) {
+    return { error: "课时小时数必须是大于 0 的有效数字", status: 400 };
+  }
+  return {
+    teacher_name: teacherName,
+    grade,
+    subject,
+    student_names: studentNames,
+    salary_per_unit: moneyRound(salaryPerUnit),
+    unit_hours: unitHours,
+    is_active: isActive,
+    notes: Object.prototype.hasOwnProperty.call(body, "notes") ? text(body.notes) : text(current.notes),
+  };
+}
+
+function activeTeacherSalaryRuleConflict(rule, excludeId = 0) {
+  return get(`
+    SELECT *
+    FROM teacher_salary_rules
+    WHERE teacher_name = ?
+      AND grade = ?
+      AND subject = ?
+      AND student_names = ?
+      AND id <> ?
+    LIMIT 1
+  `, [rule.teacher_name, rule.grade, rule.subject, rule.student_names, Number(excludeId) || 0]);
+}
+
+function createTeacherSalaryRule(body) {
+  const rule = normalizeTeacherSalaryRuleInput(body);
+  if (rule.error) return rule;
+  if (activeTeacherSalaryRuleConflict(rule)) {
+    return { error: "相同老师、年级、科目和学生集合的启用规则已存在", status: 409 };
+  }
+  const result = db.prepare(`
+    INSERT INTO teacher_salary_rules(
+      teacher_name, grade, subject, student_names, salary_per_unit, unit_hours, is_active, notes
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    rule.teacher_name,
+    rule.grade,
+    rule.subject,
+    rule.student_names,
+    rule.salary_per_unit,
+    rule.unit_hours,
+    rule.is_active,
+    rule.notes,
+  );
+  return get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+}
+
+function updateTeacherSalaryRule(id, body) {
+  const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
+  if (!current) return { error: "薪资规则不存在", status: 404 };
+  const rule = normalizeTeacherSalaryRuleInput(body, current);
+  if (rule.error) return rule;
+  if (activeTeacherSalaryRuleConflict(rule, id)) {
+    return { error: "相同老师、年级、科目和学生集合的启用规则已存在", status: 409 };
+  }
+  db.prepare(`
+    UPDATE teacher_salary_rules
+    SET teacher_name = ?, grade = ?, subject = ?, student_names = ?,
+        salary_per_unit = ?, unit_hours = ?, is_active = ?, notes = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    rule.teacher_name,
+    rule.grade,
+    rule.subject,
+    rule.student_names,
+    rule.salary_per_unit,
+    rule.unit_hours,
+    rule.is_active,
+    rule.notes,
+    Number(id),
+  );
+  return get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
+}
+
+function deactivateTeacherSalaryRule(id) {
+  const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
+  if (!current) return { error: "薪资规则不存在", status: 404 };
+  db.prepare(`
+    UPDATE teacher_salary_rules
+    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(Number(id));
+  return get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
+}
+
+function syncTeacherSalaryRuleCandidatesFromLessons() {
+  return withTransaction(() => {
+    const existingKeys = new Set(teacherSalaryRules().map((rule) => teacherSalaryRuleKey(rule)));
+    const seenLessonKeys = new Set();
+    const skippedReasons = new Map();
+    const insert = db.prepare(`
+      INSERT INTO teacher_salary_rules(
+        teacher_name, grade, subject, student_names, salary_per_unit, unit_hours, is_active, notes
+      )
+      VALUES (?, ?, ?, ?, 0, 2, 0, ?)
+    `);
+    let createdCount = 0;
+    let existingCount = 0;
+    let scannedLessonCount = 0;
+    const createdRules = [];
+    for (const lesson of all(`
+      SELECT teacher_name, grade, subject, student_names
+      FROM lessons
+      ORDER BY teacher_name, grade, subject, student_names, id
+    `)) {
+      scannedLessonCount += 1;
+      const candidate = {
+        teacher_name: text(lesson.teacher_name),
+        grade: text(lesson.grade),
+        subject: text(lesson.subject),
+        student_names: normalizedStudents(lesson.student_names),
+      };
+      const missing = [];
+      if (!candidate.teacher_name) missing.push("缺少老师");
+      if (!candidate.grade) missing.push("缺少年级");
+      if (!candidate.subject) missing.push("缺少科目");
+      if (!candidate.student_names) missing.push("缺少学生");
+      if (missing.length) {
+        const reason = missing.join("、");
+        skippedReasons.set(reason, (skippedReasons.get(reason) || 0) + 1);
+        continue;
+      }
+      const key = teacherSalaryRuleKey(candidate);
+      if (seenLessonKeys.has(key)) continue;
+      seenLessonKeys.add(key);
+      if (existingKeys.has(key)) {
+        existingCount += 1;
+        continue;
+      }
+      const result = insert.run(
+        candidate.teacher_name,
+        candidate.grade,
+        candidate.subject,
+        candidate.student_names,
+        "自动候选：请填写每2小时薪资",
+      );
+      const created = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
+      createdRules.push(created);
+      existingKeys.add(key);
+      createdCount += 1;
+    }
+    return {
+      scannedLessonCount,
+      uniqueCandidateCount: seenLessonKeys.size,
+      createdCount,
+      existingCount,
+      skippedCount: [...skippedReasons.values()].reduce((sum, count) => sum + count, 0),
+      skippedReasons: [...skippedReasons.entries()].map(([reason, count]) => ({ reason, count })),
+      createdRules,
+    };
+  });
+}
+
+function parseLessonHours(timeSlot) {
+  const range = parseTimeRange(timeSlot);
+  if (!range) return null;
+  const hours = (range.end - range.start) / 60;
+  return Number.isFinite(hours) && hours > 0 ? hours : null;
+}
+
+function lessonSalaryUnits(timeSlot, unitHours = 2) {
+  const normalizedUnitHours = optionalNumber(unitHours);
+  const divisor = normalizedUnitHours != null && normalizedUnitHours > 0 ? normalizedUnitHours : 2;
+  const hours = parseLessonHours(timeSlot);
+  if (hours == null) {
+    return {
+      hours: null,
+      units: 1,
+      warning: `无法解析课程时间「${text(timeSlot) || "空"}」，已默认按 1 课时计算`,
+    };
+  }
+  return { hours, units: hours / divisor, warning: "" };
+}
+
+function calculateTeacherSalaryFromRule(rule, lesson) {
+  if (!rule) return null;
+  const unitResult = lessonSalaryUnits(lesson.time_slot, rule.unit_hours);
+  return {
+    rule_id: Number(rule.id),
+    salary: moneyRound(num(rule.salary_per_unit) * unitResult.units),
+    salary_per_unit: num(rule.salary_per_unit),
+    unit_hours: num(rule.unit_hours) || 2,
+    lesson_hours: unitResult.hours,
+    lesson_units: unitResult.units,
+    warning: unitResult.warning,
+  };
+}
+
+function resolvedTeacherSalaryForLesson(data, options = {}) {
+  const teacherSalary = optionalNumber(data.teacher_salary);
+  const explicitSalary = data.teacher_salary_present === true
+    || (
+      data.teacher_salary_present !== false
+      && Object.prototype.hasOwnProperty.call(data, "teacher_salary")
+      && teacherSalary !== null
+    );
+  if (explicitSalary && teacherSalary !== null) {
+    return {
+      teacher_salary: teacherSalary,
+      teacher_salary_source: text(data.teacher_salary_source) || text(options.explicitSource) || "manual",
+      teacher_salary_rule_id: optionalNumber(data.teacher_salary_rule_id),
+      warning: "",
+    };
+  }
+  if (options.autoTeacherSalary !== false) {
+    const rule = activeTeacherSalaryRuleForLesson(data);
+    const calculated = calculateTeacherSalaryFromRule(rule, data);
+    if (calculated) {
+      return {
+        teacher_salary: calculated.salary,
+        teacher_salary_source: "auto",
+        teacher_salary_rule_id: calculated.rule_id,
+        warning: calculated.warning,
+      };
+    }
+  }
+  return {
+    teacher_salary: null,
+    teacher_salary_source: "empty",
+    teacher_salary_rule_id: null,
+    warning: "",
+  };
+}
+
+function applyTeacherSalaryRulesToLessons(lessonIds) {
+  const ids = [...new Set((lessonIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return { error: "请至少选择一条课程记录", status: 400 };
+  if (ids.length > 500) return { error: "单次最多处理 500 条课程记录", status: 400 };
+  return withTransaction(() => {
+    const updatedLessons = [];
+    const skippedReasons = [];
+    const warnings = [];
+    for (const id of ids) {
+      const lesson = get("SELECT * FROM lessons WHERE id = ?", [id]);
+      if (!lesson) {
+        skippedReasons.push({ lesson_id: id, reason: "课程不存在" });
+        continue;
+      }
+      const rule = activeTeacherSalaryRuleForLesson(lesson);
+      const calculated = calculateTeacherSalaryFromRule(rule, lesson);
+      if (!calculated) {
+        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的教师薪资规则" });
+        continue;
+      }
+      db.prepare(`
+        UPDATE lessons
+        SET teacher_salary = ?, teacher_salary_source = 'auto',
+            teacher_salary_rule_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(calculated.salary, calculated.rule_id, id);
+      const updated = get("SELECT * FROM lessons WHERE id = ?", [id]);
+      updatedLessons.push(updated);
+      if (calculated.warning) warnings.push({ lesson_id: id, warning: calculated.warning });
+    }
+    return {
+      updatedCount: updatedLessons.length,
+      skippedCount: skippedReasons.length,
+      updatedLessons,
+      skippedReasons,
+      warnings,
+    };
+  });
+}
+
 function courseCompletionKey(row) {
   return [
     text(row.grade),
@@ -4738,7 +5108,12 @@ function sanitizeLessonRows(rows, user) {
     output = output.filter((row) => text(row.teacher_name) === text(user.teacher_name));
   }
   if (user.role === "owner" || user.role === "admin") return output;
-  return output.map((row) => ({ ...row, teacher_salary: 0 }));
+  return output.map((row) => ({
+    ...row,
+    teacher_salary: 0,
+    teacher_salary_source: "",
+    teacher_salary_rule_id: null,
+  }));
 }
 
 function sanitizeBootstrap(data, user) {
@@ -4900,6 +5275,18 @@ function xlsxLessonKey(row) {
   return [text(row.date), text(row.teacher_name), text(row.time_slot)].join("\u0001");
 }
 
+function xlsxLessonSalaryPreserveKey(row) {
+  return [
+    text(row.date),
+    text(row.teacher_name),
+    text(row.time_slot),
+    text(row.classroom),
+    text(row.grade),
+    text(row.subject),
+    normalizedStudents(row.student_names),
+  ].join("\u0001");
+}
+
 function compareXlsxLessons(monthKey, xlsxRows, options = {}) {
   const issues = [];
   const dbRows = all("SELECT * FROM lessons WHERE month_key = ?", [monthKey]);
@@ -5004,7 +5391,7 @@ function compareXlsxLessons(monthKey, xlsxRows, options = {}) {
     }
     const xSalary = moneyRound(num(xrow.teacher_salary));
     const dbSalary = moneyRound(num(dbRow.teacher_salary));
-    if (xSalary !== dbSalary) {
+    if (xrow.teacher_salary_present && xSalary !== dbSalary) {
       changed = true;
       addXlsxIssue(issues, {
         severity: "MEDIUM",
@@ -5791,6 +6178,16 @@ function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true, 
 
 function importLessonsFromWorkbook(buffer, monthKey, replace = true) {
   const { sheet_name: sheetName, rows } = readXlsxTotalRowsForImport(buffer, monthKey);
+  const existingByKey = new Map();
+  const existingBySalaryPreserveKey = new Map();
+  for (const row of all("SELECT * FROM lessons WHERE month_key = ?", [monthKey])) {
+    const key = xlsxLessonKey(row);
+    if (!existingByKey.has(key)) existingByKey.set(key, []);
+    existingByKey.get(key).push(row);
+    const salaryPreserveKey = xlsxLessonSalaryPreserveKey(row);
+    if (!existingBySalaryPreserveKey.has(salaryPreserveKey)) existingBySalaryPreserveKey.set(salaryPreserveKey, []);
+    existingBySalaryPreserveKey.get(salaryPreserveKey).push(row);
+  }
   if (replace) {
     const seen = new Set();
     const deleteByDate = db.prepare("DELETE FROM lessons WHERE date = ? AND month_key = ?");
@@ -5807,11 +6204,32 @@ function importLessonsFromWorkbook(buffer, monthKey, replace = true) {
   for (const row of rows) {
     upsertTeacher(row.teacher_name);
     for (const name of splitStudents(row.student_names)) upsertStudent(name, row.grade);
+    const lessonData = { ...row };
+    if (row.teacher_salary_present) {
+      lessonData.teacher_salary_source = "import";
+      lessonData.teacher_salary_rule_id = null;
+    } else {
+      const exactMatches = existingBySalaryPreserveKey.get(xlsxLessonSalaryPreserveKey(row)) || [];
+      const existingMatches = exactMatches.length === 1 ? exactMatches : (existingByKey.get(xlsxLessonKey(row)) || []);
+      const existing = existingMatches.length === 1 ? existingMatches[0] : null;
+      const existingSalary = optionalNumber(existing?.teacher_salary);
+      if (existing && existingSalary !== null) {
+        lessonData.teacher_salary = existingSalary;
+        lessonData.teacher_salary_present = true;
+        lessonData.teacher_salary_source = text(existing.teacher_salary_source) || "legacy";
+        lessonData.teacher_salary_rule_id = optionalNumber(existing.teacher_salary_rule_id);
+      } else {
+        lessonData.teacher_salary = null;
+        lessonData.teacher_salary_present = false;
+        lessonData.teacher_salary_source = "empty";
+        lessonData.teacher_salary_rule_id = null;
+      }
+    }
     insertLesson({
-      ...row,
-      month_key: row.month_key,
-      sort_order: row.source_row,
-    });
+      ...lessonData,
+      month_key: lessonData.month_key,
+      sort_order: lessonData.source_row,
+    }, { autoTeacherSalary: false, explicitSource: "import" });
     count += 1;
   }
   return { sheet_name: sheetName, lessons: count, rows };
@@ -5885,7 +6303,7 @@ function timeTokenToMinutes(value) {
 function parseTimeRange(value) {
   const raw = text(value)
     .replaceAll("：", ":")
-    .replace(/[—–~～至到]/g, "-")
+    .replace(/[—–－~～至到]/g, "-")
     .replace(/\s+/g, "");
   if (!raw) return null;
   const parts = raw.split("-").filter(Boolean);
@@ -6049,18 +6467,30 @@ function applyAuditPatch(issue) {
   if (patch.type === "insert_lesson" && patch.lesson) {
     if (patch.lesson.teacher_name) upsertTeacher(patch.lesson.teacher_name);
     for (const name of splitStudents(patch.lesson.student_names)) upsertStudent(name, patch.lesson.grade || "");
-    insertLesson(patch.lesson);
+    insertLesson({
+      ...patch.lesson,
+      teacher_salary_source: patch.lesson.teacher_salary_present ? "import" : "empty",
+      teacher_salary_rule_id: null,
+    }, { autoTeacherSalary: false, explicitSource: "import" });
     return true;
   }
   if (patch.type === "lesson" && patch.id) {
-    const allowed = ["teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject", "student_names", "notes", "course_status", "status", "teacher_salary"];
+    const allowed = [
+      "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
+      "student_names", "notes", "course_status", "status", "teacher_salary",
+      "teacher_salary_source", "teacher_salary_rule_id",
+    ];
     const payload = {};
     for (const field of allowed) {
       if (Object.prototype.hasOwnProperty.call(patch, field)) payload[field] = patch[field];
     }
     if (Object.keys(payload).length) {
       if (Object.prototype.hasOwnProperty.call(payload, "status")) Object.assign(payload, legacyStatusFields(payload.status));
-      patchTable("lessons", "id", Number(patch.id), [...allowed, "teacher_salary", "month_key", "sort_order"], { ...payload, updated_at: new Date().toISOString() });
+      if (Object.prototype.hasOwnProperty.call(payload, "teacher_salary")) {
+        payload.teacher_salary_source = "import";
+        payload.teacher_salary_rule_id = null;
+      }
+      patchTable("lessons", "id", Number(patch.id), [...allowed, "month_key", "sort_order", "updated_at"], { ...payload, updated_at: new Date().toISOString() });
       return true;
     }
   }
@@ -6202,16 +6632,18 @@ function patchTable(table, idField, idValue, allowedFields, data) {
   db.prepare(`UPDATE ${table} SET ${assignments} WHERE ${idField} = ?`).run(...params, idValue);
 }
 
-function insertLesson(data) {
+function insertLesson(data, options = {}) {
   const monthKey = data.month_key || getSetting("month_key");
   const status = deriveStatus(data);
   const legacy = legacyStatusFields(status);
+  const salary = resolvedTeacherSalaryForLesson(data, options);
   const result = db.prepare(`
     INSERT INTO lessons(
       teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
-      student_names, notes, course_status, status, teacher_salary, month_key, sort_order
+      student_names, notes, course_status, status, teacher_salary, teacher_salary_source,
+      teacher_salary_rule_id, month_key, sort_order
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     text(data.teacher_name),
     text(data.date || monthKey),
@@ -6224,11 +6656,14 @@ function insertLesson(data) {
     text(data.notes),
     text(data.course_status || legacy.course_status),
     status,
-    num(data.teacher_salary),
+    salary.teacher_salary,
+    salary.teacher_salary_source,
+    salary.teacher_salary_rule_id,
     text(monthKey),
     num(data.sort_order),
   );
-  return get("SELECT * FROM lessons WHERE id = ?", [Number(result.lastInsertRowid)]);
+  const lesson = get("SELECT * FROM lessons WHERE id = ?", [Number(result.lastInsertRowid)]);
+  return salary.warning ? { ...lesson, teacher_salary_warning: salary.warning } : lesson;
 }
 
 function copyLessons(body) {
@@ -6275,7 +6710,6 @@ function copyLessons(body) {
         notes: src.notes || "",
         course_status: resetStatus ? "未上" : src.course_status,
         status: resetStatus ? "待上" : src.status,
-        teacher_salary: src.teacher_salary,
         month_key: monthKeyFromDate(pair.target_date),
         sort_order: sortOrder,
       }));
@@ -6313,6 +6747,92 @@ async function handleApi(req, res, url) {
     return sendJson(res, result);
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
+
+  if (req.method === "GET" && url.pathname === "/api/teacher-salary-rules") {
+    return sendJson(res, { rules: teacherSalaryRules() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-salary-rules") {
+    const body = await readBody(req);
+    const rule = createTeacherSalaryRule(body);
+    if (rule.error) return sendError(res, rule.status || 400, rule.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "teacher_salary_rules", entity_id: String(rule.id), before: null, after: rule });
+    writeOperationLog(user, {
+      operation_type: "新增教师薪资规则",
+      operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
+      target_type: "teacher_salary_rules",
+      target_id: String(rule.id),
+    });
+    return sendJson(res, rule, 201);
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-salary-rules/sync-candidates") {
+    const result = syncTeacherSalaryRuleCandidatesFromLessons();
+    recordAuditEvent(req, user, {
+      action: "sync_candidates",
+      entity_type: "teacher_salary_rules",
+      entity_id: "lessons",
+      before: null,
+      after: result,
+    });
+    writeOperationLog(user, {
+      operation_type: "同步教师薪资规则候选",
+      operation_content: `扫描 ${result.scannedLessonCount} 节历史课，新增 ${result.createdCount} 条，已有 ${result.existingCount} 条，跳过 ${result.skippedCount} 条`,
+      target_type: "teacher_salary_rules",
+      target_id: result.createdRules.map((row) => row.id).join(","),
+    });
+    return sendJson(res, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/teacher-salary-rules/apply-selected") {
+    const body = await readBody(req);
+    const ids = [...new Set((body.lesson_ids || []).map(Number).filter(Boolean))];
+    const before = ids.length
+      ? all(`SELECT * FROM lessons WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, ids)
+      : [];
+    const result = applyTeacherSalaryRulesToLessons(ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "apply_selected",
+      entity_type: "teacher_salary_rules",
+      entity_id: "lessons",
+      before,
+      after: result,
+    });
+    writeOperationLog(user, {
+      operation_type: "按规则更新教师薪资",
+      operation_content: `所选 ${ids.length} 条，更新 ${result.updatedCount} 条，跳过 ${result.skippedCount} 条`,
+      target_type: "lessons",
+      target_id: result.updatedLessons.map((row) => row.id).join(","),
+    });
+    return sendJson(res, result);
+  }
+  const teacherSalaryRuleMatch = url.pathname.match(/^\/api\/teacher-salary-rules\/(\d+)$/);
+  if (teacherSalaryRuleMatch && req.method === "PUT") {
+    const id = Number(teacherSalaryRuleMatch[1]);
+    const before = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [id]);
+    const rule = updateTeacherSalaryRule(id, await readBody(req));
+    if (rule.error) return sendError(res, rule.status || 400, rule.error);
+    recordAuditEvent(req, user, { action: "update", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
+    writeOperationLog(user, {
+      operation_type: "修改教师薪资规则",
+      operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
+      target_type: "teacher_salary_rules",
+      target_id: String(id),
+    });
+    return sendJson(res, rule);
+  }
+  if (teacherSalaryRuleMatch && req.method === "DELETE") {
+    const id = Number(teacherSalaryRuleMatch[1]);
+    const before = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [id]);
+    const rule = deactivateTeacherSalaryRule(id);
+    if (rule.error) return sendError(res, rule.status || 400, rule.error);
+    recordAuditEvent(req, user, { action: "deactivate", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
+    writeOperationLog(user, {
+      operation_type: "停用教师薪资规则",
+      operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names}`,
+      target_type: "teacher_salary_rules",
+      target_id: String(id),
+    });
+    return sendJson(res, rule);
+  }
 
   if (req.method === "GET" && url.pathname === "/api/users") {
     return sendJson(res, { users: userRows(user), roles: USER_ROLES });
@@ -6778,7 +7298,10 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/lessons") {
     const body = await readBody(req);
-    const lesson = insertLesson(body);
+    const lessonData = { ...body };
+    delete lessonData.teacher_salary_source;
+    delete lessonData.teacher_salary_rule_id;
+    const lesson = insertLesson(lessonData);
     recordAuditEvent(req, user, { action: "create", entity_type: "lessons", entity_id: String(lesson.id), before: null, after: lesson });
     writeOperationLog(user, { operation_type: "创建课程", operation_content: `${text(body.teacher_name)} ${text(body.date)} ${text(body.time_slot)} ${text(body.subject)} ${text(body.student_names)}`, target_type: "lessons", target_id: String(lesson.id) });
     return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson) }, 201);
@@ -6789,6 +7312,28 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
     const payload = { ...body, updated_at: new Date().toISOString() };
+    delete payload.teacher_salary_source;
+    delete payload.teacher_salary_rule_id;
+    if (Object.prototype.hasOwnProperty.call(body, "teacher_salary")) {
+      const manualSalary = optionalNumber(body.teacher_salary);
+      payload.teacher_salary = manualSalary;
+      payload.teacher_salary_source = manualSalary === null ? "empty" : "manual";
+      payload.teacher_salary_rule_id = null;
+    } else {
+      const salaryMatchFields = ["teacher_name", "grade", "subject", "student_names", "time_slot"];
+      const matchFieldsChanged = salaryMatchFields.some((field) => Object.prototype.hasOwnProperty.call(body, field));
+      const currentSource = text(current.teacher_salary_source);
+      if (matchFieldsChanged && (!currentSource || currentSource === "empty" || currentSource === "auto")) {
+        const resolvedSalary = resolvedTeacherSalaryForLesson({
+          ...current,
+          ...body,
+          teacher_salary_present: false,
+        });
+        payload.teacher_salary = resolvedSalary.teacher_salary;
+        payload.teacher_salary_source = resolvedSalary.teacher_salary_source;
+        payload.teacher_salary_rule_id = resolvedSalary.teacher_salary_rule_id;
+      }
+    }
     if (Object.prototype.hasOwnProperty.call(body, "status")) {
       Object.assign(payload, legacyStatusFields(body.status));
     } else if (Object.prototype.hasOwnProperty.call(body, "lesson_status") || Object.prototype.hasOwnProperty.call(body, "course_status")) {
@@ -6796,7 +7341,8 @@ async function handleApi(req, res, url) {
     }
     auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
-      "student_names", "notes", "course_status", "status", "teacher_salary", "month_key", "sort_order",
+      "student_names", "notes", "course_status", "status", "teacher_salary", "teacher_salary_source",
+      "teacher_salary_rule_id", "month_key", "sort_order", "updated_at",
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     writeOperationLog(user, { operation_type: "修改课程", operation_content: `${text(updated.teacher_name)} ${text(updated.date)} ${text(updated.time_slot)} ${text(updated.subject)} ${text(updated.student_names)}`, target_type: "lessons", target_id: String(lessonMatch[1]) });

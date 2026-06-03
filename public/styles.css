@@ -1887,6 +1887,22 @@ td.text-cell {
   line-height: 1.5;
 }
 
+.teacher-salary-select-cell {
+  padding: 9px 12px;
+  text-align: center;
+}
+
+.teacher-salary-lesson-select:not(:disabled),
+.teacher-salary-select-all:not(:disabled) {
+  cursor: pointer;
+}
+
+.teacher-salary-lesson-select:disabled,
+.teacher-salary-select-all:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 tr.abnormal td {
   background: var(--warn-bg);
   color: var(--warn-fg);
