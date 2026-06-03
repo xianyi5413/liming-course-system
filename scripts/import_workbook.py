@@ -55,6 +55,15 @@ def number(value):
         return 0
 
 
+def optional_number(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def iso_date(value):
     if value in (None, ""):
         return ""
@@ -103,6 +112,23 @@ def split_students(value):
     return [part.strip() for part in re.split(r"[、,，;；]", text(value)) if part.strip()]
 
 
+def salary_preserve_key(date, teacher, time_slot, classroom, grade, subject, student_names):
+    students = sorted({
+        re.sub(r"\s+", "", name)
+        for name in split_students(student_names)
+        if re.sub(r"\s+", "", name)
+    })
+    return (
+        text(date),
+        text(teacher),
+        text(time_slot),
+        text(classroom),
+        text(grade),
+        text(subject),
+        "、".join(students),
+    )
+
+
 def valid_teacher_name(value):
     name = text(value)
     if not name or name == "合计" or name.startswith("#"):
@@ -145,6 +171,12 @@ def ensure_schema_exists(conn):
     ).fetchone()
     if not row:
         raise RuntimeError("数据库结构需要升级。请先运行 npm run init 以创建 teacher_adjustments_monthly。")
+    lesson_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(lessons)").fetchall()
+    }
+    required_columns = {"teacher_salary_source", "teacher_salary_rule_id"}
+    if not required_columns.issubset(lesson_columns):
+        raise RuntimeError("数据库结构需要升级。请先运行 npm run init 以创建教师薪资来源字段。")
 
 
 def upsert_student(conn, name, grade):
@@ -179,7 +211,7 @@ def lesson_rows(ws, fallback_month_key):
         student_names = text(ws.cell(row_idx, 9).value)
         notes = text(ws.cell(row_idx, 10).value)
         course_status = text(ws.cell(row_idx, 11).value)
-        teacher_salary = number(ws.cell(row_idx, 12).value)
+        teacher_salary = optional_number(ws.cell(row_idx, 12).value)
         if not any([teacher, date, lesson_status, time_slot, classroom, grade, subject, student_names, notes, course_status, teacher_salary]):
             continue
         if not date:
@@ -198,6 +230,7 @@ def lesson_rows(ws, fallback_month_key):
             "notes": notes,
             "course_status": course_status,
             "teacher_salary": teacher_salary,
+            "teacher_salary_present": teacher_salary is not None,
             "month_key": row_month_key,
             "status": derive_status(lesson_status, course_status),
         })
@@ -207,6 +240,24 @@ def lesson_rows(ws, fallback_month_key):
 def import_lessons(conn, wb, total_sheet_name, month_key, replace):
     ws = wb[total_sheet_name]
     rows = lesson_rows(ws, month_key)
+    existing_by_key = {}
+    existing_by_salary_preserve_key = {}
+    for existing in conn.execute(
+        """
+        SELECT date, teacher_name, time_slot, classroom, grade, subject, student_names, teacher_salary,
+               teacher_salary_source, teacher_salary_rule_id
+        FROM lessons
+        WHERE month_key = ?
+        """,
+        (month_key,),
+    ).fetchall():
+        key = (text(existing[0]), text(existing[1]), text(existing[2]))
+        existing_by_key.setdefault(key, []).append(existing)
+        exact_key = salary_preserve_key(
+            existing[0], existing[1], existing[2], existing[3],
+            existing[4], existing[5], existing[6]
+        )
+        existing_by_salary_preserve_key.setdefault(exact_key, []).append(existing)
     if replace:
         pairs = sorted({(row["date"], row["month_key"]) for row in rows if row["date"]})
         if pairs:
@@ -218,13 +269,30 @@ def import_lessons(conn, wb, total_sheet_name, month_key, replace):
         upsert_teacher(conn, row["teacher"])
         for name in split_students(row["student_names"]):
             upsert_student(conn, name, row["grade"])
+        teacher_salary = row["teacher_salary"]
+        teacher_salary_source = "import" if row["teacher_salary_present"] else "empty"
+        teacher_salary_rule_id = None
+        if not row["teacher_salary_present"]:
+            key = (text(row["date"]), text(row["teacher"]), text(row["time_slot"]))
+            exact_key = salary_preserve_key(
+                row["date"], row["teacher"], row["time_slot"], row["classroom"],
+                row["grade"], row["subject"], row["student_names"]
+            )
+            exact_matches = existing_by_salary_preserve_key.get(exact_key, [])
+            matches = exact_matches if len(exact_matches) == 1 else existing_by_key.get(key, [])
+            existing = matches[0] if len(matches) == 1 else None
+            if existing is not None and existing[7] is not None:
+                teacher_salary = existing[7]
+                teacher_salary_source = text(existing[8]) or "legacy"
+                teacher_salary_rule_id = existing[9]
         conn.execute(
             """
             INSERT INTO lessons(
               teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
-              student_names, notes, course_status, status, teacher_salary, month_key, sort_order
+              student_names, notes, course_status, status, teacher_salary, teacher_salary_source,
+              teacher_salary_rule_id, month_key, sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["teacher"],
@@ -238,7 +306,9 @@ def import_lessons(conn, wb, total_sheet_name, month_key, replace):
                 row["notes"],
                 row["course_status"] or "未上",
                 row["status"],
-                row["teacher_salary"],
+                teacher_salary,
+                teacher_salary_source,
+                teacher_salary_rule_id,
                 row["month_key"],
                 row["row_idx"],
             ),
