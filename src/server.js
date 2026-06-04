@@ -574,9 +574,13 @@ function weekdayCn(dateValue) {
   return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
 }
 
+function courseStatusValues() {
+  return mergeLookupValues(STATUS, "custom_course_statuses");
+}
+
 function deriveStatus(row = {}) {
   const current = text(row.status);
-  if (STATUS.includes(current)) return current;
+  if (courseStatusValues().includes(current)) return current;
   if (row.lesson_status === "试课") return "试课";
   if (row.lesson_status === "考试") return "考试";
   if (row.lesson_status === "上课（未缴费）") return "未缴费";
@@ -595,7 +599,7 @@ function compareGradeName(a, b) {
 }
 
 function legacyStatusFields(statusValue) {
-  const status = STATUS.includes(text(statusValue)) ? text(statusValue) : "待上";
+  const status = courseStatusValues().includes(text(statusValue)) ? text(statusValue) : "待上";
   if (status === "试课") return { lesson_status: "试课", course_status: "未上" };
   if (status === "考试") return { lesson_status: "考试", course_status: "未上" };
   if (status === "未缴费") return { lesson_status: "上课（未缴费）", course_status: "已上" };
@@ -1114,21 +1118,43 @@ function todayKey() {
   return dateKey(new Date());
 }
 
+function firstTeacherLessonDate(name) {
+  return text(get(`
+    SELECT MIN(date) AS first_lesson_date
+    FROM lessons
+    WHERE teacher_name = ? AND date IS NOT NULL AND TRIM(date) <> ''
+  `, [name])?.first_lesson_date);
+}
+
+function firstStudentLessonDate(name) {
+  const studentName = text(name);
+  if (!studentName) return "";
+  for (const lesson of all(`
+    SELECT date, student_names
+    FROM lessons
+    WHERE date IS NOT NULL AND TRIM(date) <> ''
+    ORDER BY date, id
+  `)) {
+    if (splitStudents(lesson.student_names).includes(studentName)) return text(lesson.date);
+  }
+  return "";
+}
+
 function teacherProfiles() {
   return all(`
     SELECT *
     FROM teachers
     ORDER BY CASE status WHEN '在职' THEN 0 WHEN '离职' THEN 2 ELSE 1 END, name
-  `);
+  `).map((row) => ({ ...row, first_lesson_date: firstTeacherLessonDate(row.name) }));
 }
 
 function studentProfiles() {
   return all(`
     SELECT *
     FROM students
-  `).sort((a, b) => (
-    ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3 }[a.status] ?? 1)
-    - ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3 }[b.status] ?? 1)
+  `).map((row) => ({ ...row, first_lesson_date: firstStudentLessonDate(row.name) })).sort((a, b) => (
+    ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[a.status] ?? 1)
+    - ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[b.status] ?? 1)
     || compareGradeName(a.grade, b.grade)
     || a.name.localeCompare(b.name, "zh-Hans-CN")
   ));
@@ -2477,6 +2503,40 @@ function rechargesInRange(range) {
   `, [range.start, range.end]);
 }
 
+function studentBalanceThroughDate(studentName, dateKeyValue) {
+  const name = text(studentName);
+  const dateKey = text(dateKeyValue);
+  if (!name || !validDateKey(dateKey)) return { actual_balance: 0, gift_balance: 0 };
+  const monthKey = monthKeyFromDate(dateKey);
+  if (!validMonthKey(monthKey)) return { actual_balance: 0, gift_balance: 0 };
+  const previousMonth = previousMonthKey(monthKey);
+  const previousSummary = validMonthKey(previousMonth)
+    ? studentSummary(feeDetails(previousMonth), previousMonth, true).find((row) => row.student_name === name)
+    : null;
+  const currentSummary = studentSummary(feeDetails(monthKey), monthKey, true).find((row) => row.student_name === name);
+  const storedPrevActual = num(currentSummary?.prev_actual);
+  const storedPrevGift = num(currentSummary?.prev_gift);
+  const prevActual = previousSummary ? num(previousSummary.actual_balance) : storedPrevActual;
+  const prevGift = previousSummary ? num(previousSummary.gift_balance) : storedPrevGift;
+  const details = feeDetails(monthKey).filter((row) => (
+    row.student_name === name && row.effective && row.date >= monthKey && row.date <= dateKey
+  ));
+  const recharges = rechargesInRange({ start: monthKey, end: dateKey }).filter((row) => row.student_name === name);
+  const curRecharge = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0));
+  const curGift = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_gift), 0));
+  const totalFee = moneyRound(details.reduce((sum, row) => sum + num(row.unit_price), 0));
+  const actualBase = moneyRound(prevActual + curRecharge + Math.min(prevGift, 0));
+  const giftBase = moneyRound(Math.max(prevGift, 0) + curGift);
+  const actualConsumption = moneyRound(Math.min(totalFee, Math.max(0, actualBase)));
+  const remainingFee = moneyRound(totalFee - actualConsumption);
+  const giftConsumption = moneyRound(Math.min(remainingFee, Math.max(0, giftBase)));
+  const unpaidFee = moneyRound(remainingFee - giftConsumption);
+  return {
+    actual_balance: moneyRound(actualBase - actualConsumption - unpaidFee),
+    gift_balance: moneyRound(giftBase - giftConsumption),
+  };
+}
+
 function financeBase(range) {
   const monthKeys = monthsCovered(range.start, range.end);
   const details = [];
@@ -2939,7 +2999,7 @@ function normalizeAuditName(value) {
 }
 
 function inactiveStudentStatus(status) {
-  return ["离校", "已流出"].includes(text(status));
+  return ["离校", "已流出", "已毕业"].includes(text(status));
 }
 
 function studentBalanceOpen(row) {
@@ -3865,6 +3925,7 @@ function studentStatementData(studentName, range) {
     details.push(...studentDetails);
     const effectiveDetails = studentDetails.filter((row) => row.effective);
     const monthRecharge = recharges.filter((row) => (row.event_date || row.month_key) >= monthKey && (row.event_date || row.month_key) <= monthEndKey(monthKey));
+    const monthSummary = studentSummary(monthDetails, monthKey, true).find((row) => row.student_name === name);
     if (effectiveDetails.length || monthRecharge.length) {
       monthRows.push({
         month_key: monthKey,
@@ -3872,6 +3933,8 @@ function studentStatementData(studentName, range) {
         total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
         cur_recharge: monthRecharge.reduce((sum, row) => sum + num(row.cur_recharge), 0),
         cur_gift: monthRecharge.reduce((sum, row) => sum + num(row.cur_gift), 0),
+        actual_balance: num(monthSummary?.actual_balance),
+        gift_balance: num(monthSummary?.gift_balance),
       });
     }
   }
@@ -3881,6 +3944,8 @@ function studentStatementData(studentName, range) {
     : null;
   if (!details.length && !recharges.length && !latestSummary) return null;
   const effectiveDetails = details.filter((row) => row.effective);
+  const openingBalance = studentBalanceThroughDate(name, addDays(range.start, -1));
+  const closingBalance = studentBalanceThroughDate(name, range.end);
   return {
     student_name: name,
     range,
@@ -3890,8 +3955,12 @@ function studentStatementData(studentName, range) {
       total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
       cur_recharge: recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0),
       cur_gift: recharges.reduce((sum, row) => sum + num(row.cur_gift), 0),
-      actual_balance: num(latestSummary?.actual_balance),
-      gift_balance: num(latestSummary?.gift_balance),
+      opening_actual_balance: openingBalance.actual_balance,
+      opening_gift_balance: openingBalance.gift_balance,
+      closing_actual_balance: closingBalance.actual_balance,
+      closing_gift_balance: closingBalance.gift_balance,
+      actual_balance: closingBalance.actual_balance,
+      gift_balance: closingBalance.gift_balance,
       latest_month: latestMonth,
     },
     month_rows: monthRows.sort((a, b) => a.month_key.localeCompare(b.month_key)),
@@ -4067,9 +4136,10 @@ function bootstrap(monthKey, includeInactive = false) {
     lookups: {
       lesson_status: LESSON_STATUS,
       course_status: COURSE_STATUS,
-      status: STATUS,
+      status: courseStatusValues(),
       classrooms: mergeLookupValues(CLASSROOMS, "custom_classrooms"),
       subjects: mergeLookupValues(SUBJECTS, "custom_subjects"),
+      times: mergeLookupValues([], "custom_time_slots"),
       grades: GRADES,
       staff_roles: STAFF_ROLES,
       expense_categories: EXPENSE_CATEGORIES,

@@ -9,7 +9,7 @@ const navGroups = [
   { key: "teachers", label: "👨‍🏫 教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "老师档案"]] },
   { key: "operations", label: "💼 运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "📊 经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "⚙️ 设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
 /**
@@ -46,6 +46,9 @@ const FIELD_TIERS = {
 };
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
+const studentPromotionMap = { 初一: "初二", 初二: "初三", 初三: "高一", 高一: "高二", 高二: "高三", 高三: "已毕业" };
+const studentStatusOptions = ["在读", "离校", "已流出", "暂停", "已毕业"];
+const defaultCourseStatuses = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
 const gradeTrendColors = {
   "初一": "#10b981",
   "初二": "#06b6d4",
@@ -176,6 +179,7 @@ let expenseModal = null;
 let pricingAuditModal = null;
 let lessonCreateDraft = null;
 let lessonCopyDraft = null;
+let lessonBatchCopyDraft = null;
 let weekCopyDraft = null;
 let focusedLessonIds = [];
 let dirtyFlags = {};                /* [C档] 标记派生数据脏键，进入对应页面时消费 */
@@ -1400,6 +1404,14 @@ async function refreshStudentQueryOnly() {
   render();
 }
 
+async function applyStudentQuerySelection(value) {
+  const next = String(value || "").trim();
+  selectedStudent = next;
+  studentQueryNameDraft = next;
+  studentStatementModalOpen = false;
+  await refreshStudentQueryOnly();
+}
+
 function readMatrixRange() {
   try {
     if (localStorage.getItem(MATRIX_RANGE_USER_SET_KEY) === "1") {
@@ -2025,7 +2037,7 @@ function renderSummaryFilterBar(rows, filteredRows) {
 }
 
 function statusValues() {
-  return state?.lookups?.status || ["待上", "已上", "请假", "试课", "考试", "未缴费"];
+  return state?.lookups?.status || defaultCourseStatuses;
 }
 
 function rowStatus(row = {}) {
@@ -3074,12 +3086,13 @@ function lessonToolbarHtml(rows) {
         <button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button>
         <button class="btn week-copy-btn" type="button">整周复制</button>
         <button class="btn primary add-lesson" type="button">新增课程</button>
+        <button class="btn batch-copy-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量复制${selectedCount ? `（${selectedCount}）` : ""}</button>
         <button class="btn danger batch-delete-lessons" type="button" ${selectedCount && !lessonBatchDeleting ? "" : "disabled"}>
           ${lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`}
         </button>
       </div>
       <div class="lesson-selection-summary">
-        ${selectedCount ? `已选择 ${selectedCount} / ${rows.length} 节` : `当前可见 ${rows.length} 节`}
+        ${selectedCount ? `已选择 ${selectedCount} / ${rows.length} 节` : ""}
       </div>
     </div>
   `;
@@ -3103,9 +3116,14 @@ function updateLessonSelectionControls(rows = visibleLessonRows()) {
     batchButton.disabled = !selectedCount || lessonBatchDeleting;
     batchButton.textContent = lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`;
   }
+  const batchCopyButton = document.querySelector(".batch-copy-lessons");
+  if (batchCopyButton) {
+    batchCopyButton.disabled = !selectedCount;
+    batchCopyButton.textContent = `批量复制${selectedCount ? `（${selectedCount}）` : ""}`;
+  }
   const summary = document.querySelector(".lesson-selection-summary");
   if (summary) {
-    summary.textContent = selectedCount ? `已选择 ${selectedCount} / ${visibleCount} 节` : `当前可见 ${visibleCount} 节`;
+    summary.textContent = selectedCount ? `已选择 ${selectedCount} / ${visibleCount} 节` : "";
   }
 }
 
@@ -3129,7 +3147,27 @@ function parseDateList(value) {
 }
 
 function usedLessonLookupValues(key) {
-  return uniqueSorted(state.used_lesson_lookups?.[key] || []);
+  const base = {
+    classrooms: state.lookups?.classrooms || [],
+    subjects: state.lookups?.subjects || [],
+    times: state.lookups?.times || [],
+    grades: (state.lookups?.grades || []).map((g) => g.name),
+  }[key] || [];
+  return uniqueSorted([...base, ...(state.used_lesson_lookups?.[key] || [])]);
+}
+
+function studentGradeOptions() {
+  const seen = new Set();
+  return [...(state.lookups?.grades || []).map((g) => g.name), "已毕业"].filter((value) => {
+    const key = String(value || "").trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function profileDateValue(row) {
+  return row?.joined_at || row?.first_lesson_date || "";
 }
 
 function lessonStudentOptions() {
@@ -3316,6 +3354,131 @@ function lessonCopyModal() {
   `;
 }
 
+function selectedLessonRowsSorted() {
+  const selected = new Set([...selectedLessonIds].map(Number).filter(Boolean));
+  return sortLessons(state.lessons || [])
+    .filter((row) => selected.has(Number(row.id)));
+}
+
+function lessonBatchCopyTargetFromSource(row, offsetDays = 7) {
+  return {
+    source_id: Number(row.id),
+    teacher_name: row.teacher_name || "",
+    date: addDays(row.date, offsetDays),
+    status: rowStatus(row) || "",
+    time_slot: row.time_slot || "",
+    classroom: row.classroom || "",
+    grade: row.grade || "",
+    subject: row.subject || "",
+    student_names: row.student_names || "",
+    notes: row.notes || "",
+    teacher_salary: "",
+  };
+}
+
+function openLessonBatchCopyDraft() {
+  const sourceRows = selectedLessonRowsSorted();
+  if (!sourceRows.length) return null;
+  const offsetDays = 7;
+  return {
+    offsetDays,
+    sourceRows,
+    targetRows: sourceRows.map((row) => lessonBatchCopyTargetFromSource(row, offsetDays)),
+  };
+}
+
+function resetLessonBatchCopyDates(offsetDays) {
+  if (!lessonBatchCopyDraft) return;
+  lessonBatchCopyDraft = {
+    ...lessonBatchCopyDraft,
+    offsetDays,
+    targetRows: lessonBatchCopyDraft.sourceRows.map((row, index) => ({
+      ...(lessonBatchCopyDraft.targetRows[index] || lessonBatchCopyTargetFromSource(row, offsetDays)),
+      date: addDays(row.date, offsetDays),
+    })),
+  };
+}
+
+function batchCopyInputCell(index, field, value, type = "text", extra = "") {
+  return `<input class="control batch-copy-field" data-index="${index}" data-field="${field}" type="${type}" value="${escapeHtml(value || "")}" ${extra}>`;
+}
+
+function lessonBatchCopyModal() {
+  if (!lessonBatchCopyDraft) return "";
+  const sourceRows = lessonBatchCopyDraft.sourceRows || [];
+  const targetRows = lessonBatchCopyDraft.targetRows || [];
+  return `
+    <div class="modal-backdrop batch-copy-modal">
+      <div class="modal-panel batch-copy-panel">
+        <div class="modal-head batch-copy-drag-handle">
+          <div>
+            <div class="modal-title">批量复制课程</div>
+            <div class="modal-subtitle">原课程保持不变；目标课程可编辑，教师薪资留空时按当前规则自动匹配。</div>
+          </div>
+          <button class="btn batch-copy-cancel" type="button">取消</button>
+        </div>
+        <div class="batch-copy-body">
+          <div class="copy-form">
+            <label class="filter-field">
+              <span>整体平移天数</span>
+              <input class="control batch-copy-offset" type="number" step="1" value="${escapeHtml(String(lessonBatchCopyDraft.offsetDays ?? 7))}">
+            </label>
+          </div>
+          <div class="small-title">原课程</div>
+          <div class="table-wrap copy-preview-wrap batch-copy-preview">
+            <table class="copy-preview-table">
+              <thead><tr><th>日期</th><th>星期</th><th>时间</th><th>老师</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th><th>状态</th></tr></thead>
+              <tbody>
+                ${sourceRows.map((row) => `
+                  <tr>
+                    <td class="text-cell">${escapeHtml(row.date)}</td>
+                    <td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td>
+                    <td class="text-cell">${escapeHtml(row.time_slot)}</td>
+                    <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
+                    <td class="text-cell">${escapeHtml(row.classroom)}</td>
+                    <td class="text-cell">${escapeHtml(row.grade)}</td>
+                    <td class="text-cell">${escapeHtml(row.subject)}</td>
+                    <td class="text-cell">${escapeHtml(row.student_names)}</td>
+                    <td class="text-cell">${escapeHtml(rowStatus(row))}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+          <div class="small-title">目标课程</div>
+          <div class="table-wrap copy-preview-wrap batch-copy-edit-wrap">
+            <table class="copy-preview-table batch-copy-edit-table">
+              <thead><tr><th>日期</th><th>星期</th><th>时间</th><th>老师</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th><th>备注</th><th>状态</th><th>教师薪资</th></tr></thead>
+              <tbody>
+                ${targetRows.map((row, index) => `
+                  <tr>
+                    <td>${batchCopyInputCell(index, "date", row.date, "date")}</td>
+                    <td class="readonly">${escapeHtml(weekdayCn(row.date))}</td>
+                    <td>${batchCopyInputCell(index, "time_slot", row.time_slot)}</td>
+                    <td>${batchCopyInputCell(index, "teacher_name", row.teacher_name)}</td>
+                    <td>${batchCopyInputCell(index, "classroom", row.classroom)}</td>
+                    <td>${batchCopyInputCell(index, "grade", row.grade)}</td>
+                    <td>${batchCopyInputCell(index, "subject", row.subject)}</td>
+                    <td>${batchCopyInputCell(index, "student_names", row.student_names)}</td>
+                    <td>${batchCopyInputCell(index, "notes", row.notes)}</td>
+                    <td><select class="control batch-copy-field" data-index="${index}" data-field="status">${options(statusValues(), row.status || "待上")}</select></td>
+                    <td>${batchCopyInputCell(index, "teacher_salary", row.teacher_salary, "number", `step="0.01" placeholder="自动"` )}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <span class="muted-tip">将新增 ${targetRows.length} 节课程，不修改原课程。</span>
+          <button class="btn batch-copy-cancel" type="button">取消</button>
+          <button class="btn primary batch-copy-confirm" type="button" ${targetRows.length ? "" : "disabled"}>确认新增</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function weekCopySourceRows(sourceStart) {
   const dates = new Set(weekDates(sourceStart));
   return sortLessons(state.week_lessons || state.lessons || [])
@@ -3424,6 +3587,7 @@ function renderLessons() {
     </div>
     ${lessonCreateModal()}
     ${lessonCopyModal()}
+    ${lessonBatchCopyModal()}
     ${weekCopyModal()}
   `;
   updateLessonSelectionControls(rows);
@@ -3990,10 +4154,6 @@ function renderFeeDetails() {
             `).join("") || `<tr><td colspan="12" class="empty">暂无费用明细</td></tr>`}
           </tbody>
         </table>
-      </div>
-      <div class="filter-summary table-filter-summary">
-        <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
-        <button class="btn reset-fee-details-filter" type="button">清空筛选</button>
       </div>
     </div>
   `;
@@ -4736,7 +4896,6 @@ function studentQueryControls(studentNames) {
       <div class="filter-bar compact">
         <label>学生姓名</label>
         ${filterComboControl({ className: "student-query-name", field: "student", value: studentQueryNameDraft || selectedStudent, values: studentNames, placeholder: "输入或选择学生", dataAttr: "field" })}
-        <button class="btn primary student-query-apply" type="button">查询</button>
         <div class="segmented student-query-mode-toggle">
           <button class="segmented-option student-query-mode ${studentQueryRange.mode !== "range" ? "active" : ""}" type="button" data-mode="all">全部月份</button>
           <button class="segmented-option student-query-mode ${studentQueryRange.mode === "range" ? "active" : ""}" type="button" data-mode="range">日期范围</button>
@@ -4750,21 +4909,13 @@ function studentQueryControls(studentNames) {
 
 function studentQueryComparisonPanel(report) {
   if (!selectedStudent || !report?.summary) return "";
-  const summary = report.summary;
-  const netCash = Number(summary.cur_recharge) - Number(summary.total_fee);
   return `
     <div class="band student-comparison-panel">
       <div class="section-head">
         <div>
-          <div class="section-title">期间消费情况</div>
+          <div class="section-title">月份汇总</div>
           <div class="section-subtitle">${escapeHtml(studentStatementRangeLabel(report))}</div>
         </div>
-      </div>
-      <div class="query-head" style="margin-bottom: var(--space-4);">
-        <div class="metric"><div class="metric-label">期间现金充值</div><div class="metric-value">¥${money2(summary.cur_recharge)}</div></div>
-        <div class="metric"><div class="metric-label">期间赠送充值</div><div class="metric-value">¥${money2(summary.cur_gift)}</div></div>
-        <div class="metric"><div class="metric-label">期间消费课费</div><div class="metric-value">¥${money2(summary.total_fee)}</div></div>
-        <div class="metric"><div class="metric-label">期间净现金流变动</div><div class="metric-value ${netCash < 0 ? "negative" : ""}">${netCash > 0 ? "+" : ""}¥${money2(netCash)}</div></div>
       </div>
       <div class="table-wrap">
         <table class="student-history-table">
@@ -4778,6 +4929,383 @@ function studentQueryComparisonPanel(report) {
       </div>
     </div>
   `;
+}
+
+function imageFilenamePart(value, fallback = "未命名") {
+  const textValue = String(value || "").trim() || fallback;
+  return textValue.replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, "_");
+}
+
+function shotText(ctx, value, x, y, maxWidth, options = {}) {
+  const textValue = String(value ?? "");
+  const ellipsis = "…";
+  let output = textValue;
+  if (maxWidth && ctx.measureText(output).width > maxWidth) {
+    while (output.length > 0 && ctx.measureText(`${output}${ellipsis}`).width > maxWidth) output = output.slice(0, -1);
+    output = output ? `${output}${ellipsis}` : ellipsis;
+  }
+  if (options.align) ctx.textAlign = options.align;
+  ctx.fillText(output, x, y);
+}
+
+function shotRoundRect(ctx, x, y, width, height, radius = 12) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, width, height, radius);
+    ctx.closePath();
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function setupShotCanvas(width, height, colors) {
+  const canvas = document.createElement("canvas");
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(ratio, ratio);
+  ctx.fillStyle = colors.bg;
+  ctx.fillRect(0, 0, width, height);
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 5;
+  ctx.fillStyle = colors.panel;
+  shotRoundRect(ctx, 24, 24, width - 48, height - 48, 18);
+  ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = colors.line;
+  shotRoundRect(ctx, 24, 24, width - 48, height - 48, 18);
+  ctx.stroke();
+  ctx.fillStyle = colors.brand;
+  ctx.fillRect(24, 24, width - 48, 6);
+  return { canvas, ctx };
+}
+
+function drawShotHeader(ctx, colors, title, subtitle, width) {
+  ctx.fillStyle = colors.brandPale;
+  ctx.fillRect(25, 30, width - 50, 86);
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "900 28px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("黎明教育", width / 2, subtitle ? 66 : 70);
+  ctx.font = "800 22px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  shotText(ctx, title, width / 2, subtitle ? 96 : 104, width - 96, { align: "center" });
+  if (subtitle) {
+    ctx.fillStyle = colors.muted;
+    ctx.font = "15px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+    shotText(ctx, subtitle, width / 2, 118, width - 96, { align: "center" });
+  }
+}
+
+function drawStudentStatementHeader(ctx, colors, studentName, range, width) {
+  ctx.fillStyle = colors.brandPale;
+  ctx.fillRect(25, 30, width - 50, 124);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "900 27px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.fillText("黎明教育", width / 2, 62);
+  ctx.font = "700 18px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  shotText(ctx, studentName || "未选择学生", width / 2, 90, width - 96, { align: "center" });
+  ctx.fillStyle = colors.brandDark;
+  shotText(ctx, `${range.start || ""} ~ ${range.end || ""}`, width / 2, 116, width - 96, { align: "center" });
+  ctx.fillText("学生消费查询", width / 2, 142);
+}
+
+function studentStatementDateRange(report = studentStatementReport()) {
+  const range = report?.range || currentStudentQueryRange();
+  return { start: range.start || "", end: range.end || "" };
+}
+
+function studentStatementMetricCards(summary = {}) {
+  return [
+    { label: "有效上课次数", value: String(summary.lesson_count || 0) },
+    { label: "课程费用", value: `¥${money2(summary.total_fee || 0)}` },
+    { label: "开始日期前剩余现金", value: `¥${money2(summary.opening_actual_balance ?? 0)}`, negative: numberValue(summary.opening_actual_balance) < 0 },
+    { label: "开始日期前剩余赠送", value: `¥${money2(summary.opening_gift_balance ?? 0)}` },
+    { label: "期间充值现金", value: `¥${money2(summary.cur_recharge || 0)}` },
+    { label: "期间充值赠送", value: `¥${money2(summary.cur_gift || 0)}` },
+    { label: "结束日期后剩余现金", value: `¥${money2(summary.closing_actual_balance ?? summary.actual_balance ?? 0)}`, negative: numberValue(summary.closing_actual_balance ?? summary.actual_balance) < 0 },
+    { label: "结束日期后剩余赠送", value: `¥${money2(summary.closing_gift_balance ?? summary.gift_balance ?? 0)}` },
+  ];
+}
+
+function drawShotMetricCards(ctx, colors, cards, x, y, width) {
+  const gap = 12;
+  const cardWidth = (width - gap * (cards.length - 1)) / cards.length;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  cards.forEach((card, index) => {
+    const left = x + index * (cardWidth + gap);
+    ctx.fillStyle = colors.card;
+    shotRoundRect(ctx, left, y, cardWidth, 78, 12);
+    ctx.fill();
+    ctx.strokeStyle = colors.line;
+    ctx.stroke();
+    ctx.fillStyle = colors.muted;
+    ctx.font = "14px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+    shotText(ctx, card.label, left + 14, y + 26, cardWidth - 28);
+    ctx.fillStyle = card.negative ? "#b42318" : colors.brandDark;
+    ctx.font = "800 21px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+    shotText(ctx, card.value, left + 14, y + 56, cardWidth - 28);
+  });
+}
+
+function drawShotSectionTitle(ctx, colors, title, x, y, width = 0) {
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "800 20px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = width ? "center" : "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(title, width ? x + width / 2 : x, y);
+}
+
+function drawShotTable(ctx, colors, columns, rows, x, y, widths, options = {}) {
+  const rowHeight = options.rowHeight || 38;
+  const headHeight = options.headHeight || 40;
+  const tableWidth = widths.reduce((sum, item) => sum + item, 0);
+  const bodyRows = rows.length ? rows : [{ _empty: true }];
+  ctx.fillStyle = colors.card;
+  ctx.strokeStyle = colors.line;
+  ctx.fillRect(x, y, tableWidth, headHeight + bodyRows.length * rowHeight);
+  ctx.strokeRect(x, y, tableWidth, headHeight + bodyRows.length * rowHeight);
+  let cursor = x;
+  ctx.font = "800 15px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  columns.forEach((column, index) => {
+    ctx.fillStyle = colors.brandSoft;
+    ctx.fillRect(cursor, y, widths[index], headHeight);
+    ctx.strokeStyle = colors.line;
+    ctx.strokeRect(cursor, y, widths[index], headHeight);
+    ctx.fillStyle = colors.brandDark;
+    shotText(ctx, column.label, cursor + widths[index] / 2, y + headHeight / 2, widths[index] - 12, { align: "center" });
+    cursor += widths[index];
+  });
+  ctx.font = "14px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  bodyRows.forEach((row, rowIndex) => {
+    const top = y + headHeight + rowIndex * rowHeight;
+    if (row._empty) {
+      ctx.fillStyle = colors.card;
+      ctx.fillRect(x, top, tableWidth, rowHeight);
+      ctx.strokeStyle = colors.line;
+      ctx.strokeRect(x, top, tableWidth, rowHeight);
+      ctx.fillStyle = colors.muted;
+      ctx.textAlign = "center";
+      ctx.fillText(options.emptyText || "暂无数据", x + tableWidth / 2, top + rowHeight / 2);
+      return;
+    }
+    cursor = x;
+    columns.forEach((column, index) => {
+      ctx.fillStyle = rowIndex % 2 ? colors.brandPale : colors.card;
+      ctx.fillRect(cursor, top, widths[index], rowHeight);
+      ctx.strokeStyle = colors.line;
+      ctx.strokeRect(cursor, top, widths[index], rowHeight);
+      const align = column.align || "center";
+      const value = column.value(row);
+      ctx.fillStyle = column.negative?.(row) ? "#b42318" : colors.title;
+      ctx.textAlign = align;
+      const textX = align === "right" ? cursor + widths[index] - 8 : align === "left" ? cursor + 8 : cursor + widths[index] / 2;
+      shotText(ctx, value, textX, top + rowHeight / 2, widths[index] - 16, { align });
+      cursor += widths[index];
+    });
+  });
+  return headHeight + bodyRows.length * rowHeight;
+}
+
+function studentStatementCanvas(report = studentStatementReport()) {
+  const colors = courseNoticeShotPalette();
+  const summary = report?.summary || {};
+  const details = report?.details || [];
+  const monthRows = report?.month_rows || [];
+  const dateRange = studentStatementDateRange(report);
+  const width = 1120;
+  const contentWidth = width - 96;
+  const monthTableHeight = 40 + Math.max(1, monthRows.length) * 36;
+  const detailTableHeight = 42 + Math.max(1, details.length) * 38;
+  const height = 48 + 134 + 104 + 96 + 36 + monthTableHeight + 54 + detailTableHeight + 54;
+  const { canvas, ctx } = setupShotCanvas(width, height, colors);
+  drawStudentStatementHeader(ctx, colors, report?.student_name || selectedStudent || "未选择学生", dateRange, width);
+  const metricCards = studentStatementMetricCards(summary);
+  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), 48, 180, contentWidth);
+  drawShotMetricCards(ctx, colors, metricCards.slice(4), 48, 276, contentWidth);
+  let y = 380;
+  drawShotSectionTitle(ctx, colors, "月份汇总", 48, y, contentWidth);
+  y += 18;
+  y += drawShotTable(ctx, colors, [
+    { label: "月份", value: (row) => formatMonthOption(row.month_key), align: "left" },
+    { label: "有效课次", value: (row) => row.lesson_count || 0 },
+    { label: "课程费用", value: (row) => `¥${money2(row.total_fee || 0)}`, align: "right" },
+    { label: "现金充值", value: (row) => `¥${money2(row.cur_recharge || 0)}`, align: "right" },
+    { label: "赠送充值", value: (row) => `¥${money2(row.cur_gift || 0)}`, align: "right" },
+    { label: "月末现金", value: (row) => `¥${money2(row.actual_balance || 0)}`, align: "right", negative: (row) => numberValue(row.actual_balance) < 0 },
+    { label: "月末赠送", value: (row) => `¥${money2(row.gift_balance || 0)}`, align: "right" },
+  ], monthRows, 48, y, [150, 110, 145, 145, 145, 145, 145], { rowHeight: 36, emptyText: "暂无月份汇总" });
+  y += 42;
+  drawShotSectionTitle(ctx, colors, "明细课程表", 48, y, contentWidth);
+  y += 18;
+  drawShotTable(ctx, colors, [
+    { label: "日期", value: (row) => row.date, align: "left" },
+    { label: "状态", value: (row) => rowStatus(row) },
+    { label: "星期", value: (row) => row.weekday || weekdayCn(row.date) },
+    { label: "时间", value: (row) => row.time_slot, align: "left" },
+    { label: "老师", value: (row) => row.teacher_name },
+    { label: "年级", value: (row) => row.grade },
+    { label: "科目", value: (row) => row.subject },
+    { label: "备注", value: (row) => row.notes || "", align: "left" },
+    { label: "费用", value: (row) => `¥${money2(row.unit_price || 0)}`, align: "right" },
+  ], details, 48, y, [96, 68, 62, 116, 86, 72, 80, 342, 102], { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
+  return canvas;
+}
+
+async function downloadCanvasPng(canvas, filename) {
+  const blob = await canvasBlob(canvas);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function copyOrDownloadCanvasPng(canvas, filename) {
+  const blob = await canvasBlob(canvas);
+  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      showToast("图片已复制");
+      return { copied: true };
+    } catch {
+      // Fall through to download for browsers or contexts that block image clipboard writes.
+    }
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  alert("浏览器不支持直接复制，已为你下载图片。");
+  return { copied: false };
+}
+
+function studentStatementFilename(report = studentStatementReport()) {
+  const range = report?.range || currentStudentQueryRange();
+  const label = studentQueryRange.mode === "range" ? `${range.start}_${range.end}` : "全部月份";
+  return `黎明教育_${imageFilenamePart(report?.student_name || selectedStudent || "学生")}_${imageFilenamePart(label)}_课程费用核对.png`;
+}
+
+async function downloadStudentStatementPng(report) {
+  const canvas = studentStatementCanvas(report || { student_name: selectedStudent, range: currentStudentQueryRange(), summary: null, details: [], month_rows: [] });
+  await downloadCanvasPng(canvas, studentStatementFilename(report || { student_name: selectedStudent, range: currentStudentQueryRange() }));
+}
+
+async function copyStudentStatementPng(report) {
+  const normalizedReport = report || { student_name: selectedStudent, range: currentStudentQueryRange(), summary: null, details: [], month_rows: [] };
+  const canvas = studentStatementCanvas(normalizedReport);
+  await copyOrDownloadCanvasPng(canvas, studentStatementFilename(normalizedReport));
+}
+
+function teacherSummaryRowFor(teacherName) {
+  return (state.derived.teacher_summary || []).find((row) => String(row.teacher_name || "").trim() === String(teacherName || "").trim()) || {};
+}
+
+function teacherTransportDetailRows(summary = {}) {
+  const notes = String(summary.notes || "").trim();
+  return [
+    { item: "第一周车票", amount: numberValue(summary.week1_transport), notes },
+    { item: "第二周车票", amount: numberValue(summary.week2_transport), notes: "" },
+    { item: "第三周车票", amount: numberValue(summary.week3_transport), notes: "" },
+    { item: "第四周车票", amount: numberValue(summary.week4_transport), notes: "" },
+  ];
+}
+
+function teacherDetailCanvas(teacherName = selectedTeacher) {
+  const colors = courseNoticeShotPalette();
+  const rows = sortedLessons().filter((row) => row.teacher_name === teacherName);
+  const completedRows = rows.filter(isCompletedLesson);
+  const summary = teacherSummaryRowFor(teacherName);
+  const classSalary = numberValue(summary.salary_total) || completedRows.reduce((sum, row) => sum + numberValue(row.teacher_salary), 0);
+  const transportTotal = numberValue(summary.week1_transport)
+    + numberValue(summary.week2_transport)
+    + numberValue(summary.week3_transport)
+    + numberValue(summary.week4_transport);
+  const salaryTotal = numberValue(summary.total_salary) || classSalary + transportTotal;
+  const width = 1240;
+  const contentWidth = width - 96;
+  const detailTableHeight = 42 + Math.max(1, rows.length) * 38;
+  const transportRows = teacherTransportDetailRows(summary);
+  const transportTableHeight = 40 + 38;
+  const height = 48 + 96 + 104 + detailTableHeight + 52 + transportTableHeight + 54;
+  const { canvas, ctx } = setupShotCanvas(width, height, colors);
+  drawShotHeader(ctx, colors, `${monthLabel()} ${teacherName || "未选择教师"} 教师薪资明细`, "", width);
+  drawShotMetricCards(ctx, colors, [
+    { label: "有效课时", value: String(completedRows.length) },
+    { label: "课程记录", value: String(rows.length) },
+    { label: "课时薪资", value: `¥${money2(classSalary)}` },
+    { label: "车票/交通补贴", value: `¥${money2(transportTotal)}` },
+    { label: "薪资统计", value: `¥${money2(salaryTotal)}` },
+  ], 48, 142, contentWidth);
+  let y = 246;
+  drawShotTable(ctx, colors, [
+    { label: "日期", value: (row) => row.date, align: "left" },
+    { label: "状态", value: (row) => rowStatus(row) },
+    { label: "星期", value: (row) => weekdayCn(row.date) },
+    { label: "时间", value: (row) => row.time_slot, align: "left" },
+    { label: "教室", value: (row) => row.classroom },
+    { label: "年级", value: (row) => row.grade },
+    { label: "科目", value: (row) => row.subject },
+    { label: "学生", value: (row) => row.student_names, align: "left" },
+    { label: "备注", value: (row) => row.notes || "", align: "left" },
+    { label: "教师薪资", value: (row) => `¥${money2(isCompletedLesson(row) ? row.teacher_salary : 0)}`, align: "right" },
+  ], rows, 48, y, [106, 64, 58, 110, 60, 66, 72, 200, 298, 100], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
+  y += detailTableHeight + 42;
+  drawShotSectionTitle(ctx, colors, "车票/交通补贴明细", 48, y, contentWidth);
+  y += 18;
+  drawShotTable(
+    ctx,
+    colors,
+    transportRows.map((item) => ({
+      label: item.item,
+      value: () => `¥${money2(item.amount || 0)}`,
+      align: "center",
+    })),
+    [{}],
+    48,
+    y,
+    transportRows.map(() => contentWidth / Math.max(transportRows.length, 1)),
+    { rowHeight: 38, headHeight: 40, emptyText: "暂无车票/交通补贴" },
+  );
+  return canvas;
+}
+
+async function downloadTeacherDetailPng() {
+  if (!selectedTeacher) throw new Error("请先选择教师");
+  const canvas = teacherDetailCanvas(selectedTeacher);
+  await downloadCanvasPng(canvas, `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_教师课程薪资明细.png`);
+}
+
+async function copyTeacherDetailPng() {
+  if (!selectedTeacher) throw new Error("请先选择教师");
+  const filename = `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_教师薪资明细.png`;
+  const canvas = teacherDetailCanvas(selectedTeacher);
+  await copyOrDownloadCanvasPng(canvas, filename);
 }
 
 function xmlEscape(value) {
@@ -4827,39 +5355,6 @@ function studentStatementSvg(report) {
 </svg>`;
 }
 
-async function downloadStudentStatementPng(report) {
-  if (!report?.summary) throw new Error("请先查询学生");
-  const svg = studentStatementSvg(report);
-  const image = new Image();
-  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-  try {
-    await new Promise((resolve, reject) => {
-      image.onload = resolve;
-      image.onerror = reject;
-      image.src = url;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth || 1120;
-    canvas.height = image.naturalHeight || 900;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(image, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png", 0.96));
-    if (!blob) throw new Error("图片生成失败");
-    const link = document.createElement("a");
-    const range = report.range || currentStudentQueryRange();
-    link.href = URL.createObjectURL(blob);
-    link.download = `${report.student_name}_${range.start}_${range.end}_课程核对.png`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
 function studentStatementModal(report) {
   if (!studentStatementModalOpen || !report?.summary) return "";
   const svg = studentStatementSvg(report);
@@ -4883,6 +5378,15 @@ function studentStatementModal(report) {
   `;
 }
 
+function studentStatementMetricCardsMarkup(summary = {}) {
+  return studentStatementMetricCards(summary).map((card) => `
+    <div class="metric">
+      <div class="metric-label">${escapeHtml(card.label)}</div>
+      <div class="metric-value ${card.negative ? "negative" : ""}">${escapeHtml(card.value)}</div>
+    </div>
+  `).join("");
+}
+
 function renderStudentQuery() {
   const rows = state.derived.student_summary;
   const studentNames = uniqueSorted((state.profile_students || [])
@@ -4895,16 +5399,12 @@ function renderStudentQuery() {
     "学生查询",
     selectedStudent || "未选择学生",
     `<button class="btn export-student-statement" type="button" ${selectedStudent ? "" : "disabled"}>导出 Excel</button>
-     <button class="btn student-statement-preview" type="button" ${summary ? "" : "disabled"}>导出图片</button>`,
+     <button class="btn student-statement-preview" type="button" ${selectedStudent ? "" : "disabled"}>复制图片</button>`,
   );
   contentEl.innerHTML = `
     ${studentQueryControls(studentNames)}
-    <div class="query-head">
-      <div class="metric"><div class="metric-label">查询范围</div><div class="metric-value small">${escapeHtml(studentStatementRangeLabel(report))}</div></div>
-      <div class="metric"><div class="metric-label">有效上课次数</div><div class="metric-value">${summary ? summary.lesson_count : 0}</div></div>
-      <div class="metric"><div class="metric-label">课程费用</div><div class="metric-value">${summary ? money(summary.total_fee) : 0}</div></div>
-      <div class="metric"><div class="metric-label">最新月末现金</div><div class="metric-value ${summary && numberValue(summary.actual_balance) < 0 ? "negative" : ""}">${summary ? money(summary.actual_balance) : 0}</div></div>
-      <div class="metric"><div class="metric-label">最新月末赠送</div><div class="metric-value">${summary ? money(summary.gift_balance) : 0}</div></div>
+    <div class="query-head student-statement-metrics">
+      ${studentStatementMetricCardsMarkup(summary || {})}
     </div>
     ${studentQueryComparisonPanel(report)}
     <div class="band">
@@ -4923,7 +5423,6 @@ function renderStudentQuery() {
         </table>
       </div>
     </div>
-    ${studentStatementModal(report)}
   `;
 }
 
@@ -5131,6 +5630,100 @@ function renderAppearance() {
   `;
 }
 
+function settingsArray(key) {
+  try {
+    const parsed = JSON.parse(state?.settings?.[key] || "[]");
+    return Array.isArray(parsed) ? uniqueSorted(parsed) : [];
+  } catch {
+    return [];
+  }
+}
+
+function selectorEscape(value) {
+  return window.CSS?.escape ? CSS.escape(value) : String(value || "").replace(/["\\]/g, "\\$&");
+}
+
+function baseDataDefinitions() {
+  return [
+    {
+      key: "classrooms",
+      title: "教室",
+      settingKey: "custom_classrooms",
+      placeholder: "例如 C6",
+      values: uniqueSorted([...(state.lookups?.classrooms || []), ...(state.used_lesson_lookups?.classrooms || [])]),
+    },
+    {
+      key: "subjects",
+      title: "科目",
+      settingKey: "custom_subjects",
+      placeholder: "例如 政治",
+      values: uniqueSorted([...(state.lookups?.subjects || []), ...(state.used_lesson_lookups?.subjects || [])]),
+    },
+    {
+      key: "times",
+      title: "常用时间",
+      settingKey: "custom_time_slots",
+      placeholder: "例如 19:00-21:00",
+      values: uniqueSorted([...(state.lookups?.times || []), ...(state.used_lesson_lookups?.times || [])]),
+    },
+    {
+      key: "statuses",
+      title: "课程状态",
+      settingKey: "custom_course_statuses",
+      placeholder: "例如 调课",
+      values: uniqueSorted([...(state.lookups?.status || defaultCourseStatuses)]),
+    },
+  ];
+}
+
+function baseDataCard(def) {
+  const customValues = settingsArray(def.settingKey);
+  return `
+    <div class="base-data-card" data-setting-key="${escapeHtml(def.settingKey)}">
+      <div class="section-head base-data-card-head">
+        <div>
+          <div class="section-title">${escapeHtml(def.title)}</div>
+          <div class="section-subtitle">新增值会进入新增课程候选；删除只移除基础字典，不删除历史课程。</div>
+        </div>
+      </div>
+      <div class="base-data-add-row">
+        <input class="control base-data-new-value" data-setting-key="${escapeHtml(def.settingKey)}" placeholder="${escapeHtml(def.placeholder)}">
+        <button class="btn primary base-data-add" type="button" data-setting-key="${escapeHtml(def.settingKey)}">新增</button>
+      </div>
+      <div class="base-data-list-title">自定义值</div>
+      <div class="base-data-custom-list">
+        ${customValues.map((value) => `
+          <span class="base-data-item">
+            <span>${escapeHtml(value)}</span>
+            <button class="base-data-delete" type="button" data-setting-key="${escapeHtml(def.settingKey)}" data-value="${escapeHtml(value)}" title="从基础字典删除">×</button>
+          </span>
+        `).join("") || `<span class="muted-tip">暂无自定义值</span>`}
+      </div>
+      <div class="base-data-list-title">当前候选（默认 + 自定义 + 历史使用）</div>
+      <div class="base-data-chip-list">
+        ${def.values.map((value) => `<span class="neutral-chip">${escapeHtml(value)}</span>`).join("") || `<span class="muted-tip">暂无候选</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderBaseData() {
+  renderTopbar("基础数据", "维护新增课程常用选项；历史课程使用过的值仍会保留在候选项中");
+  contentEl.innerHTML = `
+    <div class="band base-data-panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">基础数据 / 数据字典</div>
+          <div class="section-subtitle">第一阶段管理教室、科目、常用时间和课程状态。老师、学生仍在档案页维护，年级继续使用固定顺序。</div>
+        </div>
+      </div>
+      <div class="base-data-grid">
+        ${baseDataDefinitions().map(baseDataCard).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderPricing() {
   const rows = [...state.pricing_standards].sort((a, b) => {
     const g = gradeOrder.indexOf(a.grade) - gradeOrder.indexOf(b.grade);
@@ -5332,10 +5925,7 @@ function renderStudentPricing() {
 
 function profileRows(kind = profileTab) {
   const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
-  const usedTeachers = kind === "teachers" ? new Set(usedLessonLookupValues("teachers")) : null;
-  const scopedRows = kind === "teachers"
-    ? rows.filter((row) => usedTeachers.has(String(row.name || "").trim()))
-    : rows;
+  const scopedRows = rows;
   const statusFilter = profileStatusFilter[kind] || "";
   const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
   const query = profileSearch.trim().toLowerCase();
@@ -5346,12 +5936,42 @@ function profileRows(kind = profileTab) {
     ? statusRows.filter((row) => searchFields(row).some((value) => String(value || "").toLowerCase().includes(query)))
     : statusRows;
   if (kind !== "students") return filtered;
+  const profileGradeOrder = [...gradeOrder, "已毕业"];
   return [...filtered].sort((a, b) => {
-    const gradeDelta = gradeOrder.indexOf(a.grade) - gradeOrder.indexOf(b.grade);
-    if (gradeOrder.includes(a.grade) && gradeOrder.includes(b.grade) && gradeDelta) return gradeDelta;
-    if (gradeOrder.includes(a.grade) !== gradeOrder.includes(b.grade)) return gradeOrder.includes(a.grade) ? -1 : 1;
+    const gradeDelta = profileGradeOrder.indexOf(a.grade) - profileGradeOrder.indexOf(b.grade);
+    if (profileGradeOrder.includes(a.grade) && profileGradeOrder.includes(b.grade) && gradeDelta) return gradeDelta;
+    if (profileGradeOrder.includes(a.grade) !== profileGradeOrder.includes(b.grade)) return profileGradeOrder.includes(a.grade) ? -1 : 1;
     return String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN");
   });
+}
+
+function studentPromotionPlan() {
+  return (state.profile_students || [])
+    .map((row) => {
+      const grade = String(row.grade || "").trim();
+      const status = String(row.status || "").trim();
+      const targetGrade = studentPromotionMap[grade];
+      if (!targetGrade || grade === "已毕业" || status === "已毕业") return null;
+      return {
+        id: row.id,
+        name: row.name,
+        fromGrade: grade,
+        toGrade: targetGrade,
+        status: targetGrade === "已毕业" ? "已毕业" : (status || "在读"),
+      };
+    })
+    .filter(Boolean);
+}
+
+function studentPromotionPreview(plan) {
+  const groups = new Map();
+  for (const item of plan) {
+    if (!groups.has(item.toGrade)) groups.set(item.toGrade, []);
+    groups.get(item.toGrade).push(item);
+  }
+  return [...groups.entries()].map(([grade, items]) => (
+    `${grade}：${items.map((item) => `${item.name}（${item.fromGrade}→${item.toGrade}）`).join("、")}`
+  )).join("\n");
 }
 
 function studentProfileTableRows(rows) {
@@ -5366,11 +5986,11 @@ function studentProfileTableRows(rows) {
       ${group}
       <tr class="profile-row" data-kind="students" data-id="${row.id}">
         <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
-        <td><select class="cell-select profile-field" data-field="grade">${options(state.lookups.grades.map((g) => g.name), row.grade || "", "未选")}</select></td>
+        <td><select class="cell-select profile-field" data-field="grade">${options(studentGradeOptions(), row.grade || "", "未选")}</select></td>
         <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
         <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
-        <td><select class="cell-select profile-field" data-field="status">${options(["在读", "离校", "已流出", "暂停"], row.status || "在读")}</select></td>
-        <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
+        <td><select class="cell-select profile-field" data-field="status">${options(studentStatusOptions, row.status || "在读")}</select></td>
+        <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
         <td><input class="cell-input profile-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
         <td><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
         <td class="readonly"><button class="btn danger delete-profile" data-kind="students" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
@@ -5394,10 +6014,10 @@ function profileModalMarkup() {
         </div>
         <div class="profile-form">
           <label>姓名<input class="control profile-modal-field" data-field="name" placeholder="${isTeacher ? "老师姓名" : "学生姓名"}"></label>
-          ${isTeacher ? "" : `<label>年级<select class="control profile-modal-field" data-field="grade">${options(state.lookups.grades.map((g) => g.name), "", "未选")}</select></label>`}
+          ${isTeacher ? "" : `<label>年级<select class="control profile-modal-field" data-field="grade">${options(studentGradeOptions(), "", "未选")}</select></label>`}
           ${isTeacher ? "" : `<label>监护人<input class="control profile-modal-field" data-field="guardian" placeholder="家长/监护人"></label>`}
           <label>电话<input class="control profile-modal-field" data-field="phone" placeholder="联系电话"></label>
-          <label>状态<select class="control profile-modal-field" data-field="status">${options(isTeacher ? ["在职", "离职", "暂停"] : ["在读", "离校", "暂停"], isTeacher ? "在职" : "在读")}</select></label>
+          <label>状态<select class="control profile-modal-field" data-field="status">${options(isTeacher ? ["在职", "离职", "暂停"] : studentStatusOptions, isTeacher ? "在职" : "在读")}</select></label>
           <label class="profile-form-wide">备注<input class="control profile-modal-field" data-field="notes" placeholder="备注"></label>
         </div>
         <div class="modal-actions">
@@ -5413,7 +6033,7 @@ function renderProfileDirectory(kind = profileTab) {
   localStorage.setItem("liming:profile-tab", profileTab);
   const rows = profileRows(kind);
   const isTeacher = kind === "teachers";
-  const statusValues = isTeacher ? ["在职", "离职", "暂停"] : ["在读", "离校", "已流出", "暂停"];
+  const statusValues = isTeacher ? ["在职", "离职", "暂停"] : studentStatusOptions;
   renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
     <table class="profile-table">
@@ -5424,7 +6044,7 @@ function renderProfileDirectory(kind = profileTab) {
             <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
             <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
             <td><select class="cell-select profile-field" data-field="status">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
-            <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
+            <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
             <td><input class="cell-input profile-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
             <td><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
             <td class="readonly"><button class="btn danger delete-profile" data-kind="teachers" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
@@ -5451,6 +6071,7 @@ function renderProfileDirectory(kind = profileTab) {
         <div class="profile-actions">
           ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
           <input class="control profile-search" type="text" autocomplete="off" spellcheck="false" placeholder="${isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选"}" value="${escapeHtml(profileSearch)}">
+          ${isTeacher ? "" : `<button class="btn bulk-promote-students" type="button">批量升年级</button>`}
           <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
         </div>
       </div>
@@ -6252,6 +6873,7 @@ function renderTeacherDetail() {
   renderTopbar(
     `${monthLabel()} 教师个人课程明细`,
     selectedTeacher ? (showSalary ? `${selectedTeacher} · 在这里录入课时薪资` : selectedTeacher) : "未选择教师",
+    `<button class="btn export-teacher-detail-image" type="button" ${selectedTeacher ? "" : "disabled"}>复制图片</button>`,
   );
   contentEl.innerHTML = `
     <div class="query-head">
@@ -6785,6 +7407,7 @@ function render() {
     recharges: renderRecharges,
     studentQuery: renderStudentQuery,
     appearance: renderAppearance,
+    baseData: renderBaseData,
     audit: renderAudit,
     teacherProfiles: renderTeacherProfiles,
     studentProfiles: renderStudentProfiles,
@@ -7102,6 +7725,48 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".base-data-add").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const settingKey = button.dataset.settingKey;
+      const def = baseDataDefinitions().find((item) => item.settingKey === settingKey);
+      const input = document.querySelector(`.base-data-new-value[data-setting-key="${selectorEscape(settingKey)}"]`);
+      const value = String(input?.value || "").trim();
+      if (!def || !value) return alert("请先填写有效内容");
+      if (def.values.some((item) => item === value)) return alert("该值已存在，不能重复新增");
+      const nextValues = uniqueSorted([...settingsArray(settingKey), value]);
+      try {
+        await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
+        await load();
+      } catch (error) {
+        alert(error.message || "保存失败");
+      }
+    });
+  });
+
+  document.querySelectorAll(".base-data-new-value").forEach((input) => {
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      document.querySelector(`.base-data-add[data-setting-key="${selectorEscape(input.dataset.settingKey)}"]`)?.click();
+    });
+  });
+
+  document.querySelectorAll(".base-data-delete").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const settingKey = button.dataset.settingKey;
+      const value = button.dataset.value;
+      if (!settingKey || !value) return;
+      if (!confirm(`从基础字典删除“${value}”？历史课程不会被修改。`)) return;
+      const nextValues = settingsArray(settingKey).filter((item) => item !== value);
+      try {
+        await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
+        await load();
+      } catch (error) {
+        alert(error.message || "删除失败");
+      }
+    });
+  });
+
   document.querySelectorAll(".ignore-room-one-conflict").forEach((input) => {
     input.addEventListener("change", async () => {
       ignoreRoomOneConflict = input.checked;
@@ -7267,6 +7932,38 @@ function wireEvents() {
     button.addEventListener("click", () => {
       profileModal = { kind: button.dataset.kind || profileTab };
       render();
+    });
+  });
+
+  document.querySelectorAll(".bulk-promote-students").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const plan = studentPromotionPlan();
+      if (!plan.length) return alert("没有可升年级的学生。已毕业学生会自动排除。");
+      if (!confirm(`将按规则批量升年级，共 ${plan.length} 名学生。已毕业学生不会处理。是否继续？`)) return;
+      const preview = studentPromotionPreview(plan);
+      if (!confirm(`请确认升年级预览：\n\n${preview}\n\n继续执行？`)) return;
+      const finalText = prompt("此操作会修改学生档案年级。请输入“确认升年级”继续：");
+      if (finalText !== "确认升年级") return;
+      button.disabled = true;
+      const failures = [];
+      try {
+        for (const item of plan) {
+          try {
+            await request(`/api/students/${item.id}`, {
+              method: "PATCH",
+              body: { grade: item.toGrade, status: item.status },
+            });
+          } catch (error) {
+            failures.push(`${item.name}：${error.message || "更新失败"}`);
+          }
+        }
+        await load();
+        if (failures.length) alert(`已处理，失败 ${failures.length} 条：\n${failures.join("\n")}`);
+        else alert(`批量升年级完成，共处理 ${plan.length} 名学生。`);
+      } catch (error) {
+        button.disabled = false;
+        alert(`批量升年级失败：${error.message}`);
+      }
     });
   });
 
@@ -8041,6 +8738,133 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".batch-copy-lessons").forEach((button) => {
+    button.addEventListener("click", () => {
+      const ids = [...selectedLessonIds].map(Number).filter(Boolean);
+      if (!ids.length) return alert("请先选择要复制的课程");
+      lessonBatchCopyDraft = openLessonBatchCopyDraft();
+      render();
+    });
+  });
+
+  document.querySelectorAll(".batch-copy-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      lessonBatchCopyDraft = null;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".batch-copy-drag-handle").forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("button, input, select, textarea")) return;
+      const panel = handle.closest(".batch-copy-panel");
+      if (!panel) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startOffsetX = Number(panel.dataset.dragX || 0);
+      const startOffsetY = Number(panel.dataset.dragY || 0);
+      const rect = panel.getBoundingClientRect();
+      const baseLeft = rect.left - startOffsetX;
+      const baseRight = rect.right - startOffsetX;
+      const baseTop = rect.top - startOffsetY;
+      const baseBottom = rect.bottom - startOffsetY;
+      const applyPosition = (clientX, clientY) => {
+        const rawX = startOffsetX + clientX - startX;
+        const rawY = startOffsetY + clientY - startY;
+        const minX = 8 - baseLeft;
+        const maxX = window.innerWidth - 8 - baseRight;
+        const minY = 8 - baseTop;
+        const maxY = window.innerHeight - 8 - baseBottom;
+        const nextX = Math.min(maxX, Math.max(minX, rawX));
+        const nextY = Math.min(maxY, Math.max(minY, rawY));
+        panel.dataset.dragX = String(nextX);
+        panel.dataset.dragY = String(nextY);
+        panel.style.transform = `translate(${nextX}px, ${nextY}px)`;
+      };
+      const onMove = (moveEvent) => applyPosition(moveEvent.clientX, moveEvent.clientY);
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+  });
+
+  document.querySelectorAll(".batch-copy-offset").forEach((input) => {
+    input.addEventListener("change", () => {
+      const offsetDays = Number.parseInt(input.value, 10);
+      resetLessonBatchCopyDates(Number.isFinite(offsetDays) ? offsetDays : 7);
+      render();
+    });
+  });
+
+  document.querySelectorAll(".batch-copy-field").forEach((input) => {
+    input.addEventListener("change", () => {
+      const index = Number(input.dataset.index);
+      const field = input.dataset.field;
+      if (!lessonBatchCopyDraft || !Number.isInteger(index) || !field) return;
+      const rows = [...(lessonBatchCopyDraft.targetRows || [])];
+      rows[index] = { ...(rows[index] || {}), [field]: input.value };
+      lessonBatchCopyDraft = { ...lessonBatchCopyDraft, targetRows: rows };
+      if (field === "date") render();
+    });
+  });
+
+  document.querySelectorAll(".batch-copy-confirm").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const modal = button.closest(".batch-copy-modal");
+      const rows = [...(lessonBatchCopyDraft?.targetRows || [])].map((row) => ({ ...row }));
+      modal?.querySelectorAll(".batch-copy-field").forEach((input) => {
+        const index = Number(input.dataset.index);
+        const field = input.dataset.field;
+        if (Number.isInteger(index) && field && rows[index]) rows[index][field] = input.value;
+      });
+      if (!rows.length) return alert("没有可复制的课程");
+      if (rows.length > 200) return alert("单次批量复制最多 200 节课");
+      button.disabled = true;
+      const failures = [];
+      try {
+        for (const row of rows) {
+          if (!isDateValue(row.date)) {
+            failures.push({ row, message: "目标日期无效" });
+            continue;
+          }
+          const payload = {
+            teacher_name: row.teacher_name || "",
+            date: row.date,
+            month_key: monthKeyFromDateValue(row.date) || state.settings.month_key,
+            status: row.status || "待上",
+            time_slot: row.time_slot || "",
+            classroom: row.classroom || "",
+            grade: row.grade || "",
+            subject: row.subject || "",
+            student_names: row.student_names || "",
+            notes: row.notes || "",
+          };
+          if (String(row.teacher_salary ?? "").trim() !== "") {
+            payload.teacher_salary = numberValue(row.teacher_salary);
+          }
+          try {
+            await request("/api/lessons", { method: "POST", body: payload });
+          } catch (error) {
+            failures.push({ row, message: error.message || "新增失败" });
+          }
+        }
+        lessonBatchCopyDraft = null;
+        selectedLessonIds = new Set();
+        await load();
+        if (failures.length) {
+          alert(`有 ${failures.length} 节课程复制失败：\n${failures.map((item) => `${item.row.date || ""} ${item.row.teacher_name || ""} ${item.row.student_names || ""}：${item.message}`).join("\n")}`);
+        }
+      } catch (error) {
+        button.disabled = false;
+        alert(`批量复制失败：${error.message}`);
+      }
+    });
+  });
+
   document.querySelectorAll(".week-copy-btn").forEach((button) => {
     button.addEventListener("click", () => {
       const sourceStart = startOfWeek(todayDate()) || monthBounds(activeMonth).start;
@@ -8675,18 +9499,13 @@ function wireEvents() {
       studentQueryNameDraft = input.value;
     });
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") document.querySelector(".student-query-apply")?.click();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyStudentQuerySelection(input.value).catch((error) => alert(error.message || "查询失败"));
+      }
     });
     input.addEventListener("change", () => {
-      studentQueryNameDraft = input.value;
-    });
-  });
-
-  document.querySelectorAll(".student-query-apply").forEach((button) => {
-    button.addEventListener("click", async () => {
-      selectedStudent = String(document.querySelector(".student-query-name")?.value || "").trim();
-      studentQueryNameDraft = selectedStudent;
-      await refreshStudentQueryOnly();
+      applyStudentQuerySelection(input.value).catch((error) => alert(error.message || "查询失败"));
     });
   });
 
@@ -8718,10 +9537,14 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".student-statement-preview").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (!state.student_statement?.summary) return alert("请先查询学生");
-      studentStatementModalOpen = true;
-      render();
+    button.addEventListener("click", async () => {
+      if (!selectedStudent) return alert("请先选择学生");
+      try {
+        if (!state.student_statement) await loadStudentStatement();
+        await copyStudentStatementPng(state.student_statement || { student_name: selectedStudent, range: currentStudentQueryRange(), summary: null, details: [], month_rows: [] });
+      } catch (error) {
+        alert(error.message || "图片复制失败");
+      }
     });
   });
 
@@ -8738,6 +9561,16 @@ function wireEvents() {
         await downloadStudentStatementPng(state.student_statement);
       } catch (error) {
         alert(error.message || "图片导出失败");
+      }
+    });
+  });
+
+  document.querySelectorAll(".export-teacher-detail-image").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await copyTeacherDetailPng();
+      } catch (error) {
+        alert(error.message || "图片复制失败");
       }
     });
   });
