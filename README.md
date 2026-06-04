@@ -9,7 +9,7 @@
 - 学生档案、学生费用明细、充值和结转；
 - 教师档案、教师课时费、交通补贴和月度薪资汇总；
 - 月度课程总表、课程状态、冲突检查和课程通知；
-- 标准价格、学生专享价、单节课费用覆盖；
+- 标准价格、学生单价规则、单节课费用覆盖；
 - 源 Excel 导入、源头对账、内部规则校验和操作日志；
 - 月度核心 Excel、教师薪资、经营概览等导出。
 
@@ -352,7 +352,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | --- | --- |
 | `lessons` | 月度课程总表，每行一节课，`student_names` 用顿号分隔多个学生，`status` 是规范化后的状态机字段，`teacher_salary` 是手填课时费 |
 | `fee_overrides` | 单节课、单个学生的手动单价覆盖（最高优先级） |
-| `student_pricing` | 学生×科目级的专享单价 |
+| `student_pricing` | 学生 + 年级 + 科目 + 学生集合的学生单价规则候选；金额为 0 表示未设置 |
 | `pricing_standards` | 年级×班型（1对1/1对2/1对3/1对多）的标准单价 |
 | `students` / `teachers` | 档案，软删除字段 `status` 标记在读/在职/离校/离职 |
 | `recharge_records` | 学生月度充值/结转记录，以 `(student_name, month_key)` 为唯一键，`source='carry_over'` 标识自动结转 |
@@ -378,7 +378,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 模块 | 入口 | 核心职责 | 主要数据表 |
 | --- | --- | --- | --- |
 | 排课 | 📅 | 月度课程录入、状态管理、冲突检测、周课表导出、家长群课程通知截图 | `lessons` / `parent_message_greetings` / `course_notice_completion_records` |
-| 学生 | 👥 | 学生档案、费用明细、充值结转、专享价管理 | `students` / `recharge_records` / `student_pricing` / `fee_overrides` |
+| 学生 | 👥 | 学生档案、费用明细、充值结转、学生单价规则管理 | `students` / `recharge_records` / `student_pricing` / `fee_overrides` |
 | 教师 | 👨‍🏫 | 教师薪资汇总、四周车贴、xlsx 导出 | `teachers` / `teacher_adjustments_monthly` |
 | 运营 | 💼 | 员工档案与薪资、日常开销、月份生命周期 | `staff` / `staff_salary_monthly` / `operating_expenses` |
 | 经营概览 | 📊 | 财务汇总、环比、分布、6 月趋势、资产负债 | 跨表只读 |
@@ -443,22 +443,26 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ### 2. 学生（👥）
 
-#### 2.1 单价决定优先级（`unitPriceFor`）
+#### 2.1 学生费用来源（`unitPriceFor`）
 
-按下列顺序逐级回退（高 → 低），命中即停止；`feeDetails` 把每节课按学生展开成一行，`price_source` 字段把命中的优先级带回前端供调试：
+`feeDetails` 把每节课按学生展开成明细行，费用来源只返回三种：`自动`、`手动`、`未设置`。
 
-| 优先级 | 触发条件 | 单价 | `price_source` |
-| --- | --- | --- | --- |
-| 1 | `lessons.status = '试课'` | 0 | `trial` |
-| 2 | `fee_overrides` 命中 `(lesson_id, student_name)` | 取覆盖值 | `manual` |
-| 3 | `lessons.status = '考试'` | 0 | `exam` |
-| 4 | `student_pricing.custom_price > 0` | 取专享价 | `custom` |
-| 5 | `student_pricing.custom_price = 0` 且备注不含「试」字 | 0（视为免单） | `waiver` |
-| 6 | 兜底 | `pricing_standards`（年级 × 班型） | `standard` |
+| 场景 | 单人费用 | 来源 |
+| --- | --- | --- |
+| 非 `已上` 课程 | 0 | 自动 |
+| `已上` 且命中有效学生单价规则，当前费用等于规则单价 | 当前费用 | 自动 |
+| `已上` 且命中有效学生单价规则，当前费用不等于规则单价 | 当前费用 | 手动 |
+| `已上` 但没有有效学生单价规则，或规则单价为 0 | 当前费用 | 未设置 |
 
-> 录入约束：`POST/PATCH /api/student-pricing` 拒绝 `custom_price ≤ 0`；规则 5 仅作为存量数据兜底语义，新建/编辑专享价时无法保存 0。
+有效学生单价规则必须精确匹配：
 
-> 收入计入口径：`isBillableDetail` 控制是否计入 `revenue` —— 默认只看 `已上 / 未缴费`；考试课例外，仅当 `price_source='manual'` 且单价 > 0 时才参与（用于「考试也按节收费」的特殊场景）。
+```text
+学生 + 年级 + 科目 + 学生集合
+```
+
+学生集合会拆分、去空、去重、排序并用顿号统一拼接。旧的空年级 / 空学生集合的 `学生 + 科目` 规则不再参与匹配；启动时会把这些旧规则曾经动态影响的已上课程费用补写到 `fee_overrides`，且不覆盖已有手动覆盖价。
+
+当前费用仍优先读取 `fee_overrides`，没有覆盖价时沿用 `pricing_standards` 的标准价作为当前账面费用；点击“按规则更新所选费用”才会把勾选明细写入 `fee_overrides`，未勾选历史费用不会被批量清洗。
 
 #### 2.2 子功能
 
@@ -468,7 +472,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 充值记录 | 表内编辑 + upsert | 字段：`prev_actual / prev_gift / cur_recharge / cur_gift / recharge_date / notes`；以 `(student_name, month_key)` 唯一键 upsert |
 | 上月结转 | `GET /api/recharges/rollover?from=...&to=...` + `ensureCarryOver` 自动刷新 | 把上月月末余额作为本月 `prev_actual / prev_gift`；`shouldRefreshCarryOver` 决定可覆盖范围（自动结转行 / 全空行）；上游月数据变化后，下游月自动结转行会在下次访问时被刷新；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷 |
 | 学生查询 | `renderStudentQuery` | 选中学生 → 当月汇总 + 当月明细 + `studentHistoryRows` 跨月历史对比 |
-| 学生专享价 | `student_pricing` | 学生×科目；UI 支持按学生/备注、科目、价格状态、本月/历史影响筛选，并显示「当月用过 N 节 / 历史 M 节」识别孤儿配置；偏离标准价 ≥ 50% 时保存提示加备注（`pricingWarnings`） |
+| 学生单价规则 | `student_pricing` | 进入页面时根据历史课程自动生成 `学生 + 年级 + 科目 + 学生集合` 候选；学生、年级、科目和学生集合只读，只有单价和备注可编辑；0 表示未设置 |
 | 价格重算 | `POST /api/pricing-recompute` | 删除当月该学生该科目所有 `fee_overrides`（让单价回到专享/标准价）；变更前后总价写入审计日志 |
 
 ---
@@ -534,7 +538,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 子功能 | 实现 | 说明 |
 | --- | --- | --- |
 | 标准单价 | `pricing_standards` | 年级 × 班型 → 单价；高/初年级班型档位略有差异（见 `priceBucket`） |
-| 内部审计 | `internalAudit(monthKey)` | 检测项见下表；离校 / 已流出学生不参与姓名相似 / 孤儿专享价检查 |
+| 内部审计 | `internalAudit(monthKey)` | 检测项见下表；离校 / 已流出学生不参与姓名相似 / 孤儿学生单价规则检查 |
 | xlsx 对账 | `runNodeXlsxAudit` | 上传 xlsx「N月总表」，按 `(date, teacher, time_slot)` 三元组比对每节课字段差异，输出可一键回填的 patch，并统计源文件新增、系统多余和字段变更 |
 | 审计修复 | `applyAuditIssues` | 批量应用 patch；CRITICAL 默认拒绝，需 `confirm_critical=true` |
 | 问题去重 | `auditIssueKey` + `visibleAuditIssues` | 用 `issue_key`（来源/类型/实体/字段/前后值的拼串）做主键，相同问题重复出现时复用同一条 |
@@ -610,7 +614,7 @@ node --check public/app.js
 | `student_typo` | WARN | 两个学生姓名 Levenshtein ≤ 1，且共享某个已知年级或一方年级缺失，且双方均非离校 / 已流出 |
 | `orphan_pricing` | WARN | `student_pricing` 行历史从未在任何 `lessons.subject` 中出现，且学生未离校 |
 | `zero_custom_pricing` | HIGH / MEDIUM | `custom_price ≤ 0`；当月有非试课节课命中 → HIGH，否则 MEDIUM |
-| `price_outlier` | WARN | 专享价相对标准价偏离 ≥ 30% |
+| `price_outlier` | WARN | 学生单价规则相对标准价偏离 ≥ 30% |
 | `price_zero` | HIGH | 有效课时（已上 / 未缴费）单价 = 0 |
 
 ---
@@ -781,12 +785,13 @@ node --check public/app.js
   - `POST /api/teacher-salary-rules/apply-selected`
 - `teacher_salary_rules.is_active` 字段仍保留用于兼容历史接口；当前自动匹配以 `salary_per_unit > 0` 为生效条件。
 
-#### 学生单价新增弹窗与下拉样式
+#### 学生单价规则候选
 
-- `学生 -> 学生单价` 顶部常驻“新增个性化单价”表单已移除，改为 `+ 新增个性化单价` 按钮。
-- 点击按钮后通过弹窗填写学生姓名、科目、单价、备注；保存后关闭弹窗并刷新列表。
-- 该调整不影响已有筛选、删除、编辑、价格状态提示和单价生效逻辑。
-- `教师 -> 薪资规则` 新增弹窗和 `学生 -> 学生单价` 新增弹窗中的下拉候选已改为浅色风格，不再出现黑底白字；该样式修复不影响排课新增课程、页面筛选框和其他下拉框。
+- `学生 -> 学生单价` 改为自动候选表，不再手动新增或删除规则。
+- 候选规则从历史课程生成，唯一键为 `学生 + 年级 + 科目 + 学生集合`；学生集合会规范化，学生顺序不同仍视为同一条规则。
+- 表格只显示学生、年级、科目、学生集合、单价、来源、备注；前四列只读，单价和备注失焦保存。
+- 单价为 0 显示为未设置，不参与费用规则判断；来源只显示自动、手动、未设置。
+- 旧的空年级 / 空学生集合规则会保留在数据库中用于审计追溯，但不在页面展示，也不参与新规则匹配。
 
 ### 配色方案
 
@@ -910,7 +915,7 @@ giftBalance       = giftBase - giftConsumption
 | Excel 充值/费用核对脚本只能比对单月，无法跨工作簿 | 新增 `scripts/sync_source_workbooks.js` 一键同步多月 + 整体备份；审计脚本支持 `--simulate-sync=YYYY-MM-01,...` 临时库重放；新增「相邻 Excel 结转核对」与跨月汇总去重 | `scripts/sync_source_workbooks.js` / `scripts/audit_source_vs_summary.js` |
 | 中文姓名输入框每输入一个字符就整页刷新 | `bindSafeTextInput` 改为输入时只更新草稿，按 Enter / 失焦 / change 才提交并重渲染；增加 IME composition 状态判断，不在合成中触发 | `public/app.js` `bindSafeTextInput` |
 | 应收账款口径只统计「状态=未缴费」 | 拆出 `account_debt_receivable` + `unpaid_lesson_receivable`，`accounts_receivable` 按学生取最大值合并去重 | `financeBreakdowns` |
-| 专享价 `custom_price = 0` 会强制覆盖课时价为 0 | POST/PATCH 拒绝 `≤ 0`；存量 0 显式归为 `price_source='waiver'`，备注含「试」字时回退至标准价 | `unitPriceFor` / `/api/student-pricing` |
+| 学生单价 `custom_price = 0` 会强制覆盖课时价为 0 | 现改为 0 元规则只表示未设置；旧空组合规则不再参与匹配，必要时以 `fee_overrides` 保留历史费用 | `unitPriceFor` / `/api/student-pricing` |
 | `recomputePricing` 静默删除手填覆盖 | UI 弹窗显式显示「将清除 N 条手填价格、重算 M 节课」 | `app.js` `.pricing-recompute` |
 | 强删月份无确认 | UI 二次确认弹窗，需手输 `month_key` 字符串才能解锁删除按钮；同时 `ensureCarryOver` 在下次访问下游月时按新的 `previousDataMonth` 自动刷新自动结转行 | `deleteMonth` / `month-delete-confirm` |
 | `previousEqualRange` 用滑动窗口处理自然月 | 当 `range` 是完整自然月时，改用真实的上一自然月；自定义区间仍走滑动窗口 | `previousEqualRange` |

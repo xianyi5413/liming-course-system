@@ -62,7 +62,7 @@ const PRICING = [
   ["初二", 1, 300, "1对1"], ["初二", 2, 240, "1对2"], ["初二", 4, 160, "1对多"],
   ["初一", 1, 300, "1对1"], ["初一", 2, 240, "1对2"], ["初一", 4, 160, "1对多"],
 ];
-const GRADE_ORDER = GRADES.map((grade) => grade.name);
+const GRADE_ORDER = [...GRADES.map((grade) => grade.name), "已毕业"];
 const NEXT_GRADE = {
   初一: "初二",
   初二: "初三",
@@ -515,6 +515,7 @@ function initDb() {
       VALUES (?, ?, ?, ?)
     `).run(row[0], row[1], row[2], row[3]);
   }
+  preserveLegacyStudentPricingFeeOverrides();
   seedDefaultUsers();
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
 }
@@ -1024,32 +1025,16 @@ function activeStudentPricingRuleForLesson({ studentName, grade, subject, studen
   const gradeValue = text(grade);
   const subjectValue = text(subject);
   const studentNamesValue = normalizedStudents(studentNames);
-  if (!name || !subjectValue) return null;
-  if (gradeValue && studentNamesValue) {
-    const exact = get(`
-      SELECT *
-      FROM student_pricing
-      WHERE student_name = ?
-        AND grade = ?
-        AND subject = ?
-        AND student_names = ?
-        AND custom_price > 0
-      ORDER BY id DESC
-      LIMIT 1
-    `, [name, gradeValue, subjectValue, studentNamesValue]);
-    if (exact) return exact;
-  }
-  return get(`
+  if (!name || !gradeValue || !subjectValue || !studentNamesValue) return null;
+  return all(`
     SELECT *
     FROM student_pricing
     WHERE student_name = ?
+      AND grade = ?
       AND subject = ?
-      AND TRIM(COALESCE(grade, '')) = ''
-      AND TRIM(COALESCE(student_names, '')) = ''
       AND custom_price > 0
     ORDER BY id DESC
-    LIMIT 1
-  `, [name, subjectValue]);
+  `, [name, gradeValue, subjectValue]).find((rule) => normalizedStudents(rule.student_names) === studentNamesValue) || null;
 }
 
 function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status, studentNames }) {
@@ -1062,7 +1047,6 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
 
   const rule = activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames });
   const rulePrice = rule ? num(rule.custom_price) : 0;
-  const legacyRule = rule && !text(rule.grade) && !text(rule.student_names);
 
   const bucket = priceBucket(grade, studentCount);
   const standard = get(
@@ -1071,18 +1055,135 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
   );
   const currentPrice = override
     ? num(override.unit_price)
-    : legacyRule
-      ? rulePrice
-      : (standard ? num(standard.unit_price) : 0);
+    : (standard ? num(standard.unit_price) : 0);
   const source = rule
     ? (Math.abs(currentPrice - rulePrice) < 0.0001 ? "auto" : "manual")
-    : (override ? "manual" : "pending");
+    : "pending";
   return {
     unit_price: currentPrice,
     source,
     rule_price: rule ? rulePrice : null,
     pricing_rule_id: rule ? Number(rule.id) : null,
   };
+}
+
+function studentPricingRuleKey(row) {
+  return [
+    text(row.student_name),
+    text(row.grade),
+    text(row.subject),
+    normalizedStudents(row.student_names),
+  ].join("\u0001");
+}
+
+function isCompleteStudentPricingRule(row) {
+  return Boolean(
+    text(row.student_name)
+    && text(row.grade)
+    && text(row.subject)
+    && normalizedStudents(row.student_names)
+  );
+}
+
+function preserveLegacyStudentPricingFeeOverrides() {
+  const legacyRules = all(`
+    SELECT *
+    FROM student_pricing
+    WHERE custom_price > 0
+      AND TRIM(COALESCE(grade, '')) = ''
+      AND TRIM(COALESCE(student_names, '')) = ''
+    ORDER BY id
+  `);
+  if (!legacyRules.length) return { insertedCount: 0, legacyRuleCount: 0 };
+
+  const rulesByStudentSubject = new Map();
+  for (const rule of legacyRules) {
+    const studentName = text(rule.student_name);
+    const subject = text(rule.subject);
+    if (!studentName || !subject) continue;
+    rulesByStudentSubject.set(`${studentName}\u0001${subject}`, rule);
+  }
+
+  let insertedCount = 0;
+  return withTransaction(() => {
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO fee_overrides(lesson_id, student_name, unit_price, updated_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+    for (const lesson of all("SELECT * FROM lessons ORDER BY id")) {
+      if (!isCompletedLesson(lesson)) continue;
+      for (const studentName of splitStudents(lesson.student_names)) {
+        const rule = rulesByStudentSubject.get(`${studentName}\u0001${text(lesson.subject)}`);
+        if (!rule) continue;
+        const result = insert.run(Number(lesson.id), studentName, moneyRound(rule.custom_price));
+        insertedCount += result.changes || 0;
+      }
+    }
+    return { insertedCount, legacyRuleCount: legacyRules.length };
+  });
+}
+
+function syncStudentPricingCandidatesFromLessons() {
+  return withTransaction(() => {
+    const existingKeys = new Set(all("SELECT * FROM student_pricing").map((rule) => studentPricingRuleKey(rule)));
+    const seenLessonKeys = new Set();
+    const skippedReasons = new Map();
+    const insert = db.prepare(`
+      INSERT INTO student_pricing(student_name, grade, subject, student_names, custom_price, notes)
+      VALUES (?, ?, ?, ?, 0, '')
+    `);
+    let createdCount = 0;
+    let existingCount = 0;
+    let scannedLessonCount = 0;
+    const createdRules = [];
+
+    for (const lesson of all(`
+      SELECT grade, subject, student_names
+      FROM lessons
+      ORDER BY grade, subject, student_names, id
+    `)) {
+      scannedLessonCount += 1;
+      const grade = text(lesson.grade);
+      const subject = text(lesson.subject);
+      const studentNames = normalizedStudents(lesson.student_names);
+      const students = splitStudents(studentNames);
+      const missing = [];
+      if (!grade) missing.push("缺少年级");
+      if (!subject) missing.push("缺少科目");
+      if (!studentNames || !students.length) missing.push("缺少学生");
+      if (missing.length) {
+        const reason = missing.join("、");
+        skippedReasons.set(reason, (skippedReasons.get(reason) || 0) + 1);
+        continue;
+      }
+
+      for (const studentName of students) {
+        const candidate = { student_name: studentName, grade, subject, student_names: studentNames };
+        const key = studentPricingRuleKey(candidate);
+        if (seenLessonKeys.has(key)) continue;
+        seenLessonKeys.add(key);
+        if (existingKeys.has(key)) {
+          existingCount += 1;
+          continue;
+        }
+        const result = insert.run(studentName, grade, subject, studentNames);
+        const created = get("SELECT * FROM student_pricing WHERE id = ?", [Number(result.lastInsertRowid)]);
+        createdRules.push(created);
+        existingKeys.add(key);
+        createdCount += 1;
+      }
+    }
+
+    return {
+      scannedLessonCount,
+      uniqueCandidateCount: seenLessonKeys.size,
+      createdCount,
+      existingCount,
+      skippedCount: [...skippedReasons.values()].reduce((sum, count) => sum + count, 0),
+      skippedReasons: [...skippedReasons.entries()].map(([reason, count]) => ({ reason, count })),
+      createdRules,
+    };
+  });
 }
 
 function upsertStudent(name, grade) {
@@ -3329,7 +3430,7 @@ function internalAudit(monthKey, { log = true } = {}) {
         entity: `pricing_${pricing.id}`,
         field: "student_pricing",
         before_value: `${pricing.student_name}-${pricing.subject}`,
-        message: `${pricing.student_name}-${pricing.subject} 从未在课程中使用，可能是误建的个性价`,
+        message: `${pricing.student_name}-${pricing.subject} 从未在课程中使用，可能是误建的学生单价规则`,
         data: { pricing_id: pricing.id },
       }));
       continue;
@@ -3346,7 +3447,7 @@ function internalAudit(monthKey, { log = true } = {}) {
         entity: `pricing_${pricing.id}`,
         field: "custom_price",
         before_value: custom,
-        message: `${pricing.student_name}-${pricing.subject} 专享价为 0，建议改为试课状态或单节手动费用覆盖`,
+        message: `${pricing.student_name}-${pricing.subject} 学生单价规则为 0，建议设置有效规则或单节手动费用覆盖`,
         data: { pricing_id: pricing.id, student_name: pricing.student_name, subject: pricing.subject, custom_price: custom },
       }));
       continue;
@@ -3359,7 +3460,7 @@ function internalAudit(monthKey, { log = true } = {}) {
         field: "custom_price",
         before_value: custom,
         after_value: std,
-        message: `${pricing.student_name}-${pricing.subject} 专享价相对标准价偏离超过 30%`,
+        message: `${pricing.student_name}-${pricing.subject} 学生单价规则相对标准价偏离超过 30%`,
         data: { pricing_id: pricing.id, student_name: pricing.student_name, subject: pricing.subject, custom_price: custom, standard_price: std },
       }));
     }
@@ -4155,7 +4256,7 @@ function studentStatementRows(monthKey, studentName, range = null) {
       row.notes,
       row.unit_price,
       row.price_source === "manual" ? "手动"
-        : row.price_source === "pending" ? "待设置"
+        : row.price_source === "pending" ? "未设置"
           : "自动",
     ]),
   ];
@@ -4192,18 +4293,33 @@ function studentHistoryRows(studentName) {
 
 function studentPricingRows(monthKey) {
   const lessons = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY date, teacher_name, time_slot, id");
-  const rows = all("SELECT * FROM student_pricing ORDER BY id").map((row) => {
+  const rows = all("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
     const studentNames = normalizedStudents(row.student_names);
     const matches = lessons.filter((lesson) => (
-      splitStudents(lesson.student_names).includes(studentName)
+      splitStudents(normalizedStudents(lesson.student_names)).includes(studentName)
       && text(lesson.subject) === subject
-      && (!grade || text(lesson.grade) === grade)
-      && (!studentNames || normalizedStudents(lesson.student_names) === studentNames)
+      && text(lesson.grade) === grade
+      && normalizedStudents(lesson.student_names) === studentNames
       && isCompletedLesson(lesson)
     ));
+    const rulePrice = num(row.custom_price);
+    const mismatchCount = rulePrice > 0
+      ? matches.filter((lesson) => {
+        const price = unitPriceFor({
+          studentName,
+          subject: lesson.subject,
+          grade: lesson.grade,
+          studentCount: splitStudents(lesson.student_names).length,
+          lessonId: lesson.id,
+          status: deriveStatus(lesson),
+          studentNames: lesson.student_names,
+        });
+        return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
+      }).length
+      : 0;
     return {
       ...row,
       grade,
@@ -4211,6 +4327,8 @@ function studentPricingRows(monthKey) {
       lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"),
       current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length,
       total_lessons: matches.length,
+      rule_source: rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto"),
+      mismatch_lessons: mismatchCount,
     };
   });
   return rows.sort((a, b) => (
@@ -4351,6 +4469,7 @@ function bootstrap(monthKey, includeInactive = false) {
     autoPromoteStudentsForMonth(monthKey);
     ensureCarryOverChain(monthKey);
   });
+  syncStudentPricingCandidatesFromLessons();
   const details = feeDetails(monthKey);
   const settings = Object.fromEntries(all("SELECT key, value FROM settings").map((row) => [row.key, row.value]));
   settings.month_key = monthKey;
@@ -6046,7 +6165,7 @@ function xlsxStudentCrossChecks(xlsxRows) {
           field: "custom_price",
           xlsx_value: `标准价 ${std}`,
           db_value: custom,
-          message: `${student}-${pricing.subject} 专享价与按 ${match.grade}/${match.count} 人计算的标准价差额超过 50%`,
+          message: `${student}-${pricing.subject} 学生单价规则与按 ${match.grade}/${match.count} 人计算的标准价差额超过 50%`,
         });
       }
     }
@@ -6937,7 +7056,7 @@ function pricingWarnings({ student_name, subject, custom_price, notes }) {
     if (std > 0 && Math.abs(custom - std) / std > 0.5 && !text(notes)) {
       warnings.push({
         type: "price_outlier",
-        message: "⚠ 专享价与标准价差额较大，建议在备注里说明原因",
+        message: "⚠ 学生单价规则与标准价差额较大，建议在备注里说明原因",
       });
     }
   }
@@ -7805,7 +7924,7 @@ async function handleApi(req, res, url) {
     };
     if (!payload.student_name || !payload.subject) return sendError(res, 400, "student_name and subject are required");
     if (payload.custom_price < 0) {
-      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为待设置候选");
+      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为未设置候选");
     }
     const result = db.prepare(`
       INSERT INTO student_pricing(student_name, grade, subject, student_names, custom_price, notes)
@@ -7826,7 +7945,7 @@ async function handleApi(req, res, url) {
   if (studentPricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
     if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) < 0) {
-      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为待设置候选");
+      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为未设置候选");
     }
     const payload = { ...body };
     if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);
