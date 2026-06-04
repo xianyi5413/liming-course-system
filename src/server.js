@@ -609,14 +609,16 @@ function isEffective(row) {
   return status === "已上" || status === "未缴费";
 }
 
+function isCompletedLesson(row) {
+  return deriveStatus(row) === "已上";
+}
+
 function isUnpaid(row) {
   return deriveStatus(row) === "未缴费";
 }
 
 function isBillableDetail(row) {
-  const status = deriveStatus(row);
-  if (status === "考试") return row.price_source === "manual" && num(row.unit_price) > 0;
-  return isEffective(row);
+  return isCompletedLesson(row);
 }
 
 function xmlDecode(value) {
@@ -1639,6 +1641,7 @@ function feeDetails(monthKey) {
         unit_price: price.unit_price,
         price_source: price.source,
       };
+      const billable = isBillableDetail(detail);
       details.push({
         id: `${lesson.id}:${index + 1}`,
         lesson_id: lesson.id,
@@ -1654,12 +1657,12 @@ function feeDetails(monthKey) {
         grade: lesson.grade,
         subject: lesson.subject,
         notes: lesson.notes,
-        unit_price: price.unit_price,
+        unit_price: billable ? price.unit_price : 0,
         price_source: price.source,
         course_status: lesson.course_status,
         teacher_salary: num(lesson.teacher_salary),
         student_count: studentCount,
-        effective: isBillableDetail(detail),
+        effective: billable,
       });
     });
   }
@@ -1881,7 +1884,7 @@ function teacherSummary(monthKey, includeInactive = false) {
       active_this_month: active.has(name),
     });
     const row = byTeacher.get(name);
-    if (isEffective(lesson)) {
+    if (isCompletedLesson(lesson)) {
       row.lesson_count += 1;
       row.salary_total = moneyRound(row.salary_total + num(lesson.teacher_salary));
     }
@@ -4129,7 +4132,17 @@ function teacherSalaryRules() {
   return all(`
     SELECT *
     FROM teacher_salary_rules
-    ORDER BY is_active DESC, teacher_name, grade, subject, student_names, id
+    ORDER BY teacher_name,
+      CASE grade
+        WHEN '初一' THEN 1
+        WHEN '初二' THEN 2
+        WHEN '初三' THEN 3
+        WHEN '高一' THEN 4
+        WHEN '高二' THEN 5
+        WHEN '高三' THEN 6
+        ELSE 99
+      END,
+      grade, subject, student_names, id
   `);
 }
 
@@ -4207,7 +4220,7 @@ function createTeacherSalaryRule(body) {
   const rule = normalizeTeacherSalaryRuleInput(body);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule)) {
-    return { error: "相同老师、年级、科目和学生集合的启用规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
   }
   const result = db.prepare(`
     INSERT INTO teacher_salary_rules(
@@ -4233,7 +4246,7 @@ function updateTeacherSalaryRule(id, body) {
   const rule = normalizeTeacherSalaryRuleInput(body, current);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule, id)) {
-    return { error: "相同老师、年级、科目和学生集合的启用规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
   }
   db.prepare(`
     UPDATE teacher_salary_rules
@@ -4315,7 +4328,7 @@ function syncTeacherSalaryRuleCandidatesFromLessons() {
         candidate.grade,
         candidate.subject,
         candidate.student_names,
-        "自动候选：请填写每2小时薪资",
+        "",
       );
       const created = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(result.lastInsertRowid)]);
       createdRules.push(created);
@@ -4357,6 +4370,7 @@ function lessonSalaryUnits(timeSlot, unitHours = 2) {
 
 function calculateTeacherSalaryFromRule(rule, lesson) {
   if (!rule) return null;
+  if (!isCompletedLesson(lesson)) return null;
   const unitResult = lessonSalaryUnits(lesson.time_slot, rule.unit_hours);
   return {
     rule_id: Number(rule.id),
@@ -4370,6 +4384,14 @@ function calculateTeacherSalaryFromRule(rule, lesson) {
 }
 
 function resolvedTeacherSalaryForLesson(data, options = {}) {
+  if (!isCompletedLesson(data)) {
+    return {
+      teacher_salary: 0,
+      teacher_salary_source: "empty",
+      teacher_salary_rule_id: null,
+      warning: "",
+    };
+  }
   const teacherSalary = optionalNumber(data.teacher_salary);
   const explicitSalary = data.teacher_salary_present === true
     || (
@@ -4417,6 +4439,10 @@ function applyTeacherSalaryRulesToLessons(lessonIds) {
       const lesson = get("SELECT * FROM lessons WHERE id = ?", [id]);
       if (!lesson) {
         skippedReasons.push({ lesson_id: id, reason: "课程不存在" });
+        continue;
+      }
+      if (!isCompletedLesson(lesson)) {
+        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与薪资规则" });
         continue;
       }
       const rule = activeTeacherSalaryRuleForLesson(lesson);
@@ -7338,6 +7364,12 @@ async function handleApi(req, res, url) {
       Object.assign(payload, legacyStatusFields(body.status));
     } else if (Object.prototype.hasOwnProperty.call(body, "lesson_status") || Object.prototype.hasOwnProperty.call(body, "course_status")) {
       payload.status = deriveStatus({ ...current, ...body });
+    }
+    const statusChanged = ["status", "lesson_status", "course_status"].some((field) => Object.prototype.hasOwnProperty.call(body, field));
+    if (statusChanged && !isCompletedLesson({ ...current, ...payload })) {
+      payload.teacher_salary = 0;
+      payload.teacher_salary_source = "empty";
+      payload.teacher_salary_rule_id = null;
     }
     auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",

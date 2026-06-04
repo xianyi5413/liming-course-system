@@ -1892,6 +1892,22 @@ td.text-cell {
   text-align: center;
 }
 
+.teacher-detail-table .select-col {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.teacher-detail-bulkbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-4);
+}
+
 .teacher-salary-lesson-select:not(:disabled),
 .teacher-salary-select-all:not(:disabled) {
   cursor: pointer;
@@ -2834,6 +2850,50 @@ select.control,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.teacher-salary-rule-modal .lesson-create-form,
+.student-pricing-modal .lesson-create-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.teacher-salary-rule-modal .lesson-create-form .wide,
+.student-pricing-modal .lesson-create-form .wide {
+  grid-column: 1 / -1;
+}
+
+.teacher-salary-rule-modal .filter-combo,
+.student-pricing-modal .filter-combo {
+  width: 100%;
+}
+
+.teacher-salary-rule-modal .filter-combo-menu,
+.student-pricing-modal .filter-combo-menu {
+  z-index: 90;
+  background: var(--panel-raised);
+  color: var(--text);
+  border-color: var(--line);
+  box-shadow: var(--shadow-sticky);
+}
+
+.teacher-salary-rule-modal :is(input, select, option),
+.student-pricing-modal :is(input, select, option) {
+  color-scheme: light;
+}
+
+.teacher-salary-rule-modal :is(.control, select.control),
+.student-pricing-modal :is(.control, select.control) {
+  background: var(--input-bg);
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.teacher-salary-rule-modal select.control option,
+.student-pricing-modal select.control option {
+  background: var(--panel);
+  color: var(--ink);
+}
+
 .lesson-create-modal .lesson-create-students-field {
   grid-column: 1 / -1;
 }
@@ -2876,7 +2936,9 @@ select.control,
 }
 
 @media (max-width: 720px) {
-  .lesson-create-modal .lesson-create-form {
+  .lesson-create-modal .lesson-create-form,
+  .teacher-salary-rule-modal .lesson-create-form,
+  .student-pricing-modal .lesson-create-form {
     grid-template-columns: 1fr;
   }
 }
