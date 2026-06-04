@@ -1384,8 +1384,17 @@ button:disabled,
   display: grid;
   place-items: center;
   width: 22px;
-  font-size: 1.05rem;
   line-height: 1;
+}
+
+.nav-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .nav-label {
@@ -1893,6 +1902,14 @@ td.text-cell {
 }
 
 .teacher-detail-table .select-col {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.fee-detail-table .select-col {
   width: 44px;
   min-width: 44px;
   max-width: 44px;
@@ -2967,11 +2984,13 @@ select.control,
   max-height: 320px;
 }
 
-.batch-copy-panel {
+.modal-panel.batch-copy-panel {
   display: flex;
   flex-direction: column;
-  width: min(1200px, 92vw);
-  max-height: 88vh;
+  width: min(1500px, calc(100vw - 80px));
+  max-width: calc(100vw - 32px);
+  height: min(900px, 90vh);
+  max-height: 90vh;
   overflow: hidden;
 }
 
@@ -2994,34 +3013,44 @@ select.control,
 
 .batch-copy-edit-wrap,
 .batch-copy-preview {
-  max-height: 280px;
+  max-height: 340px;
   overflow: auto;
 }
 
 .batch-copy-preview table {
-  min-width: 920px;
+  min-width: 1360px;
 }
 
 .batch-copy-edit-table {
-  min-width: 1420px;
+  min-width: 1360px;
 }
 
 .batch-copy-edit-table th,
 .batch-copy-edit-table td {
-  min-width: 124px;
+  min-width: 118px;
+  padding: 6px 8px;
 }
 
-.batch-copy-edit-table th:nth-child(2),
-.batch-copy-edit-table td:nth-child(2) {
+.batch-copy-edit-table .control {
+  min-width: 108px;
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: var(--text-table);
+}
+
+.batch-copy-edit-table th:nth-child(3),
+.batch-copy-edit-table td:nth-child(3),
+.batch-copy-edit-table th:nth-child(4),
+.batch-copy-edit-table td:nth-child(4) {
   min-width: 72px;
   text-align: center;
 }
 
-.batch-copy-edit-table th:nth-child(8),
-.batch-copy-edit-table td:nth-child(8),
 .batch-copy-edit-table th:nth-child(9),
-.batch-copy-edit-table td:nth-child(9) {
-  min-width: 180px;
+.batch-copy-edit-table td:nth-child(9),
+.batch-copy-edit-table th:nth-child(10),
+.batch-copy-edit-table td:nth-child(10) {
+  min-width: 220px;
 }
 
 .batch-copy-panel .modal-actions {
@@ -3032,6 +3061,13 @@ select.control,
   padding: var(--space-4) var(--space-5);
   border-top: 1px solid var(--line);
   background: var(--panel);
+}
+
+@media (max-width: 760px) {
+  .modal-panel.batch-copy-panel {
+    width: calc(100vw - 24px);
+    max-width: calc(100vw - 24px);
+  }
 }
 
 .modal-backdrop {
@@ -4905,12 +4941,13 @@ tr.risk-debt:hover td {
 
 .cell-input.number,
 .course-table :is(th, td):nth-child(12),
-.fee-detail-table :is(th, td):nth-child(11),
+.fee-detail-table :is(th, td):nth-child(12),
+.fee-detail-table :is(th, td):nth-child(13),
 .student-summary-table :is(th, td):nth-child(n + 4),
 .recharge-table :is(th, td):nth-child(n + 3):nth-child(-n + 6),
 .pricing-table :is(th, td):nth-child(3),
 .student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(3),
+.student-pricing-table :is(th, td):nth-child(5),
 .teacher-salary-table :is(th, td):nth-child(n + 3):nth-child(-n + 8),
 .finance-table :is(th, td):nth-child(n + 2),
 .risk-table :is(th, td):nth-child(3) {
@@ -4930,15 +4967,14 @@ tr.risk-debt:hover td {
 .course-table :is(th, td):nth-child(13),
 .course-table :is(th, td):nth-child(14),
 .course-table :is(th, td):nth-child(15),
-.fee-detail-table :is(th, td):nth-child(3),
 .fee-detail-table :is(th, td):nth-child(4),
 .fee-detail-table :is(th, td):nth-child(5),
 .fee-detail-table :is(th, td):nth-child(6),
 .fee-detail-table :is(th, td):nth-child(7),
 .fee-detail-table :is(th, td):nth-child(8),
 .fee-detail-table :is(th, td):nth-child(9),
-.fee-detail-table :is(th, td):nth-child(12),
-.fee-detail-table :is(th, td):nth-child(13),
+.fee-detail-table :is(th, td):nth-child(10),
+.fee-detail-table :is(th, td):nth-child(14),
 .student-summary-table :is(th, td):nth-child(2),
 .student-summary-table :is(th, td):nth-child(3),
 .recharge-table :is(th, td):nth-child(2),
@@ -4948,6 +4984,7 @@ tr.risk-debt:hover td {
 .student-pricing-create-table :is(th, td):nth-child(2),
 .student-pricing-create-table :is(th, td):nth-child(5),
 .student-pricing-table :is(th, td):nth-child(2),
+.student-pricing-table :is(th, td):nth-child(3),
 .student-pricing-table :is(th, td):nth-child(6),
 .teacher-salary-table :is(th, td):nth-child(2),
 .top-students-table :is(th, td):nth-child(2),
@@ -4956,12 +4993,13 @@ tr.risk-debt:hover td {
 }
 
 .course-table :is(th, td):nth-child(12),
-.fee-detail-table :is(th, td):nth-child(11),
+.fee-detail-table :is(th, td):nth-child(12),
+.fee-detail-table :is(th, td):nth-child(13),
 .student-summary-table :is(th, td):nth-child(n + 4),
 .recharge-table :is(th, td):nth-child(n + 3):nth-child(-n + 6),
 .pricing-table :is(th, td):nth-child(3),
 .student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(3),
+.student-pricing-table :is(th, td):nth-child(5),
 .teacher-salary-table :is(th, td):nth-child(n + 3):nth-child(-n + 8),
 .profit-table :is(th, td):nth-child(n + 2),
 .balance-table :is(th, td):nth-child(2),
@@ -4974,9 +5012,9 @@ tr.risk-debt:hover td {
 .course-table :is(th, td):nth-child(1),
 .course-table :is(th, td):nth-child(9),
 .course-table :is(th, td):nth-child(10),
-.fee-detail-table :is(th, td):nth-child(1),
 .fee-detail-table :is(th, td):nth-child(2),
-.fee-detail-table :is(th, td):nth-child(10),
+.fee-detail-table :is(th, td):nth-child(3),
+.fee-detail-table :is(th, td):nth-child(11),
 .student-summary-table :is(th, td):nth-child(1),
 .recharge-table :is(th, td):nth-child(1),
 .recharge-table :is(th, td):nth-child(8),
@@ -4986,7 +5024,8 @@ tr.risk-debt:hover td {
 .student-pricing-create-table :is(th, td):nth-child(4),
 .student-pricing-table :is(th, td):nth-child(1),
 .student-pricing-table :is(th, td):nth-child(4),
-.student-pricing-table :is(th, td):nth-child(5),
+.student-pricing-table :is(th, td):nth-child(7),
+.student-pricing-table :is(th, td):nth-child(8),
 .teacher-salary-table :is(th, td):nth-child(1),
 .teacher-salary-table :is(th, td):nth-child(9),
 .finance-table :is(th, td):nth-child(1),
@@ -5002,11 +5041,11 @@ tr.risk-debt:hover td {
 .course-table td:nth-child(7) .cell-select,
 .course-table td:nth-child(8) .cell-select,
 .course-table td:nth-child(11) .cell-select,
-.fee-detail-table td:nth-child(11) .cell-input,
+.fee-detail-table td:nth-child(12) .cell-input,
 .recharge-table td:nth-child(n + 3):nth-child(-n + 6) .cell-input,
 .pricing-table td:nth-child(3) .cell-input,
 .student-pricing-create-table td:nth-child(3) .cell-input,
-.student-pricing-table td:nth-child(3) .cell-input,
+.student-pricing-table td:nth-child(5) .cell-input,
 .teacher-salary-table td:nth-child(n + 3):nth-child(-n + 7) .cell-input {
   text-align: inherit;
 }

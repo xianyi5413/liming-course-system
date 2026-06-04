@@ -123,10 +123,12 @@ function initDb() {
     CREATE TABLE IF NOT EXISTS student_pricing (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       student_name TEXT NOT NULL,
+      grade TEXT DEFAULT '',
       subject TEXT NOT NULL,
+      student_names TEXT DEFAULT '',
       custom_price REAL NOT NULL DEFAULT 0,
       notes TEXT DEFAULT '',
-      UNIQUE (student_name, subject)
+      UNIQUE (student_name, grade, subject, student_names)
     );
 
     CREATE TABLE IF NOT EXISTS lessons (
@@ -382,6 +384,45 @@ function initDb() {
     db.prepare("ALTER TABLE recharge_records ADD COLUMN source TEXT DEFAULT ''").run();
   }
 
+  const studentPricingSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'student_pricing'")?.sql);
+  if (!studentPricingSql.includes("grade TEXT") || !studentPricingSql.includes("student_names TEXT") || !studentPricingSql.includes("UNIQUE (student_name, grade, subject, student_names)")) {
+    withTransaction(() => {
+      db.prepare("ALTER TABLE student_pricing RENAME TO student_pricing_legacy").run();
+      db.exec(`
+        CREATE TABLE student_pricing (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          student_name TEXT NOT NULL,
+          grade TEXT DEFAULT '',
+          subject TEXT NOT NULL,
+          student_names TEXT DEFAULT '',
+          custom_price REAL NOT NULL DEFAULT 0,
+          notes TEXT DEFAULT '',
+          UNIQUE (student_name, grade, subject, student_names)
+        );
+      `);
+      const legacyColumns = db.prepare("PRAGMA table_info(student_pricing_legacy)").all().map((column) => column.name);
+      const hasGrade = legacyColumns.includes("grade");
+      const hasStudentNames = legacyColumns.includes("student_names");
+      const legacyRows = all("SELECT * FROM student_pricing_legacy ORDER BY id");
+      const insert = db.prepare(`
+        INSERT OR IGNORE INTO student_pricing(id, student_name, grade, subject, student_names, custom_price, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of legacyRows) {
+        insert.run(
+          Number(row.id),
+          text(row.student_name),
+          hasGrade ? text(row.grade) : "",
+          text(row.subject),
+          hasStudentNames ? normalizedStudents(row.student_names) : "",
+          num(row.custom_price),
+          text(row.notes),
+        );
+      }
+      db.prepare("DROP TABLE student_pricing_legacy").run();
+    });
+  }
+
   const staffColumns = db.prepare("PRAGMA table_info(staff)").all().map((column) => column.name);
   const staffColumnDefs = {
     pay_type: "TEXT DEFAULT '月薪'",
@@ -615,6 +656,10 @@ function isEffective(row) {
 
 function isCompletedLesson(row) {
   return deriveStatus(row) === "已上";
+}
+
+function effectiveTeacherSalary(row) {
+  return isCompletedLesson(row) ? num(row.teacher_salary) : 0;
 }
 
 function isUnpaid(row) {
@@ -974,34 +1019,70 @@ function priceBucket(grade, studentCount) {
   return studentCount >= 4 ? 4 : studentCount;
 }
 
-function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status }) {
-  if (status === "试课") return { unit_price: 0, source: "trial" };
+function activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames }) {
+  const name = text(studentName);
+  const gradeValue = text(grade);
+  const subjectValue = text(subject);
+  const studentNamesValue = normalizedStudents(studentNames);
+  if (!name || !subjectValue) return null;
+  if (gradeValue && studentNamesValue) {
+    const exact = get(`
+      SELECT *
+      FROM student_pricing
+      WHERE student_name = ?
+        AND grade = ?
+        AND subject = ?
+        AND student_names = ?
+        AND custom_price > 0
+      ORDER BY id DESC
+      LIMIT 1
+    `, [name, gradeValue, subjectValue, studentNamesValue]);
+    if (exact) return exact;
+  }
+  return get(`
+    SELECT *
+    FROM student_pricing
+    WHERE student_name = ?
+      AND subject = ?
+      AND TRIM(COALESCE(grade, '')) = ''
+      AND TRIM(COALESCE(student_names, '')) = ''
+      AND custom_price > 0
+    ORDER BY id DESC
+    LIMIT 1
+  `, [name, subjectValue]);
+}
+
+function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status, studentNames }) {
+  if (status !== "已上") return { unit_price: 0, source: "auto", rule_price: 0, pricing_rule_id: null };
 
   const override = get(
     "SELECT unit_price FROM fee_overrides WHERE lesson_id = ? AND student_name = ?",
     [lessonId, studentName],
   );
-  if (override) return { unit_price: num(override.unit_price), source: "manual" };
 
-  if (status === "考试") return { unit_price: 0, source: "exam" };
-
-  const custom = get(
-    "SELECT custom_price, notes FROM student_pricing WHERE student_name = ? AND subject = ?",
-    [studentName, subject],
-  );
-  if (custom && custom.custom_price !== "") {
-    const customPrice = num(custom.custom_price);
-    const customNotes = text(custom.notes);
-    if (customPrice > 0) return { unit_price: customPrice, source: "custom" };
-    if (customPrice === 0 && !/试课|试听|试/.test(customNotes)) return { unit_price: 0, source: "waiver" };
-  }
+  const rule = activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames });
+  const rulePrice = rule ? num(rule.custom_price) : 0;
+  const legacyRule = rule && !text(rule.grade) && !text(rule.student_names);
 
   const bucket = priceBucket(grade, studentCount);
   const standard = get(
     "SELECT unit_price FROM pricing_standards WHERE grade = ? AND student_count = ?",
     [grade, bucket],
   );
-  return { unit_price: standard ? num(standard.unit_price) : 0, source: "standard" };
+  const currentPrice = override
+    ? num(override.unit_price)
+    : legacyRule
+      ? rulePrice
+      : (standard ? num(standard.unit_price) : 0);
+  const source = rule
+    ? (Math.abs(currentPrice - rulePrice) < 0.0001 ? "auto" : "manual")
+    : (override ? "manual" : "pending");
+  return {
+    unit_price: currentPrice,
+    source,
+    rule_price: rule ? rulePrice : null,
+    pricing_rule_id: rule ? Number(rule.id) : null,
+  };
 }
 
 function upsertStudent(name, grade) {
@@ -1222,6 +1303,70 @@ function createStudentProfile(body) {
     text(body.left_at),
   );
   return get("SELECT * FROM students WHERE id = ?", [Number(result.lastInsertRowid)]);
+}
+
+function backfillStudentJoinedAt() {
+  return withTransaction(() => {
+    const updatedRows = [];
+    const skippedRows = [];
+    const rows = all(`
+      SELECT id, name
+      FROM students
+      WHERE TRIM(COALESCE(joined_at, '')) = ''
+      ORDER BY name
+    `);
+    for (const row of rows) {
+      const joinedAt = firstStudentLessonDate(row.name);
+      if (!joinedAt) {
+        skippedRows.push({ id: row.id, name: row.name });
+        continue;
+      }
+      db.prepare(`
+        UPDATE students
+        SET joined_at = ?
+        WHERE id = ? AND TRIM(COALESCE(joined_at, '')) = ''
+      `).run(joinedAt, Number(row.id));
+      updatedRows.push({ id: row.id, name: row.name, joined_at: joinedAt });
+    }
+    return {
+      updated: updatedRows.length,
+      updated_rows: updatedRows,
+      skipped_without_lessons: skippedRows.length,
+      skipped_rows: skippedRows,
+    };
+  });
+}
+
+function backfillTeacherJoinedAt() {
+  return withTransaction(() => {
+    const updatedRows = [];
+    const skippedRows = [];
+    const rows = all(`
+      SELECT id, name
+      FROM teachers
+      WHERE TRIM(COALESCE(joined_at, '')) = ''
+      ORDER BY name
+    `);
+    for (const row of rows) {
+      const joinedAt = firstTeacherLessonDate(row.name);
+      if (!joinedAt) {
+        skippedRows.push({ id: row.id, name: row.name });
+        continue;
+      }
+      db.prepare(`
+        UPDATE teachers
+        SET joined_at = ?
+        WHERE id = ? AND TRIM(COALESCE(joined_at, '')) = ''
+      `).run(joinedAt, Number(row.id));
+      updatedRows.push({ id: row.id, name: row.name, joined_at: joinedAt });
+    }
+    return {
+      updated: updatedRows.length,
+      updated_rows: updatedRows,
+      skipped_without_lessons: skippedRows.length,
+      skipped_rows: skippedRows,
+    };
+  });
 }
 
 function disableTeacherAccountsByName(teacherName) {
@@ -1661,6 +1806,7 @@ function feeDetails(monthKey) {
         studentCount,
         lessonId: lesson.id,
         status,
+        studentNames: lesson.student_names,
       });
       const detail = {
         status,
@@ -1673,6 +1819,7 @@ function feeDetails(monthKey) {
         lesson_id: lesson.id,
         student_index: index + 1,
         student_name: studentName,
+        student_names: normalizedStudents(lesson.student_names),
         teacher_name: lesson.teacher_name,
         date: lesson.date,
         lesson_status: lesson.lesson_status,
@@ -1685,6 +1832,9 @@ function feeDetails(monthKey) {
         notes: lesson.notes,
         unit_price: billable ? price.unit_price : 0,
         price_source: price.source,
+        rule_price: billable ? price.rule_price : 0,
+        pricing_rule_id: price.pricing_rule_id || null,
+        can_apply_pricing_rule: billable && price.pricing_rule_id && price.rule_price != null,
         course_status: lesson.course_status,
         teacher_salary: num(lesson.teacher_salary),
         student_count: studentCount,
@@ -2579,7 +2729,7 @@ function financeBase(range) {
   const teacherSalary = new Map();
   for (const detail of effectiveDetails) {
     if (lessonSalary.has(detail.lesson_id)) continue;
-    const salary = num(detail.teacher_salary);
+    const salary = effectiveTeacherSalary(detail);
     lessonSalary.set(detail.lesson_id, salary);
     const teacherName = detail.teacher_name || "未填写";
     teacherSalary.set(teacherName, moneyRound((teacherSalary.get(teacherName) || 0) + salary));
@@ -2720,7 +2870,7 @@ function financeBreakdowns(current) {
       item.revenue = moneyRound(item.revenue + detailRevenue(row));
       if (!item._lesson_ids.has(row.lesson_id)) {
         item._lesson_ids.add(row.lesson_id);
-        item.teacher_cost = moneyRound(item.teacher_cost + num(row.teacher_salary));
+        item.teacher_cost = moneyRound(item.teacher_cost + effectiveTeacherSalary(row));
       }
     }
     return [...map.entries()].map(([name, data]) => ({
@@ -2741,7 +2891,7 @@ function financeBreakdowns(current) {
     item.revenue = moneyRound(item.revenue + detailRevenue(row));
     if (!item._lesson_ids.has(row.lesson_id)) {
       item._lesson_ids.add(row.lesson_id);
-      item.teacher_cost = moneyRound(item.teacher_cost + num(row.teacher_salary));
+      item.teacher_cost = moneyRound(item.teacher_cost + effectiveTeacherSalary(row));
     }
   }
   const byClassType = [...classMap.values()].map((row) => ({
@@ -3617,7 +3767,7 @@ function coreLessonRows(monthKey) {
       lesson.student_names,
       lesson.notes,
       lesson.course_status,
-      num(lesson.teacher_salary),
+      effectiveTeacherSalary(lesson),
       splitStudents(lesson.student_names).length,
       sequence,
     ];
@@ -4005,11 +4155,8 @@ function studentStatementRows(monthKey, studentName, range = null) {
       row.notes,
       row.unit_price,
       row.price_source === "manual" ? "手动"
-        : row.price_source === "custom" ? "个性价"
-          : row.price_source === "exam" ? "考试手填"
-            : row.price_source === "trial" ? "试课免费"
-              : row.price_source === "waiver" ? "退费/减免"
-                : "标准价",
+        : row.price_source === "pending" ? "待设置"
+          : "自动",
     ]),
   ];
 }
@@ -4044,22 +4191,35 @@ function studentHistoryRows(studentName) {
 }
 
 function studentPricingRows(monthKey) {
-  const normalizedNames = "REPLACE(REPLACE(REPLACE(REPLACE(l.student_names, '、', ','), '，', ','), ';', ','), '；', ',')";
-  return all(`
-    SELECT sp.*,
-           sp.student_name || '-' || sp.subject AS lookup_key,
-           (SELECT COUNT(*)
-              FROM lessons l
-             WHERE (',' || ${normalizedNames} || ',') LIKE '%,' || sp.student_name || ',%'
-               AND l.subject = sp.subject
-               AND l.month_key = ?) AS current_month_lessons,
-           (SELECT COUNT(*)
-              FROM lessons l
-             WHERE (',' || ${normalizedNames} || ',') LIKE '%,' || sp.student_name || ',%'
-               AND l.subject = sp.subject) AS total_lessons
-      FROM student_pricing sp
-     ORDER BY sp.student_name, sp.subject
-  `, [monthKey]);
+  const lessons = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY date, teacher_name, time_slot, id");
+  const rows = all("SELECT * FROM student_pricing ORDER BY id").map((row) => {
+    const studentName = text(row.student_name);
+    const grade = text(row.grade);
+    const subject = text(row.subject);
+    const studentNames = normalizedStudents(row.student_names);
+    const matches = lessons.filter((lesson) => (
+      splitStudents(lesson.student_names).includes(studentName)
+      && text(lesson.subject) === subject
+      && (!grade || text(lesson.grade) === grade)
+      && (!studentNames || normalizedStudents(lesson.student_names) === studentNames)
+      && isCompletedLesson(lesson)
+    ));
+    return {
+      ...row,
+      grade,
+      student_names: studentNames,
+      lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"),
+      current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length,
+      total_lessons: matches.length,
+    };
+  });
+  return rows.sort((a, b) => (
+    compareGradeName(a.grade, b.grade)
+    || text(a.student_name).localeCompare(text(b.student_name), "zh-Hans-CN")
+    || text(a.subject).localeCompare(text(b.subject), "zh-Hans-CN")
+    || text(a.student_names).localeCompare(text(b.student_names), "zh-Hans-CN")
+    || Number(a.id || 0) - Number(b.id || 0)
+  ));
 }
 
 function recomputePricing(body) {
@@ -4086,6 +4246,7 @@ function recomputePricing(body) {
         studentCount: names.length,
         lessonId: lesson.id,
         status: deriveStatus(lesson),
+        studentNames: lesson.student_names,
       });
       oldTotal += num(oldPrice.unit_price);
       const removed = db.prepare("DELETE FROM fee_overrides WHERE lesson_id = ? AND student_name = ?").run(lesson.id, studentName);
@@ -4097,6 +4258,7 @@ function recomputePricing(body) {
         studentCount: names.length,
         lessonId: lesson.id,
         status: deriveStatus(lesson),
+        studentNames: lesson.student_names,
       });
       newTotal += num(newPrice.unit_price);
     }
@@ -4116,6 +4278,68 @@ function recomputePricing(body) {
       old_total: oldTotal,
       new_total: newTotal,
       audit_log_id: Number(get("SELECT last_insert_rowid() AS id").id),
+    };
+  });
+}
+
+function applyStudentPricingRulesToDetails(items) {
+  const normalizedItems = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const lessonId = Number(item.lesson_id);
+    const studentName = text(item.student_name);
+    const key = `${lessonId}\u0001${studentName}`;
+    if (!lessonId || !studentName || seen.has(key)) continue;
+    seen.add(key);
+    normalizedItems.push({ lesson_id: lessonId, student_name: studentName });
+  }
+  if (!normalizedItems.length) return { error: "请选择要按规则更新的费用明细", status: 400 };
+  return withTransaction(() => {
+    const updatedDetails = [];
+    const skippedDetails = [];
+    for (const item of normalizedItems) {
+      const lesson = get("SELECT * FROM lessons WHERE id = ?", [item.lesson_id]);
+      if (!lesson) {
+        skippedDetails.push({ ...item, reason: "lesson_not_found" });
+        continue;
+      }
+      if (!isCompletedLesson(lesson)) {
+        skippedDetails.push({ ...item, reason: "not_completed" });
+        continue;
+      }
+      if (!splitStudents(lesson.student_names).includes(item.student_name)) {
+        skippedDetails.push({ ...item, reason: "student_not_in_lesson" });
+        continue;
+      }
+      const rule = activeStudentPricingRuleForLesson({
+        studentName: item.student_name,
+        grade: lesson.grade,
+        subject: lesson.subject,
+        studentNames: lesson.student_names,
+      });
+      if (!rule || num(rule.custom_price) <= 0) {
+        skippedDetails.push({ ...item, reason: "no_active_rule" });
+        continue;
+      }
+      const unitPrice = moneyRound(num(rule.custom_price));
+      db.prepare(`
+        INSERT INTO fee_overrides(lesson_id, student_name, unit_price, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(lesson_id, student_name) DO UPDATE SET
+          unit_price = excluded.unit_price,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(item.lesson_id, item.student_name, unitPrice);
+      updatedDetails.push({
+        ...item,
+        unit_price: unitPrice,
+        pricing_rule_id: Number(rule.id),
+      });
+    }
+    return {
+      updatedCount: updatedDetails.length,
+      skippedCount: skippedDetails.length,
+      updatedDetails,
+      skippedDetails,
     };
   });
 }
@@ -5181,7 +5405,7 @@ function apiArea(req, url) {
   if (p.includes("student") || p === "/api/fee-overrides") return "students";
   if (p.startsWith("/api/course-notice") || p.startsWith("/api/teacher-course-notice")) return "schedule";
   if (p.includes("lessons") || p.includes("months") || p.includes("schedule-conflicts") || p === "/api/settings") return "schedule";
-  if (p === "/api/teachers") return "profiles";
+  if (p.startsWith("/api/teachers")) return "profiles";
   return "schedule";
 }
 
@@ -6024,9 +6248,9 @@ function importStudentPricingFromWorkbook(buffer) {
     }
     if (!studentName || !subject || row.values[2] == null || row.values[2] === "") continue;
     db.prepare(`
-      INSERT INTO student_pricing(student_name, subject, custom_price, notes)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(student_name, subject) DO UPDATE SET
+      INSERT INTO student_pricing(student_name, grade, subject, student_names, custom_price, notes)
+      VALUES (?, '', ?, '', ?, ?)
+      ON CONFLICT(student_name, grade, subject, student_names) DO UPDATE SET
         custom_price = excluded.custom_price,
         notes = excluded.notes
     `).run(studentName, subject, num(row.values[2]), text(row.values[5]));
@@ -7184,6 +7408,17 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: "create", entity_type: "teachers", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, result, 201);
   }
+  if (req.method === "POST" && url.pathname === "/api/teachers/backfill-joined-at") {
+    const result = backfillTeacherJoinedAt();
+    recordAuditEvent(req, user, { action: "backfill_joined_at", entity_type: "teachers", entity_id: "batch", before: null, after: result });
+    writeOperationLog(user, {
+      operation_type: "补齐老师入职日期",
+      operation_content: `补齐 ${result.updated} 条，保持空 ${result.skipped_without_lessons} 条`,
+      target_type: "teachers",
+      target_id: "batch",
+    });
+    return sendJson(res, result);
+  }
 
   const studentHistoryMatch = url.pathname.match(/^\/api\/student\/([^/]+)\/history$/);
   if (studentHistoryMatch && req.method === "GET") {
@@ -7197,6 +7432,17 @@ async function handleApi(req, res, url) {
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "students", entity_id: String(result.id), before: null, after: result });
     return sendJson(res, { ...result, warnings: studentWarnings(result.name, result.grade) }, 201);
+  }
+  if (req.method === "POST" && url.pathname === "/api/students/backfill-joined-at") {
+    const result = backfillStudentJoinedAt();
+    recordAuditEvent(req, user, { action: "backfill_joined_at", entity_type: "students", entity_id: "batch", before: null, after: result });
+    writeOperationLog(user, {
+      operation_type: "补齐学生入学日期",
+      operation_content: `补齐 ${result.updated} 条，保持空 ${result.skipped_without_lessons} 条`,
+      target_type: "students",
+      target_id: "batch",
+    });
+    return sendJson(res, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/staff") return sendJson(res, { staff: staffRows() });
@@ -7532,30 +7778,59 @@ async function handleApi(req, res, url) {
     return sendJson(res, result);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/student-pricing/apply-selected") {
+    const body = await readBody(req);
+    const items = Array.isArray(body.items) ? body.items : [];
+    const result = applyStudentPricingRulesToDetails(items);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "apply_selected", entity_type: "student_pricing", entity_id: "fee_overrides", before: body, after: result });
+    writeOperationLog(user, {
+      operation_type: "按规则更新学生费用",
+      operation_content: `所选 ${items.length} 条，更新 ${result.updatedCount} 条，跳过 ${result.skippedCount} 条`,
+      target_type: "fee_overrides",
+      target_id: result.updatedDetails.map((row) => `${row.lesson_id}:${row.student_name}`).join(","),
+    });
+    return sendJson(res, result);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/student-pricing") {
     const body = await readBody(req);
-    if (!text(body.student_name) || !text(body.subject)) return sendError(res, 400, "student_name and subject are required");
-    if (num(body.custom_price) <= 0) {
-      return sendError(res, 400, "学生专享价必须大于 0；试课请设置课程状态为「试课」，退费/减免请在费用明细中做单节手动覆盖");
+    const payload = {
+      student_name: text(body.student_name),
+      grade: text(body.grade),
+      subject: text(body.subject),
+      student_names: normalizedStudents(body.student_names),
+      custom_price: num(body.custom_price),
+      notes: text(body.notes),
+    };
+    if (!payload.student_name || !payload.subject) return sendError(res, 400, "student_name and subject are required");
+    if (payload.custom_price < 0) {
+      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为待设置候选");
     }
     const result = db.prepare(`
-      INSERT INTO student_pricing(student_name, subject, custom_price, notes)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(student_name, subject) DO UPDATE SET
+      INSERT INTO student_pricing(student_name, grade, subject, student_names, custom_price, notes)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(student_name, grade, subject, student_names) DO UPDATE SET
         custom_price = excluded.custom_price,
         notes = excluded.notes
-    `).run(text(body.student_name), text(body.subject), num(body.custom_price), text(body.notes));
-    const row = get("SELECT * FROM student_pricing WHERE student_name = ? AND subject = ?", [text(body.student_name), text(body.subject)]);
-    recordAuditEvent(req, user, { action: "upsert", entity_type: "student_pricing", entity_id: `${text(body.student_name)}|${text(body.subject)}`, before: null, after: row });
-    return sendJson(res, { id: Number(result.lastInsertRowid), ok: true, warnings: pricingWarnings(body) }, 201);
+    `).run(payload.student_name, payload.grade, payload.subject, payload.student_names, payload.custom_price, payload.notes);
+    const row = get(`
+      SELECT *
+      FROM student_pricing
+      WHERE student_name = ? AND grade = ? AND subject = ? AND student_names = ?
+    `, [payload.student_name, payload.grade, payload.subject, payload.student_names]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "student_pricing", entity_id: `${payload.student_name}|${payload.grade}|${payload.subject}|${payload.student_names}`, before: null, after: row });
+    return sendJson(res, { id: Number(row.id), ok: true, warnings: pricingWarnings(row) }, 201);
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
   if (studentPricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
-    if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) <= 0) {
-      return sendError(res, 400, "学生专享价必须大于 0；试课请设置课程状态为「试课」，退费/减免请在费用明细中做单节手动覆盖");
+    if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) < 0) {
+      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为待设置候选");
     }
-    const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "subject", "custom_price", "notes"], body, "student_pricing");
+    const payload = { ...body };
+    if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);
+    const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "grade", "subject", "student_names", "custom_price", "notes"], payload, "student_pricing");
     return sendJson(res, { ...row, warnings: pricingWarnings(row) });
   }
   if (studentPricingMatch && req.method === "DELETE") {
