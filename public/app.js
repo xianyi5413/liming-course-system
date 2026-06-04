@@ -1860,7 +1860,7 @@ function filterLabel(entries, value) {
 
 const rechargeSourceOptions = [["all", "全部"], ["manual", "手动/无来源"], ["carry_over", "自动结转"]];
 const balanceFilterOptions = [["actual", "有现金余额"], ["gift", "有赠送余额"], ["zero", "全为零"]];
-const priceFilterOptions = [["positive", "已设置"], ["zero", "待设置"]];
+const priceFilterOptions = [["positive", "已设置"], ["zero", "未设置"]];
 const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
 
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
@@ -2131,7 +2131,7 @@ function detailRowClass(row) {
 
 function priceSourceLabel(source) {
   if (source === "manual") return "手动";
-  if (source === "pending") return "待设置";
+  if (source === "pending") return "未设置";
   return "自动";
 }
 
@@ -2139,14 +2139,14 @@ function priceSourceTitle(row) {
   const amount = `¥${money(row.unit_price)}`;
   const rule = row.rule_price == null ? "" : `，规则费用 ¥${money(row.rule_price)}`;
   if (row.price_source === "manual") return `当前费用 ${amount}${rule}，与规则不一致，视为手动`;
-  if (row.price_source === "pending") return "已上课程尚未设置有效学生单价规则";
+  if (row.price_source === "pending") return "已上课程未设置有效学生单价规则";
   return `系统自动费用 ${amount}${rule}`;
 }
 
 function priceSourceBadge(row) {
   const title = escapeHtml(priceSourceTitle(row));
   if (row.price_source === "manual") return `<span class="price-source-badge manual" title="${title}">手</span>`;
-  if (row.price_source === "pending") return `<span class="price-source-badge waiver" title="${title}">待</span>`;
+  if (row.price_source === "pending") return `<span class="price-source-badge waiver" title="${title}">未</span>`;
   return `<span class="price-source-badge custom" title="${title}">自</span>`;
 }
 
@@ -5825,13 +5825,13 @@ function pricingAuditModalMarkup() {
         <div class="modal-head">
           <div>
             <div class="modal-title">${escapeHtml(pricing.student_name)} · ${escapeHtml(pricing.subject)} · ${monthLabel()}影响审计</div>
-            <div class="modal-subtitle">当前个性价 ¥${money(customPrice)}，本月命中 ${details.length} 节课，手填覆盖 ${manualCount} 条。</div>
+            <div class="modal-subtitle">当前规则单价 ¥${money(customPrice)}，本月命中 ${details.length} 节课，手填覆盖 ${manualCount} 条。</div>
           </div>
           <button class="btn pricing-audit-cancel" type="button">取消</button>
         </div>
         <div class="table-wrap">
           <table class="pricing-audit-table">
-            <thead><tr><th>日期</th><th>状态</th><th>当前单价</th><th>来源</th><th>与个性价差额</th></tr></thead>
+            <thead><tr><th>日期</th><th>状态</th><th>当前单价</th><th>来源</th><th>与规则差额</th></tr></thead>
             <tbody>
               ${details.map((row) => {
                 const diff = numberValue(row.unit_price) - customPrice;
@@ -5850,7 +5850,7 @@ function pricingAuditModalMarkup() {
         </div>
         <div class="modal-actions">
           <button class="btn pricing-audit-cancel" type="button">取消</button>
-          <button class="btn primary pricing-recompute" type="button" ${details.length ? "" : "disabled"} data-name="${escapeHtml(pricing.student_name)}" data-subject="${escapeHtml(pricing.subject)}" data-count="${details.length}" data-manual-count="${manualCount}" data-price="${money(customPrice)}">全部重算（按最新个性价）</button>
+          <button class="btn primary pricing-recompute" type="button" ${details.length ? "" : "disabled"} data-name="${escapeHtml(pricing.student_name)}" data-subject="${escapeHtml(pricing.subject)}" data-count="${details.length}" data-manual-count="${manualCount}" data-price="${money(customPrice)}">全部重算（按最新规则单价）</button>
         </div>
       </div>
     </div>
@@ -5899,8 +5899,6 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
       ${filterComboControl({ className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "输入或选择学生集合" })}
       <label>价格状态</label>
       ${filterComboControl({ className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "输入或选择价格状态" })}
-      <label>影响范围</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "usage", value: filterLabel(usageFilterOptions, studentPricingFilter.usage), values: usageFilterOptions.map((item) => item[1]), placeholder: "输入或选择影响范围" })}
       <div class="filter-summary">
         <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn primary apply-student-pricing-filter" type="button">筛选</button>
@@ -5913,16 +5911,13 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
 function renderStudentPricing() {
   const rows = [...(state.student_pricing || [])].sort(compareStudentPricingRule);
   const visibleRows = rows.filter(studentPricingMatchesFilter);
-  const zeroPriceRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
-  const studentNames = (state.profile_students || state.students || [])
-    .filter((row) => !["已流出", "离校"].includes(row.status || "在读"))
-    .map((row) => row.name);
-  renderTopbar("学生单价表", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条个性化价格`, historyToggleAction());
+  const unsetRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
+  renderTopbar("学生单价规则", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条规则`, historyToggleAction());
   contentEl.innerHTML = `
-    ${zeroPriceRows.length ? `
+    ${unsetRows.length ? `
       <div class="finance-notice-list">
         <div class="finance-notice">
-          <strong>发现 ${zeroPriceRows.length} 条待设置单价规则</strong>
+          <strong>发现 ${unsetRows.length} 条未设置单价规则</strong>
           <span>单价为 0 的规则只作为候选保留，不参与费用规则匹配；填写有效金额后才会用于自动判断。</span>
         </div>
       </div>
@@ -5930,62 +5925,30 @@ function renderStudentPricing() {
     <div class="band">
       <div class="section-head">
         <div>
-          <div class="section-title">个性化单价列表</div>
-          <div class="section-subtitle">学生单价按“学生 + 年级 + 科目 + 学生集合”识别；0 元规则仅作为待设置候选。</div>
+          <div class="section-title">学生收费规则</div>
+          <div class="section-subtitle">规则候选由历史课程自动生成；学生、年级、科目和学生集合只读，填写单价后参与费用明细判断。</div>
         </div>
-        <button class="btn primary open-student-pricing-modal" type="button">+ 新增个性化单价</button>
       </div>
       ${renderStudentPricingFilterBar(rows, visibleRows)}
       <div class="table-wrap">
         <table class="student-pricing-table">
-          <thead><tr><th>学生姓名</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>本月影响</th><th>查找键</th><th class="wide">备注</th><th>操作</th></tr></thead>
+          <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>来源</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr>
-                <td><input class="cell-input student-pricing-field" data-id="${row.id}" data-field="student_name" value="${escapeHtml(row.student_name)}"></td>
-                <td><select class="cell-select student-pricing-field" data-id="${row.id}" data-field="grade">${options(["", ...gradeSortOrder], row.grade)}</select></td>
-                <td><select class="cell-select student-pricing-field" data-id="${row.id}" data-field="subject">${options(state.lookups.subjects, row.subject)}</select></td>
-                <td><input class="cell-input student-pricing-field wide" data-id="${row.id}" data-field="student_names" value="${escapeHtml(row.student_names || "")}" placeholder="空=兼容旧规则"></td>
+              <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
+                <td class="text-cell">${escapeHtml(row.student_name)}</td>
+                <td class="text-cell">${escapeHtml(row.grade)}</td>
+                <td class="text-cell">${escapeHtml(row.subject)}</td>
+                <td class="text-cell wide">${escapeHtml(row.student_names || "")}</td>
                 <td><input class="cell-input number student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}" data-id="${row.id}" data-field="custom_price" type="number" min="0" step="0.01" value="${moneyInput(row.custom_price)}"></td>
-                <td class="text-cell right">
-                  <button class="btn ghost pricing-impact-btn" type="button" data-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade || "")}" data-subject="${escapeHtml(row.subject)}" data-student-names="${escapeHtml(row.student_names || "")}">${row.current_month_lessons || 0} 次</button>
-                  <span class="muted-tip">/ 累计 ${row.total_lessons || 0}</span>
-                </td>
-                <td class="text-cell">${escapeHtml(row.lookup_key)}</td>
+                <td class="text-cell">${priceSourceLabel(row.rule_source)}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
-                <td class="readonly"><button class="btn danger delete-student-price" data-id="${row.id}">删除</button></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无个性化单价</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
-    <datalist id="student-name-list">${studentNames.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}</datalist>
-    ${studentPricingModalOpen ? `
-      <div class="modal-backdrop student-pricing-modal">
-        <div class="modal-panel">
-          <div class="modal-head">
-            <div>
-              <div class="modal-title">新增个性化单价</div>
-              <div class="modal-subtitle">学生单价规则按学生、年级、科目和学生集合匹配；金额大于 0 才生效。</div>
-            </div>
-          </div>
-          <div class="lesson-create-form">
-            <label>学生姓名${filterComboControl({ id: "new-student-price-name", className: "modal-combo-input", field: "student", value: "", values: studentNames, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
-            <label>年级${filterComboControl({ id: "new-student-price-grade", className: "modal-combo-input", field: "grade", value: "", values: gradeSortOrder, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
-            <label>科目${filterComboControl({ id: "new-student-price-subject", className: "modal-combo-input", field: "subject", value: "", values: state.lookups.subjects || [], placeholder: "输入或选择科目", emptyLabel: "" })}</label>
-            <label>学生集合<input id="new-student-price-student-names" class="control" placeholder="该规则对应的完整学生名单"></label>
-            <label>单价<input id="new-student-price-value" class="control" type="number" min="0" step="0.01" placeholder="单价"></label>
-            <label class="wide">备注<input id="new-student-price-notes" class="control" placeholder="备注"></label>
-          </div>
-          <div class="modal-actions">
-            <button class="btn" type="button" data-action="close-student-pricing-modal">取消</button>
-            <button class="btn primary add-student-price" type="button">保存</button>
-          </div>
-        </div>
-      </div>
-    ` : ""}
-    ${pricingAuditModalMarkup()}
   `;
 }
 
@@ -9528,7 +9491,7 @@ function wireEvents() {
     input.addEventListener("change", () => {
       const value = input.type === "number" ? numberValue(input.value) : input.value;
       if (input.dataset.field === "custom_price" && numberValue(value) < 0) {
-        alert("学生单价必须大于或等于 0；0 元规则仅作为待设置候选。");
+        alert("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。");
         return load();
       }
       refreshAfter(() => request(`/api/student-pricing/${input.dataset.id}`, {
@@ -9569,7 +9532,7 @@ function wireEvents() {
       const customPrice = document.querySelector("#new-student-price-value").value;
       const notes = document.querySelector("#new-student-price-notes").value;
       if (!studentName || !subject) return alert("请填写学生姓名和科目");
-      if (customPrice !== "" && numberValue(customPrice) < 0) return alert("学生单价必须大于或等于 0；0 元规则仅作为待设置候选。");
+      if (customPrice !== "" && numberValue(customPrice) < 0) return alert("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。");
       button.disabled = true;
       try {
         await request("/api/student-pricing", {
@@ -9580,14 +9543,14 @@ function wireEvents() {
         await load();
       } catch (error) {
         button.disabled = false;
-        alert(`新增个性化单价失败：${error.message}`);
+        alert(`新增学生单价规则失败：${error.message}`);
       }
     });
   });
 
   document.querySelectorAll(".delete-student-price").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!confirm("删除这条个性化单价？")) return;
+      if (!confirm("删除这条学生单价规则？")) return;
       refreshAfter(() => request(`/api/student-pricing/${button.dataset.id}`, { method: "DELETE" }));
     });
   });
@@ -9616,7 +9579,7 @@ function wireEvents() {
       const count = Number(button.dataset.count || 0);
       const manualCount = Number(button.dataset.manualCount || 0);
       const price = button.dataset.price || "0";
-      if (!confirm(`将清除 ${manualCount} 条手填价格，并重算 ${count} 节课程，回归个性价 ¥${price}，是否继续？`)) return;
+      if (!confirm(`将清除 ${manualCount} 条手填价格，并重算 ${count} 节课程，回归规则单价 ¥${price}，是否继续？`)) return;
       try {
         const result = await request("/api/pricing-recompute", {
           method: "POST",
