@@ -3,7 +3,7 @@ const navGroups = [
   {
     key: "students",
     label: "学生",
-    views: [["feeDetails", "费用明细"], ["summary", "费用汇总"], ["recharges", "充值记录"], ["studentQuery", "学生查询"]],
+    views: [["feeDetails", "费用明细"], ["summary", "费用汇总"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
     moreViews: [["studentPricing", "学生单价"], ["studentProfiles", "学生档案"]],
   },
   { key: "teachers", label: "教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "老师档案"]] },
@@ -86,7 +86,7 @@ const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", fin
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "studentQuery", "recharges", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
+  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "studentQuery", "recharges", "openingBalances", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
   finance: new Set(["finance", "recharges", "studentQuery", "expenses", "appearance"]),
   teacher: new Set(["weekMatrix", "teacherDetail", "appearance"]),
 };
@@ -150,6 +150,9 @@ let activeNavGroup = localStorage.getItem("liming:nav-group") || "";
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
 let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
+let rechargeModalOpen = false;
+let openingBalanceFilter = { student: "", grade: "" };
+let openingBalanceModalOpen = false;
 let feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
 let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
@@ -782,6 +785,8 @@ async function load() {
   if (loadGeneration !== thisGeneration) return;
   state.profile_students = canArea("students") ? ((await request("/api/students")).students || []) : [];
   if (loadGeneration !== thisGeneration) return;
+  state.opening_balances = canArea("students") ? ((await request("/api/opening-balances")).opening_balances || []) : (state.opening_balances || []);
+  if (loadGeneration !== thisGeneration) return;
   state.teacher_salary_rules = canArea("salary") ? ((await request("/api/teacher-salary-rules")).rules || []) : [];
   if (loadGeneration !== thisGeneration) return;
   state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
@@ -1127,32 +1132,44 @@ function displayTeacherSalaryForLesson(lesson) {
 function displayTeacherRuleSalaryForLesson(lesson) {
   if (!isCompletedLesson(lesson)) return 0;
   const calculated = teacherSalaryRuleCalculation(lesson);
-  return calculated ? calculated.salary : null;
+  return calculated ? calculated.salary : 0;
 }
 
 function teacherSalarySourceLabel(lesson) {
   if (!isCompletedLesson(lesson)) return "自动";
-  const rule = activeTeacherSalaryRuleForLesson(lesson);
   const calculated = teacherSalaryRuleCalculation(lesson);
-  if (!rule) return "无规则";
-  if (!calculated) return "待设置";
-  const current = optionalNumberValue(lesson.teacher_salary);
-  if (current === null) return "待填写";
-  return Math.abs(current - calculated.salary) < 0.005 ? "自动" : "手动";
+  const ruleSalary = calculated ? calculated.salary : 0;
+  const current = displayTeacherSalaryForLesson(lesson);
+  if (ruleSalary <= 0) return current === 0 ? "未设置" : "手动";
+  return Math.abs(current - ruleSalary) < 0.005 ? "自动" : "手动";
+}
+
+function teacherSalarySourceTitle(lesson) {
+  if (!isCompletedLesson(lesson)) return "非已上课程教师薪资自动按 0 处理";
+  const label = teacherSalarySourceLabel(lesson);
+  const amount = `¥${money(displayTeacherSalaryForLesson(lesson))}`;
+  const ruleSalary = displayTeacherRuleSalaryForLesson(lesson);
+  const rule = `，规则薪资 ¥${money(ruleSalary)}`;
+  if (label === "未设置") return "已上课程未设置有效教师薪资规则";
+  if (label === "手动") return `当前薪资 ${amount}${rule}，与规则不一致，视为手动`;
+  return `系统自动薪资 ${amount}${rule}`;
+}
+
+function teacherSalarySourceBadge(lesson) {
+  return sourceStatusBadge(teacherSalarySourceLabel(lesson), teacherSalarySourceTitle(lesson));
 }
 
 function teacherSalaryRuleDisableReason(lesson) {
   if (!isCompletedLesson(lesson)) return "非已上课程薪资自动按 0 处理";
   const rule = activeTeacherSalaryRuleForLesson(lesson);
-  if (!rule) return "未匹配到薪资规则";
-  return "薪资规则尚未设置金额";
+  if (!rule) return "未设置有效薪资规则";
+  return "未设置有效薪资金额";
 }
 
 function teacherSalaryRuleStatusForLesson(lesson) {
   if (!isCompletedLesson(lesson)) return "非已上";
   if (teacherSalaryRuleCalculation(lesson)) return "有有效规则";
-  if (activeTeacherSalaryRuleForLesson(lesson)) return "规则待设置";
-  return "无规则";
+  return "未设置";
 }
 
 function teacherDetailMatchesFilter(row, filter = teacherDetailFilter) {
@@ -1628,7 +1645,7 @@ function ensureExpenseFilterDates() {
 }
 
 function rechargeSource(row) {
-  return state.recharges.find((item) => item.student_name === row.student_name)?.source || "";
+  return row.source || state.recharges.find((item) => item.student_name === row.student_name)?.source || "";
 }
 
 function rechargeSourceTag(source) {
@@ -1642,6 +1659,129 @@ function rechargePrevCell(row, field) {
     ? `自动取 ${formatMonthOption(row.prev_source_month)} 的月末结余`
     : "源表期初结转";
   return `<td class="readonly right" title="${escapeHtml(title)}">${money(value)}</td>`;
+}
+
+function isRealRechargeRow(row) {
+  return numberValue(row?.cur_recharge) !== 0 || numberValue(row?.cur_gift) !== 0;
+}
+
+function studentProfileByName(name) {
+  return (state.profile_students || []).find((row) => row.name === name) || null;
+}
+
+function rechargeRows() {
+  return [...(state.recharges || [])]
+    .filter(isRealRechargeRow)
+    .map((row) => {
+      const profile = studentProfileByName(row.student_name);
+      return {
+        ...row,
+        grade: row.grade || profile?.grade || "",
+        status: profile?.status || "在读",
+        recharge_notes: row.notes || "",
+      };
+    })
+    .sort(compareStudentGradeName);
+}
+
+function defaultRechargeDate() {
+  const monthKey = state?.settings?.month_key || activeMonth;
+  const today = todayDate();
+  if (today.slice(0, 7) === String(monthKey || "").slice(0, 7)) return today;
+  return monthBounds(monthKey).start;
+}
+
+function rechargeModalMarkup() {
+  if (!rechargeModalOpen) return "";
+  const students = uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean));
+  const grades = uniqueSorted([...gradeOrder, ...usedLessonLookupValues("grades")]);
+  return `
+    <div class="modal-backdrop recharge-modal">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">新增充值记录</div>
+            <div class="modal-subtitle">${escapeHtml(formatMonthOption(state?.settings?.month_key || activeMonth))}</div>
+          </div>
+          <button class="btn recharge-modal-cancel" type="button">取消</button>
+        </div>
+        <div class="lesson-create-form">
+          <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
+          <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
+          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-field="recharge_date" type="date" value="${escapeHtml(defaultRechargeDate())}"></label>
+          <label>现金充值<input id="new-recharge-cur" class="control recharge-modal-field" data-field="cur_recharge" type="number" step="0.01" value="0"></label>
+          <label>赠送充值<input id="new-recharge-gift" class="control recharge-modal-field" data-field="cur_gift" type="number" step="0.01" value="0"></label>
+          <label>来源 / 渠道<input id="new-recharge-source" class="control recharge-modal-field" data-field="source" placeholder="如现金、微信、支付宝"></label>
+          <label class="wide">备注<input id="new-recharge-notes" class="control recharge-modal-field" data-field="notes" placeholder="备注"></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn recharge-modal-cancel" type="button">取消</button>
+          <button class="btn primary add-recharge-record" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function openingBalanceRows() {
+  return [...(state.opening_balances || [])]
+    .filter((row) => numberValue(row.opening_actual_balance) !== 0 || numberValue(row.opening_gift_balance) !== 0)
+    .map((row) => {
+      const profile = studentProfileByName(row.student_name);
+      return {
+        ...row,
+        grade: row.grade || profile?.grade || "",
+      };
+    })
+    .sort(compareStudentGradeName);
+}
+
+function openingBalanceMatchesFilter(row) {
+  if (openingBalanceFilter.student && !row.student_name.toLowerCase().includes(openingBalanceFilter.student.toLowerCase())) return false;
+  if (openingBalanceFilter.grade && !textContains(row.grade, openingBalanceFilter.grade)) return false;
+  return true;
+}
+
+function dynamicOpeningBalanceFilterOptions(rows) {
+  const rowsFor = (field) => rowsForFilterOption(rows, openingBalanceFilter, field, (row, filter) => {
+    if (field !== "student" && filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+    if (field !== "grade" && filter.grade && !textContains(row.grade, filter.grade)) return false;
+    return true;
+  });
+  return {
+    students: uniqueSorted(rowsFor("student").map((row) => row.student_name)),
+    grades: uniqueSorted(rowsFor("grade").map((row) => row.grade)),
+  };
+}
+
+function openingBalanceModalMarkup() {
+  if (!openingBalanceModalOpen) return "";
+  const students = uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean));
+  const grades = uniqueSorted([...gradeOrder, ...usedLessonLookupValues("grades")]);
+  return `
+    <div class="modal-backdrop opening-balance-modal">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">新增期初余额</div>
+            <div class="modal-subtitle">全局账户期初余额</div>
+          </div>
+          <button class="btn opening-balance-modal-cancel" type="button">取消</button>
+        </div>
+        <div class="lesson-create-form">
+          <label>学生姓名${filterComboControl({ id: "new-opening-student", className: "opening-balance-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
+          <label>年级${filterComboControl({ id: "new-opening-grade", className: "opening-balance-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
+          <label>期初现金余额<input id="new-opening-actual" class="control opening-balance-modal-field" data-field="opening_actual_balance" type="number" step="0.01" value="0"></label>
+          <label>期初赠送余额<input id="new-opening-gift" class="control opening-balance-modal-field" data-field="opening_gift_balance" type="number" step="0.01" value="0"></label>
+          <label class="wide">备注<input id="new-opening-notes" class="control opening-balance-modal-field" data-field="notes" placeholder="如：承接2026年1月底余额"></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn opening-balance-modal-cancel" type="button">取消</button>
+          <button class="btn primary add-opening-balance" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function monthDeleteModal() {
@@ -1860,7 +2000,7 @@ function filterLabel(entries, value) {
 
 const rechargeSourceOptions = [["all", "全部"], ["manual", "手动/无来源"], ["carry_over", "自动结转"]];
 const balanceFilterOptions = [["actual", "有现金余额"], ["gift", "有赠送余额"], ["zero", "全为零"]];
-const priceFilterOptions = [["positive", "已设置"], ["zero", "未设置"]];
+const priceFilterOptions = [["auto", "自动"], ["manual", "手动"], ["pending", "未设置"]];
 const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
 
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
@@ -1996,8 +2136,8 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
           ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
         </label>
         <label class="filter-field">
-          <span>价格来源</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "输入或选择来源" })}
+          <span>价格状态</span>
+          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "输入或选择价格状态" })}
         </label>
         <label class="filter-field filter-date-range">
           <span>日期</span>
@@ -2143,11 +2283,14 @@ function priceSourceTitle(row) {
   return `系统自动费用 ${amount}${rule}`;
 }
 
+function sourceStatusBadge(label, title) {
+  const className = label === "手动" ? "manual" : label === "未设置" ? "waiver" : "custom";
+  const shortLabel = label === "手动" ? "手" : label === "未设置" ? "未" : "自";
+  return `<span class="price-source-badge ${className}" title="${escapeHtml(title)}">${shortLabel}</span>`;
+}
+
 function priceSourceBadge(row) {
-  const title = escapeHtml(priceSourceTitle(row));
-  if (row.price_source === "manual") return `<span class="price-source-badge manual" title="${title}">手</span>`;
-  if (row.price_source === "pending") return `<span class="price-source-badge waiver" title="${title}">未</span>`;
-  return `<span class="price-source-badge custom" title="${title}">自</span>`;
+  return sourceStatusBadge(priceSourceLabel(row.price_source), priceSourceTitle(row));
 }
 
 function editablePriceCell(row) {
@@ -4173,7 +4316,7 @@ function renderFeeDetails() {
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">备注</th><th>单人费用</th><th>规则费用</th><th>来源</th>
+              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
@@ -4195,10 +4338,9 @@ function renderFeeDetails() {
                 <td class="text-cell">${escapeHtml(row.notes)}</td>
                 ${editablePriceCell(row)}
                 <td class="text-cell right">${row.rule_price == null ? "" : money(row.rule_price)}</td>
-                <td class="text-cell">${priceSourceLabel(row.price_source)}</td>
               </tr>
             `;
-            }).join("") || `<tr><td colspan="14" class="empty">暂无费用明细</td></tr>`}
+            }).join("") || `<tr><td colspan="13" class="empty">暂无费用明细</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -4225,32 +4367,25 @@ function renderSummary() {
       <div class="table-wrap">
         <table class="student-summary-table">
           <thead>
-            <tr><th></th><th>学生姓名</th><th>年级</th><th>${isToDate ? "累计上课次数" : "上课次数"}</th><th>${isToDate ? "累计课程费用" : "课程总费用"}</th><th>${isToDate ? "截至结余现金" : "月末结余现金"}</th><th>${isToDate ? "截至结余赠送" : "月末结余赠送"}</th></tr>
+            <tr><th>学生姓名</th><th>年级</th><th>上课次数</th><th>课程总费用</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送学费</th><th>本月实际消费</th><th>本月赠送消费</th><th>本月实际余额</th><th>本月赠送余额</th></tr>
           </thead>
           <tbody>
-            ${visibleRows.map((row) => {
-              const expanded = expandedSummaryStudents.has(row.student_name);
-              return `
+            ${visibleRows.map((row) => `
                 <tr class="summary-master-row" style="background:${gradeColor(row.grade)}">
-                  <td class="text-cell summary-expand-cell">
-                    <button class="summary-expand-btn" type="button" data-student-name="${escapeHtml(row.student_name)}" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "⏷" : "⏵"}</button>
-                  </td>
-                  <td class="text-cell">
-                    <button class="summary-name-btn" type="button" data-student-name="${escapeHtml(row.student_name)}">${escapeHtml(row.student_name)}</button>
-                  </td>
+                  <td class="text-cell">${escapeHtml(row.student_name)}</td>
                   <td class="text-cell grade-cell">${escapeHtml(row.grade)}</td>
-                  <td class="text-cell right">${row.lesson_count}</td>
+                  <td class="text-cell right">${Math.round(numberValue(row.lesson_count))}</td>
                   <td class="text-cell right">${money(row.total_fee)}</td>
+                  <td class="text-cell right ${numberValue(row.prev_actual) < 0 ? "negative" : ""}">${money(row.prev_actual)}</td>
+                  <td class="text-cell right ${numberValue(row.prev_gift) < 0 ? "negative" : ""}">${money(row.prev_gift)}</td>
+                  <td class="text-cell right ${numberValue(row.cur_recharge) < 0 ? "negative" : ""}">${money(row.cur_recharge)}</td>
+                  <td class="text-cell right ${numberValue(row.cur_gift) < 0 ? "negative" : ""}">${money(row.cur_gift)}</td>
+                  <td class="text-cell right">${money(row.actual_consumption)}</td>
+                  <td class="text-cell right">${money(row.gift_consumption)}</td>
                   <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${money(row.actual_balance)}</td>
                   <td class="text-cell right ${numberValue(row.gift_balance) < 0 ? "negative" : ""}">${money(row.gift_balance)}</td>
                 </tr>
-                ${expanded ? `
-                  <tr class="summary-detail-row">
-                    <td colspan="7">${balanceDetailCards(row)}</td>
-                  </tr>
-                ` : ""}
-              `;
-            }).join("") || `<tr><td colspan="7" class="empty">暂无学生费用汇总</td></tr>`}
+              `).join("") || `<tr><td colspan="12" class="empty">暂无学生费用汇总</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -4856,12 +4991,19 @@ function dynamicRechargeFilterOptions(rows, filter = currentRechargeFilter()) {
 }
 
 function renderRecharges() {
-  const rows = [...(state.derived.student_summary || [])].sort(compareStudentGradeName);
+  const rows = rechargeRows();
   const opts = dynamicRechargeFilterOptions(rows);
   const visibleRows = rows.filter((row) => rechargeMatchesFilter(row));
-  renderTopbar(`${monthLabel()} 充值记录`, `已显示 ${visibleRows.length} / 共 ${rows.length} 名学生`);
+  renderTopbar(`${monthLabel()} 充值记录`, `已显示 ${visibleRows.length} / 共 ${rows.length} 条充值记录`);
   contentEl.innerHTML = `
     <div class="band">
+      <div class="section-head">
+        <div>
+          <div class="section-title">充值记录</div>
+          <div class="section-subtitle">仅显示当前月份已有充值记录的学生。</div>
+        </div>
+        <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
+      </div>
       <div class="filter-bar compact">
         <label>来源</label>
         ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
@@ -4878,7 +5020,7 @@ function renderRecharges() {
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="recharge-row" data-student-name="${escapeHtml(row.student_name)}" style="background:${gradeColor(row.grade)}">
+              <tr class="recharge-row" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" style="background:${gradeColor(row.grade)}">
                 <td class="text-cell">${escapeHtml(row.student_name)} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 ${rechargePrevCell(row, "prev_actual")}
@@ -4888,11 +5030,57 @@ function renderRecharges() {
                 <td><input class="cell-input recharge-field" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无学生</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
+    ${rechargeModalMarkup()}
+  `;
+}
+
+function renderOpeningBalances() {
+  const rows = openingBalanceRows();
+  const opts = dynamicOpeningBalanceFilterOptions(rows);
+  const visibleRows = rows.filter((row) => openingBalanceMatchesFilter(row));
+  renderTopbar("期初余额", `已显示 ${visibleRows.length} / 共 ${rows.length} 条期初余额`);
+  contentEl.innerHTML = `
+    <div class="band">
+      <div class="section-head">
+        <div>
+          <div class="section-title">期初余额</div>
+          <div class="section-subtitle">全局账户期初余额，用于系统上线前余额承接，不属于充值流水。</div>
+        </div>
+        <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
+      </div>
+      <div class="filter-bar compact">
+        <label>学生姓名</label>
+        ${filterComboControl({ className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
+        <label>年级</label>
+        ${filterComboControl({ className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
+        <button class="btn reset-opening-balance-filter" type="button">清空筛选</button>
+      </div>
+      <div class="table-wrap">
+        <table class="recharge-table opening-balance-table">
+          <thead>
+            <tr><th>学生姓名</th><th>年级</th><th>期初现金余额</th><th>期初赠送余额</th><th class="wide">备注</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            ${visibleRows.map((row) => `
+              <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" style="background:${gradeColor(row.grade)}">
+                <td class="text-cell">${escapeHtml(row.student_name)}</td>
+                <td class="text-cell">${escapeHtml(row.grade)}</td>
+                <td><input class="cell-input number opening-balance-field" data-field="opening_actual_balance" type="number" value="${moneyInput(row.opening_actual_balance)}"></td>
+                <td><input class="cell-input number opening-balance-field" data-field="opening_gift_balance" type="number" value="${moneyInput(row.opening_gift_balance)}"></td>
+                <td><input class="cell-input wide opening-balance-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
+                <td><button class="btn danger delete-opening-balance" type="button">删除</button></td>
+              </tr>
+            `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ${openingBalanceModalMarkup()}
   `;
 }
 
@@ -5873,8 +6061,11 @@ function studentPricingMatchesFilter(row) {
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.student_names && !textContains(row.student_names, filter.student_names)) return false;
-  if (filter.price === "zero" && numberValue(row.custom_price) > 0) return false;
-  if (filter.price === "positive" && numberValue(row.custom_price) <= 0) return false;
+  if (filter.price) {
+    const source = priceSourceFilterValue(row.rule_source);
+    const sourceLabel = priceSourceLabel(source);
+    if (filter.price !== source && !textContains(sourceLabel, filter.price)) return false;
+  }
   const currentLessons = numberValue(row.current_month_lessons);
   const totalLessons = numberValue(row.total_lessons);
   if (filter.usage === "current" && currentLessons <= 0) return false;
@@ -5901,7 +6092,6 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
       ${filterComboControl({ className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "输入或选择价格状态" })}
       <div class="filter-summary">
         <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
-        <button class="btn primary apply-student-pricing-filter" type="button">筛选</button>
         <button class="btn reset-student-pricing-filter" type="button">清空筛选</button>
       </div>
     </div>
@@ -5932,7 +6122,7 @@ function renderStudentPricing() {
       ${renderStudentPricingFilterBar(rows, visibleRows)}
       <div class="table-wrap">
         <table class="student-pricing-table">
-          <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>来源</th><th class="wide">备注</th></tr></thead>
+          <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
@@ -6833,14 +7023,14 @@ function renderTeacherSalaryRules() {
           ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students, placeholder: "输入学生搜索" })}
         </label>
         <label class="filter-field">
-          <span>薪资状态</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "输入或选择状态" })}
+          <span>价格状态</span>
+          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "输入或选择价格状态" })}
         </label>
         <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
       </div>
       <div class="table-wrap">
         <table class="teacher-salary-rule-table">
-          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>课时单位</th><th class="wide">备注</th></tr></thead>
+          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
@@ -6849,7 +7039,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${escapeHtml(rule.subject)}</td>
                 <td class="text-cell wide">${escapeHtml(rule.student_names)}</td>
                 <td><input class="cell-input number teacher-salary-rule-field" data-field="salary_per_unit" type="number" min="0" step="0.01" value="${teacherSalaryInputValue(rule.salary_per_unit)}"></td>
-                <td class="text-cell right">${money(rule.unit_hours)} 小时</td>
+                <td class="text-cell">${teacherSalaryRuleSalaryStatus(rule)}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的教师薪资规则</td></tr>`}
@@ -6932,8 +7122,8 @@ function renderTeacherDetail() {
           ${filterComboControl({ className: "teacher-detail-filter-input", field: "student", value: teacherDetailFilter.student, values: filterOptions.students, placeholder: "输入或选择学生" })}
         </label>
         <label class="filter-field">
-          <span>来源</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "输入或选择来源" })}
+          <span>薪资状态</span>
+          ${filterComboControl({ className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "输入或选择薪资状态" })}
         </label>
         <label class="filter-field">
           <span>规则状态</span>
@@ -6949,7 +7139,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table">
-          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th><th>来源</th>" : ""}<th>学生人数</th></tr></thead>
+          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row) => {
               const calculated = showSalary ? teacherSalaryRuleCalculation(row) : null;
@@ -6958,20 +7148,19 @@ function renderTeacherDetail() {
               const sourceLabel = showSalary ? teacherSalarySourceLabel(row) : "";
               const disabledReason = showSalary && !calculated ? teacherSalaryRuleDisableReason(row) : "";
               const ruleTitle = calculated?.warning || (calculated ? `${calculated.rule.salary_per_unit} 元 / ${calculated.rule.unit_hours || 2} 小时` : disabledReason);
+              const salaryTitle = showSalary ? teacherSalarySourceTitle(row) : "";
               const displayedTeacherSalary = displayTeacherSalaryForLesson(row);
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${calculated ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : disabledReason)}"></td>` : ""}
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.student_names)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
-                    <td><input class="cell-input number teacher-detail-salary-field" data-id="${row.id}" data-field="teacher_salary" type="number" step="0.01" value="${escapeHtml(teacherSalaryInputValue(displayedTeacherSalary))}" placeholder="未填写" ${isCompletedLesson(row) ? "" : "disabled title=\"非已上课程薪资自动按 0 处理\""}></td>
+                    <td class="price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><input class="cell-input number teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}" data-id="${row.id}" data-field="teacher_salary" type="number" step="0.01" value="${escapeHtml(teacherSalaryInputValue(displayedTeacherSalary))}" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}>${teacherSalarySourceBadge(row)}</td>
                     <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : money(displayedRuleSalary)}</td>
-                    <td class="text-cell" title="${escapeHtml(ruleTitle)}">${escapeHtml(sourceLabel)}</td>
                   ` : ""}
-                  <td class="text-cell right">${splitStudents(row.student_names).length}</td>
                 </tr>
               `;
-            }).join("") || `<tr><td colspan="${showSalary ? 15 : 11}" class="empty">暂无符合条件的教师课程</td></tr>`}
+            }).join("") || `<tr><td colspan="${showSalary ? 13 : 10}" class="empty">暂无符合条件的教师课程</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -7438,6 +7627,7 @@ function render() {
     summary: renderSummary,
     finance: renderFinance,
     recharges: renderRecharges,
+    openingBalances: renderOpeningBalances,
     studentQuery: renderStudentQuery,
     appearance: renderAppearance,
     baseData: renderBaseData,
@@ -7919,6 +8109,139 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".open-recharge-modal").forEach((button) => {
+    button.addEventListener("click", () => {
+      rechargeModalOpen = true;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".recharge-modal-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      rechargeModalOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".recharge-modal").forEach((modal) => {
+    modal.addEventListener("click", (event) => {
+      if (event.target !== modal) return;
+      rechargeModalOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll("#new-recharge-student").forEach((input) => {
+    const fillGrade = () => {
+      const gradeInput = document.querySelector("#new-recharge-grade");
+      const profile = studentProfileByName(input.value.trim());
+      if (gradeInput && profile?.grade) gradeInput.value = profile.grade;
+    };
+    input.addEventListener("change", fillGrade);
+    input.addEventListener("blur", fillGrade);
+  });
+
+  document.querySelectorAll(".open-opening-balance-modal").forEach((button) => {
+    button.addEventListener("click", () => {
+      openingBalanceModalOpen = true;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".opening-balance-modal-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      openingBalanceModalOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".opening-balance-modal").forEach((modal) => {
+    modal.addEventListener("click", (event) => {
+      if (event.target !== modal) return;
+      openingBalanceModalOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll("#new-opening-student").forEach((input) => {
+    const fillGrade = () => {
+      const gradeInput = document.querySelector("#new-opening-grade");
+      const profile = studentProfileByName(input.value.trim());
+      if (gradeInput && profile?.grade) gradeInput.value = profile.grade;
+    };
+    input.addEventListener("change", fillGrade);
+    input.addEventListener("blur", fillGrade);
+  });
+
+  document.querySelectorAll(".add-opening-balance").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const studentName = document.querySelector("#new-opening-student")?.value.trim() || "";
+      const grade = document.querySelector("#new-opening-grade")?.value.trim() || "";
+      const actual = document.querySelector("#new-opening-actual")?.value || "0";
+      const gift = document.querySelector("#new-opening-gift")?.value || "0";
+      const notes = document.querySelector("#new-opening-notes")?.value || "";
+      if (!studentName) return alert("请填写学生姓名");
+      if (optionalNumberValue(actual) === null) return alert("请填写有效的期初现金余额");
+      if (optionalNumberValue(gift) === null) return alert("请填写有效的期初赠送余额");
+      if (numberValue(actual) === 0 && numberValue(gift) === 0) return alert("期初现金余额和期初赠送余额不能同时为 0");
+      button.disabled = true;
+      try {
+        await request("/api/opening-balances", {
+          method: "POST",
+          body: {
+            student_name: studentName,
+            grade,
+            opening_actual_balance: optionalNumberValue(actual) || 0,
+            opening_gift_balance: optionalNumberValue(gift) || 0,
+            notes,
+          },
+        });
+        openingBalanceModalOpen = false;
+        await load();
+      } catch (error) {
+        button.disabled = false;
+        alert(`新增期初余额失败：${error.message}`);
+      }
+    });
+  });
+
+  document.querySelectorAll(".add-recharge-record").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const studentName = document.querySelector("#new-recharge-student")?.value.trim() || "";
+      const grade = document.querySelector("#new-recharge-grade")?.value.trim() || "";
+      const rechargeDate = document.querySelector("#new-recharge-date")?.value || "";
+      const curRecharge = document.querySelector("#new-recharge-cur")?.value || "0";
+      const curGift = document.querySelector("#new-recharge-gift")?.value || "0";
+      const source = document.querySelector("#new-recharge-source")?.value || "";
+      const notes = document.querySelector("#new-recharge-notes")?.value || "";
+      if (!studentName) return alert("请填写学生姓名");
+      if (optionalNumberValue(curRecharge) === null) return alert("请填写有效的现金充值");
+      if (optionalNumberValue(curGift) === null) return alert("请填写有效的赠送充值");
+      if (numberValue(curRecharge) === 0 && numberValue(curGift) === 0) return alert("实际充值和赠送充值不能同时为 0");
+      button.disabled = true;
+      try {
+        await request("/api/recharges", {
+          method: "POST",
+          body: {
+            student_name: studentName,
+            grade,
+            month_key: state.settings.month_key,
+            cur_recharge: optionalNumberValue(curRecharge) || 0,
+            cur_gift: optionalNumberValue(curGift) || 0,
+            recharge_date: rechargeDate,
+            source,
+            notes,
+          },
+        });
+        rechargeModalOpen = false;
+        await load();
+      } catch (error) {
+        button.disabled = false;
+        alert(`新增充值记录失败：${error.message}`);
+      }
+    });
+  });
+
   document.querySelectorAll(".recharge-source-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeSourceFilter = canonicalFilterValue(rechargeSourceOptions, value) || "all";
@@ -7945,6 +8268,47 @@ function wireEvents() {
       rechargeGradeFilter = "";
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
       render();
+    });
+  });
+
+  document.querySelectorAll(".opening-balance-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      openingBalanceFilter = { ...openingBalanceFilter, [input.dataset.filterField || input.dataset.field]: value };
+    }, () => render());
+  });
+
+  document.querySelectorAll(".reset-opening-balance-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      openingBalanceFilter = { student: "", grade: "" };
+      render();
+    });
+  });
+
+  document.querySelectorAll(".opening-balance-field").forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = input.closest(".opening-balance-row");
+      const payload = collectRowPayload(row, ".opening-balance-field");
+      if (numberValue(payload.opening_actual_balance) === 0 && numberValue(payload.opening_gift_balance) === 0
+        && !confirm("期初现金余额和期初赠送余额都为 0，这将删除该期初余额。是否继续？")) {
+        load();
+        return;
+      }
+      refreshAfter(() => request(`/api/opening-balances/${encodeURIComponent(row.dataset.id)}`, {
+        method: "PUT",
+        body: {
+          student_name: row.dataset.studentName,
+          grade: row.dataset.grade || "",
+          ...payload,
+        },
+      }));
+    });
+  });
+
+  document.querySelectorAll(".delete-opening-balance").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = button.closest(".opening-balance-row");
+      if (!confirm(`删除 ${row.dataset.studentName} 的期初余额？`)) return;
+      refreshAfter(() => request(`/api/opening-balances/${encodeURIComponent(row.dataset.id)}`, { method: "DELETE" }));
     });
   });
 
@@ -8665,39 +9029,44 @@ function wireEvents() {
           : value;
       studentPricingFilter = { ...studentPricingFilter, [field]: canonical };
     };
-    if (input.tagName === "SELECT") {
-      input.addEventListener("change", () => {
-        applyStudentPricingFilter(input.value);
-        render();
-      });
-      return;
-    }
-    input.addEventListener("input", () => {
+    const selector = inputFocusSelector(input);
+    let composing = false;
+    let renderTimer = null;
+    const renderFilter = (restoreFocus = true) => {
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+      }
+      const value = input.value;
+      applyStudentPricingFilter(value);
+      render();
+      if (restoreFocus) restoreInputFocus(selector, value);
+    };
+    const scheduleRender = () => {
+      if (renderTimer) clearTimeout(renderTimer);
+      renderTimer = setTimeout(() => renderFilter(true), 250);
+    };
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
       applyStudentPricingFilter(input.value);
+      scheduleRender();
+    });
+    input.addEventListener("input", () => {
+      if (composing) return;
+      applyStudentPricingFilter(input.value);
+      scheduleRender();
     });
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        applyStudentPricingFilter(input.value);
-        render();
+      if (event.key === "Enter" && !composing) {
+        event.preventDefault();
+        renderFilter(true);
       }
     });
     input.addEventListener("change", () => {
-      applyStudentPricingFilter(input.value);
-    });
-  });
-
-  document.querySelectorAll(".apply-student-pricing-filter").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
-        const field = input.dataset.filterField;
-        const value = field === "price"
-          ? canonicalFilterValue(priceFilterOptions, input.value)
-          : field === "usage"
-            ? canonicalFilterValue(usageFilterOptions, input.value)
-            : input.value;
-        studentPricingFilter = { ...studentPricingFilter, [field]: value };
-      });
-      render();
+      if (!composing) renderFilter(false);
     });
   });
 
@@ -9372,12 +9741,18 @@ function wireEvents() {
         load();
         return;
       }
+      if (numberValue(payload.cur_recharge) === 0 && numberValue(payload.cur_gift) === 0
+        && !confirm("实际充值和赠送充值都为 0，这将删除该充值记录。是否继续？")) {
+        load();
+        return;
+      }
       refreshAfter(() => request("/api/recharges", {
         method: "POST",
         body: {
           student_name: row.dataset.studentName,
-          grade: summary.grade || "",
+          grade: row.dataset.grade || summary.grade || "",
           month_key: state.settings.month_key,
+          source: row.dataset.source || "",
           ...payload,
         },
       }));

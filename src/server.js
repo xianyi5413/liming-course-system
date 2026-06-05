@@ -191,6 +191,19 @@ function initDb() {
       UNIQUE (student_name, month_key)
     );
 
+    CREATE TABLE IF NOT EXISTS student_opening_balances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      month_key TEXT NOT NULL DEFAULT '',
+      student_name TEXT NOT NULL,
+      grade TEXT DEFAULT '',
+      opening_actual_balance REAL DEFAULT 0,
+      opening_gift_balance REAL DEFAULT 0,
+      notes TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (month_key, student_name)
+    );
+
     CREATE TABLE IF NOT EXISTS teacher_adjustments (
       teacher_name TEXT PRIMARY KEY,
       week1_transport REAL DEFAULT 0,
@@ -383,6 +396,7 @@ function initDb() {
   if (!rechargeColumns.includes("source")) {
     db.prepare("ALTER TABLE recharge_records ADD COLUMN source TEXT DEFAULT ''").run();
   }
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_student_opening_balances_student ON student_opening_balances(student_name)").run();
 
   const studentPricingSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'student_pricing'")?.sql);
   if (!studentPricingSql.includes("grade TEXT") || !studentPricingSql.includes("student_names TEXT") || !studentPricingSql.includes("UNIQUE (student_name, grade, subject, student_names)")) {
@@ -525,6 +539,35 @@ initDb();
 if (process.argv.includes("--init-db")) {
   console.log(`Database initialized: ${dbPath}`);
   process.exit(0);
+}
+
+const REAL_RECHARGE_SQL = "(COALESCE(cur_recharge, 0) <> 0 OR COALESCE(cur_gift, 0) <> 0)";
+
+function isRealRechargeRecord(row) {
+  return num(row?.cur_recharge) !== 0 || num(row?.cur_gift) !== 0;
+}
+
+function openingBalanceRows() {
+  return all(`
+    SELECT ob.*, COALESCE(NULLIF(ob.grade, ''), s.grade, '') AS display_grade
+    FROM student_opening_balances ob
+    LEFT JOIN students s ON s.name = ob.student_name
+    WHERE COALESCE(ob.opening_actual_balance, 0) <> 0 OR COALESCE(ob.opening_gift_balance, 0) <> 0
+    ORDER BY ob.student_name
+  `).map((row) => ({
+    ...row,
+    grade: row.display_grade || row.grade || "",
+  }));
+}
+
+function openingBalanceMap() {
+  return new Map(openingBalanceRows().map((row) => [row.student_name, {
+    month_key: "",
+    actual_balance: num(row.opening_actual_balance),
+    gift_balance: num(row.opening_gift_balance),
+    grade: text(row.grade),
+    opening_balance_id: row.id,
+  }]));
 }
 
 function all(sql, params = []) {
@@ -1260,7 +1303,7 @@ function activeStudentNames(monthKey) {
     for (const name of splitStudents(lesson.student_names)) active.add(name);
   }
   for (const recharge of all(
-    "SELECT DISTINCT student_name FROM recharge_records WHERE month_key = ? AND TRIM(student_name) <> ''",
+    `SELECT DISTINCT student_name FROM recharge_records WHERE month_key = ? AND TRIM(student_name) <> '' AND ${REAL_RECHARGE_SQL}`,
     [monthKey],
   )) {
     active.add(recharge.student_name);
@@ -1946,19 +1989,207 @@ function feeDetails(monthKey) {
   return details;
 }
 
+function studentAccountEventDate(row, monthKey = "") {
+  const direct = text(row.event_date || row.recharge_date || row.date);
+  if (validDateKey(direct)) return direct;
+  const rowMonth = text(row.month_key);
+  if (validMonthKey(rowMonth)) return rowMonth;
+  if (validMonthKey(monthKey)) return monthKey;
+  return "";
+}
+
+function studentAccountLessonDate(row, monthKey = "") {
+  const direct = text(row.date);
+  if (validDateKey(direct)) return direct;
+  if (validMonthKey(monthKey)) return monthEndKey(monthKey);
+  return studentAccountEventDate(row, monthKey);
+}
+
+function studentAccountTimeOrder(value) {
+  const range = parseTimeRange(value);
+  return range ? range.start : 24 * 60 + 999;
+}
+
+function studentAccountEventSortKey(event) {
+  if (event.type === "recharge") {
+    return [
+      event.date,
+      "0",
+      "0000",
+      String(num(event.row?.id)).padStart(10, "0"),
+      String(event.index).padStart(10, "0"),
+    ].join("|");
+  }
+  return [
+    event.date,
+    "1",
+    String(event.time_order).padStart(4, "0"),
+    String(num(event.row?.lesson_id)).padStart(10, "0"),
+    String(num(event.row?.student_index)).padStart(6, "0"),
+    text(event.row?.id),
+    String(event.index).padStart(10, "0"),
+  ].join("|");
+}
+
+function compareStudentAccountEvents(a, b) {
+  return studentAccountEventSortKey(a).localeCompare(studentAccountEventSortKey(b), "zh-Hans-CN");
+}
+
+function studentAccountBatchBalance(batches) {
+  return batches.reduce((acc, batch) => ({
+    actual: moneyRound(acc.actual + num(batch.actual_balance)),
+    gift: moneyRound(acc.gift + num(batch.gift_balance)),
+  }), { actual: 0, gift: 0 });
+}
+
+function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
+  const actual = moneyRound(row.actual_balance ?? row.cur_recharge);
+  const gift = moneyRound(row.gift_balance ?? row.cur_gift);
+  if (actual === 0 && gift === 0) return;
+  let batchActual = actual;
+  let batchGift = gift;
+
+  if (actual > 0) {
+    const current = studentAccountBatchBalance(batches);
+    let remainingOffset = Math.min(Math.max(-current.actual, 0), actual);
+    for (const batch of batches) {
+      if (remainingOffset <= 0) break;
+      const debt = Math.max(-num(batch.actual_balance), 0);
+      if (debt <= 0) continue;
+      const offset = Math.min(debt, remainingOffset);
+      batch.actual_balance = moneyRound(num(batch.actual_balance) + offset);
+      remainingOffset = moneyRound(remainingOffset - offset);
+    }
+    batchActual = moneyRound(actual - Math.min(Math.max(-current.actual, 0), actual));
+  } else if (actual < 0) {
+    let remainingReduction = Math.abs(actual);
+    for (const batch of batches) {
+      if (remainingReduction <= 0) break;
+      const available = Math.max(num(batch.actual_balance), 0);
+      if (available <= 0) continue;
+      const reduction = Math.min(available, remainingReduction);
+      batch.actual_balance = moneyRound(num(batch.actual_balance) - reduction);
+      remainingReduction = moneyRound(remainingReduction - reduction);
+    }
+    batchActual = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
+  }
+
+  if (gift < 0) {
+    let remainingReduction = Math.abs(gift);
+    for (const batch of batches) {
+      if (remainingReduction <= 0) break;
+      const available = Math.max(num(batch.gift_balance), 0);
+      if (available <= 0) continue;
+      const reduction = Math.min(available, remainingReduction);
+      batch.gift_balance = moneyRound(num(batch.gift_balance) - reduction);
+      remainingReduction = moneyRound(remainingReduction - reduction);
+    }
+    batchGift = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
+  }
+  if (batchActual === 0 && batchGift === 0) return;
+  batches.push({
+    date: studentAccountEventDate(row, fallbackDate),
+    id: row.id || 0,
+    actual_balance: batchActual,
+    gift_balance: batchGift,
+  });
+}
+
+function applyStudentLessonCharge(batches, feeValue) {
+  let remaining = moneyRound(Math.max(0, num(feeValue)));
+  let actualUse = 0;
+  let giftUse = 0;
+
+  for (const batch of batches) {
+    if (remaining <= 0) break;
+    const cashUse = moneyRound(Math.min(Math.max(num(batch.actual_balance), 0), remaining));
+    if (cashUse > 0) {
+      batch.actual_balance = moneyRound(num(batch.actual_balance) - cashUse);
+      remaining = moneyRound(remaining - cashUse);
+      actualUse = moneyRound(actualUse + cashUse);
+    }
+    if (remaining <= 0) break;
+    const giftUseValue = moneyRound(Math.min(Math.max(num(batch.gift_balance), 0), remaining));
+    if (giftUseValue > 0) {
+      batch.gift_balance = moneyRound(num(batch.gift_balance) - giftUseValue);
+      remaining = moneyRound(remaining - giftUseValue);
+      giftUse = moneyRound(giftUse + giftUseValue);
+    }
+  }
+
+  if (remaining > 0) {
+    batches.push({ date: "", id: 0, actual_balance: moneyRound(-remaining), gift_balance: 0 });
+    actualUse = moneyRound(actualUse + remaining);
+  }
+  return {
+    actual_consumption: moneyRound(actualUse),
+    gift_consumption: moneyRound(giftUse),
+  };
+}
+
+function calculateStudentAccountTimeline(options = {}) {
+  const monthKey = text(options.monthKey);
+  const batches = [];
+  addStudentAccountBatch(batches, {
+    event_date: "",
+    id: 0,
+    actual_balance: options.openingActual,
+    gift_balance: options.openingGift,
+  }, monthKey);
+  const details = (options.details || []).filter((row) => row.effective);
+  const recharges = (options.recharges || []).filter(isRealRechargeRecord);
+  const events = [
+    ...recharges.map((row, index) => ({ type: "recharge", date: studentAccountEventDate(row, monthKey), row, index })),
+    ...details.map((row, index) => ({
+      type: "lesson",
+      date: studentAccountLessonDate(row, monthKey),
+      time_order: studentAccountTimeOrder(row.time_slot),
+      row,
+      index,
+    })),
+  ].sort(compareStudentAccountEvents);
+  const result = {
+    lesson_count: 0,
+    total_fee: 0,
+    cur_recharge: 0,
+    cur_gift: 0,
+    actual_consumption: 0,
+    gift_consumption: 0,
+    actual_balance: moneyRound(options.openingActual),
+    gift_balance: moneyRound(options.openingGift),
+  };
+
+  for (const event of events) {
+    if (event.type === "recharge") {
+      const actual = moneyRound(event.row.cur_recharge);
+      const gift = moneyRound(event.row.cur_gift);
+      result.cur_recharge = moneyRound(result.cur_recharge + actual);
+      result.cur_gift = moneyRound(result.cur_gift + gift);
+      addStudentAccountBatch(batches, event.row, monthKey);
+      continue;
+    }
+    const fee = moneyRound(Math.max(0, num(event.row.unit_price)));
+    result.lesson_count += 1;
+    result.total_fee = moneyRound(result.total_fee + fee);
+    const charge = applyStudentLessonCharge(batches, fee);
+    result.actual_consumption = moneyRound(result.actual_consumption + charge.actual_consumption);
+    result.gift_consumption = moneyRound(result.gift_consumption + charge.gift_consumption);
+  }
+
+  const balance = studentAccountBatchBalance(batches);
+  result.actual_balance = moneyRound(balance.actual);
+  result.gift_balance = moneyRound(balance.gift);
+  return result;
+}
+
 function previousCarryOverBalances(monthKey, cache = new Map()) {
   if (!validMonthKey(monthKey)) return new Map();
   if (cache.has(monthKey)) return cache.get(monthKey);
-  if (monthUsesSourceWorkbookOpening(monthKey)) {
-    const empty = new Map();
-    cache.set(monthKey, empty);
-    return empty;
-  }
   const fromMonth = previousDataMonth(monthKey);
   if (!fromMonth) {
-    const empty = new Map();
-    cache.set(monthKey, empty);
-    return empty;
+    const opening = openingBalanceMap();
+    cache.set(monthKey, opening);
+    return opening;
   }
   const rows = studentSummary(feeDetails(fromMonth), fromMonth, true, cache);
   const balances = new Map(rows.filter(studentSummaryHasSignal).map((row) => [row.student_name, {
@@ -1994,7 +2225,7 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
       row.total_fee = moneyRound(row.total_fee + num(detail.unit_price));
     }
   }
-  for (const recharge of all("SELECT * FROM recharge_records WHERE month_key = ?", [monthKey])) {
+  for (const recharge of all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL}`, [monthKey])) {
     const profile = profiles.get(recharge.student_name) || {};
     if (!byStudent.has(recharge.student_name)) {
       byStudent.set(recharge.student_name, {
@@ -2004,6 +2235,20 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
         lesson_count: 0,
         total_fee: 0,
         active_this_month: active.has(recharge.student_name),
+      });
+    }
+  }
+  for (const [studentName, balance] of carryOverBalances.entries()) {
+    if (num(balance.actual_balance) === 0 && num(balance.gift_balance) === 0) continue;
+    const profile = profiles.get(studentName) || {};
+    if (!byStudent.has(studentName)) {
+      byStudent.set(studentName, {
+        student_name: studentName,
+        grade: balance.grade || profile.grade || "",
+        status: profile.status || "在读",
+        lesson_count: 0,
+        total_fee: 0,
+        active_this_month: active.has(studentName),
       });
     }
   }
@@ -2023,32 +2268,45 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
   }
 
   const rows = [...byStudent.values()]
-    .filter((row) => includeInactive || row.active_this_month || inactiveStudentStatus(row.status))
     .sort((a, b) => a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
+  const rechargeRows = all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL}`, [monthKey]);
+  const rechargesByStudent = new Map();
+  for (const recharge of rechargeRows) {
+    if (!rechargesByStudent.has(recharge.student_name)) rechargesByStudent.set(recharge.student_name, []);
+    rechargesByStudent.get(recharge.student_name).push(recharge);
+  }
+  for (const list of rechargesByStudent.values()) {
+    list.sort((a, b) => compareStudentAccountEvents(
+      { type: "recharge", date: studentAccountEventDate(a, monthKey), row: a, index: 0 },
+      { type: "recharge", date: studentAccountEventDate(b, monthKey), row: b, index: 0 },
+    ));
+  }
+  const detailsByStudent = new Map();
+  for (const detail of details) {
+    if (!detail.effective) continue;
+    if (!detailsByStudent.has(detail.student_name)) detailsByStudent.set(detail.student_name, []);
+    detailsByStudent.get(detail.student_name).push(detail);
+  }
   return rows.map((row) => {
-    const recharge = get(
-      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
-      [row.student_name, monthKey],
-    ) || {};
+    const studentRecharges = rechargesByStudent.get(row.student_name) || [];
+    const recharge = studentRecharges[0] || {};
     const carryOver = carryOverBalances.get(row.student_name);
     const storedPrevActual = num(recharge.prev_actual);
     const storedPrevGift = num(recharge.prev_gift);
     const prevActual = carryOver ? num(carryOver.actual_balance) : storedPrevActual;
     const prevGift = carryOver ? num(carryOver.gift_balance) : storedPrevGift;
-    const curRecharge = moneyRound(recharge.cur_recharge);
-    const curGift = moneyRound(recharge.cur_gift);
-    const totalFee = moneyRound(row.total_fee);
-    const actualBase = moneyRound(prevActual + curRecharge + Math.min(prevGift, 0));
-    const giftBase = moneyRound(Math.max(prevGift, 0) + curGift);
-    const actualConsumption = moneyRound(Math.min(totalFee, Math.max(0, actualBase)));
-    const remainingFee = moneyRound(totalFee - actualConsumption);
-    const giftConsumption = moneyRound(Math.min(remainingFee, Math.max(0, giftBase)));
-    const unpaidFee = moneyRound(remainingFee - giftConsumption);
-    const actualBalance = moneyRound(actualBase - actualConsumption - unpaidFee);
-    const giftBalance = moneyRound(giftBase - giftConsumption);
+    const account = calculateStudentAccountTimeline({
+      studentName: row.student_name,
+      monthKey,
+      details: detailsByStudent.get(row.student_name) || [],
+      recharges: studentRecharges,
+      openingActual: prevActual,
+      openingGift: prevGift,
+    });
     return {
       ...row,
-      total_fee: totalFee,
+      lesson_count: account.lesson_count,
+      total_fee: account.total_fee,
       grade: row.grade || recharge.grade || profiles.get(row.student_name)?.grade || "",
       status: row.status || profiles.get(row.student_name)?.status || "在读",
       prev_actual: moneyRound(prevActual),
@@ -2056,14 +2314,14 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
       prev_actual_stored: storedPrevActual,
       prev_gift_stored: storedPrevGift,
       prev_source_month: carryOver?.month_key || "",
-      cur_recharge: curRecharge,
-      cur_gift: curGift,
+      cur_recharge: account.cur_recharge,
+      cur_gift: account.cur_gift,
       recharge_date: recharge.recharge_date || "",
       recharge_notes: recharge.notes || "",
-      actual_consumption: actualConsumption,
-      gift_consumption: giftConsumption,
-      actual_balance: actualBalance,
-      gift_balance: giftBalance,
+      actual_consumption: account.actual_consumption,
+      gift_consumption: account.gift_consumption,
+      actual_balance: account.actual_balance,
+      gift_balance: account.gift_balance,
     };
   }).filter((row) => shouldShowStudentSummaryRow(row, includeInactive));
 }
@@ -2397,12 +2655,6 @@ function ensureCarryOver(monthKey) {
   }
 
   const candidates = carryOverCandidates(fromMonth);
-  const insertRecharge = db.prepare(`
-    INSERT OR IGNORE INTO recharge_records(
-      student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
-    )
-    VALUES (?, ?, ?, ?, 0, 0, '', ?, 'carry_over', ?)
-  `);
   const updateRecharge = db.prepare(`
     UPDATE recharge_records
     SET grade = ?,
@@ -2425,6 +2677,13 @@ function ensureCarryOver(monthKey) {
       [row.student_name, monthKey],
     );
     if (existing) {
+      if (!isRealRechargeRecord(existing)) {
+        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
+        updated += 1;
+        carriedActual += actual;
+        carriedGift += gift;
+        continue;
+      }
       if (!shouldRefreshCarryOver(existing)) {
         skipped += 1;
         continue;
@@ -2436,8 +2695,6 @@ function ensureCarryOver(monthKey) {
       const patch = carryOverRecordPatch(existing, fromMonth);
       updateRecharge.run(row.grade || "", actual, gift, patch.source, patch.notes, row.student_name, monthKey);
       if (changed) updated += 1;
-    } else if (insertRecharge.run(row.student_name, row.grade || "", actual, gift, carryOverNote(null, fromMonth), monthKey).changes) {
-      ensured += 1;
     }
     carriedActual += actual;
     carriedGift += gift;
@@ -2751,40 +3008,80 @@ function rechargesInRange(range) {
     FROM recharge_records
     WHERE COALESCE(NULLIF(recharge_date, ''), month_key) >= ?
       AND COALESCE(NULLIF(recharge_date, ''), month_key) <= ?
+      AND ${REAL_RECHARGE_SQL}
   `, [range.start, range.end]);
+}
+
+function studentAccountRowsInRange(studentName, range) {
+  const name = text(studentName);
+  if (!name || !range) return { details: [], recharges: [] };
+  const details = [];
+  for (const monthKey of monthsCovered(range.start, range.end)) {
+    for (const detail of feeDetails(monthKey)) {
+      if (detail.student_name !== name || !detail.effective) continue;
+      const eventDate = studentAccountLessonDate(detail, monthKey);
+      if (eventDate >= range.start && eventDate <= range.end) details.push(detail);
+    }
+  }
+  return {
+    details,
+    recharges: rechargesInRange(range).filter((row) => row.student_name === name),
+  };
+}
+
+function calculateStudentAccountRange(studentName, range) {
+  const name = text(studentName);
+  if (!name || !range) return null;
+  const openingBalance = studentBalanceThroughDate(name, addDays(range.start, -1));
+  const rows = studentAccountRowsInRange(name, range);
+  return {
+    opening_actual_balance: openingBalance.actual_balance,
+    opening_gift_balance: openingBalance.gift_balance,
+    ...calculateStudentAccountTimeline({
+      studentName: name,
+      monthKey: monthKeyFromDate(range.start),
+      details: rows.details,
+      recharges: rows.recharges,
+      openingActual: openingBalance.actual_balance,
+      openingGift: openingBalance.gift_balance,
+    }),
+    details: rows.details,
+    recharges: rows.recharges,
+  };
 }
 
 function studentBalanceThroughDate(studentName, dateKeyValue) {
   const name = text(studentName);
   const dateKey = text(dateKeyValue);
   if (!name || !validDateKey(dateKey)) return { actual_balance: 0, gift_balance: 0 };
-  const monthKey = monthKeyFromDate(dateKey);
-  if (!validMonthKey(monthKey)) return { actual_balance: 0, gift_balance: 0 };
-  const previousMonth = previousMonthKey(monthKey);
-  const previousSummary = validMonthKey(previousMonth)
-    ? studentSummary(feeDetails(previousMonth), previousMonth, true).find((row) => row.student_name === name)
-    : null;
-  const currentSummary = studentSummary(feeDetails(monthKey), monthKey, true).find((row) => row.student_name === name);
-  const storedPrevActual = num(currentSummary?.prev_actual);
-  const storedPrevGift = num(currentSummary?.prev_gift);
-  const prevActual = previousSummary ? num(previousSummary.actual_balance) : storedPrevActual;
-  const prevGift = previousSummary ? num(previousSummary.gift_balance) : storedPrevGift;
-  const details = feeDetails(monthKey).filter((row) => (
-    row.student_name === name && row.effective && row.date >= monthKey && row.date <= dateKey
-  ));
-  const recharges = rechargesInRange({ start: monthKey, end: dateKey }).filter((row) => row.student_name === name);
-  const curRecharge = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0));
-  const curGift = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_gift), 0));
-  const totalFee = moneyRound(details.reduce((sum, row) => sum + num(row.unit_price), 0));
-  const actualBase = moneyRound(prevActual + curRecharge + Math.min(prevGift, 0));
-  const giftBase = moneyRound(Math.max(prevGift, 0) + curGift);
-  const actualConsumption = moneyRound(Math.min(totalFee, Math.max(0, actualBase)));
-  const remainingFee = moneyRound(totalFee - actualConsumption);
-  const giftConsumption = moneyRound(Math.min(remainingFee, Math.max(0, giftBase)));
-  const unpaidFee = moneyRound(remainingFee - giftConsumption);
+  const opening = openingBalanceMap().get(name) || {};
+  let actualBalance = moneyRound(opening.actual_balance);
+  let giftBalance = moneyRound(opening.gift_balance);
+  const earliest = earliestDataMonth();
+  if (!earliest || dateKey < earliest) {
+    return { actual_balance: actualBalance, gift_balance: giftBalance };
+  }
+  const targetMonth = monthKeyFromDate(dateKey);
+  for (const monthKey of monthsCovered(earliest, dateKey)) {
+    const range = {
+      start: monthKey,
+      end: monthKey === targetMonth ? dateKey : monthEndKey(monthKey),
+    };
+    const rows = studentAccountRowsInRange(name, range);
+    const account = calculateStudentAccountTimeline({
+      studentName: name,
+      monthKey,
+      details: rows.details,
+      recharges: rows.recharges,
+      openingActual: actualBalance,
+      openingGift: giftBalance,
+    });
+    actualBalance = account.actual_balance;
+    giftBalance = account.gift_balance;
+  }
   return {
-    actual_balance: moneyRound(actualBase - actualConsumption - unpaidFee),
-    gift_balance: moneyRound(giftBase - giftConsumption),
+    actual_balance: moneyRound(actualBalance),
+    gift_balance: moneyRound(giftBalance),
   };
 }
 
@@ -3259,6 +3556,8 @@ function studentBalanceOpen(row) {
 
 function shouldShowStudentSummaryRow(row, includeInactive = false) {
   if (includeInactive) return true;
+  if (row.active_this_month) return true;
+  if (num(row.prev_actual) !== 0 || num(row.prev_gift) !== 0) return true;
   if (!inactiveStudentStatus(row.status)) return true;
   return studentBalanceOpen(row);
 }
@@ -3523,6 +3822,11 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
       continue;
     }
     if (existing) {
+      if (!isRealRechargeRecord(existing)) {
+        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
+        updated += 1;
+        continue;
+      }
       const patch = carryOverRecordPatch(existing, fromMonth);
       db.prepare(`
         UPDATE recharge_records
@@ -3542,14 +3846,6 @@ function rolloverRecharges(fromMonth, toMonth, force = false) {
         toMonth,
       );
       updated += 1;
-    } else {
-      db.prepare(`
-        INSERT INTO recharge_records(
-          student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
-        )
-        VALUES (?, ?, ?, ?, 0, 0, '', ?, 'carry_over', ?)
-      `).run(row.student_name, row.grade || "", num(row.actual_balance), num(row.gift_balance), carryOverNote(null, fromMonth), toMonth);
-      inserted += 1;
     }
   }
   const candidateNames = new Set(rows.map((row) => row.student_name));
@@ -3886,7 +4182,7 @@ function coreStudentSummaryRows(monthKey, details) {
   const rows = summaryRows.filter((row) => includedStudentNames.has(text(row.student_name)));
   return [
     [`${monthLabelCn(monthKey)} 学生费用汇总`],
-    ["学生姓名", "年级", "上课次数", "课程总费用", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "本月实际消费", "本月赠送消费", "实际余额", "赠送余额"],
+    ["学生姓名", "年级", "上课次数", "课程总费用", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "本月实际消费", "本月赠送消费", "本月实际余额", "本月赠送余额"],
     ...rows.map((row) => [
       row.student_name,
       row.grade,
@@ -3978,6 +4274,7 @@ function coreRechargeRows(monthKey, details) {
   const recharges = all(
     `SELECT * FROM recharge_records
      WHERE month_key = ?
+       AND ${REAL_RECHARGE_SQL}
      ORDER BY CASE WHEN recharge_date IS NULL OR TRIM(recharge_date) = '' THEN 1 ELSE 0 END,
        recharge_date, id, student_name`,
     [monthKey],
@@ -4176,16 +4473,22 @@ function studentStatementData(studentName, range) {
     details.push(...studentDetails);
     const effectiveDetails = studentDetails.filter((row) => row.effective);
     const monthRecharge = recharges.filter((row) => (row.event_date || row.month_key) >= monthKey && (row.event_date || row.month_key) <= monthEndKey(monthKey));
-    const monthSummary = studentSummary(monthDetails, monthKey, true).find((row) => row.student_name === name);
+    const overlap = {
+      start: range.start > monthKey ? range.start : monthKey,
+      end: range.end < monthEndKey(monthKey) ? range.end : monthEndKey(monthKey),
+    };
+    const monthAccount = calculateStudentAccountRange(name, overlap) || {};
     if (effectiveDetails.length || monthRecharge.length) {
       monthRows.push({
         month_key: monthKey,
-        lesson_count: effectiveDetails.length,
-        total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
-        cur_recharge: monthRecharge.reduce((sum, row) => sum + num(row.cur_recharge), 0),
-        cur_gift: monthRecharge.reduce((sum, row) => sum + num(row.cur_gift), 0),
-        actual_balance: num(monthSummary?.actual_balance),
-        gift_balance: num(monthSummary?.gift_balance),
+        lesson_count: num(monthAccount.lesson_count),
+        total_fee: num(monthAccount.total_fee),
+        cur_recharge: num(monthAccount.cur_recharge),
+        cur_gift: num(monthAccount.cur_gift),
+        actual_consumption: num(monthAccount.actual_consumption),
+        gift_consumption: num(monthAccount.gift_consumption),
+        actual_balance: num(monthAccount.actual_balance),
+        gift_balance: num(monthAccount.gift_balance),
       });
     }
   }
@@ -4195,23 +4498,24 @@ function studentStatementData(studentName, range) {
     : null;
   if (!details.length && !recharges.length && !latestSummary) return null;
   const effectiveDetails = details.filter((row) => row.effective);
-  const openingBalance = studentBalanceThroughDate(name, addDays(range.start, -1));
-  const closingBalance = studentBalanceThroughDate(name, range.end);
+  const accountRange = calculateStudentAccountRange(name, range) || {};
   return {
     student_name: name,
     range,
     summary: {
       grade: latestSummary?.grade || details.find((row) => row.grade)?.grade || "",
-      lesson_count: effectiveDetails.length,
-      total_fee: effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0),
-      cur_recharge: recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0),
-      cur_gift: recharges.reduce((sum, row) => sum + num(row.cur_gift), 0),
-      opening_actual_balance: openingBalance.actual_balance,
-      opening_gift_balance: openingBalance.gift_balance,
-      closing_actual_balance: closingBalance.actual_balance,
-      closing_gift_balance: closingBalance.gift_balance,
-      actual_balance: closingBalance.actual_balance,
-      gift_balance: closingBalance.gift_balance,
+      lesson_count: num(accountRange.lesson_count ?? effectiveDetails.length),
+      total_fee: moneyRound(accountRange.total_fee ?? effectiveDetails.reduce((sum, row) => sum + num(row.unit_price), 0)),
+      cur_recharge: moneyRound(accountRange.cur_recharge ?? recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0)),
+      cur_gift: moneyRound(accountRange.cur_gift ?? recharges.reduce((sum, row) => sum + num(row.cur_gift), 0)),
+      actual_consumption: moneyRound(accountRange.actual_consumption),
+      gift_consumption: moneyRound(accountRange.gift_consumption),
+      opening_actual_balance: moneyRound(accountRange.opening_actual_balance),
+      opening_gift_balance: moneyRound(accountRange.opening_gift_balance),
+      closing_actual_balance: moneyRound(accountRange.actual_balance),
+      closing_gift_balance: moneyRound(accountRange.gift_balance),
+      actual_balance: moneyRound(accountRange.actual_balance),
+      gift_balance: moneyRound(accountRange.gift_balance),
       latest_month: latestMonth,
     },
     month_rows: monthRows.sort((a, b) => a.month_key.localeCompare(b.month_key)),
@@ -4226,7 +4530,7 @@ function studentStatementRows(monthKey, studentName, range = null) {
   const { summary, details, recharges } = report;
   return [
     [`${report.range.start} 至 ${report.range.end} 学生账单`, report.student_name],
-    ["学生姓名", "年级", "上课次数", "课程总费用", "期间实际充值", "期间赠送学费", "最新实际余额", "最新赠送余额"],
+    ["学生姓名", "年级", "上课次数", "课程总费用", "期间实际充值", "期间赠送学费", "期间实际消费", "期间赠送消费", "最新实际余额", "最新赠送余额"],
     [
       report.student_name,
       summary.grade || "",
@@ -4234,6 +4538,8 @@ function studentStatementRows(monthKey, studentName, range = null) {
       summary.total_fee || 0,
       summary.cur_recharge || 0,
       summary.cur_gift || 0,
+      summary.actual_consumption || 0,
+      summary.gift_consumption || 0,
       summary.actual_balance || 0,
       summary.gift_balance || 0,
     ],
@@ -4272,7 +4578,7 @@ function studentHistoryRows(studentName) {
     const details = feeDetails(monthKey);
     const studentDetails = details.filter((row) => row.student_name === name);
     const recharge = get(
-      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
+      `SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ? AND ${REAL_RECHARGE_SQL}`,
       [name, monthKey],
     );
     if (!studentDetails.length && !recharge) continue;
@@ -4494,7 +4800,8 @@ function bootstrap(monthKey, includeInactive = false) {
     pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
     student_pricing: studentPricingRows(monthKey),
     lessons: all("SELECT *, ? AS weekday FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", ["", monthKey]),
-    recharges: all("SELECT * FROM recharge_records WHERE month_key = ? ORDER BY student_name", [monthKey]),
+    recharges: all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL} ORDER BY student_name`, [monthKey]),
+    opening_balances: openingBalanceRows(),
     derived: {
       fee_details: details,
       student_summary: studentSummary(details, monthKey, includeInactive),
@@ -5273,6 +5580,85 @@ function auditedDelete(req, actor, table, idField, idValue, entityType = table) 
   return result;
 }
 
+function normalizedOpeningBalancePayload(body) {
+  const studentName = text(body.student_name);
+  if (!studentName) return { error: "学生姓名不能为空", status: 400 };
+  const profile = get("SELECT grade FROM students WHERE name = ?", [studentName]);
+  const payload = {
+    month_key: text(body.month_key),
+    student_name: studentName,
+    grade: text(body.grade) || text(profile?.grade),
+    opening_actual_balance: num(body.opening_actual_balance),
+    opening_gift_balance: num(body.opening_gift_balance),
+    notes: text(body.notes),
+  };
+  if (Math.abs(payload.opening_actual_balance) > 100000) return { error: "期初现金余额超出合理范围", status: 400 };
+  if (Math.abs(payload.opening_gift_balance) > 100000) return { error: "期初赠送余额超出合理范围", status: 400 };
+  return { payload };
+}
+
+function createOpeningBalance(body) {
+  const normalized = normalizedOpeningBalancePayload(body);
+  if (normalized.error) return normalized;
+  const payload = normalized.payload;
+  if (payload.opening_actual_balance === 0 && payload.opening_gift_balance === 0) {
+    return { error: "期初现金余额和期初赠送余额不能同时为 0", status: 400 };
+  }
+  if (get("SELECT id FROM student_opening_balances WHERE student_name = ?", [payload.student_name])) {
+    return { error: "该学生已有期初余额", status: 409 };
+  }
+  const result = db.prepare(`
+    INSERT INTO student_opening_balances(
+      month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    payload.month_key,
+    payload.student_name,
+    payload.grade,
+    payload.opening_actual_balance,
+    payload.opening_gift_balance,
+    payload.notes,
+  );
+  upsertStudent(payload.student_name, payload.grade);
+  return { ok: true, id: result.lastInsertRowid, row: get("SELECT * FROM student_opening_balances WHERE id = ?", [result.lastInsertRowid]) };
+}
+
+function updateOpeningBalance(id, body) {
+  const before = get("SELECT * FROM student_opening_balances WHERE id = ?", [id]);
+  if (!before) return { error: "未找到期初余额记录", status: 404 };
+  const normalized = normalizedOpeningBalancePayload({ ...before, ...body });
+  if (normalized.error) return normalized;
+  const payload = normalized.payload;
+  if (payload.opening_actual_balance === 0 && payload.opening_gift_balance === 0) {
+    db.prepare("DELETE FROM student_opening_balances WHERE id = ?").run(id);
+    return { ok: true, deleted: true, before };
+  }
+  const duplicate = get("SELECT id FROM student_opening_balances WHERE student_name = ? AND id <> ?", [payload.student_name, id]);
+  if (duplicate) return { error: "该学生已有期初余额", status: 409 };
+  db.prepare(`
+    UPDATE student_opening_balances
+    SET month_key = ?,
+        student_name = ?,
+        grade = ?,
+        opening_actual_balance = ?,
+        opening_gift_balance = ?,
+        notes = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    payload.month_key,
+    payload.student_name,
+    payload.grade,
+    payload.opening_actual_balance,
+    payload.opening_gift_balance,
+    payload.notes,
+    id,
+  );
+  upsertStudent(payload.student_name, payload.grade);
+  return { ok: true, row: get("SELECT * FROM student_opening_balances WHERE id = ?", [id]), before };
+}
+
 function parseCookies(req) {
   const cookies = {};
   for (const part of String(req.headers.cookie || "").split(";")) {
@@ -5519,6 +5905,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/reconcile")) return "audit";
   if (p.startsWith("/api/audit") || p === "/api/source-workbooks" || p === "/api/import/source-workbook") return "audit";
   if (p === "/api/recharges" || p === "/api/recharges/rollover") return "recharges";
+  if (p.startsWith("/api/opening-balances")) return "students";
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
   if (p.includes("student") || p === "/api/fee-overrides") return "students";
@@ -5565,6 +5952,7 @@ function sanitizeBootstrap(data, user) {
       ? [{ id: null, name: user.teacher_name, active_this_month: true }]
       : data.teachers,
     recharges: user.role === "teacher" ? [] : data.recharges,
+    opening_balances: user.role === "teacher" ? [] : data.opening_balances,
     student_pricing: user.role === "teacher" ? [] : data.student_pricing,
     derived: {
       ...data.derived,
@@ -6254,6 +6642,9 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
   const studentName = text(row.values[0]);
   if (!studentName) return false;
   const grade = text(row.values[1]);
+  const curRecharge = num(row.values[4]);
+  const curGift = num(row.values[5]);
+  if (curRecharge === 0 && curGift === 0) return false;
   db.prepare(`
     INSERT INTO recharge_records(
       student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
@@ -6274,8 +6665,8 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
     grade,
     num(row.values[2]),
     num(row.values[3]),
-    num(row.values[4]),
-    num(row.values[5]),
+    curRecharge,
+    curGift,
     isoDateValue(row.values[6]),
     text(row.values[7]),
     sourceLabel,
@@ -7743,6 +8134,35 @@ async function handleApi(req, res, url) {
     return sendJson(res, result);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/opening-balances") {
+    return sendJson(res, { scope: "global", opening_balances: openingBalanceRows() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/opening-balances") {
+    const result = createOpeningBalance(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "student_opening_balances", entity_id: String(result.id), before: null, after: result.row });
+    return sendJson(res, result, 201);
+  }
+  const openingBalanceMatch = url.pathname.match(/^\/api\/opening-balances\/(\d+)$/);
+  if (openingBalanceMatch && req.method === "PUT") {
+    const id = Number(openingBalanceMatch[1]);
+    const result = updateOpeningBalance(id, await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: result.deleted ? "delete_zero" : "update",
+      entity_type: "student_opening_balances",
+      entity_id: String(id),
+      before: result.before,
+      after: result.deleted ? { deleted: true } : result.row,
+    });
+    return sendJson(res, result);
+  }
+  if (openingBalanceMatch && req.method === "DELETE") {
+    const id = Number(openingBalanceMatch[1]);
+    const result = auditedDelete(req, user, "student_opening_balances", "id", id, "student_opening_balances");
+    return sendJson(res, { ok: true, deleted: (result.changes || 0) > 0 });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
     for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
@@ -7960,12 +8380,23 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
+    const studentName = text(body.student_name);
+    if (!studentName) return sendError(res, 400, "学生姓名不能为空");
     const curRecharge = num(body.cur_recharge);
     const curGift = num(body.cur_gift);
     if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
     if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
     const canEditOpeningBalance = !previousDataMonth(monthKey);
-    const before = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [text(body.student_name), monthKey]);
+    const before = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [studentName, monthKey]);
+    if (curRecharge === 0 && curGift === 0) {
+      if (!before) return sendError(res, 400, "实际充值和赠送充值不能同时为 0");
+      const result = withTransaction(() => {
+        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(before.id);
+        return refreshCarryOverAfter(monthKey);
+      });
+      recordAuditEvent(req, user, { action: "delete_zero_recharge", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: null, carry_over: result } });
+      return sendJson(res, { ok: true, deleted: true, carry_over: result });
+    }
     const result = withTransaction(() => {
       db.prepare(`
         INSERT INTO recharge_records(
@@ -7982,7 +8413,7 @@ async function handleApi(req, res, url) {
           notes = excluded.notes,
           source = excluded.source
       `).run(
-        text(body.student_name),
+        studentName,
         text(body.grade),
         canEditOpeningBalance ? num(body.prev_actual) : 0,
         canEditOpeningBalance ? num(body.prev_gift) : 0,
@@ -7997,8 +8428,8 @@ async function handleApi(req, res, url) {
       );
       return refreshCarryOverAfter(monthKey);
     });
-    const after = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [text(body.student_name), monthKey]);
-    recordAuditEvent(req, user, { action: "upsert", entity_type: "recharge_records", entity_id: `${text(body.student_name)}|${monthKey}`, before, after: { row: after, carry_over: result } });
+    const after = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [studentName, monthKey]);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: after, carry_over: result } });
     return sendJson(res, { ok: true, carry_over: result });
   }
 

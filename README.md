@@ -6,10 +6,10 @@
 
 系统当前覆盖的核心工作包括：
 
-- 学生档案、学生费用明细、充值和结转；
+- 学生档案、学生费用明细、期初余额、充值流水和余额结转；
 - 教师档案、教师课时费、交通补贴和月度薪资汇总；
 - 月度课程总表、课程状态、冲突检查和课程通知；
-- 标准价格、学生单价规则、单节课费用覆盖；
+- 标准价格、学生单价规则、单节课费用覆盖和教师薪资规则；
 - 源 Excel 导入、源头对账、内部规则校验和操作日志；
 - 月度核心 Excel、教师薪资、经营概览等导出。
 
@@ -71,7 +71,7 @@ docker compose up -d --build
 ```
 
 详细服务器、域名、HTTPS 和数据库迁移说明见 [docs/deployment.md](docs/deployment.md)。
-审计核实与本轮修复记录见 [docs/audit-phase2-verification.md](docs/audit-phase2-verification.md)。
+审计核实记录见 [docs/audit-phase2-verification.md](docs/audit-phase2-verification.md)。
 
 ## 月份数据机制
 
@@ -83,10 +83,10 @@ YYYY-MM-01
 
 例如 `2026-05-01` 表示 2026 年 5 月。
 
-- `/api/months` 的月份列表来自 SQL 中已有的 `lessons.month_key` 和 `recharge_records.month_key`，不是来自 `data/source-workbooks/`。
+- `/api/months` 的月份列表来自 SQL 中已有的 `lessons.month_key` 和真实 `recharge_records.month_key`，不是来自 `data/source-workbooks/`。全局期初余额不产生月份。
 - 月份数据主要保存在 SQLite 中；源 Excel 和 SQL 数据不是同一个东西。
 - 新建月份会在 SQL 层建立月份上下文并补齐结转逻辑，但不会自动生成 `data/source-workbooks/2026年N月.xlsx`。
-- 如果某个月没有课程但有自动结转或充值记录，该月份也可能出现在月份列表中。
+- 如果某个月没有课程但有真实充值记录，该月份也可能出现在月份列表中。
 - Excel 工作簿中的跨月课程会按课程实际日期归入对应 `month_key`。
 
 ## 数据导入与源 Excel
@@ -153,6 +153,116 @@ db=158
 [xlsx audit][lessons][skip] sheet=4月总表 row=1234 cells=H1234=¥ reason=missing-date|missing-student|missing-teacher|missing-time
 ```
 
+## 功能说明
+
+### 学生费用与余额口径
+
+系统支持 `学生 -> 期初余额`，用于记录系统上线前学生账户已有的现金余额和赠送余额。期初余额是全局账户初始化数据，不属于某一个月份，不进入 `recharge_records`，也不计入本月充值。
+
+`学生 -> 充值记录` 只记录真实流水，包括现金充值、赠送充值和退费。`实际充值 = 0 且 赠送充值 = 0` 的记录不视为真实充值记录，不在页面、接口和核心 Excel 的充值记录口径中展示。
+
+学生扣费采用按时间顺序的批次 FIFO 口径：
+
+- 期初余额作为第一笔虚拟批次；
+- 后续每条真实充值形成一个新批次；
+- 课程按日期和时间顺序扣费；
+- 扣费按批次顺序进行，每个批次内部先扣现金，再扣赠送；
+- 现金不足时可以形成现金欠费；
+- 赠送余额不会抵扣现金欠费，后续赠送充值只进入赠送批次；
+- 后续现金充值会先抵扣已有现金欠费。
+
+这套口径影响 `学生 -> 费用汇总`、`学生 -> 学生查询`、学生账单/复制图片，以及核心 Excel 中的学生费用汇总。`学生 -> 费用明细` 仍显示每节课的应收单人费用，不显示现金/赠送拆分。
+
+### 学生费用汇总
+
+`学生 -> 费用汇总` 现在是一张完整横向表格，不再依赖展开行查看核心余额数据。主表固定 12 列：
+
+```text
+学生姓名
+年级
+上课次数
+课程总费用
+上月实际结转
+上月赠送结转
+本月实际充值
+本月赠送学费
+本月实际消费
+本月赠送消费
+本月实际余额
+本月赠送余额
+```
+
+学生显示范围为：本月有课程记录的学生、本月有真实充值记录的学生、月初现金或赠送余额不为 0 的学生。排序按年级顺序和学生姓名，年级顺序为：
+
+```text
+初一 -> 初二 -> 初三 -> 高一 -> 高二 -> 高三 -> 已毕业
+```
+
+### 充值记录与期初余额
+
+- `学生 -> 充值记录` 只显示本月真实充值、退费、赠送流水。
+- 本月实际充值和赠送充值都为 0 的记录不显示，也不算充值记录。
+- 新增充值记录使用弹窗。
+- `学生 -> 期初余额` 用于系统上线前余额承接，支持新增、编辑、删除、学生筛选和年级筛选。
+- 期初余额是全局数据，不随顶部月份切换变化。
+- 期初余额不进入充值记录，不计入本月充值。
+
+### 学生单价规则与费用明细
+
+`学生 -> 学生单价` 是学生收费规则表，规则唯一标识为：
+
+```text
+学生 + 年级 + 科目 + 学生集合
+```
+
+学生集合会规范化处理：拆分、去空、去重、排序、统一分隔符。规则候选会从历史课程自动生成，页面只保留 `学生 / 年级 / 科目 / 学生集合 / 单价 / 价格状态 / 备注`。学生、年级、科目、学生集合只读；单价和备注可编辑。价格状态为 `自动 / 手动 / 未设置`。
+
+`学生 -> 费用明细` 中，非 `已上` 课程费用为 0。单人费用右上角用 `自 / 手 / 未` 标识价格状态，并支持勾选后点击 `按规则更新所选费用`。该操作只更新用户勾选的明细，不会自动批量改历史费用。
+
+### 教师薪资规则与教师明细
+
+`教师 -> 薪资规则` 支持按规则自动计算教师薪资，规则唯一标识为：
+
+```text
+老师 + 年级 + 科目 + 学生集合
+```
+
+学生集合同样会规范化。规则金额为 `每2小时薪资`，1 课时按 2 小时计算。规则价格状态为 `已设置 / 未设置`。
+
+`教师 -> 教师明细` 中，非 `已上` 课程薪资为 0。教师薪资右上角用 `自 / 手 / 未` 标识来源状态，并支持勾选后点击 `按规则更新所选薪资`。独立来源列和学生人数列已删除；手动薪资不会被自动覆盖，除非用户主动批量按规则更新。
+
+### 排课与课程总表
+
+`排课 -> 课程总表` 支持批量复制，按钮位于批量删除旁边。复制弹窗支持整体平移天数，默认 `+7` 天；上方显示原课程，下方显示复制后课程。原课程只读，目标课程可编辑。复制后的课程不继承原教师薪资，而是按新增课程逻辑重新匹配薪资规则。
+
+快捷日期按钮以当前真实日期为基准，`本月` 指当前真实自然月，不是顶部选择的月份。
+
+### 学生/老师档案
+
+- 学生档案显示全部学生，学生状态包含 `已毕业`。
+- 支持批量升年级：`初一 -> 初二 -> 初三 -> 高一 -> 高二 -> 高三 -> 已毕业`，执行前需要多次确认。
+- 学生入学日期可补齐为该学生第一节课日期。
+- 老师档案显示全部老师。
+- 老师入职日期可补齐为该老师第一节课日期。
+
+### 基础数据
+
+`设置 -> 基础数据` 第一阶段支持维护教室、科目、常用时间和课程状态。基础数据复用 `settings` 存储，不新增专门字典表。候选项采用：
+
+```text
+系统默认值 + 基础字典自定义值 + 历史课程 used_lesson_lookups 值
+```
+
+老师、学生仍以档案页为准；年级仍保持固定体系。
+
+### 图片复制与 UI 优化
+
+- `学生 -> 学生查询` 支持复制图片。
+- `教师 -> 教师明细` 支持复制图片。
+- 家长群课程截图、老师课程截图支持本周快捷。
+- 侧边栏 emoji 已改为线性图标。
+- 多个表格和弹窗做了布局优化。
+
 ## 数据导出功能
 
 ### 月度核心 Excel
@@ -199,10 +309,12 @@ GET /api/export/core-workbook.xlsx?month=2026-05-01
 `N月学生费用汇总`：
 
 - 来自 `feeDetails(monthKey)` 和 `studentSummary(details, monthKey)` 的后端计算结果；
+- 使用与 `学生 -> 费用汇总` 相同的 12 列和批次 FIFO 扣费口径；
 - 导出层会过滤学生范围，只保留：
   - 本月课程中出现过的学生；
-  - 本月充值记录中有实际充值、赠送、充值日期或非自动结转备注的学生；
-  - 本月实际余额或赠送余额仍大于 0 的学生。
+  - 本月有真实充值记录的学生；
+  - 月初现金余额或赠送余额不为 0 的学生；
+  - 本月末仍有现金或赠送余额的学生。
 
 `学生费用明细`：
 
@@ -212,6 +324,9 @@ GET /api/export/core-workbook.xlsx?month=2026-05-01
 `充值记录`：
 
 - 来自 `recharge_records`；
+- 只导出真实现金充值、赠送充值、退费等流水；
+- `cur_recharge = 0 且 cur_gift = 0` 的记录不视为充值记录；
+- 全局期初余额不进入充值记录 sheet；
 - 保留“未登记充值提醒”相关列，用于提示本月有课程但没有充值记录的学生。
 
 `教师薪资汇总`：
@@ -273,7 +388,7 @@ GET /api/export/core-workbook.xlsx?month=2026-05-01
 
 ### Q：为什么学生费用汇总里不是所有历史学生？
 
-核心导出只保留本月相关学生：本月上课、本月有充值信号，或本月仍有实际余额/赠送余额的学生。没有本月课程、没有充值信号且余额不为正的历史学生不会出现在该 sheet。
+核心导出和页面只保留本月相关学生：本月上课、本月有真实充值流水，或月初/期末仍有现金或赠送余额的学生。只有 0+0 空充值记录、且没有课程和余额的历史学生不会出现在该 sheet。
 
 ### Q：源 Excel 还需要保留吗？
 
@@ -352,10 +467,12 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | --- | --- |
 | `lessons` | 月度课程总表，每行一节课，`student_names` 用顿号分隔多个学生，`status` 是规范化后的状态机字段，`teacher_salary` 是手填课时费 |
 | `fee_overrides` | 单节课、单个学生的手动单价覆盖（最高优先级） |
+| `student_opening_balances` | 全局学生期初余额，记录系统上线前现金余额和赠送余额；不属于某个月，不计入充值流水 |
 | `student_pricing` | 学生 + 年级 + 科目 + 学生集合的学生单价规则候选；金额为 0 表示未设置 |
 | `pricing_standards` | 年级×班型（1对1/1对2/1对3/1对多）的标准单价 |
 | `students` / `teachers` | 档案，软删除字段 `status` 标记在读/在职/离校/离职 |
-| `recharge_records` | 学生月度充值/结转记录，以 `(student_name, month_key)` 为唯一键，`source='carry_over'` 标识自动结转 |
+| `recharge_records` | 学生月度真实充值、赠送充值、退费流水；`cur_recharge = 0 且 cur_gift = 0` 不视为真实充值记录 |
+| `teacher_salary_rules` | 老师 + 年级 + 科目 + 学生集合的教师薪资规则，金额为每 2 小时薪资 |
 | `staff` / `staff_salary_monthly` | 非教师员工档案与月薪流水 |
 | `teacher_adjustments_monthly` | 教师每月四周车贴，参与教师薪资合计 |
 | `operating_expenses` | 房租/水电/食材等运营开销 |
@@ -365,28 +482,28 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | `users` | 登录账号、角色、绑定老师姓名和账号状态 |
 | `parent_message_greetings` | 家长群课程通知的发送对象称呼、全局尾句和完整文案缓存 |
 | `course_notice_completion_records` | 家长群课程通知完成记录，按“年级 + 科目 + 学生名单 + 老师 + 日期 + 时间”唯一识别已发送课程 |
-| `settings` | 当前选定月份等系统配置 |
+| `settings` | 当前选定月份、基础数据自定义项等系统配置；基础数据候选会合并系统默认值、自定义值和历史课程 `used_lesson_lookups` 值 |
 
 所有按月数据用 `month_key='YYYY-MM-01'` 分区，月份切换不影响历史数据。
 
 权限角色：`Qing(owner)` 和管理员有全量权限；教务主要负责排课、学生费用、充值、档案和老师账号；财务看经营概览、充值、学生查询和日常开销；老师只能看自己的矩阵课表与教师明细。老师档案删除时会自动停用绑定的老师登录账号，但账号权限表保留 `disabled` 记录，便于恢复、重置密码和审计追溯。
 
-## 已完成功能与对应逻辑
+## 维护参考：模块与审计细节
 
 ### 模块总览
 
 | 模块 | 入口 | 核心职责 | 主要数据表 |
 | --- | --- | --- | --- |
-| 排课 | 📅 | 月度课程录入、状态管理、冲突检测、周课表导出、家长群课程通知截图 | `lessons` / `parent_message_greetings` / `course_notice_completion_records` |
-| 学生 | 👥 | 学生档案、费用明细、充值结转、学生单价规则管理 | `students` / `recharge_records` / `student_pricing` / `fee_overrides` |
-| 教师 | 👨‍🏫 | 教师薪资汇总、四周车贴、xlsx 导出 | `teachers` / `teacher_adjustments_monthly` |
-| 运营 | 💼 | 员工档案与薪资、日常开销、月份生命周期 | `staff` / `staff_salary_monthly` / `operating_expenses` |
-| 经营概览 | 📊 | 财务汇总、环比、分布、6 月趋势、资产负债 | 跨表只读 |
-| 设置 / 数据对账 | ⚙️ | 标准单价、内部审计、xlsx 对账、档案 CRUD | `pricing_standards` / `audit_logs` / `audit_ignores` |
+| 排课 | 线性图标 | 月度课程录入、状态管理、冲突检测、周课表导出、家长群课程通知截图 | `lessons` / `parent_message_greetings` / `course_notice_completion_records` |
+| 学生 | 线性图标 | 学生档案、费用明细、期初余额、真实充值流水、学生单价规则管理 | `students` / `student_opening_balances` / `recharge_records` / `student_pricing` / `fee_overrides` |
+| 教师 | 线性图标 | 教师薪资汇总、四周车贴、xlsx 导出 | `teachers` / `teacher_adjustments_monthly` |
+| 运营 | 线性图标 | 员工档案与薪资、日常开销、月份生命周期 | `staff` / `staff_salary_monthly` / `operating_expenses` |
+| 经营概览 | 线性图标 | 财务汇总、环比、分布、6 月趋势、资产负债 | 跨表只读 |
+| 设置 / 数据对账 | 线性图标 | 标准单价、内部审计、xlsx 对账、档案 CRUD | `pricing_standards` / `audit_logs` / `audit_ignores` |
 
 ---
 
-### 1. 排课（📅）
+### 1. 排课
 
 核心数据表 `lessons`，每行 = 一节课，多个学生用顿号分隔写在 `student_names`。
 
@@ -441,7 +558,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ---
 
-### 2. 学生（👥）
+### 2. 学生
 
 #### 2.1 学生费用来源（`unitPriceFor`）
 
@@ -469,15 +586,16 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 | 子功能 | 实现 | 说明 |
 | --- | --- | --- |
 | 学生费用汇总 | `studentSummary` | 详见下文 [金额结算口径](#金额结算口径) |
-| 充值记录 | 表内编辑 + upsert | 字段：`prev_actual / prev_gift / cur_recharge / cur_gift / recharge_date / notes`；以 `(student_name, month_key)` 唯一键 upsert |
-| 上月结转 | `GET /api/recharges/rollover?from=...&to=...` + `ensureCarryOver` 自动刷新 | 把上月月末余额作为本月 `prev_actual / prev_gift`；`shouldRefreshCarryOver` 决定可覆盖范围（自动结转行 / 全空行）；上游月数据变化后，下游月自动结转行会在下次访问时被刷新；任何手填非空记录会被跳过，UI 二次确认后允许 `force=1` 强刷 |
+| 充值记录 | 弹窗新增 + upsert | 只保存真实 `cur_recharge / cur_gift` 流水；0+0 不算充值记录；期初余额不写入 `recharge_records` |
+| 期初余额 | `student_opening_balances` | 全局账户初始化余额，不随顶部月份变化；系统起始月作为第一笔虚拟批次参与余额计算 |
+| 上月结转 | `previousCarryOverBalances` | 有上一有效月时使用上一月月末余额；没有上一有效月时读取全局期初余额；不再把期初余额当作本月充值 |
 | 学生查询 | `renderStudentQuery` | 选中学生 → 当月汇总 + 当月明细 + `studentHistoryRows` 跨月历史对比 |
 | 学生单价规则 | `student_pricing` | 进入页面时根据历史课程自动生成 `学生 + 年级 + 科目 + 学生集合` 候选；学生、年级、科目和学生集合只读，只有单价和备注可编辑；0 表示未设置 |
 | 价格重算 | `POST /api/pricing-recompute` | 删除当月该学生该科目所有 `fee_overrides`（让单价回到专享/标准价）；变更前后总价写入审计日志 |
 
 ---
 
-### 3. 教师（👨‍🏫）
+### 3. 教师
 
 | 子功能 | 实现 | 说明 |
 | --- | --- | --- |
@@ -488,7 +606,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ---
 
-### 4. 运营（💼）
+### 4. 运营
 
 | 子功能 | 实现 | 说明 |
 | --- | --- | --- |
@@ -500,7 +618,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ---
 
-### 5. 经营概览（📊）
+### 5. 经营概览
 
 入口：`financeBase(range)`，输出 10 项核心指标。
 
@@ -531,7 +649,7 @@ Docker 线上环境中，代码在 `/root/liming-course-system`；数据库通�
 
 ---
 
-### 6. 设置 / 数据对账（⚙️）
+### 6. 设置 / 数据对账
 
 #### 6.1 子功能
 
@@ -631,7 +749,7 @@ node --check public/app.js
 | 配色方案 | 左侧导航底部独立选择 `data-palette`，`localStorage` key 为 `liming:palette`，默认 `liming-blue`（品牌色 `#002147`）；明暗主题与配色方案互不混用，配色方案主要影响品牌色、按钮、选中态、截图强调色 |
 | 矩阵课表 | 10 天以内保留原有宽松矩阵尺寸，时间段之间有明显横向分隔；超过 10 天自动切换为按时间段分组的有课日期卡片；同日重叠时间会标记老师 / 学生 / 教室冲突 |
 
-## 界面与交互优化（近期更新）
+## 维护参考：界面与交互历史
 
 ### 课程总表与排课功能优化
 
@@ -649,11 +767,11 @@ node --check public/app.js
 - `排课 -> 周课表 -> 周课表明细`：行背景按“授课老师 + 日期”连续分组，同一老师同一天的课程使用同一种背景，相邻分组使用一深一浅两档背景交替显示；该样式只作用于周课表明细，不影响课程总表、矩阵课表、截图表等其他表格。
 - `学生 -> 学生档案`：年级分组行（如“初一”“初二”“高三”）优化为白底、居中、加粗、更醒目，并去掉额外明显的上下细线；边框 / 分隔线保持和普通学生行一致，仅影响学生档案年级分组行，不影响普通学生行和其他表格。
 
-### 近期功能调整
+### 页面功能补充
 
-#### 学生查询、课程批量复制与基础数据（近期补充）
+#### 学生查询、课程批量复制与基础数据
 
-学生查询页面近期优化：
+学生查询页面优化：
 
 - `学生 -> 学生查询` 恢复并保留 `月份汇总` 表。
 - 页面顶部只保留 8 个核心数据卡，桌面端固定为 `2 行 × 4 列`。
@@ -672,7 +790,7 @@ node --check public/app.js
 - 批量复制弹窗已放大，支持横向 / 纵向滚动；弹窗标题栏支持拖动，关闭后位置重置。
 - 复制后的教师薪资不继承原课程，仍按当前新增课程 / 薪资规则逻辑处理。
 
-学生档案近期优化：
+学生档案页面优化：
 
 - 页面位置：`学生 -> 学生档案`。
 - 学生状态和年级选项新增 `已毕业`，且 `已毕业` 纳入非活跃学生状态判断。
@@ -681,7 +799,7 @@ node --check public/app.js
 - 批量升年级需要三步确认：总确认、分组预览确认、输入 `确认升年级`。
 - 学生入学日期为空时，默认显示该学生第一节课日期；该默认日期只在显示层派生，不写回数据库，不覆盖人工填写日期。
 
-老师档案近期优化：
+老师档案页面优化：
 
 - 页面位置：`教师 -> 老师档案`。
 - 老师入职日期为空时，默认显示该老师第一节课日期。
@@ -706,7 +824,7 @@ node --check public/app.js
 - 教师明细图片统计包含有效课时、课程记录、课时薪资、车票 / 交通补贴、薪资统计；薪资统计包含车票 / 交通补贴。
 - 教师明细图片表格不显示 `规则薪资`，图片最后展示横向转置的 `车票/交通补贴明细`。
 
-本轮主要涉及文件：`public/app.js`、`public/styles.css`、`src/server.js`。本轮未修改费用计算核心逻辑、薪资计算核心逻辑和充值结转逻辑；基础数据没有新建数据库表。
+基础数据没有新建专门字典表，仍复用 `settings` 存储。
 
 #### 学生档案与学生查询显示全部学生档案
 
@@ -724,7 +842,7 @@ node --check public/app.js
 - `学生 -> 费用明细`：学生、授课老师、年级、状态、价格来源筛选联动。
 - `学生 -> 费用汇总`：学生、年级筛选联动；余额状态保持固定枚举，但会参与候选项收缩。
 - `学生 -> 充值记录`：学生、年级筛选联动；来源保持固定枚举，但会参与候选项收缩。
-- 该调整只改变筛选候选项，不改变费用计算、充值结转、课程排序或数据库数据。
+- 该调整只改变筛选候选项，不改变费用计算、余额结转、课程排序或数据库数据。
 
 #### 非“已上”课程费用和薪资口径
 
@@ -756,7 +874,7 @@ node --check public/app.js
 
 `教师 -> 教师明细` 增加了规则薪资参考和来源判断，来源大致包括：`无规则`、`待填写`、`自动`、`手动`。当前薪资与规则计算值一致时显示为自动；不一致时显示为手动。教师明细支持勾选课程后点击“按规则更新所选薪资”，只会把所选课程更新为当前规则计算值，未选中的课程不会被修改；没有有效规则或规则金额为 0 的课程不能批量应用。
 
-教师明细近期优化：
+教师明细页面优化：
 
 - 新增年级、科目、学生、来源、规则状态筛选；筛选项基于当前月份、当前教师和当前明细数据生成。
 - 筛选后，表头全选只会选择当前可见且可应用规则的课程。
@@ -764,7 +882,7 @@ node --check public/app.js
 
 进入 `教师 -> 薪资规则` 页面时，系统会根据历史课程自动补齐规则候选。候选规则默认金额为 0，只作为待设置候选显示，不参与自动匹配；当“每2小时薪资”大于 0 时，规则才参与新增课程自动匹配、复制课程重新匹配、教师明细规则薪资计算和批量按规则更新。薪资规则页已简化：不显示状态列和操作列，不需要保存 / 启用 / 停用按钮，修改“每2小时薪资”或备注后失焦自动保存。
 
-薪资规则页近期优化：
+薪资规则页面优化：
 
 - `+ 新增规则` 按钮移动到全局规则卡片标题附近，新增规则使用弹窗。
 - 规则列表支持老师、年级、科目、学生搜索、薪资状态筛选。
@@ -872,24 +990,30 @@ node --check public/app.js
 
 ## 金额结算口径
 
-每个月每个学生的余额按下式结算（见 `studentSummary`）：
+学生余额不是简单的“现金总池 + 赠送总池”月末一次性扣费，而是按账户批次逐笔处理。
 
-```
-actualBase       = prevActual + curRecharge + min(prevGift, 0)
-giftBase         = max(prevGift, 0) + curGift
-actualConsumption = min(totalFee, max(0, actualBase))
-remainingFee      = totalFee - actualConsumption
-giftConsumption   = min(remainingFee, max(0, giftBase))
-unpaidFee         = remainingFee - giftConsumption
-actualBalance     = actualBase - actualConsumption - unpaidFee
-giftBalance       = giftBase - giftConsumption
-```
+系统先确定本月月初余额：
+
+- 如果当前月有上一有效数据月，使用上一有效月的月末现金余额和赠送余额；
+- 如果当前月没有上一有效数据月，使用全局 `student_opening_balances` 期初余额；
+- 期初余额只作为账户初始化批次，不计入本月充值。
+
+随后按时间线处理真实充值和已上课程：
+
+1. 期初余额作为第一笔虚拟批次。
+2. 每条真实充值记录形成一个新批次；现金充值、赠送充值和负数退费都按充值日期进入时间线。
+3. 同一天充值先于课程；多条充值按 `recharge_date`、`id` 排序；课程按日期、`time_slot` 和课程 id 稳定排序。
+4. 每节 `已上` 课程使用 `feeDetails()` 算出的单人应收费用扣费；非 `已上` 课程费用为 0，不参与扣费。
+5. 扣费从最早未扣完批次开始，每个批次内部先扣现金，再扣赠送，扣完后进入下一批次。
+6. 所有批次都不足时，剩余部分形成现金欠费，现金余额可为负数；赠送余额不能为负数。
+7. 后续现金充值会先抵扣现金欠费；后续赠送充值不会抵扣现金欠费。
 
 口径要点：
 
-- **现金优先消费，赠送兜底**：实际现金（含上月结转 + 本月充值）先消耗课程费用，不足部分用赠送余额顶。
-- **负的上月赠送结转会扣减实际余额**（`+ min(prevGift, 0)`），避免赠送账户成为永久"负债悬空"。
-- **总资金不足时**未覆盖的课费写入 `actualBalance` 负数，赠送余额清零；正常情况下两边的余额拆分都保证 `actual + gift == 总充值 - 总费用`。
+- **本月实际充值 / 本月赠送学费**只统计真实充值记录，0+0 空记录不参与。
+- **本月实际消费 / 本月赠送消费**来自批次 FIFO 后每节课落到现金账户或赠送账户的消费拆分。
+- **课程总费用 = 本月实际消费 + 本月赠送消费**；现金消费中可以包含欠费部分。
+- **本月实际余额 / 本月赠送余额**是时间线处理完成后的月末余额。
 - **finance.revenue 是收入认现口径**：每条有效课时先算 `allocated_revenue = unit_price × (actual_consumption / total_fee)`、`allocated_gift_consumption = unit_price × (gift_consumption / total_fee)`，再汇总到经营概览。学生没付钱的课时不计现金收入，仅在余额上体现为负数或在 `accounts_receivable` 体现（限 `状态=未缴费` 的课）。
 - **经营拆分同口径**：老师人效、年级/科目/班型收入、Top 学生贡献均使用 `allocated_revenue`，避免顶部收入按现金认现、底部排行按课程标价的口径混用。
 
@@ -897,7 +1021,7 @@ giftBalance       = giftBase - giftConsumption
 
 金额相关数据流向图见 [docs/money-data-flow.svg](docs/money-data-flow.svg)。
 
-本轮代码和金额口径审计记录见 [docs/financial-data-flow-audit.md](docs/financial-data-flow-audit.md)，其中列明了已修复的口径问题、仍保留的低风险冗余项、服务器清理边界和后续建议。
+金额口径审计记录见 [docs/financial-data-flow-audit.md](docs/financial-data-flow-audit.md)，其中列明了已修复的口径问题、仍保留的低风险冗余项、服务器清理边界和后续建议。
 
 ## 已知 bug / 风险（重点关注金额相关）
 
@@ -910,18 +1034,18 @@ giftBalance       = giftBase - giftConsumption
 | 历史问题 | 修复方式 | 相关代码 |
 | --- | --- | --- |
 | 跨月课程被丢弃或被错误归入工作簿月份 | 改为按「课程实际日期」决定 `month_key`，跨月行不再被丢弃；导入时按 (date, month_key) 精确删除，不会误覆盖其他月份 | `readXlsxTotalRowsForImport` / `importLessonsFromWorkbook` / `import_workbook.py:lesson_rows` |
-| Excel 充值表的「上月实际/赠送结转」被硬编码为 0 | 导入时读取 C/D 列写入 `prev_actual` / `prev_gift`，并标记 `source='source-workbook:*'`；含 source-workbook 充值的月份不再被自动结转覆盖 | `upsertRechargeFromWorkbook` / `monthUsesSourceWorkbookOpening` / `import_recharges` |
+| 系统上线前余额曾混在充值/结转口径中 | 拆出全局 `student_opening_balances`；期初余额不属于月份、不计入充值流水，系统起始月从全局期初余额开始结转 | `student_opening_balances` / `previousCarryOverBalances` / `studentSummary` |
 | Excel「学生费用明细」手填单价不会回写到系统 | 导入工作簿时按 (lesson_id, student_name) 写入 `fee_overrides`，让历史 Excel 单价成为系统计费的权威值；`findLessonForFeeOverride` 按行实际日期月份匹配，跨月课也能命中 | `importFeeOverridesFromWorkbook` / `findLessonForFeeOverride` |
 | Excel 充值/费用核对脚本只能比对单月，无法跨工作簿 | 新增 `scripts/sync_source_workbooks.js` 一键同步多月 + 整体备份；审计脚本支持 `--simulate-sync=YYYY-MM-01,...` 临时库重放；新增「相邻 Excel 结转核对」与跨月汇总去重 | `scripts/sync_source_workbooks.js` / `scripts/audit_source_vs_summary.js` |
 | 中文姓名输入框每输入一个字符就整页刷新 | `bindSafeTextInput` 改为输入时只更新草稿，按 Enter / 失焦 / change 才提交并重渲染；增加 IME composition 状态判断，不在合成中触发 | `public/app.js` `bindSafeTextInput` |
 | 应收账款口径只统计「状态=未缴费」 | 拆出 `account_debt_receivable` + `unpaid_lesson_receivable`，`accounts_receivable` 按学生取最大值合并去重 | `financeBreakdowns` |
 | 学生单价 `custom_price = 0` 会强制覆盖课时价为 0 | 现改为 0 元规则只表示未设置；旧空组合规则不再参与匹配，必要时以 `fee_overrides` 保留历史费用 | `unitPriceFor` / `/api/student-pricing` |
 | `recomputePricing` 静默删除手填覆盖 | UI 弹窗显式显示「将清除 N 条手填价格、重算 M 节课」 | `app.js` `.pricing-recompute` |
-| 强删月份无确认 | UI 二次确认弹窗，需手输 `month_key` 字符串才能解锁删除按钮；同时 `ensureCarryOver` 在下次访问下游月时按新的 `previousDataMonth` 自动刷新自动结转行 | `deleteMonth` / `month-delete-confirm` |
+| 强删月份无确认 | UI 二次确认弹窗，需手输 `month_key` 字符串才能解锁删除按钮；下游月份会按新的 `previousDataMonth` 重新计算月初余额 | `deleteMonth` / `month-delete-confirm` |
 | `previousEqualRange` 用滑动窗口处理自然月 | 当 `range` 是完整自然月时，改用真实的上一自然月；自定义区间仍走滑动窗口 | `previousEqualRange` |
 | `gross_margin` 用 `pctChange` 误导 | 增加 `mom_pp`（百分点差），UI 切换到 pp 显示 | `metricOverview` |
 | `severityCounts` 吞掉非标准 severity | 动态新增桶，`pricing_recompute` 等写入的 `info` 也会被汇总 | `severityCounts` |
-| 上游充值补录后，下游旧自动结转不会消失 | `ensureCarryOver` / `rolloverRecharges` 会删除余额已归零学生的失效自动结转；`POST /api/recharges` 保存后级联刷新后续月份，学生历史页也会先刷新结转链 | `refreshCarryOverAfter` / `isAutoCarryOverRecord` / `/api/recharges` |
+| 上游充值补录后，下游余额口径不会刷新 | 余额结转改为按上一有效月月末余额或全局期初余额计算；`POST /api/recharges` 保存后会触发后续月份刷新 | `previousCarryOverBalances` / `refreshCarryOverAfter` / `/api/recharges` |
 | 主题选择占用顶栏空间 | 主题下拉移到左侧导航底部，顶栏只保留月份和当前页面操作 | `renderNav` / `renderTopbar` |
 | 配色方案与课程截图未联动 | 新增 `data-palette` / `liming:palette` 和 12 套配色；课程通知截图预览、复制图片、下载 PNG 统一读取 `--shot-*` 变量，暗色模式下仍保持浅色家长版 | `public/styles.css` / `courseNoticeCanvas` |
 | 暗色模式偏绿偏脏 | 暗色基础变量改为近黑 / 蓝黑后台风格，大面积背景不再使用绿色系；配色方案在暗色下只影响局部强调 | `:root[data-theme="dark"]` / `prefers-color-scheme` |
@@ -964,7 +1088,7 @@ giftBalance       = giftBase - giftConsumption
    "小 明" 与 "小明" 被当成两个学生。审计 `student_typo` 通过 `normalizeAuditName` 去空格后做 Levenshtein 兜底，但平时录入时不会自动合并。
 
 10. **`student_names` 修改后 `fee_overrides` 留下孤儿行**
-    `fee_overrides` 主键为 `(lesson_id, student_name)`。课程总表中修改某节课的 `student_names`（移除某个学生）后，数据库里该学生的 `fee_overrides` 行不会被级联删除，成为僵尸数据。这是后端 PATCH 处理逻辑的 bug，本轮未触及修复，后续需在 `/api/lessons/:id` PATCH 中补入旧学生名清理逻辑。
+    `fee_overrides` 主键为 `(lesson_id, student_name)`。课程总表中修改某节课的 `student_names`（移除某个学生）后，数据库里该学生的 `fee_overrides` 行不会被级联删除，成为僵尸数据。这是后端 PATCH 处理逻辑的 bug，当前未修复，后续需在 `/api/lessons/:id` PATCH 中补入旧学生名清理逻辑。
 
 ## 受限范围（不在 MVP 内）
 
