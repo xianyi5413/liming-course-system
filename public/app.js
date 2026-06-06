@@ -183,7 +183,6 @@ let staffPayrollSearch = "";
 let expenseModal = null;
 let pricingAuditModal = null;
 let lessonCreateDraft = null;
-let lessonCopyDraft = null;
 let lessonBatchCopyDraft = null;
 let weekCopyDraft = null;
 let focusedLessonIds = [];
@@ -738,23 +737,38 @@ function enhanceCustomDateInputs() {
   }
 }
 
-async function load() {
+async function load(options = {}) {
+  const previousState = state || {};
+  const refreshGlobal = options.refreshGlobal !== false || !auth.user || !previousState.settings;
   dirtyFlags = {};                   /* [C档] 全量 load 重置所有脏标记 */
   lessonWarningsMap = {};            /* [约束5] 全量重绘时清空 warnings 缓存 */
   const thisGeneration = ++loadGeneration;
-  const authResult = await request("/api/auth/me");
-  if (loadGeneration !== thisGeneration) return;
-  auth = { ...auth, ...authResult };
+  if (refreshGlobal) {
+    const authResult = await request("/api/auth/me");
+    if (loadGeneration !== thisGeneration) return;
+    auth = { ...auth, ...authResult };
+  }
   if (!auth.user) return renderLogin();
   if (!canView(view)) view = firstAllowedView();
-  months = await request("/api/months");
-  if (loadGeneration !== thisGeneration) return;
+  if (refreshGlobal || !months.length) {
+    months = await request("/api/months");
+    if (loadGeneration !== thisGeneration) return;
+  }
   const params = new URLSearchParams();
   if (activeMonth) params.set("month", activeMonth);
   if (includeInactive) params.set("include_inactive", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
   state = await request(`/api/bootstrap${query}`);
   if (loadGeneration !== thisGeneration) return;
+  if (!refreshGlobal) {
+    state.profile_teachers = previousState.profile_teachers || [];
+    state.profile_students = previousState.profile_students || [];
+    state.opening_balances = previousState.opening_balances || [];
+    state.teacher_salary_rules = previousState.teacher_salary_rules || [];
+    state.source_workbooks = previousState.source_workbooks || [];
+    state.users = previousState.users || [];
+    state.staff = previousState.staff || [];
+  }
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
@@ -781,30 +795,34 @@ async function load() {
   ensureFinanceRangeDates();
   state.finance = canArea("finance") ? await request(`/api/finance-summary?${financeRangeQuery()}`) : null;
   if (loadGeneration !== thisGeneration) return;
-  state.profile_teachers = canArea("profiles") || canArea("scheduleRead") ? ((await request("/api/teachers")).teachers || []) : [];
-  if (loadGeneration !== thisGeneration) return;
-  state.profile_students = canArea("students") ? ((await request("/api/students")).students || []) : [];
-  if (loadGeneration !== thisGeneration) return;
-  state.opening_balances = canArea("students") ? ((await request("/api/opening-balances")).opening_balances || []) : (state.opening_balances || []);
-  if (loadGeneration !== thisGeneration) return;
-  state.teacher_salary_rules = canArea("salary") ? ((await request("/api/teacher-salary-rules")).rules || []) : [];
-  if (loadGeneration !== thisGeneration) return;
-  state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
-  if (loadGeneration !== thisGeneration) return;
-  state.users = canArea("users") ? ((await request("/api/users")).users || []) : [];
-  if (loadGeneration !== thisGeneration) return;
-  if (canArea("audit")) {
+  if (refreshGlobal) {
+    state.profile_teachers = canArea("profiles") || canArea("scheduleRead") ? ((await request("/api/teachers")).teachers || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+    state.profile_students = canArea("students") ? ((await request("/api/students")).students || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+    state.opening_balances = canArea("students") ? ((await request("/api/opening-balances")).opening_balances || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+    state.teacher_salary_rules = canArea("salary") ? ((await request("/api/teacher-salary-rules")).rules || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+    state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+    state.users = canArea("users") ? ((await request("/api/users")).users || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+  }
+  if (canArea("audit") && refreshGlobal) {
     await refreshAuditEvents();
     if (loadGeneration !== thisGeneration) return;
-  } else {
+  } else if (!canArea("audit")) {
     auditState.events = [];
   }
   if (!auditSourceWorkbook && state.source_workbooks.length) {
     auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
       || state.source_workbooks[0].filename;
   }
-  state.staff = canArea("staff") ? ((await request("/api/staff")).staff || []) : [];
-  if (loadGeneration !== thisGeneration) return;
+  if (refreshGlobal) {
+    state.staff = canArea("staff") ? ((await request("/api/staff")).staff || []) : [];
+    if (loadGeneration !== thisGeneration) return;
+  }
   state.staff_salary = canArea("staff") ? ((await request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
   if (loadGeneration !== thisGeneration) return;
   state.staff_attendance = canArea("staff") ? ((await request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
@@ -1333,6 +1351,13 @@ function previousMonth(value) {
   if (Number.isNaN(date.getTime())) return "";
   const prev = new Date(date.getFullYear(), date.getMonth() - 1, 1);
   return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function offsetMonth(value, offset) {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "";
+  const target = new Date(date.getFullYear(), date.getMonth() + offset, 1);
+  return `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
 function monthBounds(monthKey) {
@@ -1865,19 +1890,24 @@ function monthDeleteModal() {
 function ensureLessonFilterDates() {
   const monthKey = state?.settings?.month_key || activeMonth;
   const week = currentWeekRange();
-  if (lessonFilter.month_key !== monthKey || !lessonFilter.date_preset_initialized) {
-    lessonFilter = { ...lessonFilter, month_key: monthKey, start_date: week.start, end_date: week.end, date_preset_initialized: true };
-    saveLessonFilter();
-    return;
+  const nextFilter = { ...lessonFilter, month_key: monthKey };
+  let changed = nextFilter.month_key !== lessonFilter.month_key;
+  if (!nextFilter.date_preset_initialized) {
+    nextFilter.start_date = week.start;
+    nextFilter.end_date = week.end;
+    nextFilter.date_preset_initialized = true;
+    changed = true;
   }
-  if (!lessonFilter.start_date || !lessonFilter.end_date) {
-    lessonFilter = {
-      ...lessonFilter,
-      month_key: monthKey,
-      start_date: lessonFilter.start_date || week.start,
-      end_date: lessonFilter.end_date || week.end,
-      date_preset_initialized: true,
-    };
+  if (!isDateValue(nextFilter.start_date)) {
+    nextFilter.start_date = week.start;
+    changed = true;
+  }
+  if (!isDateValue(nextFilter.end_date)) {
+    nextFilter.end_date = week.end;
+    changed = true;
+  }
+  if (changed) {
+    lessonFilter = nextFilter;
     saveLessonFilter();
   }
 }
@@ -1900,6 +1930,14 @@ function lessonRangeLoaded() {
   return loaded.start <= desired.start && loaded.end >= desired.end;
 }
 
+async function loadLessonRangeOnly() {
+  const range = lessonLoadRange();
+  if (!range) return;
+  const result = await request(`/api/lessons-range?start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`);
+  state.lessons = result.lessons || [];
+  state.lesson_loaded_range = range;
+}
+
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
   const week = currentWeekRange();
@@ -1908,13 +1946,14 @@ function resetLessonFilter() {
 }
 
 function lessonPresetRange(preset) {
-  if (preset === "today") {
-    const today = todayDate();
-    return { start_date: today, end_date: today };
+  const today = todayDate();
+  if (preset === "yesterday" || preset === "today" || preset === "tomorrow") {
+    const offset = preset === "yesterday" ? -1 : preset === "tomorrow" ? 1 : 0;
+    const date = addDays(today, offset);
+    return { start_date: date, end_date: date };
   }
   if (preset === "prev-week" || preset === "next-week") {
-    const base = todayDate();
-    const weekStart = startOfWeek(base);
+    const weekStart = startOfWeek(today);
     const offset = preset === "prev-week" ? -7 : 7;
     const start = addDays(weekStart, offset);
     return { start_date: start, end_date: addDays(start, 6) };
@@ -1923,8 +1962,10 @@ function lessonPresetRange(preset) {
     const week = currentWeekRange();
     return { start_date: week.start, end_date: week.end };
   }
-  if (preset === "month") {
-    const bounds = monthBounds(`${todayDate().slice(0, 7)}-01`);
+  if (preset === "prev-month" || preset === "month" || preset === "next-month") {
+    const currentMonth = `${today.slice(0, 7)}-01`;
+    const offset = preset === "prev-month" ? -1 : preset === "next-month" ? 1 : 0;
+    const bounds = monthBounds(offsetMonth(currentMonth, offset));
     return { start_date: bounds.start, end_date: bounds.end };
   }
   return null;
@@ -2078,11 +2119,15 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
     <div class="filter-field lesson-quick-field">
       <span>快捷</span>
       <span class="lesson-quick-buttons">
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="yesterday">昨日</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="today">今日</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="tomorrow">明日</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-week">上周</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="week">本周</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="next-week">下周</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-month">上月</button>
         <button class="btn ghost lesson-date-preset" type="button" data-preset="month">本月</button>
+        <button class="btn ghost lesson-date-preset" type="button" data-preset="next-month">下月</button>
       </span>
     </div>
     <label class="filter-field">
@@ -3045,6 +3090,22 @@ function patchLessonInState(updatedLesson) {             /* [约束4] 乐观更�
   if (idx !== -1) state.lessons[idx] = { ...state.lessons[idx], ...updatedLesson };
 }
 
+function appendLessonToState(lesson) {
+  const append = (rows) => {
+    const next = Array.isArray(rows) ? [...rows] : [];
+    const index = next.findIndex((row) => String(row.id) === String(lesson.id));
+    if (index === -1) next.push(lesson);
+    else next[index] = { ...next[index], ...lesson };
+    return next;
+  };
+  state.lessons = append(state.lessons);
+  state.week_lessons = append(state.week_lessons);
+}
+
+function markLessonDerivedDataDirty() {
+  for (const key of ["finance", "summary", "studentSummary", "teacherSalary"]) markDirty(key);
+}
+
 /* ── scroll 捕获/恢复 ────────────────────────────────────────────── */
 function captureLessonScroll() {                         /* [边界5] 捕获 .table-wrap 滚动位置 */
   const wrap = document.querySelector(".table-wrap");
@@ -3266,7 +3327,6 @@ function lessonRow(row, cumulative) {
       <td class="readonly right narrow">${count}</td>
       <td class="readonly right narrow">${cumulative}</td>
       <td class="readonly narrow row-actions">
-        <button class="btn ghost lesson-copy-btn" data-lesson-id="${row.id}" title="复制到其他日期">⎘</button>
         <button class="btn danger delete-lesson" data-id="${row.id}">删除</button>
         ${warningIcon}                                  <!-- [约束5] 渲染 PATCH 返回的 warnings 标记 -->
       </td>
@@ -3309,6 +3369,7 @@ function lessonToolbarHtml(rows) {
         <button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button>
         <button class="btn week-copy-btn" type="button">整周复制</button>
         <button class="btn primary add-lesson" type="button">新增课程</button>
+        <button class="btn batch-complete-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量已上${selectedCount ? `（${selectedCount}）` : ""}</button>
         <button class="btn batch-copy-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量复制${selectedCount ? `（${selectedCount}）` : ""}</button>
         <button class="btn danger batch-delete-lessons" type="button" ${selectedCount && !lessonBatchDeleting ? "" : "disabled"}>
           ${lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`}
@@ -3343,6 +3404,11 @@ function updateLessonSelectionControls(rows = visibleLessonRows()) {
   if (batchCopyButton) {
     batchCopyButton.disabled = !selectedCount;
     batchCopyButton.textContent = `批量复制${selectedCount ? `（${selectedCount}）` : ""}`;
+  }
+  const batchCompleteButton = document.querySelector(".batch-complete-lessons");
+  if (batchCompleteButton) {
+    batchCompleteButton.disabled = !selectedCount;
+    batchCompleteButton.textContent = `批量已上${selectedCount ? `（${selectedCount}）` : ""}`;
   }
   const summary = document.querySelector(".lesson-selection-summary");
   if (summary) {
@@ -3532,49 +3598,6 @@ function lessonCreateSelectValue(modal, field, emptyMessage) {
   const manual = String(modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${field}"]`)?.value || "").trim();
   if (!manual) throw new Error(emptyMessage);
   return manual;
-}
-
-function lessonCopyModal() {
-  if (!lessonCopyDraft) return "";
-  const lesson = state.lessons.find((row) => Number(row.id) === Number(lessonCopyDraft.lessonId));
-  if (!lesson) return "";
-  const defaultDate = lessonCopyDraft.targetDate || addDays(lesson.date, 1);
-  const multiText = lessonCopyDraft.multiText || [defaultDate].filter(Boolean).join("\n");
-  return `
-    <div class="modal-backdrop copy-modal">
-      <div class="modal-panel copy-panel">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">复制课程</div>
-            <div class="modal-subtitle">${escapeHtml(lesson.date)} ${escapeHtml(lesson.time_slot)} · ${escapeHtml(lesson.teacher_name)} · ${escapeHtml(lesson.student_names)}</div>
-          </div>
-          <button class="btn lesson-copy-cancel" type="button">取消</button>
-        </div>
-        <div class="copy-form">
-          <div class="quick-row">
-            <button class="btn ghost lesson-copy-quick" type="button" data-days="1">+1 天</button>
-            <button class="btn ghost lesson-copy-quick" type="button" data-days="7">+7 天</button>
-          </div>
-          <label class="filter-field">
-            <span>复制到日期</span>
-            <input class="control lesson-copy-date" type="date" value="${escapeHtml(defaultDate)}">
-          </label>
-          <label class="copy-check">
-            <input class="lesson-copy-multi-toggle" type="checkbox" ${lessonCopyDraft.multi ? "checked" : ""}>
-            <span>多选日期模式（最多 7 天）</span>
-          </label>
-          <label class="filter-field ${lessonCopyDraft.multi ? "" : "hidden"}">
-            <span>目标日期，一行一个</span>
-            <textarea class="control lesson-copy-dates" rows="5">${escapeHtml(multiText)}</textarea>
-          </label>
-        </div>
-        <div class="modal-actions">
-          <button class="btn lesson-copy-cancel" type="button">取消</button>
-          <button class="btn primary lesson-copy-confirm" type="button" data-lesson-id="${lesson.id}">确认复制</button>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function selectedLessonRowsSorted() {
@@ -3808,7 +3831,6 @@ function renderLessons() {
       </div>
     </div>
     ${lessonCreateModal()}
-    ${lessonCopyModal()}
     ${lessonBatchCopyModal()}
     ${weekCopyModal()}
   `;
@@ -4407,7 +4429,6 @@ function renderSummary() {
   renderTopbar(
     `${isToDate ? `截至${monthLabel()}` : monthLabel()} 学生费用汇总`,
     `课程费用 ${money(totalFee)} 元，余额合计 ${money(totalBalance)} 元`,
-    `<button class="btn rollover-recharges" type="button">从上月结转</button>`,
   );
   contentEl.innerHTML = `
     <div class="band">
@@ -7953,7 +7974,7 @@ function wireEvents() {
       activeMonth = select.value;
       localStorage.setItem("liming:month", activeMonth);
       resetFinanceRangeToActiveMonth();
-      await load();
+      await load({ refreshGlobal: false });
     });
   });
 
@@ -8995,7 +9016,8 @@ function wireEvents() {
       applyLessonFilter(value, false);
     }, async () => {
       if ((input.dataset.filterField === "start_date" || input.dataset.filterField === "end_date") && !lessonRangeLoaded()) {
-        await load();
+        await loadLessonRangeOnly();
+        render();
       } else {
         render();
       }
@@ -9015,7 +9037,8 @@ function wireEvents() {
       };
       saveLessonFilter();
       if (!lessonRangeLoaded()) {
-        await load();
+        await loadLessonRangeOnly();
+        render();
       } else {
         render();
       }
@@ -9232,7 +9255,6 @@ function wireEvents() {
   async function afterCopy(result) {
     const created = result.lessons || [];
     const outside = created.filter((lesson) => monthKeyFromDateValue(lesson.date) !== activeMonth);
-    lessonCopyDraft = null;
     weekCopyDraft = null;
     if (outside.length) {
       const nextMonth = monthKeyFromDateValue(outside[0].date);
@@ -9249,68 +9271,31 @@ function wireEvents() {
     await load();
   }
 
-  document.querySelectorAll(".lesson-copy-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      const lesson = state.lessons.find((row) => String(row.id) === String(button.dataset.lessonId));
-      if (!lesson) return;
-      lessonCopyDraft = {
-        lessonId: Number(lesson.id),
-        targetDate: addDays(lesson.date, 1),
-        multi: false,
-        multiText: addDays(lesson.date, 1),
-      };
-      render();
-    });
-  });
-
-  document.querySelectorAll(".lesson-copy-cancel").forEach((button) => {
-    button.addEventListener("click", () => {
-      lessonCopyDraft = null;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".lesson-copy-quick").forEach((button) => {
-    button.addEventListener("click", () => {
-      const lesson = state.lessons.find((row) => Number(row.id) === Number(lessonCopyDraft?.lessonId));
-      if (!lesson) return;
-      const targetDate = addDays(lesson.date, Number(button.dataset.days || 1));
-      lessonCopyDraft = { ...lessonCopyDraft, targetDate, multiText: targetDate };
-      render();
-    });
-  });
-
-  document.querySelectorAll(".lesson-copy-date").forEach((input) => {
-    input.addEventListener("change", () => {
-      lessonCopyDraft = { ...lessonCopyDraft, targetDate: input.value, multiText: input.value };
-      render();
-    });
-  });
-
-  document.querySelectorAll(".lesson-copy-multi-toggle").forEach((input) => {
-    input.addEventListener("change", () => {
-      lessonCopyDraft = { ...lessonCopyDraft, multi: input.checked };
-      render();
-    });
-  });
-
-  document.querySelectorAll(".lesson-copy-confirm").forEach((button) => {
+  document.querySelectorAll(".batch-complete-lessons").forEach((button) => {
     button.addEventListener("click", async () => {
-      const modal = button.closest(".copy-modal");
-      const useMulti = modal.querySelector(".lesson-copy-multi-toggle")?.checked;
-      const dates = useMulti
-        ? parseDateList(modal.querySelector(".lesson-copy-dates")?.value)
-        : [modal.querySelector(".lesson-copy-date")?.value].filter(isDateValue);
-      if (!dates.length) return alert("请选择目标日期");
-      if (dates.length > 7) return alert("多选日期最多 7 天");
+      const ids = [...selectedLessonIds].map(Number).filter(Boolean);
+      if (!ids.length) return alert("请先选择要标记为已上的课程");
+      const rows = selectedLessonRowsSorted();
+      const invalid = rows.filter((row) => rowStatus(row) !== "待上");
+      if (invalid.length) {
+        const details = invalid.slice(0, 5)
+          .map((row) => `${row.date || ""} ${row.teacher_name || ""} ${row.student_names || ""}：${rowStatus(row) || "未设置"}`)
+          .join("\n");
+        return alert(`只能将“待上”课程批量标记为“已上”，请先取消选择非待上课程。${details ? `\n\n${details}` : ""}`);
+      }
+      button.disabled = true;
       try {
-        const result = await request("/api/lessons/copy", {
+        const result = await request("/api/lessons/batch-mark-completed", {
           method: "POST",
-          body: { source_lesson_ids: [Number(button.dataset.lessonId)], target_dates: dates, reset_status: true },
+          body: { ids },
         });
-        await afterCopy(result);
+        selectedLessonIds = new Set();
+        await load();
+        showToast(`已将 ${result.updated || ids.length} 节课程标记为已上`);
       } catch (error) {
+        button.disabled = false;
         alert(error.message);
+        updateLessonSelectionControls();
       }
     });
   });
@@ -9718,6 +9703,9 @@ function wireEvents() {
     button.addEventListener("click", async () => {
       const date = isDateValue(button.dataset.date) ? button.dataset.date : (lessonFilter.start_date || todayDate());
       const teacherName = button.dataset.teacher || "";
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "正在新增课程…";
       try {
         const lesson = await request("/api/lessons", {
           method: "POST",
@@ -9728,13 +9716,18 @@ function wireEvents() {
             status: "待上",
           },
         });
-        await load();
+        appendLessonToState(lesson);
+        markLessonDerivedDataDirty();
+        render();
+        refreshLessonConflicts();
         requestAnimationFrame(() => {
           const target = document.querySelector(`.lesson-field[data-id="${lesson.id}"][data-field="time_slot"]`)
             || document.querySelector(`.lesson-field[data-id="${lesson.id}"]`);
           target?.focus();
         });
       } catch (error) {
+        button.disabled = false;
+        button.textContent = originalText;
         alert(`新增课程失败：${error.message}`);
       }
     });
@@ -9785,23 +9778,6 @@ function wireEvents() {
       localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
       saveMatrixRange();
       render();
-    });
-  });
-
-  document.querySelectorAll(".rollover-recharges").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const toMonth = state.settings.month_key;
-      const fromMonth = previousMonth(toMonth);
-      if (!fromMonth) return alert("当前月份无效，无法结转");
-      if (!confirm(`从 ${formatMonthOption(fromMonth)} 结转余额到 ${formatMonthOption(toMonth)}？自动结转和空白结转会刷新，已手工填写的非 0 结转会跳过。`)) return;
-      const result = await request(`/api/recharges/rollover?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(toMonth)}`, { method: "POST" });
-      if (result.skipped > 0 && confirm(`新增 ${result.inserted} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人。是否覆盖这些手工结转？`)) {
-        const forced = await request(`/api/recharges/rollover?from=${encodeURIComponent(fromMonth)}&to=${encodeURIComponent(toMonth)}&force=1`, { method: "POST" });
-        alert(`结转完成：新增 ${forced.inserted} 人，覆盖 ${forced.updated} 人，跳过 ${forced.skipped} 人。`);
-      } else {
-        alert(`结转完成：新增 ${result.inserted} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人。`);
-      }
-      await load();
     });
   });
 

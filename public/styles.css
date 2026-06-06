@@ -2682,18 +2682,6 @@ select.control,
   gap: var(--space-2);
 }
 
-.lesson-copy-btn {
-  opacity: 0;
-  transform: translateY(1px);
-  transition: opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
-}
-
-.course-table tr:hover .lesson-copy-btn,
-.lesson-copy-btn:focus-visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .lesson-table-toolbar {
   display: flex;
   align-items: center;
@@ -2796,6 +2784,7 @@ select.control,
 .lesson-quick-buttons {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-1);
   min-height: 38px;
 }
@@ -2961,23 +2950,11 @@ select.control,
 }
 
 .quick-row,
-.copy-check,
 .week-copy-form {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   flex-wrap: wrap;
-}
-
-.copy-check {
-  color: var(--muted);
-  font-size: var(--text-ui);
-  font-weight: 700;
-}
-
-.lesson-copy-dates {
-  min-height: 112px;
-  resize: vertical;
 }
 
 .copy-preview-wrap {
@@ -5034,6 +5011,18 @@ tr.risk-debt:hover td {
 .risk-table :is(th, td):nth-child(2),
 .risk-table :is(th, td):nth-child(4) {
   text-align: left;
+}
+
+.table-wrap td.empty,
+td.empty {
+  height: 84px;
+  padding: 28px;
+  color: var(--muted);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  text-align: center;
+  vertical-align: middle;
+  white-space: normal;
 }
 
 .course-table td:nth-child(2) .cell-input,
