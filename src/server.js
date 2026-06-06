@@ -545,6 +545,7 @@ const REAL_RECHARGE_SQL = "(COALESCE(cur_recharge, 0) <> 0 OR COALESCE(cur_gift,
 
 const DERIVED_CACHE_LOG_THRESHOLD_MS = Number(process.env.DERIVED_CACHE_LOG_THRESHOLD_MS || 120);
 const DERIVED_CACHE_DEBUG = process.env.DERIVED_CACHE_DEBUG === "1";
+const DERIVED_CACHE_LOG_ENABLED = process.env.PERF_LOG === "1" || DERIVED_CACHE_DEBUG;
 const derivedCaches = {
   bootstrap: new Map(),
   feeDetails: new Map(),
@@ -575,7 +576,7 @@ function clearDerivedCache(reason = "") {
 }
 
 function logDerivedTiming(label, elapsedMs, extra = "") {
-  if (DERIVED_CACHE_DEBUG || elapsedMs >= DERIVED_CACHE_LOG_THRESHOLD_MS) {
+  if (DERIVED_CACHE_LOG_ENABLED && (DERIVED_CACHE_DEBUG || elapsedMs >= DERIVED_CACHE_LOG_THRESHOLD_MS)) {
     console.info(`[perf] ${label} ${elapsedMs.toFixed(1)}ms${extra ? ` ${extra}` : ""}`);
   }
 }
@@ -4090,69 +4091,6 @@ function internalAudit(monthKey, { log = true } = {}) {
   return { run_id: runId, month_key: monthKey, counts: severityCounts(issues), issue_count: issues.length, groups, issues };
 }
 
-function rolloverRecharges(fromMonth, toMonth, force = false) {
-  if (!fromMonth || !toMonth) {
-    throw new Error("from and to are required");
-  }
-  const rows = carryOverCandidates(fromMonth);
-  let inserted = 0;
-  let updated = 0;
-  let skipped = 0;
-
-  for (const row of rows) {
-    const existing = get(
-      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
-      [row.student_name, toMonth],
-    );
-    if (existing && !shouldRefreshCarryOver(existing, force)) {
-      skipped += 1;
-      continue;
-    }
-    if (existing) {
-      if (!isRealRechargeRecord(existing)) {
-        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
-        updated += 1;
-        continue;
-      }
-      const patch = carryOverRecordPatch(existing, fromMonth);
-      db.prepare(`
-        UPDATE recharge_records
-        SET grade = ?,
-            prev_actual = ?,
-            prev_gift = ?,
-            source = ?,
-            notes = ?
-        WHERE student_name = ? AND month_key = ?
-      `).run(
-        row.grade || "",
-        num(row.actual_balance),
-        num(row.gift_balance),
-        patch.source,
-        patch.notes,
-        row.student_name,
-        toMonth,
-      );
-      updated += 1;
-    }
-  }
-  const candidateNames = new Set(rows.map((row) => row.student_name));
-  for (const existing of all("SELECT * FROM recharge_records WHERE month_key = ?", [toMonth])) {
-    if (candidateNames.has(existing.student_name) || !isAutoCarryOverRecord(existing)) continue;
-    db.prepare("DELETE FROM recharge_records WHERE id = ?").run(existing.id);
-    updated += 1;
-  }
-
-  return {
-    from: fromMonth,
-    to: toMonth,
-    force,
-    source_students: rows.length,
-    inserted,
-    updated,
-    skipped,
-  };
-}
-
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i += 1) {
@@ -6201,7 +6139,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/staff")) return "staff";
   if (p.startsWith("/api/reconcile")) return "audit";
   if (p.startsWith("/api/audit") || p === "/api/source-workbooks" || p === "/api/import/source-workbook") return "audit";
-  if (p === "/api/recharges" || p === "/api/recharges/rollover") return "recharges";
+  if (p === "/api/recharges") return "recharges";
   if (p.startsWith("/api/opening-balances")) return "students";
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
@@ -7793,6 +7731,78 @@ function insertLesson(data, options = {}) {
   return salary.warning ? { ...lesson, teacher_salary_warning: salary.warning } : lesson;
 }
 
+function lessonStatusPatchPayload(current, nextData) {
+  const payload = {};
+  if (Object.prototype.hasOwnProperty.call(nextData, "status")) {
+    Object.assign(payload, legacyStatusFields(nextData.status));
+  } else if (Object.prototype.hasOwnProperty.call(nextData, "lesson_status") || Object.prototype.hasOwnProperty.call(nextData, "course_status")) {
+    payload.status = deriveStatus({ ...current, ...nextData });
+  }
+  const statusChanged = ["status", "lesson_status", "course_status"].some((field) => Object.prototype.hasOwnProperty.call(nextData, field));
+  if (!statusChanged) return payload;
+  const nextLesson = { ...current, ...nextData, ...payload };
+  if (!isCompletedLesson(nextLesson)) {
+    return {
+      ...payload,
+      teacher_salary: 0,
+      teacher_salary_source: "empty",
+      teacher_salary_rule_id: null,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(nextData, "teacher_salary")) return payload;
+  const currentSource = text(current.teacher_salary_source);
+  if (!currentSource || currentSource === "empty" || currentSource === "auto") {
+    const salary = resolvedTeacherSalaryForLesson({
+      ...nextLesson,
+      teacher_salary_present: false,
+    });
+    return {
+      ...payload,
+      teacher_salary: salary.teacher_salary,
+      teacher_salary_source: salary.teacher_salary_source,
+      teacher_salary_rule_id: salary.teacher_salary_rule_id,
+    };
+  }
+  return payload;
+}
+
+function batchMarkLessonsCompleted(ids) {
+  const lessonIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
+  if (!lessonIds.length) return { error: "ids required", status: 400 };
+  if (lessonIds.length > 500) return { error: "single batch capped at 500 rows", status: 400 };
+  return withTransaction(() => {
+    const placeholders = lessonIds.map(() => "?").join(",");
+    const rows = all(`SELECT * FROM lessons WHERE id IN (${placeholders})`, lessonIds);
+    const byId = new Map(rows.map((row) => [Number(row.id), row]));
+    const missing = lessonIds.filter((id) => !byId.has(id));
+    if (missing.length) return { error: `课程不存在：${missing.slice(0, 5).join(", ")}`, status: 404 };
+    const invalid = lessonIds.map((id) => byId.get(id)).filter((row) => deriveStatus(row) !== "待上");
+    if (invalid.length) {
+      const details = invalid.slice(0, 5)
+        .map((row) => `${text(row.date)} ${text(row.teacher_name)} ${text(row.student_names)}：${deriveStatus(row)}`)
+        .join("\n");
+      return { error: `只能将“待上”课程批量标记为“已上”，请先取消选择非待上课程。${details ? `\n${details}` : ""}`, status: 400 };
+    }
+    const updatedRows = [];
+    const allowed = [
+      "lesson_status", "course_status", "status", "teacher_salary", "teacher_salary_source",
+      "teacher_salary_rule_id", "updated_at",
+    ];
+    const updatedAt = new Date().toISOString();
+    for (const id of lessonIds) {
+      const current = byId.get(id);
+      const payload = {
+        status: "已上",
+        updated_at: updatedAt,
+        ...lessonStatusPatchPayload(current, { status: "已上" }),
+      };
+      patchTable("lessons", "id", id, allowed, payload);
+      updatedRows.push(get("SELECT * FROM lessons WHERE id = ?", [id]));
+    }
+    return { ok: true, updated: updatedRows.length, lessons: updatedRows };
+  });
+}
+
 function copyLessons(body) {
   const resetStatus = body.reset_status !== false;
   const pairs = Array.isArray(body.pairs)
@@ -8460,17 +8470,6 @@ async function handleApi(req, res, url) {
     return sendCsv(res, financeCsvRows(summary), `经营概览_${summary.range.start}_至_${summary.range.end}.csv`);
   }
 
-  if (req.method === "POST" && url.pathname === "/api/recharges/rollover") {
-    const fromMonth = text(url.searchParams.get("from"));
-    const toMonth = text(url.searchParams.get("to"));
-    const force = url.searchParams.get("force") === "1";
-    const before = all("SELECT * FROM recharge_records WHERE month_key IN (?, ?) ORDER BY month_key, student_name", [fromMonth, toMonth]);
-    const result = rolloverRecharges(fromMonth, toMonth, force);
-    const after = all("SELECT * FROM recharge_records WHERE month_key IN (?, ?) ORDER BY month_key, student_name", [fromMonth, toMonth]);
-    recordAuditEvent(req, user, { action: "rollover", entity_type: "recharge_records", entity_id: `${fromMonth}->${toMonth}`, before, after: { result, rows: after } });
-    return sendJson(res, result);
-  }
-
   if (req.method === "GET" && url.pathname === "/api/opening-balances") {
     return sendJson(res, { scope: "global", opening_balances: openingBalanceRows() });
   }
@@ -8514,6 +8513,15 @@ async function handleApi(req, res, url) {
     return sendJson(res, result, 201);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/lessons/batch-mark-completed") {
+    const body = await readBody(req);
+    const result = batchMarkLessonsCompleted(body.ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "batch_mark_completed", entity_type: "lessons", entity_id: "batch", before: { ids: body.ids || [] }, after: { updated: result.updated } });
+    writeOperationLog(user, { operation_type: "批量标记已上", operation_content: `已将 ${result.updated} 节课程标记为已上`, target_type: "lessons", target_id: (body.ids || []).map(Number).filter(Boolean).join(",") });
+    return sendJson(res, result);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/lessons") {
     const body = await readBody(req);
     const lessonData = { ...body };
@@ -8552,17 +8560,7 @@ async function handleApi(req, res, url) {
         payload.teacher_salary_rule_id = resolvedSalary.teacher_salary_rule_id;
       }
     }
-    if (Object.prototype.hasOwnProperty.call(body, "status")) {
-      Object.assign(payload, legacyStatusFields(body.status));
-    } else if (Object.prototype.hasOwnProperty.call(body, "lesson_status") || Object.prototype.hasOwnProperty.call(body, "course_status")) {
-      payload.status = deriveStatus({ ...current, ...body });
-    }
-    const statusChanged = ["status", "lesson_status", "course_status"].some((field) => Object.prototype.hasOwnProperty.call(body, field));
-    if (statusChanged && !isCompletedLesson({ ...current, ...payload })) {
-      payload.teacher_salary = 0;
-      payload.teacher_salary_source = "empty";
-      payload.teacher_salary_rule_id = null;
-    }
+    Object.assign(payload, lessonStatusPatchPayload(current, body));
     auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
       "student_names", "notes", "course_status", "status", "teacher_salary", "teacher_salary_source",
