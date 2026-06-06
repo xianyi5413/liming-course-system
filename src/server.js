@@ -543,6 +543,67 @@ if (process.argv.includes("--init-db")) {
 
 const REAL_RECHARGE_SQL = "(COALESCE(cur_recharge, 0) <> 0 OR COALESCE(cur_gift, 0) <> 0)";
 
+const DERIVED_CACHE_LOG_THRESHOLD_MS = Number(process.env.DERIVED_CACHE_LOG_THRESHOLD_MS || 120);
+const DERIVED_CACHE_DEBUG = process.env.DERIVED_CACHE_DEBUG === "1";
+const derivedCaches = {
+  bootstrap: new Map(),
+  feeDetails: new Map(),
+  studentSummary: new Map(),
+  studentSummaryToDate: new Map(),
+  teacherSummary: new Map(),
+  studentBalanceThroughDate: new Map(),
+};
+
+function cacheKey(...parts) {
+  return parts.map((part) => text(part)).join("|");
+}
+
+function cloneDerivedValue(value) {
+  return value == null ? value : structuredClone(value);
+}
+
+function derivedCacheEntryCount() {
+  return Object.values(derivedCaches).reduce((sum, cache) => sum + cache.size, 0);
+}
+
+function clearDerivedCache(reason = "") {
+  const count = derivedCacheEntryCount();
+  for (const cache of Object.values(derivedCaches)) cache.clear();
+  if (count && DERIVED_CACHE_DEBUG) {
+    console.info(`[perf] derived cache cleared entries=${count}${reason ? ` reason=${reason}` : ""}`);
+  }
+}
+
+function logDerivedTiming(label, elapsedMs, extra = "") {
+  if (DERIVED_CACHE_DEBUG || elapsedMs >= DERIVED_CACHE_LOG_THRESHOLD_MS) {
+    console.info(`[perf] ${label} ${elapsedMs.toFixed(1)}ms${extra ? ` ${extra}` : ""}`);
+  }
+}
+
+function cachedDerived(cacheName, key, label, build, decorate = (value) => value) {
+  const cache = derivedCaches[cacheName];
+  if (cache?.has(key)) {
+    if (DERIVED_CACHE_DEBUG) console.info(`[perf] ${label} cache hit`);
+    return decorate(cloneDerivedValue(cache.get(key)));
+  }
+  const started = performance.now();
+  const value = build();
+  const elapsed = performance.now() - started;
+  if (cache) cache.set(key, cloneDerivedValue(value));
+  logDerivedTiming(label, elapsed, "cache miss");
+  return decorate(value);
+}
+
+function markFeeDetails(rows, monthKey) {
+  if (Array.isArray(rows)) {
+    Object.defineProperty(rows, "__feeDetailsMonthKey", {
+      value: monthKey,
+      configurable: true,
+    });
+  }
+  return rows;
+}
+
 function isRealRechargeRecord(row) {
   return num(row?.cur_recharge) !== 0 || num(row?.cur_gift) !== 0;
 }
@@ -568,6 +629,179 @@ function openingBalanceMap() {
     grade: text(row.grade),
     opening_balance_id: row.id,
   }]));
+}
+
+const OPENING_BALANCE_IMPORT_HEADERS = ["学生姓名", "年级", "期初现金余额", "期初赠送余额", "备注"];
+
+const OPENING_BALANCE_HEADER_ALIASES = {
+  student_name: new Set(["学生姓名", "姓名", "学生"]),
+  grade: new Set(["年级"]),
+  opening_actual_balance: new Set(["期初现金余额", "期初现金", "现金余额", "实际余额", "期初实际余额"]),
+  opening_gift_balance: new Set(["期初赠送余额", "期初赠送", "赠送余额", "期初赠送学费", "赠送学费"]),
+  notes: new Set(["备注", "说明"]),
+};
+
+function openingBalanceTemplateRows() {
+  return [OPENING_BALANCE_IMPORT_HEADERS];
+}
+
+function openingBalanceExportRows() {
+  return [
+    OPENING_BALANCE_IMPORT_HEADERS,
+    ...openingBalanceRows()
+      .sort((a, b) => compareGradeName(a.grade, b.grade) || text(a.student_name).localeCompare(text(b.student_name), "zh-Hans-CN"))
+      .map((row) => [
+        row.student_name,
+        row.grade || "",
+        moneyRound(row.opening_actual_balance).toFixed(2),
+        moneyRound(row.opening_gift_balance).toFixed(2),
+        row.notes || "",
+      ]),
+  ];
+}
+
+function openingBalanceExportFilename() {
+  return `黎明教育_学生期初余额_${exportTimestamp()}.xlsx`;
+}
+
+function normalizedOpeningBalanceHeader(value) {
+  return text(value).replace(/\s+/g, "").replace(/[：:]/g, "");
+}
+
+function openingBalanceHeaderField(value) {
+  const header = normalizedOpeningBalanceHeader(value);
+  for (const [field, aliases] of Object.entries(OPENING_BALANCE_HEADER_ALIASES)) {
+    if (aliases.has(header)) return field;
+  }
+  return "";
+}
+
+function readOpeningBalanceImportSheet(buffer) {
+  const entries = unzipXlsx(buffer);
+  const sheets = workbookSheets(entries).filter((sheet) => sheet.state !== "hidden" && sheet.state !== "veryHidden");
+  const preferredNames = new Set(["期初余额", "期初余额导入模板"]);
+  const preferred = sheets.filter((sheet) => preferredNames.has(sheet.name));
+  const candidates = [...preferred, ...sheets.filter((sheet) => !preferredNames.has(sheet.name))];
+  for (const sheetInfo of candidates) {
+    const sheet = readXlsxSheetRows(buffer, sheetInfo.name);
+    if (sheet.rows.some((row) => row.values.some((value) => text(value)))) return sheet;
+  }
+  return candidates[0] ? readXlsxSheetRows(buffer, candidates[0].name) : { sheet_name: "", rows: [] };
+}
+
+function openingBalanceImportHeader(rows) {
+  for (const row of rows.slice(0, 20)) {
+    const columns = {};
+    for (const [index, value] of row.values.entries()) {
+      const field = openingBalanceHeaderField(value);
+      if (field && columns[field] == null) columns[field] = index;
+    }
+    if (columns.student_name != null
+      && (columns.opening_actual_balance != null || columns.opening_gift_balance != null)) {
+      return { source_row: row.source_row, columns };
+    }
+  }
+  return null;
+}
+
+function parseOpeningBalanceImportAmount(value) {
+  if (value == null || (typeof value === "string" && value.trim() === "")) return { ok: true, value: 0 };
+  if (typeof value === "number") return Number.isFinite(value) ? { ok: true, value } : { ok: false };
+  const raw = text(value).replace(/[,\s￥¥]/g, "");
+  if (!raw) return { ok: true, value: 0 };
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? { ok: true, value: parsed } : { ok: false };
+}
+
+function openingBalanceImportCell(row, columns, field) {
+  const index = columns[field];
+  return index == null ? "" : row.values[index];
+}
+
+function importOpeningBalancesFromWorkbook(buffer) {
+  const sheet = readOpeningBalanceImportSheet(buffer);
+  const header = openingBalanceImportHeader(sheet.rows);
+  if (!header) {
+    return {
+      ok: false,
+      sheet_name: sheet.sheet_name,
+      imported: 0,
+      skipped: 0,
+      failed: 1,
+      details: [{ row: 0, status: "failed", message: "未找到期初余额表头，请使用学生姓名、期初现金余额、期初赠送余额等列" }],
+    };
+  }
+
+  const profiles = new Map(all("SELECT name, grade FROM students").map((row) => [text(row.name), row]));
+  const existingNames = new Set(all("SELECT student_name FROM student_opening_balances")
+    .map((row) => text(row.student_name))
+    .filter(Boolean));
+  const seenNames = new Set();
+  const details = [];
+  let imported = 0;
+  let skipped = 0;
+  let failed = 0;
+  const insert = db.prepare(`
+    INSERT INTO student_opening_balances(
+      month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes
+    )
+    VALUES ('', ?, ?, ?, ?, ?)
+  `);
+
+  withTransaction(() => {
+    for (const row of sheet.rows.filter((item) => item.source_row > header.source_row)) {
+      if (!row.values.some((value) => text(value))) continue;
+      const studentName = text(openingBalanceImportCell(row, header.columns, "student_name"));
+      if (!studentName) {
+        failed += 1;
+        details.push({ row: row.source_row, status: "failed", message: "学生姓名为空" });
+        continue;
+      }
+      if (seenNames.has(studentName)) {
+        skipped += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "skipped", message: "Excel 内重复学生，已跳过" });
+        continue;
+      }
+      seenNames.add(studentName);
+
+      const actual = parseOpeningBalanceImportAmount(openingBalanceImportCell(row, header.columns, "opening_actual_balance"));
+      const gift = parseOpeningBalanceImportAmount(openingBalanceImportCell(row, header.columns, "opening_gift_balance"));
+      if (!actual.ok || !gift.ok) {
+        failed += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "金额格式错误" });
+        continue;
+      }
+      if (actual.value === 0 && gift.value === 0) {
+        skipped += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "skipped", message: "现金和赠送均为 0，跳过" });
+        continue;
+      }
+      if (existingNames.has(studentName)) {
+        skipped += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "skipped", message: "已存在，跳过" });
+        continue;
+      }
+
+      const profile = profiles.get(studentName);
+      const grade = text(openingBalanceImportCell(row, header.columns, "grade")) || text(profile?.grade);
+      const notes = text(openingBalanceImportCell(row, header.columns, "notes"));
+      insert.run(studentName, grade, actual.value, gift.value, notes);
+      existingNames.add(studentName);
+      imported += 1;
+      details.push({ row: row.source_row, student_name: studentName, status: "imported", message: "导入成功" });
+    }
+  });
+
+  return { ok: true, sheet_name: sheet.sheet_name, imported, skipped, failed, details };
+}
+
+async function importOpeningBalancesFromUpload(req) {
+  const raw = await spawnSafeReadRaw(req);
+  const parts = parseMultipart(req, raw);
+  const file = parts.file || parts.xlsx || Object.values(parts).find((part) => part.filename);
+  if (!file || !file.content?.length) throw new Error("请先选择 xlsx 文件");
+  if (file.filename && !file.filename.toLowerCase().endsWith(".xlsx")) throw new Error("仅支持 .xlsx 文件");
+  return importOpeningBalancesFromWorkbook(file.content);
 }
 
 function all(sql, params = []) {
@@ -1935,7 +2169,7 @@ function patchExpense(id, body) {
   });
 }
 
-function feeDetails(monthKey) {
+function buildFeeDetails(monthKey) {
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
   const details = [];
   for (const lesson of lessons) {
@@ -1987,6 +2221,17 @@ function feeDetails(monthKey) {
     });
   }
   return details;
+}
+
+function feeDetails(monthKey) {
+  const key = text(monthKey);
+  return cachedDerived(
+    "feeDetails",
+    key,
+    `feeDetails month=${key}`,
+    () => buildFeeDetails(key),
+    (rows) => markFeeDetails(rows, key),
+  );
 }
 
 function studentAccountEventDate(row, monthKey = "") {
@@ -2201,7 +2446,7 @@ function previousCarryOverBalances(monthKey, cache = new Map()) {
   return balances;
 }
 
-function studentSummary(details, monthKey, includeInactive = false, carryOverCache = new Map()) {
+function buildStudentSummary(details, monthKey, includeInactive = false, carryOverCache = new Map()) {
   const byStudent = new Map();
   const active = activeStudentNames(monthKey);
   const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [row.name, row]));
@@ -2326,6 +2571,17 @@ function studentSummary(details, monthKey, includeInactive = false, carryOverCac
   }).filter((row) => shouldShowStudentSummaryRow(row, includeInactive));
 }
 
+function studentSummary(details, monthKey, includeInactive = false, carryOverCache = new Map()) {
+  const canCache = Array.isArray(details) && details.__feeDetailsMonthKey === monthKey;
+  if (!canCache) return buildStudentSummary(details, monthKey, includeInactive, carryOverCache);
+  return cachedDerived(
+    "studentSummary",
+    cacheKey(monthKey, includeInactive ? "1" : "0"),
+    `studentSummary month=${monthKey} includeInactive=${includeInactive ? 1 : 0}`,
+    () => buildStudentSummary(details, monthKey, includeInactive, carryOverCache),
+  );
+}
+
 function studentSummaryHasSignal(row) {
   return row.active_this_month
     || num(row.lesson_count) !== 0
@@ -2340,7 +2596,7 @@ function studentSummaryHasSignal(row) {
     || !!text(row.recharge_notes);
 }
 
-function studentSummaryToDate(monthKey, includeInactive = false) {
+function buildStudentSummaryToDate(monthKey, includeInactive = false) {
   if (!validMonthKey(monthKey)) return [];
   const months = allPartitionedMonths()
     .filter((item) => item <= monthKey)
@@ -2348,9 +2604,10 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
   const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [row.name, row]));
   const active = activeStudentNames(monthKey);
   const byStudent = new Map();
+  const carryOverCache = new Map();
 
   for (const itemMonth of months) {
-    const monthRows = studentSummary(feeDetails(itemMonth), itemMonth, true);
+    const monthRows = studentSummary(feeDetails(itemMonth), itemMonth, true, carryOverCache);
     for (const row of monthRows) {
       if (!studentSummaryHasSignal(row)) continue;
       const profile = profiles.get(row.student_name) || {};
@@ -2395,7 +2652,16 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
     .sort((a, b) => compareGradeName(a.grade, b.grade) || a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
 }
 
-function teacherSummary(monthKey, includeInactive = false) {
+function studentSummaryToDate(monthKey, includeInactive = false) {
+  return cachedDerived(
+    "studentSummaryToDate",
+    cacheKey(monthKey, includeInactive ? "1" : "0"),
+    `studentSummaryToDate month=${monthKey} includeInactive=${includeInactive ? 1 : 0}`,
+    () => buildStudentSummaryToDate(monthKey, includeInactive),
+  );
+}
+
+function buildTeacherSummary(monthKey, includeInactive = false) {
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
   const byTeacher = new Map();
   const active = activeTeacherNames(monthKey);
@@ -2444,6 +2710,15 @@ function teacherSummary(monthKey, includeInactive = false) {
       notes: adj.notes || "",
     };
   }).sort((a, b) => a.teacher_name.localeCompare(b.teacher_name, "zh-Hans-CN"));
+}
+
+function teacherSummary(monthKey, includeInactive = false) {
+  return cachedDerived(
+    "teacherSummary",
+    cacheKey(monthKey, includeInactive ? "1" : "0"),
+    `teacherSummary month=${monthKey} includeInactive=${includeInactive ? 1 : 0}`,
+    () => buildTeacherSummary(monthKey, includeInactive),
+  );
 }
 
 function getSetting(key) {
@@ -3050,7 +3325,7 @@ function calculateStudentAccountRange(studentName, range) {
   };
 }
 
-function studentBalanceThroughDate(studentName, dateKeyValue) {
+function buildStudentBalanceThroughDate(studentName, dateKeyValue) {
   const name = text(studentName);
   const dateKey = text(dateKeyValue);
   if (!name || !validDateKey(dateKey)) return { actual_balance: 0, gift_balance: 0 };
@@ -3083,6 +3358,18 @@ function studentBalanceThroughDate(studentName, dateKeyValue) {
     actual_balance: moneyRound(actualBalance),
     gift_balance: moneyRound(giftBalance),
   };
+}
+
+function studentBalanceThroughDate(studentName, dateKeyValue) {
+  const name = text(studentName);
+  const dateKey = text(dateKeyValue);
+  if (!name || !validDateKey(dateKey)) return { actual_balance: 0, gift_balance: 0 };
+  return cachedDerived(
+    "studentBalanceThroughDate",
+    cacheKey(name, dateKey),
+    `studentBalanceThroughDate student=${name} date=${dateKey}`,
+    () => buildStudentBalanceThroughDate(name, dateKey),
+  );
 }
 
 function financeBase(range) {
@@ -4768,7 +5055,7 @@ function applyStudentPricingRulesToDetails(items) {
   });
 }
 
-function bootstrap(monthKey, includeInactive = false) {
+function buildBootstrap(monthKey, includeInactive = false) {
   syncStudentsFromLessons();
   syncTeachersFromLessons();
   withTransaction(() => {
@@ -4809,6 +5096,16 @@ function bootstrap(monthKey, includeInactive = false) {
       teacher_summary: teacherSummary(monthKey, includeInactive),
     },
   };
+}
+
+function bootstrap(monthKey, includeInactive = false) {
+  const key = cacheKey(monthKey, includeInactive ? "1" : "0");
+  return cachedDerived(
+    "bootstrap",
+    key,
+    `bootstrap month=${monthKey} includeInactive=${includeInactive ? 1 : 0}`,
+    () => buildBootstrap(monthKey, includeInactive),
+  );
 }
 
 function lessonsInDateRange(start, end) {
@@ -7577,6 +7874,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, result);
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
+  if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
 
   if (req.method === "GET" && url.pathname === "/api/teacher-salary-rules") {
     return sendJson(res, { rules: teacherSalaryRules() });
@@ -8104,6 +8402,45 @@ async function handleApi(req, res, url) {
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       `student-statement-${studentName}-${range.start}_${range.end}.xlsx`,
     );
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/opening-balances/template.xlsx") {
+    return sendBuffer(
+      res,
+      xlsxBuffer("期初余额", openingBalanceTemplateRows()),
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "期初余额导入模板.xlsx",
+    );
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/opening-balances/export.xlsx") {
+    return sendBuffer(
+      res,
+      xlsxBuffer("期初余额", openingBalanceExportRows()),
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      openingBalanceExportFilename(),
+    );
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/opening-balances/import") {
+    try {
+      const result = await importOpeningBalancesFromUpload(req);
+      recordAuditEvent(req, user, {
+        action: "import",
+        entity_type: "student_opening_balances",
+        entity_id: "xlsx",
+        before: null,
+        after: {
+          imported: result.imported,
+          skipped: result.skipped,
+          failed: result.failed,
+          sheet_name: result.sheet_name,
+        },
+      });
+      return sendJson(res, result);
+    } catch (error) {
+      return sendError(res, 400, error.message || "导入期初余额失败");
+    }
   }
 
   const studentStatementMatch = url.pathname.match(/^\/api\/student\/(.+)\/statement$/);

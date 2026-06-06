@@ -1784,6 +1784,54 @@ function openingBalanceModalMarkup() {
   `;
 }
 
+function openingBalanceImportResultMessage(result) {
+  const lines = [
+    `成功导入 ${result.imported || 0} 条，跳过 ${result.skipped || 0} 条，失败 ${result.failed || 0} 条`,
+  ];
+  const details = (result.details || []).filter((item) => item.status !== "imported");
+  if (details.length) {
+    lines.push("", "明细：");
+    for (const item of details.slice(0, 30)) {
+      const rowLabel = item.row ? `第 ${item.row} 行` : "表头";
+      const student = item.student_name ? `（${item.student_name}）` : "";
+      lines.push(`${rowLabel}${student}：${item.message || item.status || ""}`);
+    }
+    if (details.length > 30) lines.push(`……另有 ${details.length - 30} 条明细未显示`);
+  }
+  return lines.join("\n");
+}
+
+function chooseOpeningBalanceImportFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    let settled = false;
+    const cleanup = () => {
+      window.removeEventListener("focus", handleFocus);
+      input.remove();
+    };
+    const finish = (file) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(file);
+    };
+    const handleFocus = () => {
+      setTimeout(() => {
+        if (!settled && !input.files?.length) finish(null);
+      }, 300);
+    };
+    input.type = "file";
+    input.accept = ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", () => {
+      finish(input.files?.[0] || null);
+    }, { once: true });
+    setTimeout(() => window.addEventListener("focus", handleFocus, { once: true }), 0);
+    input.click();
+  });
+}
+
 function monthDeleteModal() {
   if (!monthDeleteDraft) return "";
   const counts = monthDeleteDraft.counts || {};
@@ -5051,7 +5099,12 @@ function renderOpeningBalances() {
           <div class="section-title">期初余额</div>
           <div class="section-subtitle">全局账户期初余额，用于系统上线前余额承接，不属于充值流水。</div>
         </div>
-        <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
+        <div class="profile-actions opening-balance-actions">
+          <button class="btn download-opening-balance-template" type="button">下载模板</button>
+          <button class="btn import-opening-balance-excel" type="button">导入 Excel</button>
+          <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
+          <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
+        </div>
       </div>
       <div class="filter-bar compact">
         <label>学生姓名</label>
@@ -8145,6 +8198,61 @@ function wireEvents() {
     button.addEventListener("click", () => {
       openingBalanceModalOpen = true;
       render();
+    });
+  });
+
+  document.querySelectorAll(".download-opening-balance-template").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await downloadBlob("/api/opening-balances/template.xlsx", "期初余额导入模板.xlsx");
+      } catch (error) {
+        alert(`下载模板失败：${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".export-opening-balance-excel").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await downloadBlob("/api/opening-balances/export.xlsx", "黎明教育_学生期初余额.xlsx");
+      } catch (error) {
+        alert(`导出期初余额失败：${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".import-opening-balance-excel").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const file = await chooseOpeningBalanceImportFile();
+      if (!file) return;
+      button.disabled = true;
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch("/api/opening-balances/import", {
+          method: "POST",
+          body: form,
+          cache: "no-store",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          auth.user = null;
+          renderLogin(data.error || "请先登录");
+        }
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await load();
+        alert(openingBalanceImportResultMessage(data));
+      } catch (error) {
+        alert(`导入期初余额失败：${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
     });
   });
 
