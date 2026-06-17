@@ -3822,6 +3822,57 @@ select.control {
   animation: surface-enter 120ms var(--ease-out);
 }
 
+.custom-select-search {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  display: flex;
+  gap: 4px;
+  padding: 2px 0 6px;
+  background: var(--panel-raised);
+}
+
+.custom-select-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 5px 8px;
+}
+
+.custom-select-search-input:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.custom-select-search-clear {
+  width: 30px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.custom-select-search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.custom-select-empty {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: var(--text-ui);
+}
+
 .custom-select-option {
   width: 100%;
   border: 0;
@@ -5185,7 +5236,26 @@ td.empty {
 .filter-combo .control {
   width: 100%;
   min-width: 136px;
-  padding-right: 34px;
+  padding-right: 62px;
+}
+
+.filter-combo-clear {
+  position: absolute;
+  top: 1px;
+  right: 33px;
+  bottom: 1px;
+  width: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.filter-combo-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .filter-combo-toggle {
@@ -5253,6 +5323,12 @@ td.empty {
 
 .filter-combo-option.muted {
   color: var(--muted);
+}
+
+.filter-combo-empty {
+  padding: 7px 9px;
+  color: var(--muted);
+  font-size: var(--text-ui);
 }
 
 .week-grid-panel {
