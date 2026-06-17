@@ -411,6 +411,34 @@ function customSelectMenu(wrapper) {
   return wrapper?._customSelectMenu || wrapper?.querySelector(".custom-select-menu") || null;
 }
 
+function customSelectSearchInput(wrapper) {
+  return customSelectMenu(wrapper)?.querySelector(".custom-select-search-input") || null;
+}
+
+function customSelectVisibleOptions(menu) {
+  return [...(menu?.querySelectorAll(".custom-select-option:not(:disabled)") || [])]
+    .filter((option) => !option.hidden);
+}
+
+function customSelectFilterText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function filterCustomSelectOptions(wrapper) {
+  const menu = customSelectMenu(wrapper);
+  if (!menu) return;
+  const query = customSelectFilterText(customSelectSearchInput(wrapper)?.value || "");
+  let visibleCount = 0;
+  menu.querySelectorAll(".custom-select-option").forEach((option) => {
+    const haystack = customSelectFilterText(`${option.textContent || ""} ${option.dataset.value || ""}`);
+    const matched = !query || haystack.includes(query);
+    option.hidden = !matched;
+    if (matched && !option.disabled) visibleCount += 1;
+  });
+  const empty = menu.querySelector(".custom-select-empty");
+  if (empty) empty.hidden = visibleCount > 0;
+}
+
 function selectDisplayText(select) {
   return select.selectedOptions?.[0]?.textContent?.trim() || select.options?.[select.selectedIndex]?.textContent?.trim() || "请选择";
 }
@@ -477,9 +505,13 @@ function openCustomSelect(wrapper) {
   wrapper.classList.add("open");
   customSelectMenu(wrapper)?.classList.add("open");
   wrapper.querySelector(".custom-select-button")?.setAttribute("aria-expanded", "true");
+  const searchInput = customSelectSearchInput(wrapper);
+  if (searchInput) searchInput.value = "";
+  filterCustomSelectOptions(wrapper);
   positionCustomSelectMenu(wrapper);
   scrollCustomSelectOptionIntoView(wrapper);
   positionCustomSelectMenu(wrapper);
+  requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }));
 }
 
 function enhanceCustomSelects() {
@@ -514,6 +546,27 @@ function enhanceCustomSelects() {
     menu._customSelectOwner = wrapper;
     wrapper._customSelectMenu = menu;
 
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "custom-select-search";
+    const searchInput = document.createElement("input");
+    searchInput.className = "custom-select-search-input";
+    searchInput.type = "text";
+    searchInput.autocomplete = "off";
+    searchInput.spellcheck = false;
+    searchInput.placeholder = "输入搜索";
+    searchInput.setAttribute("aria-label", "搜索选项");
+    const searchClear = document.createElement("button");
+    searchClear.type = "button";
+    searchClear.className = "custom-select-search-clear";
+    searchClear.setAttribute("aria-label", "清空搜索");
+    searchClear.textContent = "×";
+    searchWrap.append(searchInput, searchClear);
+    const emptyOption = document.createElement("div");
+    emptyOption.className = "custom-select-empty";
+    emptyOption.hidden = true;
+    emptyOption.textContent = "无匹配选项";
+    menu.append(searchWrap, emptyOption);
+
     [...select.options].forEach((nativeOption) => {
       const option = document.createElement("button");
       option.type = "button";
@@ -529,6 +582,31 @@ function enhanceCustomSelects() {
         closeCustomSelects();
       });
       menu.appendChild(option);
+    });
+
+    searchInput.addEventListener("input", () => {
+      filterCustomSelectOptions(wrapper);
+    });
+    searchInput.addEventListener("keydown", (event) => {
+      const optionsList = customSelectVisibleOptions(menu);
+      if (event.key === "Escape") {
+        closeCustomSelects();
+        button.focus();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        optionsList[0]?.focus();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        optionsList[optionsList.length - 1]?.focus();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        (menu.querySelector(".custom-select-option.selected:not([hidden])") || optionsList[0])?.click();
+      }
+    });
+    searchClear.addEventListener("click", () => {
+      searchInput.value = "";
+      filterCustomSelectOptions(wrapper);
+      searchInput.focus({ preventScroll: true });
     });
 
     button.addEventListener("click", () => {
@@ -549,11 +627,12 @@ function enhanceCustomSelects() {
       if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         openCustomSelect(wrapper);
-        (customSelectMenu(wrapper)?.querySelector(".custom-select-option.selected") || customSelectMenu(wrapper)?.querySelector(".custom-select-option"))?.focus();
+        customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
       }
     });
     menu.addEventListener("keydown", (event) => {
-      const optionsList = [...menu.querySelectorAll(".custom-select-option:not(:disabled)")];
+      if (event.target?.classList?.contains("custom-select-search-input")) return;
+      const optionsList = customSelectVisibleOptions(menu);
       const currentIndex = optionsList.indexOf(document.activeElement);
       if (event.key === "Escape") {
         closeCustomSelects();
@@ -563,7 +642,8 @@ function enhanceCustomSelects() {
         optionsList[Math.min(optionsList.length - 1, currentIndex + 1)]?.focus();
       } else if (event.key === "ArrowUp") {
         event.preventDefault();
-        optionsList[Math.max(0, currentIndex - 1)]?.focus();
+        if (currentIndex <= 0) customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
+        else optionsList[Math.max(0, currentIndex - 1)]?.focus();
       }
     });
 
@@ -893,6 +973,27 @@ function yuan2(value) {
 function todayDate() {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatBeijingTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const source = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(raw)
+    ? `${raw.replace(" ", "T")}Z`
+    : (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/[zZ]|[+-]\d{2}:\d{2}$/.test(raw) ? `${raw}Z` : raw);
+  const date = new Date(source);
+  if (Number.isNaN(date.getTime())) return raw;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 function currentWeekRange() {
@@ -1636,7 +1737,7 @@ function financePresetRange(preset) {
 }
 
 function readLessonFilter() {
-  const defaults = { month_key: "", teacher: "", student: "", start_date: "", end_date: "", status: "", query: "", date_preset_initialized: false };
+  const defaults = { month_key: "", teacher: "", student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(LESSON_FILTER_KEY) || "{}") };
   } catch {
@@ -1889,21 +1990,21 @@ function monthDeleteModal() {
 
 function ensureLessonFilterDates() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const week = currentWeekRange();
+  const bounds = monthBounds(monthKey);
   const nextFilter = { ...lessonFilter, month_key: monthKey };
   let changed = nextFilter.month_key !== lessonFilter.month_key;
   if (!nextFilter.date_preset_initialized) {
-    nextFilter.start_date = week.start;
-    nextFilter.end_date = week.end;
+    nextFilter.start_date = bounds.start;
+    nextFilter.end_date = bounds.end;
     nextFilter.date_preset_initialized = true;
     changed = true;
   }
   if (!isDateValue(nextFilter.start_date)) {
-    nextFilter.start_date = week.start;
+    nextFilter.start_date = bounds.start;
     changed = true;
   }
   if (!isDateValue(nextFilter.end_date)) {
-    nextFilter.end_date = week.end;
+    nextFilter.end_date = bounds.end;
     changed = true;
   }
   if (changed) {
@@ -1912,11 +2013,13 @@ function ensureLessonFilterDates() {
   }
 }
 
-function lessonLoadRange() {
+function lessonLoadRange({ includeActiveMonth = view !== "lessons" } = {}) {
   const bounds = monthBounds(state?.settings?.month_key || activeMonth);
   const start = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : bounds.start;
   const end = isDateValue(lessonFilter.end_date) ? lessonFilter.end_date : bounds.end;
   if (!start || !end || start > end) return null;
+  // 课程总表的主数据源只由页面内部日期范围决定；顶部全局月份仅用于首次默认值。
+  if (!includeActiveMonth) return { start, end };
   return {
     start: start < bounds.start ? start : bounds.start,
     end: end > bounds.end ? end : bounds.end,
@@ -1940,8 +2043,8 @@ async function loadLessonRangeOnly() {
 
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const week = currentWeekRange();
-  lessonFilter = { month_key: monthKey, teacher: "", student: "", start_date: week.start, end_date: week.end, status: "", query: "", date_preset_initialized: true };
+  const bounds = monthBounds(monthKey);
+  lessonFilter = { month_key: monthKey, teacher: "", student: "", start_date: bounds.start, end_date: bounds.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
@@ -2000,6 +2103,9 @@ function dynamicLessonFilterOptions(rows, filter, options = {}) {
     teachers: uniqueSorted(lessonRowsForOption(rows, filter, "teacher", options).map((row) => row.teacher_name)),
     students: uniqueSorted(lessonRowsForOption(rows, filter, "student", options).flatMap((row) => splitStudents(row.student_names))),
     statuses: uniqueSorted(lessonRowsForOption(rows, filter, "status", options).map((row) => rowStatus(row))),
+    classrooms: uniqueSorted(lessonRowsForOption(rows, filter, "classroom", options).map((row) => row.classroom)),
+    grades: uniqueSorted(lessonRowsForOption(rows, filter, "grade", options).map((row) => row.grade)),
+    subjects: uniqueSorted(lessonRowsForOption(rows, filter, "subject", options).map((row) => row.subject)),
   };
 }
 
@@ -2010,6 +2116,9 @@ function lessonMatchesFilter(row, filter, options = {}) {
     const needle = filter.student.toLowerCase();
     if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
   }
+  if (filter.classroom && !textContains(row.classroom, filter.classroom)) return false;
+  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (includeDate) {
     if (filter.start_date && (!row.date || row.date < filter.start_date)) return false;
     if (filter.end_date && (!row.date || row.date > filter.end_date)) return false;
@@ -2056,10 +2165,12 @@ function filterComboControl({ id = "", className, field, value, values, placehol
   return `
     <span class="filter-combo">
       <input ${id ? `id="${escapeHtml(id)}"` : ""} class="control filter-combo-input ${className}" ${dataName}="${escapeHtml(field)}" type="text" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || "")}">
+      <button class="filter-combo-clear" type="button" aria-label="清空" ${value ? "" : "hidden"}>×</button>
       <button class="filter-combo-toggle" type="button" aria-label="展开候选">⌄</button>
       <span class="filter-combo-menu">
         ${emptyLabel ? `<button class="filter-combo-option muted" type="button" data-value="">${escapeHtml(emptyLabel)}</button>` : ""}
         ${normalized.map((item) => `<button class="filter-combo-option" type="button" data-value="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join("")}
+        <span class="filter-combo-empty" hidden>无匹配选项</span>
       </span>
     </span>
   `;
@@ -2107,6 +2218,20 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       ${filterComboControl({ className: "lesson-filter-input", field: "student", value: lessonFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
     </label>
   `;
+  const compactExtraFilters = compact ? `
+    <label class="filter-field">
+      <span>教室</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "classroom", value: lessonFilter.classroom, values: opts.classrooms, placeholder: "输入或选择教室" })}
+    </label>
+    <label class="filter-field">
+      <span>年级</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "grade", value: lessonFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
+    </label>
+    <label class="filter-field">
+      <span>科目</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "subject", value: lessonFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
+    </label>
+  ` : "";
   const fullFilters = compact ? "" : `
     <label class="filter-field filter-date-range">
       <span>日期</span>
@@ -2134,6 +2259,18 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       <span>状态</span>
       ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
     </label>
+    <label class="filter-field">
+      <span>教室</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "classroom", value: lessonFilter.classroom, values: opts.classrooms, placeholder: "输入或选择教室" })}
+    </label>
+    <label class="filter-field">
+      <span>年级</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "grade", value: lessonFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
+    </label>
+    <label class="filter-field">
+      <span>科目</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "subject", value: lessonFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
+    </label>
     <label class="filter-field filter-search">
       <span>搜索</span>
       <input class="control lesson-filter-input" data-filter-field="query" type="text" autocomplete="off" spellcheck="false" placeholder="学生、备注、教室、科目" value="${escapeHtml(lessonFilter.query)}">
@@ -2144,6 +2281,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       <div class="filter-controls">
         ${teacherSelect}
         ${studentInput}
+        ${compactExtraFilters}
         ${fullFilters}
       </div>
       <div class="filter-summary">
@@ -3021,7 +3159,7 @@ function renderTopbar(title, meta = "", actions = "") {
       <button class="sidebar-toggle" type="button" aria-label="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" title="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" aria-pressed="${sidebarCollapsed ? "true" : "false"}">☰</button>
       <div class="title-block">
         <div class="page-title">${escapeHtml(title)}</div>
-        <div class="page-meta">${escapeHtml(meta)}</div>
+        ${meta ? `<div class="page-meta">${escapeHtml(meta)}</div>` : ""}
       </div>
     </div>
     <div class="toolbar">
@@ -3067,8 +3205,15 @@ function sortedLessons() {
   return sortLessons(state.lessons);
 }
 
+function lessonDateRangeRows(rows = sortedLessons()) {
+  const start = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : "";
+  const end = isDateValue(lessonFilter.end_date) ? lessonFilter.end_date : "";
+  if (!start || !end || start > end) return rows;
+  return rows.filter((row) => row.date >= start && row.date <= end);
+}
+
 function visibleLessonRows() {
-  const allRows = sortedLessons();
+  const allRows = lessonDateRangeRows();
   const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
   return focusSet.size
     ? allRows.filter((row) => focusSet.has(Number(row.id)))
@@ -3164,17 +3309,12 @@ function updateLessonSummaryMetrics() {                  /* [B档] 更新概要�
   const rows = visibleLessonRows();
   pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
-  const monthStats = lessonStats(monthLessonRows());
   const metricValues = document.querySelectorAll(".summary-grid .metric-value");
   if (metricValues.length >= 4) {
     metricValues[0].textContent = stats.records;
     metricValues[1].textContent = stats.effective;
     metricValues[2].textContent = stats.studentTotal;
     metricValues[3].textContent = stats.teacherCount;
-  }
-  const pageMeta = document.querySelector(".page-meta");
-  if (pageMeta && view === "lessons") {
-    pageMeta.textContent = `${monthLabel()} · 有效课程 ${monthStats.effective} 节，学生人次 ${monthStats.studentTotal}`;
   }
 }
 
@@ -3785,12 +3925,11 @@ function weekCopyModal() {
 
 function renderLessons() {
   ensureLessonFilterDates();
-  const allRows = sortedLessons();
+  const allRows = lessonDateRangeRows();
   const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
   const rows = visibleLessonRows();
   pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
-  const monthStats = lessonStats(monthLessonRows());
   const rangeText = formatLessonDateRange();
   const focusNotice = focusSet.size ? `
     <div class="band focus-lesson-panel">
@@ -3805,7 +3944,7 @@ function renderLessons() {
   ` : renderLessonFilterBar({ rows: allRows, filteredRows: rows });
   renderTopbar(
     `课程总表：${rangeText}`,
-    `${monthLabel()} · 有效课程 ${monthStats.effective} 节，学生人次 ${monthStats.studentTotal}`,
+    "",
   );
   contentEl.innerHTML = `
     <div class="summary-grid">
@@ -4311,12 +4450,6 @@ function renderWeek() {
     ${scheduleConflictPanel(conflicts)}
     ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
     <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">周课表明细</div>
-          <div class="section-subtitle">保留原列表视图，便于逐条核对课程信息。</div>
-        </div>
-      </div>
       <div class="table-wrap">
         <table class="course-table week-detail-table">
           <thead>
@@ -5323,17 +5456,17 @@ function drawShotHeader(ctx, colors, title, subtitle, width) {
 
 function drawStudentStatementHeader(ctx, colors, studentName, range, width) {
   ctx.fillStyle = colors.brandPale;
-  ctx.fillRect(25, 30, width - 50, 124);
+  ctx.fillRect(25, 30, width - 50, 88);
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = colors.brandDark;
   ctx.font = "900 27px Microsoft YaHei, PingFang SC, Arial, sans-serif";
   ctx.fillText("黎明教育", width / 2, 62);
-  ctx.font = "700 18px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-  shotText(ctx, studentName || "未选择学生", width / 2, 90, width - 96, { align: "center" });
-  ctx.fillStyle = colors.brandDark;
-  shotText(ctx, `${range.start || ""} ~ ${range.end || ""}`, width / 2, 116, width - 96, { align: "center" });
-  ctx.fillText("学生消费查询", width / 2, 142);
+  ctx.fillStyle = colors.muted;
+  ctx.font = "15px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  const generatedAt = formatBeijingTime(new Date().toISOString());
+  const summaryLine = `学生：${studentName || "未选择学生"} / 范围：${range.start || ""} ~ ${range.end || ""} / 生成：${generatedAt} / 费用概览`;
+  shotText(ctx, summaryLine, width / 2, 96, width - 96, { align: "center" });
 }
 
 function studentStatementDateRange(report = studentStatementReport()) {
@@ -5446,13 +5579,13 @@ function studentStatementCanvas(report = studentStatementReport()) {
   const contentWidth = width - 96;
   const monthTableHeight = 40 + Math.max(1, monthRows.length) * 36;
   const detailTableHeight = 42 + Math.max(1, details.length) * 38;
-  const height = 48 + 134 + 104 + 96 + 36 + monthTableHeight + 54 + detailTableHeight + 54;
+  const height = 48 + 96 + 104 + 96 + 36 + monthTableHeight + 54 + detailTableHeight + 54;
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
   drawStudentStatementHeader(ctx, colors, report?.student_name || selectedStudent || "未选择学生", dateRange, width);
   const metricCards = studentStatementMetricCards(summary);
-  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), 48, 180, contentWidth);
-  drawShotMetricCards(ctx, colors, metricCards.slice(4), 48, 276, contentWidth);
-  let y = 380;
+  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), 48, 142, contentWidth);
+  drawShotMetricCards(ctx, colors, metricCards.slice(4), 48, 238, contentWidth);
+  let y = 342;
   drawShotSectionTitle(ctx, colors, "月份汇总", 48, y, contentWidth);
   y += 18;
   y += drawShotTable(ctx, colors, [
@@ -5823,7 +5956,7 @@ function renderAudit() {
           <tbody>
             ${auditState.events.map((event) => `
               <tr>
-                <td class="text-cell">${escapeHtml(event.created_at)}</td>
+                <td class="text-cell">${escapeHtml(formatBeijingTime(event.created_at))}</td>
                 <td class="text-cell">${escapeHtml(event.actor_username)}</td>
                 <td class="text-cell">${escapeHtml(ROLE_LABELS[event.actor_role] || event.actor_role)}</td>
                 <td class="text-cell">${escapeHtml(event.action)}</td>
@@ -5850,7 +5983,8 @@ function renderUserAdmin() {
   renderTopbar(
     "账号权限",
     auth.user?.role === "academic" ? "教务仅可维护老师账号" : "维护账号、角色和绑定老师",
-    `<button class="btn primary import-teacher-users" type="button" ${canImportTeachers ? "" : "disabled"}>从模板导入老师账号</button>`,
+    `<button class="btn download-user-import-template" type="button" ${canImportTeachers ? "" : "disabled"}>下载导入模板</button>
+     <button class="btn primary import-teacher-users" type="button" ${canImportTeachers ? "" : "disabled"}>从模板导入账号</button>`,
   );
   contentEl.innerHTML = `
     ${userAdminNotice ? `<div class="audit-inline-notice">${escapeHtml(userAdminNotice)}</div>` : ""}
@@ -6899,7 +7033,7 @@ async function renderOperationLogs() {
                 <td class="text-cell">${escapeHtml(log.operator_account)}</td>
                 <td class="text-cell">${escapeHtml(log.operation_type)}</td>
                 <td class="text-cell" title="${escapeHtml(log.operation_content)}">${escapeHtml(log.operation_content)}</td>
-                <td class="text-cell">${escapeHtml(log.created_at)}</td>
+                <td class="text-cell">${escapeHtml(formatBeijingTime(log.created_at))}</td>
               </tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无操作日志</td></tr>`}
           </tbody>
@@ -7840,43 +7974,86 @@ function wireEvents() {
   document.querySelectorAll(".filter-combo").forEach((combo) => {
     const input = combo.querySelector(".filter-combo-input");
     const menu = combo.querySelector(".filter-combo-menu");
+    const clearButton = combo.querySelector(".filter-combo-clear");
     const close = () => combo.classList.remove("open");
+    const optionsList = () => [...(menu?.querySelectorAll(".filter-combo-option") || [])].filter((option) => !option.hidden);
+    const filterOptions = () => {
+      const query = customSelectFilterText(input?.value || "");
+      let visibleCount = 0;
+      menu?.querySelectorAll(".filter-combo-option").forEach((option) => {
+        const haystack = customSelectFilterText(`${option.textContent || ""} ${option.dataset.value || ""}`);
+        const matched = !query || haystack.includes(query);
+        option.hidden = !matched;
+        if (matched) visibleCount += 1;
+      });
+      const empty = menu?.querySelector(".filter-combo-empty");
+      if (empty) empty.hidden = visibleCount > 0;
+      if (clearButton) clearButton.hidden = !(input?.value || "");
+    };
     combo.querySelector(".filter-combo-toggle")?.addEventListener("click", (event) => {
       event.preventDefault();
       document.querySelectorAll(".filter-combo.open").forEach((item) => {
         if (item !== combo) item.classList.remove("open");
       });
       combo.classList.toggle("open");
+      filterOptions();
+      input?.focus({ preventScroll: true });
+    });
+    clearButton?.addEventListener("click", () => {
+      input.value = "";
+      filterOptions();
+      close();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.focus({ preventScroll: true });
     });
     menu?.querySelectorAll(".filter-combo-option").forEach((option) => {
       option.addEventListener("click", () => {
         input.value = option.dataset.value || "";
+        filterOptions();
         close();
         input.dispatchEvent(new Event("change", { bubbles: true }));
       });
+    });
+    input?.addEventListener("input", () => {
+      filterOptions();
+      combo.classList.add("open");
     });
     input?.addEventListener("keydown", (event) => {
       if (event.key === "ArrowDown") {
         event.preventDefault();
         combo.classList.add("open");
-        menu?.querySelector(".filter-combo-option")?.focus();
+        filterOptions();
+        optionsList()[0]?.focus();
+      }
+      if (event.key === "Enter") {
+        const first = optionsList()[0];
+        if (combo.classList.contains("open") && first) {
+          event.preventDefault();
+          first.click();
+        }
       }
       if (event.key === "Escape") close();
     });
     menu?.addEventListener("keydown", (event) => {
-      const optionsList = [...menu.querySelectorAll(".filter-combo-option")];
-      const index = optionsList.indexOf(document.activeElement);
+      const visibleOptions = optionsList();
+      const index = visibleOptions.indexOf(document.activeElement);
       if (event.key === "Escape") {
         close();
         input?.focus();
       } else if (event.key === "ArrowDown") {
         event.preventDefault();
-        optionsList[Math.min(optionsList.length - 1, index + 1)]?.focus();
+        visibleOptions[Math.min(visibleOptions.length - 1, index + 1)]?.focus();
       } else if (event.key === "ArrowUp") {
         event.preventDefault();
-        optionsList[Math.max(0, index - 1)]?.focus();
+        if (index <= 0) input?.focus({ preventScroll: true });
+        else visibleOptions[Math.max(0, index - 1)]?.focus();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        document.activeElement?.click?.();
       }
     });
+    filterOptions();
   });
 
   if (!filterComboEventsBound) {
@@ -8943,11 +9120,24 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".download-user-import-template").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await downloadBlob("/api/users/import-template.xlsx", "黎明教育_账号导入模板.xlsx");
+      } catch (error) {
+        alert(error.message || "下载模板失败");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
   document.querySelectorAll(".import-teacher-users").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("从 data/templates/teacher_template.xlsx 创建或更新老师账号？新账号密码为手机号后 6 位。")) return;
+      if (!confirm("从 data/templates/teacher_template.xlsx 创建或更新账号？新版模板使用“初始密码”列；旧老师模板默认密码为手机号后 6 位。")) return;
       const result = await request("/api/users/import-teachers-template", { method: "POST", body: {} });
-      userAdminNotice = `已处理 ${result.total || 0} 位老师：新增 ${result.created || 0} 个账号，更新 ${result.updated || 0} 个账号。新账号规则：账号为手机号，初始密码为手机号后 6 位。备份：${result.backup || "已生成"}`;
+      userAdminNotice = `已处理 ${result.total || 0} 行：新增 ${result.created || 0} 个账号，更新 ${result.updated || 0} 个账号。备份：${result.backup || "已生成"}`;
       await load();
     });
   });
@@ -9386,13 +9576,9 @@ function wireEvents() {
       if (!rows.length) return alert("没有可复制的课程");
       if (rows.length > 200) return alert("单次批量复制最多 200 节课");
       button.disabled = true;
-      const failures = [];
       try {
-        for (const row of rows) {
-          if (!isDateValue(row.date)) {
-            failures.push({ row, message: "目标日期无效" });
-            continue;
-          }
+        const lessons = rows.map((row) => {
+          if (!isDateValue(row.date)) throw new Error(`目标日期无效：${row.date || "空"}`);
           const payload = {
             teacher_name: row.teacher_name || "",
             date: row.date,
@@ -9405,21 +9591,13 @@ function wireEvents() {
             student_names: row.student_names || "",
             notes: row.notes || "",
           };
-          if (String(row.teacher_salary ?? "").trim() !== "") {
-            payload.teacher_salary = numberValue(row.teacher_salary);
-          }
-          try {
-            await request("/api/lessons", { method: "POST", body: payload });
-          } catch (error) {
-            failures.push({ row, message: error.message || "新增失败" });
-          }
-        }
+          if (String(row.teacher_salary ?? "").trim() !== "") payload.teacher_salary = numberValue(row.teacher_salary);
+          return payload;
+        });
+        const result = await request("/api/lessons/batch-create", { method: "POST", body: { lessons } });
         lessonBatchCopyDraft = null;
         selectedLessonIds = new Set();
-        await load();
-        if (failures.length) {
-          alert(`有 ${failures.length} 节课程复制失败：\n${failures.map((item) => `${item.row.date || ""} ${item.row.teacher_name || ""} ${item.row.student_names || ""}：${item.message}`).join("\n")}`);
-        }
+        await afterCopy(result);
       } catch (error) {
         button.disabled = false;
         alert(`批量复制失败：${error.message}`);
@@ -9512,24 +9690,12 @@ function wireEvents() {
       if (!confirm(`确认删除已选中的 ${ids.length} 节课程吗？此操作不可撤销。`)) return;
       lessonBatchDeleting = true;
       updateLessonSelectionControls();
-      const failures = [];
       try {
-        for (const id of ids) {
-          try {
-            await request(`/api/lessons/${id}`, { method: "DELETE" });
-          } catch (error) {
-            failures.push({ id, message: error.message || "删除失败" });
-          }
-        }
+        const result = await request("/api/lessons/batch-delete", { method: "POST", body: { ids } });
         lessonBatchDeleting = false;
-        if (failures.length) {
-          selectedLessonIds = new Set(failures.map((item) => Number(item.id)));
-          await load();
-          alert(`有 ${failures.length} 节课程删除失败：\n${failures.map((item) => `课程ID ${item.id}：${item.message}`).join("\n")}`);
-        } else {
-          selectedLessonIds = new Set();
-          await load();
-        }
+        selectedLessonIds = new Set();
+        await load();
+        if (result.missing?.length) alert(`已删除 ${result.deleted || 0} 节课程，另有 ${result.missing.length} 节未找到。`);
       } catch (error) {
         lessonBatchDeleting = false;
         alert(`批量删除失败：${error.message}`);

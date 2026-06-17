@@ -5800,6 +5800,41 @@ function writeOperationLog(operator, { operation_type, operation_content = "", t
   );
 }
 
+function lessonOperationText(row = {}) {
+  return [row.date, row.teacher_name, row.time_slot, row.subject, row.student_names]
+    .map(text)
+    .filter(Boolean)
+    .join(" ");
+}
+
+function userOperationText(row = {}) {
+  return [row.username, row.display_name, USER_ROLES[row.role] || row.role, row.teacher_name, row.status]
+    .map(text)
+    .filter(Boolean)
+    .join(" ");
+}
+
+function teacherOperationText(row = {}) {
+  return [row.name, row.phone, row.status]
+    .map(text)
+    .filter(Boolean)
+    .join(" ");
+}
+
+function studentOperationText(row = {}) {
+  return [row.name || row.student_name, row.grade, row.phone, row.status]
+    .map(text)
+    .filter(Boolean)
+    .join(" ");
+}
+
+function pricingOperationText(row = {}) {
+  return [row.grade, row.student_count ? `${row.student_count}人` : "", row.unit_price != null ? `¥${row.unit_price}` : "", row.description]
+    .map(text)
+    .filter(Boolean)
+    .join(" ");
+}
+
 function auditedPatchTable(req, actor, table, idField, idValue, allowedFields, data, entityType = table) {
   const before = get(`SELECT * FROM ${table} WHERE ${idField} = ?`, [idValue]);
   patchTable(table, idField, idValue, allowedFields, data);
@@ -6030,41 +6065,158 @@ function changeOwnPassword(user, currentPassword, nextPassword) {
   return { ok: true };
 }
 
+const USER_IMPORT_HEADERS = ["账号/手机号", "显示姓名", "角色", "绑定老师", "初始密码", "状态"];
+
+const USER_IMPORT_HEADER_ALIASES = {
+  username: [/账号|用户名|手机号|手机|电话/],
+  display_name: [/显示姓名|姓名|名称|昵称/],
+  role: [/角色|权限/],
+  teacher_name: [/绑定老师|绑定教师|授课老师|教师姓名|老师姓名|老师/],
+  password: [/初始密码|密码/],
+  status: [/状态|启用/],
+};
+
+const USER_IMPORT_ROLE_ALIASES = new Map([
+  ["boss", "owner"],
+  ["owner", "owner"],
+  ["qing", "owner"],
+  ["admin", "admin"],
+  ["管理员", "admin"],
+  ["jiaowu", "academic"],
+  ["academic", "academic"],
+  ["教务", "academic"],
+  ["finance", "finance"],
+  ["财务", "finance"],
+  ["teacher", "teacher"],
+  ["老师", "teacher"],
+  ["教师", "teacher"],
+]);
+
+const USER_IMPORT_STATUS_ALIASES = new Map([
+  ["active", "active"],
+  ["启用", "active"],
+  ["正常", "active"],
+  ["disabled", "disabled"],
+  ["停用", "disabled"],
+  ["禁用", "disabled"],
+]);
+
+function userImportTemplateSheets() {
+  return [
+    {
+      name: "账号导入",
+      rows: [
+        USER_IMPORT_HEADERS,
+        ["teacher001", "张老师", "老师", "张老师", "123456", "active"],
+      ],
+    },
+    {
+      name: "填写说明",
+      rows: [
+        ["字段", "说明"],
+        ["账号/手机号", "必填，建议老师账号使用手机号；旧模板中的手机号列也可以识别。"],
+        ["显示姓名", "账号显示名称；旧模板中的教师姓名列会同时作为显示姓名和绑定老师。"],
+        ["角色", "可填 boss/owner、admin、jiaowu/academic、finance、teacher，或中文：管理员、教务、财务、老师。"],
+        ["绑定老师", "老师账号必填，必须和课程表中的授课老师名称一致。"],
+        ["初始密码", "必填；旧模板未提供密码时，老师账号默认使用手机号后 6 位。"],
+        ["状态", "可填 active/disabled，或中文：启用、停用。"],
+      ],
+    },
+  ];
+}
+
+function normalizedUserImportHeader(value) {
+  return text(value).replace(/\s+/g, "").replace(/[：:]/g, "");
+}
+
+function userImportHeaderField(value) {
+  const header = normalizedUserImportHeader(value);
+  for (const [field, patterns] of Object.entries(USER_IMPORT_HEADER_ALIASES)) {
+    if (patterns.some((pattern) => pattern.test(header))) return field;
+  }
+  return "";
+}
+
+function readUserImportSheet(buffer) {
+  const entries = unzipXlsx(buffer);
+  const sheets = workbookSheets(entries).filter((sheet) => sheet.state !== "hidden" && sheet.state !== "veryHidden");
+  const preferredNames = new Set(["账号导入", "老师账号", "教师账号", "账号导入模板"]);
+  const preferred = sheets.filter((sheet) => preferredNames.has(sheet.name));
+  const candidates = [...preferred, ...sheets.filter((sheet) => !preferredNames.has(sheet.name))];
+  for (const sheetInfo of candidates) {
+    const sheet = readXlsxSheetRows(buffer, sheetInfo.name);
+    if (sheet.rows.some((row) => row.values.some((value) => text(value)))) return sheet;
+  }
+  return candidates[0] ? readXlsxSheetRows(buffer, candidates[0].name) : { sheet_name: "", rows: [] };
+}
+
+function userImportHeader(rows) {
+  for (const row of rows.slice(0, 20)) {
+    const columns = {};
+    for (const [index, value] of row.values.entries()) {
+      const field = userImportHeaderField(value);
+      if (field && columns[field] == null) columns[field] = index;
+    }
+    if (columns.username != null || (columns.display_name != null && columns.teacher_name != null)) {
+      return { source_row: row.source_row, columns };
+    }
+  }
+  return null;
+}
+
+function userImportCell(row, columns, field) {
+  const index = columns[field];
+  return index == null ? "" : row.values[index];
+}
+
+function normalizeImportedUserRole(value, fallback = "teacher") {
+  const raw = text(value || fallback);
+  const key = raw.toLowerCase();
+  return USER_IMPORT_ROLE_ALIASES.get(raw) || USER_IMPORT_ROLE_ALIASES.get(key) || ensureValidUserRole(raw) || fallback;
+}
+
+function normalizeImportedUserStatus(value) {
+  const raw = text(value || "active");
+  const key = raw.toLowerCase();
+  return USER_IMPORT_STATUS_ALIASES.get(raw) || USER_IMPORT_STATUS_ALIASES.get(key) || "active";
+}
+
 function teacherTemplateRows() {
   const templatePath = path.join(dataDir, "templates", "teacher_template.xlsx");
   if (!fs.existsSync(templatePath)) return [];
   const buffer = fs.readFileSync(templatePath);
-  const entries = unzipXlsx(buffer);
-  const sharedStrings = parseSharedStrings(entries.get("xl/sharedStrings.xml")?.toString("utf8"));
+  const sheet = readUserImportSheet(buffer);
+  const header = userImportHeader(sheet.rows);
+  if (!header) return [];
   const rows = [];
-  for (const sheet of workbookSheets(entries)) {
-    const sheetXmlText = entries.get(sheet.path)?.toString("utf8");
-    if (!sheetXmlText) continue;
-    let nameColumn = 0;
-    let phoneColumn = 1;
-    for (const [, rowTag, rowXml] of sheetXmlText.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
-      const sourceRow = Number(xmlAttr(rowTag, "r"));
-      const values = [];
-      const normalizedRowXml = rowXml.replace(/<c\b([^>]*)\/>/g, "<c$1></c>");
-      for (const [, cellTag, cellXml] of normalizedRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
-        const column = cellColumnIndex(xmlAttr(cellTag, "r"));
-        if (column >= 0) values[column] = cellValue(cellTag, cellXml, sharedStrings);
-      }
-      if (sourceRow === 1) {
-        const nameIndex = values.findIndex((value) => /教师姓名|姓名/.test(text(value)));
-        const phoneIndex = values.findIndex((value) => /手机号|电话|手机/.test(text(value)));
-        if (nameIndex >= 0) nameColumn = nameIndex;
-        if (phoneIndex >= 0) phoneColumn = phoneIndex;
-        continue;
-      }
-      const name = text(values[nameColumn]);
-      const phone = text(values[phoneColumn]).replace(/\D/g, "");
-      if (name && phone) rows.push({ name, phone, sheet: sheet.name, source_row: sourceRow });
+  for (const row of sheet.rows.filter((item) => item.source_row > header.source_row)) {
+    if (!row.values.some((value) => text(value))) continue;
+    const rawUsername = text(userImportCell(row, header.columns, "username"));
+    const username = rawUsername.replace(/\s+/g, "");
+    const displayName = text(userImportCell(row, header.columns, "display_name")) || text(userImportCell(row, header.columns, "teacher_name")) || username;
+    const role = normalizeImportedUserRole(userImportCell(row, header.columns, "role"), "teacher");
+    const teacherName = role === "teacher"
+      ? (text(userImportCell(row, header.columns, "teacher_name")) || displayName)
+      : text(userImportCell(row, header.columns, "teacher_name"));
+    let initialPassword = String(userImportCell(row, header.columns, "password") || (username ? username.slice(-6) : "") || "123456");
+    if (initialPassword.length < 6) initialPassword = "123456";
+    const status = normalizeImportedUserStatus(userImportCell(row, header.columns, "status"));
+    if (username && displayName) {
+      rows.push({
+        username,
+        display_name: displayName,
+        role,
+        teacher_name: teacherName,
+        initial_password: initialPassword,
+        status,
+        sheet: sheet.sheet_name,
+        source_row: row.source_row,
+      });
     }
   }
   const seen = new Set();
   return rows.filter((row) => {
-    const key = row.phone || row.name;
+    const key = row.username;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -6080,16 +6232,17 @@ function importTeacherUsersFromTemplate(actor, options = {}) {
   let updated = 0;
   const accounts = [];
   for (const row of rows) {
-    upsertTeacherProfileFromAccount(row.name, row.phone);
-    const username = row.phone;
-    const initialPassword = row.phone.slice(-6);
+    if (!actorCanManageUser(actor, row.role)) continue;
+    if (row.role === "teacher") upsertTeacherProfileFromAccount(row.teacher_name || row.display_name, row.username);
+    const username = row.username;
+    const initialPassword = row.initial_password;
     const existing = get("SELECT * FROM users WHERE username = ?", [username]);
     if (existing) {
       const payload = {
-        display_name: row.name,
-        role: "teacher",
-        teacher_name: row.name,
-        status: "active",
+        display_name: row.display_name,
+        role: row.role,
+        teacher_name: row.role === "teacher" ? (row.teacher_name || row.display_name) : row.teacher_name,
+        status: row.status,
         updated_at: new Date().toISOString(),
       };
       if (resetPassword) payload.password_hash = passwordHash(initialPassword);
@@ -6098,11 +6251,11 @@ function importTeacherUsersFromTemplate(actor, options = {}) {
     } else {
       db.prepare(`
         INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
-        VALUES (?, ?, 'teacher', ?, ?, 'active')
-      `).run(username, row.name, row.name, passwordHash(initialPassword));
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(username, row.display_name, row.role, row.role === "teacher" ? (row.teacher_name || row.display_name) : row.teacher_name, passwordHash(initialPassword), row.status);
       created += 1;
     }
-    accounts.push({ username, display_name: row.name, teacher_name: row.name, initial_password: initialPassword });
+    accounts.push({ username, display_name: row.display_name, role: row.role, teacher_name: row.teacher_name, status: row.status, initial_password: initialPassword });
   }
   return { ok: true, created, updated, total: rows.length, accounts, backup };
 }
@@ -7855,6 +8008,40 @@ function copyLessons(body) {
   });
 }
 
+function deleteLessonsBatch(ids) {
+  const lessonIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
+  if (!lessonIds.length) return { error: "ids required", status: 400 };
+  if (lessonIds.length > 500) return { error: "single batch capped at 500 rows", status: 400 };
+  return withTransaction(() => {
+    const placeholders = lessonIds.map(() => "?").join(",");
+    const rows = all(`SELECT * FROM lessons WHERE id IN (${placeholders}) ORDER BY date, teacher_name, time_slot, id`, lessonIds);
+    const foundIds = new Set(rows.map((row) => Number(row.id)));
+    const missing = lessonIds.filter((id) => !foundIds.has(id));
+    const del = db.prepare("DELETE FROM lessons WHERE id = ?");
+    for (const row of rows) del.run(Number(row.id));
+    return { ok: true, deleted: rows.length, missing, lessons: rows };
+  });
+}
+
+function createLessonsBatch(rows) {
+  const items = Array.isArray(rows) ? rows : [];
+  if (!items.length) return { error: "lessons required", status: 400 };
+  if (items.length > 200) return { error: "single batch capped at 200 rows", status: 400 };
+  return withTransaction(() => {
+    const created = [];
+    for (const item of items) {
+      if (!validDateKey(text(item.date))) {
+        return { error: `目标日期无效：${text(item.date) || "空"}`, status: 400 };
+      }
+      created.push(insertLesson({
+        ...item,
+        month_key: text(item.month_key) || monthKeyFromDate(item.date) || getSetting("month_key"),
+      }));
+    }
+    return { ok: true, created: created.length, lessons: created };
+  });
+}
+
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
     return sendJson(res, { user: currentUser(req), roles: USER_ROLES });
@@ -7881,6 +8068,7 @@ async function handleApi(req, res, url) {
     const result = changeOwnPassword(user, body.current_password, body.new_password);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "change_password", entity_type: "users", entity_id: String(user.id), before: null, after: { id: user.id, username: user.username } });
+    writeOperationLog(user, { operation_type: "修改密码", operation_content: `修改了账号 ${user.username} 的登录密码`, target_type: "users", target_id: String(user.id) });
     return sendJson(res, result);
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
@@ -7975,16 +8163,31 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/users") {
     return sendJson(res, { users: userRows(user), roles: USER_ROLES });
   }
+  if (req.method === "GET" && url.pathname === "/api/users/import-template.xlsx") {
+    return sendBuffer(
+      res,
+      multiSheetXlsxBuffer(userImportTemplateSheets()),
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "黎明教育_账号导入模板.xlsx",
+    );
+  }
   if (req.method === "POST" && url.pathname === "/api/users") {
     const result = createUser(user, await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "users", entity_id: String(result.id), before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增账号", operation_content: userOperationText(result), target_type: "users", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
   if (req.method === "POST" && url.pathname === "/api/users/import-teachers-template") {
     const result = importTeacherUsersFromTemplate(user, await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "import_teacher_users", entity_type: "users", entity_id: "teacher_template", before: null, after: { created: result.created, updated: result.updated, total: result.total, backup: result.backup } });
+    writeOperationLog(user, {
+      operation_type: "从模板导入账号",
+      operation_content: `处理 ${result.total || 0} 行，新增 ${result.created || 0} 个账号，更新 ${result.updated || 0} 个账号`,
+      target_type: "users",
+      target_id: "teacher_template",
+    });
     return sendJson(res, result);
   }
   const userMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
@@ -7993,6 +8196,7 @@ async function handleApi(req, res, url) {
     const result = patchUser(user, Number(userMatch[1]), await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "users", entity_id: String(userMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "修改账号", operation_content: userOperationText(result), target_type: "users", target_id: String(userMatch[1]) });
     return sendJson(res, result);
   }
   const userPasswordMatch = url.pathname.match(/^\/api\/users\/(\d+)\/password$/);
@@ -8001,6 +8205,8 @@ async function handleApi(req, res, url) {
     const result = resetUserPassword(user, Number(userPasswordMatch[1]), body.password);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "reset_password", entity_type: "users", entity_id: String(userPasswordMatch[1]), before: null, after: { ok: true } });
+    const target = get("SELECT id, username, display_name FROM users WHERE id = ?", [Number(userPasswordMatch[1])]);
+    writeOperationLog(user, { operation_type: "重置密码", operation_content: `重置了账号 ${target?.username || userPasswordMatch[1]} 的密码`, target_type: "users", target_id: String(userPasswordMatch[1]) });
     return sendJson(res, result);
   }
 
@@ -8035,8 +8241,8 @@ async function handleApi(req, res, url) {
     if (operator_account) { conditions.push("operator_account LIKE ?"); params.push(`%${operator_account}%`); }
     if (operation_type) { conditions.push("operation_type LIKE ?"); params.push(`%${operation_type}%`); }
     if (content) { conditions.push("operation_content LIKE ?"); params.push(`%${content}%`); }
-    if (start_date) { conditions.push("created_at >= ?"); params.push(start_date); }
-    if (end_date) { conditions.push("created_at <= ?"); params.push(end_date + " 23:59:59"); }
+    if (start_date) { conditions.push("datetime(created_at, '+8 hours') >= ?"); params.push(`${start_date} 00:00:00`); }
+    if (end_date) { conditions.push("datetime(created_at, '+8 hours') <= ?"); params.push(`${end_date} 23:59:59`); }
     const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
     const page_size = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 10));
@@ -8071,6 +8277,12 @@ async function handleApi(req, res, url) {
       skip_teacher_adjustments: body.skip_teacher_adjustments === true,
     });
     recordAuditEvent(req, user, { action: "import", entity_type: "source_workbook", entity_id: text(body.filename), before: null, after: result });
+    writeOperationLog(user, {
+      operation_type: body.append === true ? "追加导入月份数据" : "覆盖导入月份数据",
+      operation_content: `${path.basename(text(body.filename))} ${result.month_key}：课程 ${result.lessons || 0} 条，充值 ${result.recharges || 0} 条，学生单价 ${result.student_prices || 0} 条，费用标准 ${result.pricing_standards || 0} 条`,
+      target_type: "source_workbook",
+      target_id: text(body.filename),
+    });
     return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/reconcile/internal-only-lessons/preview") {
@@ -8102,6 +8314,12 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const result = applyAuditIssues(body.issues || [], body.confirm_critical === true);
     recordAuditEvent(req, user, { action: "audit_apply", entity_type: "audit_logs", entity_id: "batch", before: { issues: (body.issues || []).length }, after: result });
+    writeOperationLog(user, {
+      operation_type: "应用对账修复",
+      operation_content: `处理 ${body.issues?.length || 0} 项，修复 ${result.fixed || 0} 项，跳过 ${result.skipped || 0} 项`,
+      target_type: "audit_logs",
+      target_id: "batch",
+    });
     return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/audit/ignore") {
@@ -8224,6 +8442,7 @@ async function handleApi(req, res, url) {
     const result = createTeacherProfile(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "teachers", entity_id: String(result.id), before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增老师", operation_content: teacherOperationText(result), target_type: "teachers", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
   if (req.method === "POST" && url.pathname === "/api/teachers/backfill-joined-at") {
@@ -8249,6 +8468,7 @@ async function handleApi(req, res, url) {
     const result = createStudentProfile(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "students", entity_id: String(result.id), before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增学生", operation_content: studentOperationText(result), target_type: "students", target_id: String(result.id) });
     return sendJson(res, { ...result, warnings: studentWarnings(result.name, result.grade) }, 201);
   }
   if (req.method === "POST" && url.pathname === "/api/students/backfill-joined-at") {
@@ -8268,6 +8488,7 @@ async function handleApi(req, res, url) {
     const result = createStaff(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "staff", entity_id: String(result.id), before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增员工", operation_content: [result.name, result.role, result.status].map(text).filter(Boolean).join(" "), target_type: "staff", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
   const staffMatch = url.pathname.match(/^\/api\/staff\/(\d+)$/);
@@ -8277,6 +8498,7 @@ async function handleApi(req, res, url) {
     if (!result) return sendError(res, 404, "staff not found");
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "staff", entity_id: String(staffMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "修改员工", operation_content: [result.name, result.role, result.status].map(text).filter(Boolean).join(" "), target_type: "staff", target_id: String(staffMatch[1]) });
     return sendJson(res, result);
   }
   if (staffMatch && req.method === "DELETE") {
@@ -8284,6 +8506,7 @@ async function handleApi(req, res, url) {
     const result = deleteStaff(Number(staffMatch[1]));
     if (!result) return sendError(res, 404, "staff not found");
     recordAuditEvent(req, user, { action: "delete", entity_type: "staff", entity_id: String(staffMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "删除员工", operation_content: [before?.name, before?.role].map(text).filter(Boolean).join(" "), target_type: "staff", target_id: String(staffMatch[1]) });
     return sendJson(res, result);
   }
 
@@ -8298,11 +8521,14 @@ async function handleApi(req, res, url) {
     const result = upsertStaffSalary(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "staff_salary", entity_id: `${body.staff_id}|${text(body.month_key || getSetting("month_key"))}`, before, after: result });
+    writeOperationLog(user, { operation_type: before ? "修改员工薪资" : "新增员工薪资", operation_content: `员工ID ${body.staff_id} ${text(body.month_key || getSetting("month_key"))}`, target_type: "staff_salary", target_id: `${body.staff_id}|${text(body.month_key || getSetting("month_key"))}` });
     return sendJson(res, result);
   }
   const staffSalaryMatch = url.pathname.match(/^\/api\/staff-salary\/(\d+)$/);
   if (staffSalaryMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM staff_salary_monthly WHERE id = ?", [Number(staffSalaryMatch[1])]);
     const result = auditedDelete(req, user, "staff_salary_monthly", "id", Number(staffSalaryMatch[1]), "staff_salary");
+    writeOperationLog(user, { operation_type: "删除员工薪资", operation_content: `员工ID ${before?.staff_id || ""} ${before?.month_key || ""}`, target_type: "staff_salary", target_id: String(staffSalaryMatch[1]) });
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
   }
 
@@ -8317,6 +8543,7 @@ async function handleApi(req, res, url) {
     const result = upsertStaffAttendance(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "staff_attendance", entity_id: `${body.staff_id}|${text(body.attendance_date)}`, before, after: result });
+    writeOperationLog(user, { operation_type: before ? "修改员工考勤" : "新增员工考勤", operation_content: `员工ID ${body.staff_id} ${text(body.attendance_date)} ${text(body.status)}`, target_type: "staff_attendance", target_id: `${body.staff_id}|${text(body.attendance_date)}` });
     return sendJson(res, result, 201);
   }
   if (req.method === "DELETE" && url.pathname === "/api/staff-attendance") {
@@ -8324,6 +8551,7 @@ async function handleApi(req, res, url) {
     const result = deleteStaffAttendance(Number(url.searchParams.get("staff_id")), url.searchParams.get("date"));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "delete", entity_type: "staff_attendance", entity_id: `${url.searchParams.get("staff_id")}|${url.searchParams.get("date")}`, before, after: result });
+    writeOperationLog(user, { operation_type: "删除员工考勤", operation_content: `员工ID ${url.searchParams.get("staff_id")} ${url.searchParams.get("date")}`, target_type: "staff_attendance", target_id: `${url.searchParams.get("staff_id")}|${url.searchParams.get("date")}` });
     return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/staff-attendance-batch") {
@@ -8348,6 +8576,7 @@ async function handleApi(req, res, url) {
       return { upserted, deleted, errors };
     });
     recordAuditEvent(req, user, { action: "batch_attendance", entity_type: "staff_attendance", entity_id: "batch", before: { count: items.length }, after: result });
+    writeOperationLog(user, { operation_type: "批量修改员工考勤", operation_content: `处理 ${items.length} 条，新增/修改 ${result.upserted || 0} 条，删除 ${result.deleted || 0} 条`, target_type: "staff_attendance", target_id: "batch" });
     return sendJson(res, result);
   }
 
@@ -8356,6 +8585,7 @@ async function handleApi(req, res, url) {
     const result = createExpense(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "operating_expenses", entity_id: String(result.id), before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增日常开销", operation_content: `${result.expense_date} ${result.category} ¥${result.amount} ${text(result.vendor)}`, target_type: "operating_expenses", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
   const expenseMatch = url.pathname.match(/^\/api\/operating-expenses\/(\d+)$/);
@@ -8365,10 +8595,13 @@ async function handleApi(req, res, url) {
     if (!result) return sendError(res, 404, "expense not found");
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "operating_expenses", entity_id: String(expenseMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "修改日常开销", operation_content: `${result.expense_date} ${result.category} ¥${result.amount} ${text(result.vendor)}`, target_type: "operating_expenses", target_id: String(expenseMatch[1]) });
     return sendJson(res, result);
   }
   if (expenseMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM operating_expenses WHERE id = ?", [Number(expenseMatch[1])]);
     const result = auditedDelete(req, user, "operating_expenses", "id", Number(expenseMatch[1]), "operating_expenses");
+    writeOperationLog(user, { operation_type: "删除日常开销", operation_content: `${before?.expense_date || ""} ${before?.category || ""} ¥${before?.amount || 0}`, target_type: "operating_expenses", target_id: String(expenseMatch[1]) });
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
   }
 
@@ -8447,6 +8680,7 @@ async function handleApi(req, res, url) {
           sheet_name: result.sheet_name,
         },
       });
+      writeOperationLog(user, { operation_type: "导入学生期初余额", operation_content: `成功 ${result.imported || 0} 条，跳过 ${result.skipped || 0} 条，失败 ${result.failed || 0} 条`, target_type: "student_opening_balances", target_id: "xlsx" });
       return sendJson(res, result);
     } catch (error) {
       return sendError(res, 400, error.message || "导入期初余额失败");
@@ -8477,6 +8711,7 @@ async function handleApi(req, res, url) {
     const result = createOpeningBalance(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "student_opening_balances", entity_id: String(result.id), before: null, after: result.row });
+    writeOperationLog(user, { operation_type: "新增学生期初余额", operation_content: studentOperationText(result.row), target_type: "student_opening_balances", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
   const openingBalanceMatch = url.pathname.match(/^\/api\/opening-balances\/(\d+)$/);
@@ -8491,11 +8726,14 @@ async function handleApi(req, res, url) {
       before: result.before,
       after: result.deleted ? { deleted: true } : result.row,
     });
+    writeOperationLog(user, { operation_type: result.deleted ? "删除学生期初余额" : "修改学生期初余额", operation_content: studentOperationText(result.row || result.before), target_type: "student_opening_balances", target_id: String(id) });
     return sendJson(res, result);
   }
   if (openingBalanceMatch && req.method === "DELETE") {
     const id = Number(openingBalanceMatch[1]);
+    const before = get("SELECT * FROM student_opening_balances WHERE id = ?", [id]);
     const result = auditedDelete(req, user, "student_opening_balances", "id", id, "student_opening_balances");
+    writeOperationLog(user, { operation_type: "删除学生期初余额", operation_content: studentOperationText(before), target_type: "student_opening_balances", target_id: String(id) });
     return sendJson(res, { ok: true, deleted: (result.changes || 0) > 0 });
   }
 
@@ -8510,7 +8748,22 @@ async function handleApi(req, res, url) {
     const result = copyLessons(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "copy", entity_type: "lessons", entity_id: "batch", before: body, after: result });
+    writeOperationLog(user, { operation_type: body.pairs ? "整周复制课程" : "批量复制课程", operation_content: `复制新增 ${result.created || 0} 节课程`, target_type: "lessons", target_id: (result.lessons || []).map((row) => row.id).join(",") });
     return sendJson(res, result, 201);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/lessons/batch-delete") {
+    const body = await readBody(req);
+    const result = deleteLessonsBatch(body.ids || body.lesson_ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "batch_delete", entity_type: "lessons", entity_id: "batch", before: { ids: body.ids || body.lesson_ids || [] }, after: { deleted: result.deleted, missing: result.missing } });
+    writeOperationLog(user, {
+      operation_type: "批量删除课程",
+      operation_content: `批量删除课程 ${result.deleted || 0} 条${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      target_type: "lessons",
+      target_id: (result.lessons || []).map((row) => row.id).join(","),
+    });
+    return sendJson(res, result);
   }
 
   if (req.method === "POST" && url.pathname === "/api/lessons/batch-mark-completed") {
@@ -8520,6 +8773,20 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: "batch_mark_completed", entity_type: "lessons", entity_id: "batch", before: { ids: body.ids || [] }, after: { updated: result.updated } });
     writeOperationLog(user, { operation_type: "批量标记已上", operation_content: `已将 ${result.updated} 节课程标记为已上`, target_type: "lessons", target_id: (body.ids || []).map(Number).filter(Boolean).join(",") });
     return sendJson(res, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/lessons/batch-create") {
+    const body = await readBody(req);
+    const result = createLessonsBatch(body.lessons || body.rows);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "batch_create", entity_type: "lessons", entity_id: "batch", before: { count: (body.lessons || body.rows || []).length }, after: { created: result.created } });
+    writeOperationLog(user, {
+      operation_type: "批量复制课程",
+      operation_content: `批量新增课程 ${result.created || 0} 条`,
+      target_type: "lessons",
+      target_id: (result.lessons || []).map((row) => row.id).join(","),
+    });
+    return sendJson(res, result, 201);
   }
 
   if (req.method === "POST" && url.pathname === "/api/lessons") {
@@ -8587,6 +8854,7 @@ async function handleApi(req, res, url) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
     const after = auditedPatchTable(req, user, "teachers", "id", Number(teacherIdMatch[1]), ["name", "phone", "notes", "status", "joined_at", "left_at"], payload, "teachers");
+    writeOperationLog(user, { operation_type: "修改老师档案", operation_content: teacherOperationText(after), target_type: "teachers", target_id: String(teacherIdMatch[1]) });
     return sendJson(res, after);
   }
   if (teacherIdMatch && req.method === "DELETE") {
@@ -8594,6 +8862,7 @@ async function handleApi(req, res, url) {
     const result = deleteTeacherProfile(Number(teacherIdMatch[1]));
     if (!result) return sendError(res, 404, "teacher not found");
     recordAuditEvent(req, user, { action: "delete", entity_type: "teachers", entity_id: String(teacherIdMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "删除老师", operation_content: teacherOperationText(before), target_type: "teachers", target_id: String(teacherIdMatch[1]) });
     return sendJson(res, result);
   }
 
@@ -8611,6 +8880,7 @@ async function handleApi(req, res, url) {
       "name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at",
     ], payload, "students");
     const row = get("SELECT * FROM students WHERE id = ?", [Number(studentIdMatch[1])]);
+    writeOperationLog(user, { operation_type: "修改学生档案", operation_content: studentOperationText(row), target_type: "students", target_id: String(studentIdMatch[1]) });
     return sendJson(res, { ...row, warnings: studentWarnings(row.name, row.grade) });
   }
   if (studentIdMatch && req.method === "DELETE") {
@@ -8618,6 +8888,7 @@ async function handleApi(req, res, url) {
     const result = deleteStudentProfile(Number(studentIdMatch[1]));
     if (!result) return sendError(res, 404, "student not found");
     recordAuditEvent(req, user, { action: "delete", entity_type: "students", entity_id: String(studentIdMatch[1]), before, after: result });
+    writeOperationLog(user, { operation_type: "删除学生", operation_content: studentOperationText(before), target_type: "students", target_id: String(studentIdMatch[1]) });
     return sendJson(res, result);
   }
 
@@ -8634,6 +8905,7 @@ async function handleApi(req, res, url) {
     `).run(studentName, grade);
     const after = get("SELECT * FROM students WHERE name = ?", [studentName]);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "students", entity_id: studentName, before, after });
+    writeOperationLog(user, { operation_type: "修改学生年级", operation_content: studentOperationText(after), target_type: "students", target_id: studentName });
     return sendJson(res, { ok: true, student_name: studentName, grade, warnings: studentWarnings(studentName, grade) });
   }
 
@@ -8641,6 +8913,7 @@ async function handleApi(req, res, url) {
   if (pricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
     const row = auditedPatchTable(req, user, "pricing_standards", "id", Number(pricingMatch[1]), ["unit_price", "description"], body, "pricing_standards");
+    writeOperationLog(user, { operation_type: "修改费用标准", operation_content: pricingOperationText(row), target_type: "pricing_standards", target_id: String(pricingMatch[1]) });
     return sendJson(res, row);
   }
 
@@ -8649,6 +8922,7 @@ async function handleApi(req, res, url) {
     const result = recomputePricing(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "recompute", entity_type: "pricing", entity_id: "batch", before: body, after: result });
+    writeOperationLog(user, { operation_type: "重新计算费用", operation_content: `重算结果：${JSON.stringify(result).slice(0, 180)}`, target_type: "pricing", target_id: "batch" });
     return sendJson(res, result);
   }
 
@@ -8694,6 +8968,7 @@ async function handleApi(req, res, url) {
       WHERE student_name = ? AND grade = ? AND subject = ? AND student_names = ?
     `, [payload.student_name, payload.grade, payload.subject, payload.student_names]);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "student_pricing", entity_id: `${payload.student_name}|${payload.grade}|${payload.subject}|${payload.student_names}`, before: null, after: row });
+    writeOperationLog(user, { operation_type: result.changes ? "新增/修改学生单价" : "修改学生单价", operation_content: `${payload.student_name} ${payload.grade} ${payload.subject} ${payload.student_names} ¥${payload.custom_price}`, target_type: "student_pricing", target_id: String(row.id) });
     return sendJson(res, { id: Number(row.id), ok: true, warnings: pricingWarnings(row) }, 201);
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
@@ -8705,10 +8980,13 @@ async function handleApi(req, res, url) {
     const payload = { ...body };
     if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);
     const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "grade", "subject", "student_names", "custom_price", "notes"], payload, "student_pricing");
+    writeOperationLog(user, { operation_type: "修改学生单价", operation_content: `${row.student_name} ${row.grade} ${row.subject} ${row.student_names} ¥${row.custom_price}`, target_type: "student_pricing", target_id: String(studentPricingMatch[1]) });
     return sendJson(res, { ...row, warnings: pricingWarnings(row) });
   }
   if (studentPricingMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM student_pricing WHERE id = ?", [Number(studentPricingMatch[1])]);
     auditedDelete(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), "student_pricing");
+    writeOperationLog(user, { operation_type: "删除学生单价", operation_content: `${before?.student_name || ""} ${before?.grade || ""} ${before?.subject || ""} ${before?.student_names || ""}`, target_type: "student_pricing", target_id: String(studentPricingMatch[1]) });
     return sendJson(res, { ok: true });
   }
 
@@ -8730,6 +9008,7 @@ async function handleApi(req, res, url) {
         return refreshCarryOverAfter(monthKey);
       });
       recordAuditEvent(req, user, { action: "delete_zero_recharge", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: null, carry_over: result } });
+      writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${studentName} ${monthKey}`, target_type: "recharge_records", target_id: String(before.id) });
       return sendJson(res, { ok: true, deleted: true, carry_over: result });
     }
     const result = withTransaction(() => {
@@ -8765,6 +9044,7 @@ async function handleApi(req, res, url) {
     });
     const after = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [studentName, monthKey]);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: after, carry_over: result } });
+    writeOperationLog(user, { operation_type: before ? "修改充值记录" : "新增充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(after?.id || `${studentName}|${monthKey}`) });
     return sendJson(res, { ok: true, carry_over: result });
   }
 
@@ -8790,6 +9070,7 @@ async function handleApi(req, res, url) {
     }
     const after = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
+    writeOperationLog(user, { operation_type: after ? "修改学生课次费用" : "删除学生课次费用", operation_content: `课程ID ${lessonId} ${studentName} ${after ? `¥${after.unit_price}` : ""}`, target_type: "fee_overrides", target_id: `${lessonId}|${studentName}` });
     return sendJson(res, { ok: true });
   }
 
@@ -8819,6 +9100,7 @@ async function handleApi(req, res, url) {
     );
     const after = get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [text(body.teacher_name), monthKey]);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "teacher_adjustments", entity_id: `${text(body.teacher_name)}|${monthKey}`, before, after });
+    writeOperationLog(user, { operation_type: before ? "修改教师交通补贴" : "新增教师交通补贴", operation_content: `${text(body.teacher_name)} ${monthKey} 合计 ${num(after?.week1_transport) + num(after?.week2_transport) + num(after?.week3_transport) + num(after?.week4_transport)}`, target_type: "teacher_adjustments", target_id: `${text(body.teacher_name)}|${monthKey}` });
     return sendJson(res, { ok: true });
   }
 
