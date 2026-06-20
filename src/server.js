@@ -40,11 +40,178 @@ const ATTENDANCE_PAY_UNITS = {
   旷工: 0,
 };
 const USER_ROLES = {
-  owner: "Qing",
-  admin: "管理员",
+  owner: "老板",
   academic: "教务",
-  finance: "财务",
+  helper: "小助手",
+  assistant: "助教",
   teacher: "老师",
+};
+const ROLE_ALIASES = new Map([
+  ["boss", "owner"],
+  ["owner", "owner"],
+  ["qing", "owner"],
+  ["老板", "owner"],
+  ["admin", "owner"],
+  ["管理员", "owner"],
+  ["jiaowu", "academic"],
+  ["academic", "academic"],
+  ["教务", "academic"],
+  ["finance", "helper"],
+  ["财务", "helper"],
+  ["helper", "helper"],
+  ["小助手", "helper"],
+  ["teacher", "teacher"],
+  ["老师", "teacher"],
+  ["教师", "teacher"],
+  ["assistant", "assistant"],
+  ["助教", "assistant"],
+]);
+const SYSTEM_ROLE_DEFS = [
+  { code: "owner", name: "老板", description: "系统最高权限，兼容 boss/admin 历史角色", is_system: 1, readonly: 0 },
+  { code: "academic", name: "教务", description: "教务排课与学生、教师、经营数据管理", is_system: 1, readonly: 0 },
+  { code: "helper", name: "小助手", description: "日常课程、学生费用与充值录入查询，兼容 finance 历史角色", is_system: 1, readonly: 1 },
+  { code: "assistant", name: "助教", description: "课程查看、学生查询与教务辅助", is_system: 1, readonly: 1 },
+  { code: "teacher", name: "老师", description: "按页面权限查看课程和教师明细", is_system: 1, readonly: 1 },
+];
+const SYSTEM_ROLE_CODES = SYSTEM_ROLE_DEFS.map((role) => role.code);
+const PERMISSION_TREE = [
+  { key: "dashboard", label: "首页" },
+  {
+    key: "schedule",
+    label: "排课",
+    children: [
+      { key: "lessons", label: "课程总表" },
+      { key: "week", label: "周课表" },
+      { key: "weekMatrix", label: "矩阵课表" },
+      { key: "courseNotice", label: "家长群课程截图" },
+      { key: "teacherCourseNotice", label: "老师课程截图" },
+    ],
+  },
+  {
+    key: "students",
+    label: "学生",
+    children: [
+      { key: "feeDetails", label: "费用明细" },
+      { key: "summary", label: "费用汇总" },
+      { key: "recharges", label: "充值记录" },
+      { key: "openingBalances", label: "期初余额" },
+      { key: "studentQuery", label: "学生查询" },
+      { key: "studentPricing", label: "学生单价" },
+      { key: "studentProfiles", label: "学生档案" },
+    ],
+  },
+  {
+    key: "teachers",
+    label: "教师",
+    children: [
+      { key: "teacherProfiles", label: "教师档案" },
+      { key: "teacherSalary", label: "教师薪资" },
+      { key: "teacherDetail", label: "教师薪资明细" },
+      { key: "teacherSalaryRules", label: "教师薪资规则" },
+    ],
+  },
+  {
+    key: "operations",
+    label: "运营",
+    children: [
+      { key: "staffPayroll", label: "员工薪资" },
+      { key: "staffAttendance", label: "员工考勤" },
+      { key: "expenses", label: "开销管理" },
+    ],
+  },
+  { key: "finance", label: "经营总览" },
+  {
+    key: "settings",
+    label: "设置",
+    children: [
+      { key: "appearance", label: "外观设置" },
+      { key: "baseData", label: "基础数据" },
+      { key: "pricing", label: "费用标准" },
+      { key: "audit", label: "数据对账" },
+      { key: "operationLogs", label: "操作日志" },
+      { key: "userAdmin", label: "账号权限" },
+    ],
+  },
+];
+const PAGE_PERMISSION_KEYS = (() => {
+  const keys = [];
+  const visit = (node) => {
+    if (node.children?.length) node.children.forEach(visit);
+    else keys.push(node.key);
+  };
+  PERMISSION_TREE.forEach(visit);
+  return keys;
+})();
+const FILTER_PRESET_VIEW_KEYS = [
+  "lessons",
+  "week",
+  "weekMatrix",
+  "summary",
+  "recharges",
+  "teacherProfiles",
+  "teacherDetail",
+];
+const FILTER_PRESET_DATE_KEYS = new Set(["start_date", "end_date"]);
+const FILTER_PRESET_TEACHER_KEYS = new Set(["teacher_names"]);
+const DATE_PRESET_RULES = new Set([
+  "unlimited",
+  "today",
+  "yesterday",
+  "tomorrow",
+  "this_week_monday",
+  "last_week_monday",
+  "next_week_monday",
+  "this_week_sunday",
+  "last_week_sunday",
+  "next_week_sunday",
+  "this_month_first",
+  "last_month_first",
+  "next_month_first",
+  "this_month_last",
+  "last_month_last",
+  "next_month_last",
+  "this_year_first",
+  "this_year_last",
+  "fixed",
+]);
+const DEFAULT_ROLE_PERMISSIONS = {
+  owner: PAGE_PERMISSION_KEYS,
+  academic: [
+    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles",
+    "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules",
+    "finance", "appearance", "baseData", "pricing", "operationLogs",
+  ],
+  helper: [
+    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles",
+  ],
+  assistant: [
+    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "studentQuery", "studentProfiles", "teacherProfiles",
+  ],
+  teacher: ["lessons", "teacherDetail", "teacherProfiles", "appearance"],
+};
+const AREA_PERMISSION_KEYS = {
+  dashboard: ["dashboard"],
+  schedule: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  scheduleRead: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  students: ["feeDetails", "summary", "studentQuery", "studentProfiles", "studentPricing", "recharges", "openingBalances"],
+  profiles: ["studentProfiles", "teacherProfiles"],
+  pricing: ["pricing", "studentPricing"],
+  teacherTransport: ["teacherSalary"],
+  teacherSalary: ["teacherSalary"],
+  salary: ["teacherSalary", "teacherSalaryRules"],
+  finance: ["finance"],
+  expenses: ["expenses"],
+  recharges: ["recharges"],
+  studentBilling: ["feeDetails", "summary", "studentQuery"],
+  staff: ["staffPayroll", "staffAttendance"],
+  audit: ["audit"],
+  operationLogs: ["operationLogs"],
+  users: ["userAdmin"],
+  roles: ["userAdmin"],
+  coreExport: ["audit"],
 };
 const GRADES = [
   { name: "初一", color: "#E8F5E9" },
@@ -187,8 +354,7 @@ function initDb() {
       recharge_date TEXT DEFAULT '',
       notes TEXT DEFAULT '',
       source TEXT DEFAULT '',
-      month_key TEXT DEFAULT '',
-      UNIQUE (student_name, month_key)
+      month_key TEXT DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS student_opening_balances (
@@ -321,10 +487,73 @@ function initDb() {
       display_name TEXT NOT NULL DEFAULT '',
       role TEXT NOT NULL DEFAULT 'academic',
       teacher_name TEXT DEFAULT '',
+      readonly_override INTEGER DEFAULT NULL,
+      permission_override_enabled INTEGER NOT NULL DEFAULT 0,
       password_hash TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS roles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      is_system INTEGER NOT NULL DEFAULT 0,
+      readonly INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS role_permissions (
+      role_code TEXT NOT NULL,
+      permission_key TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (role_code, permission_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS role_filter_presets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role_code TEXT NOT NULL,
+      view_key TEXT NOT NULL,
+      filter_key TEXT NOT NULL,
+      filter_value_json TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (role_code, view_key, filter_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_teacher_bindings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      teacher_name TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (user_id, teacher_name),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS user_page_permissions (
+      user_id INTEGER NOT NULL,
+      permission_key TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, permission_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS user_filter_presets (
+      user_id INTEGER NOT NULL,
+      view_key TEXT NOT NULL,
+      filter_key TEXT NOT NULL,
+      filter_value_json TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, view_key, filter_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS parent_message_greetings (
@@ -396,6 +625,38 @@ function initDb() {
   if (!rechargeColumns.includes("source")) {
     db.prepare("ALTER TABLE recharge_records ADD COLUMN source TEXT DEFAULT ''").run();
   }
+  const rechargeTableSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recharge_records'")?.sql);
+  if (/UNIQUE\s*\(\s*student_name\s*,\s*month_key\s*\)/i.test(rechargeTableSql)) {
+    withTransaction(() => {
+      db.prepare("ALTER TABLE recharge_records RENAME TO recharge_records_unique_legacy").run();
+      db.exec(`
+        CREATE TABLE recharge_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          student_name TEXT NOT NULL,
+          grade TEXT DEFAULT '',
+          prev_actual REAL DEFAULT 0,
+          prev_gift REAL DEFAULT 0,
+          cur_recharge REAL DEFAULT 0,
+          cur_gift REAL DEFAULT 0,
+          recharge_date TEXT DEFAULT '',
+          notes TEXT DEFAULT '',
+          source TEXT DEFAULT '',
+          month_key TEXT DEFAULT ''
+        );
+      `);
+      db.prepare(`
+        INSERT INTO recharge_records(
+          id, student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
+          recharge_date, notes, source, month_key
+        )
+        SELECT id, student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
+               recharge_date, notes, source, month_key
+        FROM recharge_records_unique_legacy
+      `).run();
+      db.prepare("DROP TABLE recharge_records_unique_legacy").run();
+    });
+  }
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_recharge_records_month_student ON recharge_records(month_key, student_name)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_opening_balances_student ON student_opening_balances(student_name)").run();
 
   const studentPricingSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'student_pricing'")?.sql);
@@ -474,6 +735,57 @@ function initDb() {
   }
   db.prepare("UPDATE students SET status = '在读' WHERE status IS NULL OR TRIM(status) = ''").run();
 
+  const roleColumns = db.prepare("PRAGMA table_info(roles)").all().map((column) => column.name);
+  if (!roleColumns.includes("readonly")) {
+    db.prepare("ALTER TABLE roles ADD COLUMN readonly INTEGER NOT NULL DEFAULT 1").run();
+    for (const role of SYSTEM_ROLE_DEFS) {
+      db.prepare("UPDATE roles SET readonly = ? WHERE code = ?").run(Number(role.readonly) ? 1 : 0, role.code);
+    }
+  }
+
+  const userColumns = db.prepare("PRAGMA table_info(users)").all().map((column) => column.name);
+  if (!userColumns.includes("readonly_override")) {
+    db.prepare("ALTER TABLE users ADD COLUMN readonly_override INTEGER DEFAULT NULL").run();
+  }
+  if (!userColumns.includes("permission_override_enabled")) {
+    db.prepare("ALTER TABLE users ADD COLUMN permission_override_enabled INTEGER NOT NULL DEFAULT 0").run();
+  }
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_user_teacher_bindings_user ON user_teacher_bindings(user_id)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_role_filter_presets_role_view ON role_filter_presets(role_code, view_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_user_filter_presets_user_view ON user_filter_presets(user_id, view_key)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_user_page_permissions_user ON user_page_permissions(user_id)").run();
+  const userTeacherBindingMigrationKey = "user_teacher_bindings_from_legacy_v1";
+  const userTeacherBindingMigrated = text(get("SELECT value FROM settings WHERE key = ?", [userTeacherBindingMigrationKey])?.value) === "1";
+  if (!userTeacherBindingMigrated) {
+    db.prepare(`
+      INSERT OR IGNORE INTO user_teacher_bindings(user_id, teacher_name)
+      SELECT id, TRIM(teacher_name)
+      FROM users
+      WHERE TRIM(COALESCE(teacher_name, '')) <> ''
+    `).run();
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(userTeacherBindingMigrationKey);
+  }
+  const splitLegacyTeacherBindingKey = "user_teacher_bindings_split_legacy_v2";
+  const splitLegacyTeacherBindingDone = text(get("SELECT value FROM settings WHERE key = ?", [splitLegacyTeacherBindingKey])?.value) === "1";
+  if (!splitLegacyTeacherBindingDone) {
+    const insertBinding = db.prepare("INSERT OR IGNORE INTO user_teacher_bindings(user_id, teacher_name) VALUES (?, ?)");
+    for (const row of all("SELECT id, teacher_name FROM users WHERE TRIM(COALESCE(teacher_name, '')) <> ''")) {
+      const names = normalizeTeacherNameList(row.teacher_name);
+      if (!names.length) continue;
+      for (const name of names) insertBinding.run(Number(row.id), name);
+      if (names.length > 1 || text(row.teacher_name) !== names[0]) {
+        db.prepare("UPDATE users SET teacher_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(names[0], Number(row.id));
+      }
+    }
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(splitLegacyTeacherBindingKey);
+  }
+
   const lessonColumns = db.prepare("PRAGMA table_info(lessons)").all().map((column) => column.name);
   if (!lessonColumns.includes("status")) {
     db.prepare("ALTER TABLE lessons ADD COLUMN status TEXT DEFAULT ''").run();
@@ -518,8 +830,12 @@ function initDb() {
     SELECT teacher_name, ?, week1_transport, week2_transport, week3_transport, week4_transport, notes
     FROM teacher_adjustments
   `).run(currentMonth);
-  db.prepare("INSERT OR IGNORE INTO teachers(name) SELECT DISTINCT TRIM(teacher_name) FROM lessons WHERE TRIM(teacher_name) <> ''").run();
-  db.prepare("INSERT OR IGNORE INTO teachers(name) SELECT DISTINCT TRIM(teacher_name) FROM teacher_adjustments_monthly WHERE TRIM(teacher_name) <> ''").run();
+  for (const row of all("SELECT DISTINCT TRIM(teacher_name) AS teacher_name FROM lessons WHERE TRIM(teacher_name) <> ''")) {
+    upsertTeacher(row.teacher_name);
+  }
+  for (const row of all("SELECT DISTINCT TRIM(teacher_name) AS teacher_name FROM teacher_adjustments_monthly WHERE TRIM(teacher_name) <> ''")) {
+    upsertTeacher(row.teacher_name);
+  }
   for (const teacher of all("SELECT name FROM teachers ORDER BY name")) {
     db.prepare("INSERT OR IGNORE INTO teacher_adjustments_monthly(teacher_name, month_key) VALUES (?, ?)").run(teacher.name, currentMonth);
   }
@@ -531,6 +847,7 @@ function initDb() {
   }
   preserveLegacyStudentPricingFeeOverrides();
   seedDefaultUsers();
+  seedDefaultRolesAndPermissions();
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
 }
 
@@ -831,7 +1148,7 @@ function seedDefaultUsers() {
   if (count) return;
   const defaults = [
     ["boss", "Qing", "owner"],
-    ["admin", "管理员", "admin"],
+    ["admin", "管理员", "owner"],
     ["jiaowu", "教务", "academic"],
     ["teacher", "老师", "teacher"],
   ];
@@ -842,6 +1159,287 @@ function seedDefaultUsers() {
   for (const [username, displayName, role] of defaults) {
     stmt.run(username, displayName, role, passwordHash("123456"));
   }
+}
+
+function canonicalRole(role) {
+  const raw = text(role || "teacher");
+  const key = raw.toLowerCase();
+  return ROLE_ALIASES.get(raw) || ROLE_ALIASES.get(key) || raw;
+}
+
+function isSuperRole(role) {
+  return canonicalRole(role) === "owner";
+}
+
+function permissionKeySet() {
+  return new Set(PAGE_PERMISSION_KEYS);
+}
+
+function normalizePermissionKeys(keys) {
+  const allowed = permissionKeySet();
+  return [...new Set((Array.isArray(keys) ? keys : [])
+    .map(text)
+    .filter((key) => allowed.has(key)))];
+}
+
+function seedDefaultRolesAndPermissions() {
+  const roleStmt = db.prepare(`
+    INSERT INTO roles(code, name, description, is_system, readonly)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(code) DO UPDATE SET
+      name = CASE WHEN roles.is_system = 1 THEN excluded.name ELSE roles.name END,
+      description = CASE WHEN roles.is_system = 1 THEN excluded.description ELSE roles.description END,
+      is_system = 1,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  for (const role of SYSTEM_ROLE_DEFS) {
+    roleStmt.run(role.code, role.name, role.description, role.is_system, Number(role.readonly) ? 1 : 0);
+  }
+
+  const permissionStmt = db.prepare(`
+    INSERT OR IGNORE INTO role_permissions(role_code, permission_key, enabled)
+    VALUES (?, ?, 1)
+  `);
+  const defaultsMigrationKey = "role_defaults_five_roles_v1";
+  const defaultsMigrated = text(get("SELECT value FROM settings WHERE key = ?", [defaultsMigrationKey])?.value) === "1";
+  for (const role of SYSTEM_ROLE_DEFS) {
+    const existing = num(get("SELECT COUNT(*) AS count FROM role_permissions WHERE role_code = ?", [role.code])?.count);
+    if (existing && defaultsMigrated) continue;
+    if (!defaultsMigrated) db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run(role.code);
+    for (const key of DEFAULT_ROLE_PERMISSIONS[role.code] || []) permissionStmt.run(role.code, key);
+  }
+  if (!defaultsMigrated) {
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(defaultsMigrationKey);
+  }
+  const teacherScopeMigrationKey = "role_teacher_scope_lessons_detail_v2";
+  const teacherScopeMigrated = text(get("SELECT value FROM settings WHERE key = ?", [teacherScopeMigrationKey])?.value) === "1";
+  if (!teacherScopeMigrated) {
+    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run("teacher");
+    for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(teacherScopeMigrationKey);
+  }
+  const teacherProfilesMigrationKey = "role_teacher_scope_profiles_v3";
+  const teacherProfilesMigrated = text(get("SELECT value FROM settings WHERE key = ?", [teacherProfilesMigrationKey])?.value) === "1";
+  if (!teacherProfilesMigrated) {
+    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run("teacher");
+    for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(teacherProfilesMigrationKey);
+  }
+}
+
+function roleLabels() {
+  return Object.fromEntries(SYSTEM_ROLE_DEFS.map((role) => [role.code, role.name]));
+}
+
+function roleLabel(role) {
+  const labels = roleLabels();
+  const canonical = canonicalRole(role);
+  return labels[canonical] || labels[role] || text(role);
+}
+
+function roleRows() {
+  if (!tableExists("roles")) {
+    return SYSTEM_ROLE_DEFS.map((role, index) => ({ id: index + 1, ...role }));
+  }
+  const placeholders = SYSTEM_ROLE_CODES.map(() => "?").join(",");
+  return all(`
+    SELECT *
+    FROM roles
+    WHERE code IN (${placeholders})
+    ORDER BY CASE code
+      WHEN 'owner' THEN 0
+      WHEN 'academic' THEN 1
+      WHEN 'helper' THEN 2
+      WHEN 'assistant' THEN 3
+      WHEN 'teacher' THEN 4
+      ELSE 20
+    END, name, code
+  `, SYSTEM_ROLE_CODES);
+}
+
+function defaultRoleReadonly(role) {
+  const code = canonicalRole(role);
+  const def = SYSTEM_ROLE_DEFS.find((item) => item.code === code);
+  return def ? Number(def.readonly) === 1 : true;
+}
+
+function roleReadonly(role) {
+  const code = canonicalRole(role);
+  if (isSuperRole(code)) return false;
+  if (tableExists("roles")) {
+    const row = get("SELECT readonly FROM roles WHERE code = ?", [code]);
+    if (row) return Number(row.readonly) === 1;
+  }
+  return defaultRoleReadonly(code);
+}
+
+function roleExists(role) {
+  const code = canonicalRole(role);
+  return SYSTEM_ROLE_CODES.includes(code);
+}
+
+function rolePermissionKeys(role) {
+  const code = canonicalRole(role);
+  if (isSuperRole(code)) return [...PAGE_PERMISSION_KEYS];
+  if (tableExists("role_permissions")) {
+    const rows = all(`
+      SELECT permission_key
+      FROM role_permissions
+      WHERE role_code = ? AND enabled = 1
+      ORDER BY permission_key
+    `, [code]).map((row) => row.permission_key);
+    if (rows.length || tableExists("roles")) return normalizePermissionKeys(rows);
+  }
+  return normalizePermissionKeys(DEFAULT_ROLE_PERMISSIONS[code] || []);
+}
+
+function normalizeReadonlyOverride(value) {
+  if (value === "" || value == null || value === "inherit") return null;
+  return Number(value) === 1 || ["1", "true", "yes", "是", "只读"].includes(text(value).toLowerCase()) ? 1 : 0;
+}
+
+function userReadonly(row = {}) {
+  const role = canonicalRole(row.role);
+  if (isSuperRole(role)) return false;
+  if (row.readonly_override !== undefined && row.readonly_override !== null && text(row.readonly_override) !== "") {
+    return Number(row.readonly_override) === 1;
+  }
+  return roleReadonly(role);
+}
+
+function userPermissionKeys(row = {}) {
+  const role = canonicalRole(row.role);
+  if (isSuperRole(role)) return [...PAGE_PERMISSION_KEYS];
+  if (Number(row.permission_override_enabled || 0) === 1 && row.id && tableExists("user_page_permissions")) {
+    const rows = all(`
+      SELECT permission_key
+      FROM user_page_permissions
+      WHERE user_id = ? AND enabled = 1
+      ORDER BY permission_key
+    `, [Number(row.id)]).map((item) => item.permission_key);
+    return normalizePermissionKeys(rows);
+  }
+  return rolePermissionKeys(role);
+}
+
+function rolePermissionMap() {
+  return Object.fromEntries(roleRows().map((role) => [role.code, rolePermissionKeys(role.code)]));
+}
+
+function roleHasPermission(role, permissionKey) {
+  return rolePermissionKeys(role).includes(permissionKey);
+}
+
+function roleHasAnyPermission(role, keys = []) {
+  const granted = new Set(rolePermissionKeys(role));
+  return keys.some((key) => granted.has(key));
+}
+
+function roleCanAreaByPermissions(role, area) {
+  return roleHasAnyPermission(role, AREA_PERMISSION_KEYS[area] || []);
+}
+
+function userHasAnyPermission(user, keys = []) {
+  const granted = new Set(Array.isArray(user?.permissions) ? user.permissions : userPermissionKeys(user || {}));
+  return keys.some((key) => granted.has(key));
+}
+
+function userCanAreaByPermissions(user, area) {
+  return userHasAnyPermission(user, AREA_PERMISSION_KEYS[area] || []);
+}
+
+function manageableRoles(actor) {
+  const rows = roleRows();
+  if (isSuperRole(actor?.role)) return rows;
+  if (canonicalRole(actor?.role) === "academic") return rows.filter((role) => role.code === "teacher");
+  return [];
+}
+
+function roleCodeValid(code) {
+  return /^[a-z][a-z0-9_-]{1,31}$/.test(text(code));
+}
+
+function roleUsageCount(code) {
+  const canonical = canonicalRole(code);
+  const aliases = {
+    owner: ["owner", "boss", "admin"],
+    academic: ["academic", "jiaowu"],
+    helper: ["helper", "finance"],
+  }[canonical] || [canonical];
+  const placeholders = aliases.map(() => "?").join(",");
+  return num(get(`SELECT COUNT(*) AS count FROM users WHERE role IN (${placeholders}) AND status <> 'deleted'`, aliases)?.count);
+}
+
+function saveRolePermissions(code, permissions) {
+  const roleCode = canonicalRole(code);
+  const keys = isSuperRole(roleCode) ? PAGE_PERMISSION_KEYS : normalizePermissionKeys(permissions);
+  const insert = db.prepare(`
+    INSERT INTO role_permissions(role_code, permission_key, enabled, updated_at)
+    VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+    ON CONFLICT(role_code, permission_key) DO UPDATE SET enabled = 1, updated_at = CURRENT_TIMESTAMP
+  `);
+  withTransaction(() => {
+    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run(roleCode);
+    for (const key of keys) insert.run(roleCode, key);
+  });
+  return keys;
+}
+
+function createRole(body) {
+  return { error: "当前系统仅维护老板、教务、小助手、助教、老师五类内置角色", status: 400 };
+}
+
+function updateRole(code, body) {
+  const roleCode = canonicalRole(code);
+  const current = get("SELECT * FROM roles WHERE code = ?", [roleCode]);
+  if (!current) return { error: "角色不存在", status: 404 };
+  const payload = {
+    name: Number(current.is_system) ? current.name : (text(body.name) || current.name),
+    description: Object.prototype.hasOwnProperty.call(body, "description") ? text(body.description) : current.description,
+    readonly: Object.prototype.hasOwnProperty.call(body, "readonly")
+      ? (["1", "true", "yes", "是", "只读"].includes(text(body.readonly).toLowerCase()) || Number(body.readonly) === 1 ? 1 : 0)
+      : Number(current.readonly || 0),
+  };
+  if (isSuperRole(roleCode)) payload.readonly = 0;
+  db.prepare(`
+    UPDATE roles
+    SET name = ?, description = ?, readonly = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE code = ?
+  `).run(payload.name, payload.description, payload.readonly, roleCode);
+  const permissions = Object.prototype.hasOwnProperty.call(body, "permissions")
+    ? saveRolePermissions(roleCode, body.permissions)
+    : rolePermissionKeys(roleCode);
+  const filterPresets = Object.prototype.hasOwnProperty.call(body, "filter_presets")
+    ? setRoleFilterPresets(roleCode, body.filter_presets)
+    : roleFilterPresets(roleCode);
+  return {
+    ...get("SELECT * FROM roles WHERE code = ?", [roleCode]),
+    permissions,
+    filter_presets: filterPresets,
+  };
+}
+
+function deleteRole(code) {
+  const roleCode = canonicalRole(code);
+  const current = get("SELECT * FROM roles WHERE code = ?", [roleCode]);
+  if (!current) return { error: "角色不存在", status: 404 };
+  if (Number(current.is_system)) return { error: "系统内置角色不能删除", status: 400 };
+  if (roleUsageCount(roleCode) > 0) return { error: "该角色下仍有关联账号，不能删除", status: 409 };
+  withTransaction(() => {
+    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run(roleCode);
+    db.prepare("DELETE FROM role_filter_presets WHERE role_code = ?").run(roleCode);
+    db.prepare("DELETE FROM roles WHERE code = ?").run(roleCode);
+  });
+  return { ok: true, deleted: true, role: current };
 }
 
 function num(value) {
@@ -861,6 +1459,22 @@ function moneyRound(value) {
 
 function text(value) {
   return value == null ? "" : String(value).trim();
+}
+
+function isValidTeacherName(value) {
+  const name = text(value);
+  if (!name) return false;
+  const compact = name.replace(/\s+/g, "");
+  if (!compact || /^[?？�]+$/u.test(compact)) return false;
+  if (compact.includes("\uFFFD") || /[\u0000-\u001F\u007F]/u.test(compact)) return false;
+  if (/[,，、;；]/u.test(compact)) return false;
+  return true;
+}
+
+function teacherNameError(value, { required = false } = {}) {
+  const name = text(value);
+  if (!name) return required ? "老师姓名不能为空" : "";
+  return isValidTeacherName(name) ? "" : "老师姓名不能是拼接姓名、纯问号或明显乱码";
 }
 
 function validMonthKey(value) {
@@ -1109,6 +1723,7 @@ function xlsxLessonSkipReasons(row) {
   if (!row.date) reasons.push("missing-date");
   if (!text(row.student_names)) reasons.push("missing-student");
   if (!text(row.teacher_name)) reasons.push("missing-teacher");
+  else if (!isValidTeacherName(row.teacher_name)) reasons.push("invalid-teacher");
   if (!validXlsxLessonTime(row.time_slot)) reasons.push("missing-time");
   return reasons;
 }
@@ -1473,8 +2088,9 @@ function upsertStudent(name, grade) {
 }
 
 function upsertTeacher(name) {
-  if (!name) return;
-  db.prepare("INSERT OR IGNORE INTO teachers(name) VALUES (?)").run(name);
+  const teacherName = text(name);
+  if (!isValidTeacherName(teacherName)) return;
+  db.prepare("INSERT OR IGNORE INTO teachers(name) VALUES (?)").run(teacherName);
 }
 
 function syncStudentsFromLessons() {
@@ -1636,7 +2252,8 @@ function studentHasHistory(name) {
 
 function createTeacherProfile(body) {
   const name = text(body.name);
-  if (!name) return { error: "name is required", status: 400 };
+  const nameError = teacherNameError(name, { required: true });
+  if (nameError) return { error: nameError, status: 400 };
   if (get("SELECT id FROM teachers WHERE name = ?", [name])) return { error: "teacher already exists", status: 409 };
   const result = db.prepare(`
     INSERT INTO teachers(name, phone, notes, status, joined_at, left_at)
@@ -1650,18 +2267,6 @@ function createTeacherProfile(body) {
     text(body.left_at),
   );
   return get("SELECT * FROM teachers WHERE id = ?", [Number(result.lastInsertRowid)]);
-}
-
-function upsertTeacherProfileFromAccount(name, phone = "") {
-  if (!name) return null;
-  db.prepare(`
-    INSERT INTO teachers(name, phone, status)
-    VALUES (?, ?, '在职')
-    ON CONFLICT(name) DO UPDATE SET
-      phone = COALESCE(NULLIF(excluded.phone, ''), teachers.phone),
-      status = CASE WHEN teachers.status IS NULL OR TRIM(teachers.status) = '' THEN '在职' ELSE teachers.status END
-  `).run(text(name), text(phone));
-  return get("SELECT * FROM teachers WHERE name = ?", [text(name)]);
 }
 
 function createStudentProfile(body) {
@@ -2938,7 +3543,7 @@ function ensureCarryOver(monthKey) {
         prev_gift = ?,
         source = ?,
         notes = ?
-    WHERE student_name = ? AND month_key = ?
+    WHERE id = ?
   `);
   let ensured = 0;
   let updated = 0;
@@ -2949,7 +3554,7 @@ function ensureCarryOver(monthKey) {
     const actual = num(row.actual_balance);
     const gift = num(row.gift_balance);
     const existing = get(
-      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?",
+      "SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ? ORDER BY CASE WHEN source = 'carry_over' THEN 0 ELSE 1 END, id LIMIT 1",
       [row.student_name, monthKey],
     );
     if (existing) {
@@ -2969,7 +3574,7 @@ function ensureCarryOver(monthKey) {
         || text(existing.grade) !== text(row.grade)
         || !isAutoCarryOverRecord(existing);
       const patch = carryOverRecordPatch(existing, fromMonth);
-      updateRecharge.run(row.grade || "", actual, gift, patch.source, patch.notes, row.student_name, monthKey);
+      updateRecharge.run(row.grade || "", actual, gift, patch.source, patch.notes, existing.id);
       if (changed) updated += 1;
     }
     carriedActual += actual;
@@ -3723,6 +4328,189 @@ function financeSummary(range) {
     top_lists: sections.top_lists,
     trend_as_of: todayKey(),
     trend_6m: financeTrend6m(),
+  };
+}
+
+function lessonDurationHours(row = {}) {
+  const range = parseTimeRange(row.time_slot);
+  if (!range) return 1;
+  return Math.max(0, (range.end - range.start) / 60);
+}
+
+function dashboardCanSeeMoney(user) {
+  const role = canonicalRole(user.role);
+  if (role === "teacher") return false;
+  if (isSuperRole(role)) return true;
+  return roleHasAnyPermission(role, ["finance", "feeDetails", "summary", "recharges", "openingBalances"]);
+}
+
+function dashboardMetric(key, label, value, format = "number", visible = true) {
+  return { key, label, value: format === "money" ? moneyRound(value) : value, format, visible };
+}
+
+function dashboardMonthData(monthKey, user) {
+  const details = feeDetails(monthKey);
+  const summaries = studentSummary(details, monthKey, true);
+  const range = monthRange(monthKey);
+  const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, time_slot, id", [monthKey]);
+  return { details, summaries, range, lessons };
+}
+
+function dashboardMetricItems(monthKey, user) {
+  const today = todayKey();
+  const role = canonicalRole(user.role);
+  const canMoney = dashboardCanSeeMoney(user);
+  const { details, summaries, range, lessons } = dashboardMonthData(monthKey, user);
+  const todayLessons = lessons.filter((row) => row.date === today);
+  const completedToday = todayLessons.filter(isCompletedLesson).length;
+  const leaveToday = todayLessons.filter((row) => deriveStatus(row) === "请假").length;
+  const pendingToday = todayLessons.filter((row) => deriveStatus(row) === "待上").length;
+  const effectiveDetails = role === "teacher"
+    ? []
+    : details.filter((row) => row.effective);
+  const finance = canMoney ? financeSummary(range) : null;
+  const monthLessonHours = role === "teacher"
+    ? lessons.filter(isCompletedLesson).reduce((sum, row) => sum + lessonDurationHours(row), 0)
+    : effectiveDetails.reduce((sum, row) => sum + lessonDurationHours(row), 0);
+  const debtAmount = canMoney
+    ? summaries.reduce((sum, row) => sum + Math.max(0, -num(row.actual_balance)), 0)
+    : 0;
+  const activeStudentCount = num(get(`
+    SELECT COUNT(*) AS count
+    FROM students
+    WHERE COALESCE(NULLIF(status, ''), '在读') = '在读'
+  `)?.count);
+
+  const items = [
+    dashboardMetric("month_course_fee", "本月课程费", summaries.reduce((sum, row) => sum + num(row.total_fee), 0), "money", canMoney),
+    dashboardMetric("month_receivable", "本月应收", finance?.balance_sheet?.accounts_receivable || 0, "money", canMoney),
+    dashboardMetric("month_consumption_amount", "本月消耗金额", summaries.reduce((sum, row) => sum + num(row.actual_consumption) + num(row.gift_consumption), 0), "money", canMoney),
+    dashboardMetric("month_consumption_hours", "本月消耗课时", Number(monthLessonHours.toFixed(1)), "hours"),
+    dashboardMetric("today_completed_lessons", role === "teacher" ? "今日已上课程数" : "今日已上课程数", completedToday, "number"),
+    dashboardMetric("today_leave_count", "今日请假次数", leaveToday, "number"),
+    dashboardMetric("today_pending_lessons", "今日待上课程数", pendingToday, "number"),
+    dashboardMetric("student_debt_amount", "学员欠费金额", debtAmount, "money", canMoney),
+    dashboardMetric("active_student_count", "在读学员数量", activeStudentCount, "number", role !== "teacher"),
+  ];
+  if (role === "teacher") {
+    items.push(dashboardMetric("month_completed_lessons", "本月已上课程数", lessons.filter(isCompletedLesson).length, "number"));
+  }
+  return items.filter((item) => item.visible);
+}
+
+function dashboardTodos(monthKey, user) {
+  const role = canonicalRole(user.role);
+  const canMoney = dashboardCanSeeMoney(user);
+  const today = todayKey();
+  const { details, summaries, lessons } = dashboardMonthData(monthKey, user);
+  const todayLessons = lessons.filter((row) => row.date === today);
+  const todos = [
+    { key: "today_pending_lessons", label: "今日待上课程数", count: todayLessons.filter((row) => deriveStatus(row) === "待上").length, view: "lessons", filter: { start_date: today, end_date: today, status: "待上" } },
+    { key: "today_leave_lessons", label: "今日请假课程数", count: todayLessons.filter((row) => deriveStatus(row) === "请假").length, view: "lessons", filter: { start_date: today, end_date: today, status: "请假" } },
+  ];
+  if (canMoney) {
+    const debtStudents = summaries.filter((row) => num(row.actual_balance) < 0).length;
+    const missingPriceStudents = new Set(details.filter((row) => row.price_source === "pending").map((row) => row.student_name)).size;
+    todos.push(
+      { key: "debt_students", label: "欠费学生数", count: debtStudents, view: "summary", filter: { balance: "actual" } },
+      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "feeDetails", filter: { source: "pending" } },
+    );
+  }
+  if (role !== "teacher") {
+    const unboundTeachers = all(`
+      SELECT t.name
+      FROM teachers t
+      LEFT JOIN users u ON u.teacher_name = t.name AND u.status <> 'disabled' AND u.role IN ('teacher')
+      WHERE COALESCE(NULLIF(t.status, ''), '在职') = '在职' AND u.id IS NULL
+    `).length;
+    const abnormalLessons = lessons.filter((row) => !["已上", "待上"].includes(deriveStatus(row))).length;
+    todos.push(
+      { key: "unbound_teacher_accounts", label: "未绑定教师账号数", count: unboundTeachers, view: "userAdmin" },
+      { key: "abnormal_lessons", label: "本月异常课程数", count: abnormalLessons, view: "lessons" },
+    );
+  }
+  return todos.filter((item) => item.count > 0 || ["today_pending_lessons", "today_leave_lessons"].includes(item.key));
+}
+
+function dashboardTrend(start, end, user) {
+  const range = normalizeRange(start, end);
+  if (!range) return null;
+  const canMoney = dashboardCanSeeMoney(user);
+  const rows = lessonsInDateRange(range.start, range.end) || [];
+  const byDate = new Map();
+  for (let cursor = range.start; cursor <= range.end; cursor = addDays(cursor, 1)) {
+    byDate.set(cursor, { date: cursor, lesson_count: 0, student_visits: 0, course_fee: 0 });
+  }
+  for (const lesson of rows) {
+    const item = byDate.get(lesson.date);
+    if (!item) continue;
+    item.lesson_count += 1;
+    item.student_visits += splitStudents(lesson.student_names).length;
+  }
+  if (canMoney) {
+    for (const monthKey of monthsCovered(range.start, range.end)) {
+      for (const detail of feeDetails(monthKey).filter((row) => row.effective && row.date >= range.start && row.date <= range.end)) {
+        const item = byDate.get(detail.date);
+        if (item) item.course_fee = moneyRound(item.course_fee + num(detail.unit_price));
+      }
+    }
+  }
+  return [...byDate.values()];
+}
+
+function dashboardStudentPie(user) {
+  const role = canonicalRole(user.role);
+  const groups = new Map();
+  if (role === "teacher") {
+    const students = new Set();
+    for (const lesson of all("SELECT teacher_name, student_names FROM lessons")) {
+      splitStudents(lesson.student_names).forEach((name) => students.add(name));
+    }
+    groups.set("有课程记录", students.size);
+    return { dimension: "课程记录", total: students.size, items: [...groups.entries()].map(([name, value]) => ({ name, value })) };
+  }
+  const rows = all("SELECT status, grade FROM students");
+  const hasStatus = rows.some((row) => text(row.status));
+  const hasGrade = rows.some((row) => text(row.grade));
+  if (hasStatus) {
+    for (const row of rows) {
+      const key = text(row.status) || "未设置";
+      groups.set(key, (groups.get(key) || 0) + 1);
+    }
+    return { dimension: "学员状态", total: rows.length, items: [...groups.entries()].map(([name, value]) => ({ name, value })) };
+  }
+  if (hasGrade) {
+    for (const row of rows) {
+      const key = text(row.grade) || "未设置";
+      groups.set(key, (groups.get(key) || 0) + 1);
+    }
+    return { dimension: "年级", total: rows.length, items: [...groups.entries()].map(([name, value]) => ({ name, value })) };
+  }
+  const withLessons = new Set();
+  for (const lesson of all("SELECT student_names FROM lessons")) splitStudents(lesson.student_names).forEach((name) => withLessons.add(name));
+  groups.set("有课程记录", withLessons.size);
+  groups.set("无课程记录", Math.max(0, rows.length - withLessons.size));
+  return { dimension: "课程记录", total: rows.length, items: [...groups.entries()].map(([name, value]) => ({ name, value })) };
+}
+
+function dashboardData(url, user) {
+  const requestedMonth = text(url.searchParams.get("month"));
+  const monthKey = validMonthKey(requestedMonth) ? requestedMonth : getSetting("month_key");
+  const weekStart = addDays(todayKey(), -((parseDateKey(todayKey()).getDay() + 6) % 7));
+  const weekEnd = addDays(weekStart, 6);
+  const start = text(url.searchParams.get("start")) || weekStart;
+  const end = text(url.searchParams.get("end")) || weekEnd;
+  const trend = dashboardTrend(start, end, user);
+  if (!trend) return { error: "start/end must be YYYY-MM-DD and start must be before end", status: 400 };
+  return {
+    month_key: monthKey,
+    range: { start, end },
+    metrics: dashboardMetricItems(monthKey, user),
+    todos: dashboardTodos(monthKey, user),
+    trend,
+    student_pie: dashboardStudentPie(user),
+    role: canonicalRole(user.role),
+    can_see_money: dashboardCanSeeMoney(user),
   };
 }
 
@@ -5025,7 +5813,7 @@ function buildBootstrap(monthKey, includeInactive = false) {
     pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
     student_pricing: studentPricingRows(monthKey),
     lessons: all("SELECT *, ? AS weekday FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", ["", monthKey]),
-    recharges: all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL} ORDER BY student_name`, [monthKey]),
+    recharges: all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL} ORDER BY student_name, recharge_date, id`, [monthKey]),
     opening_balances: openingBalanceRows(),
     derived: {
       fee_details: details,
@@ -5140,6 +5928,8 @@ function normalizeTeacherSalaryRuleInput(body, current = {}) {
   if (!teacherName || !grade || !subject || !studentNames) {
     return { error: "老师、年级、科目和学生集合均为必填项", status: 400 };
   }
+  const nameError = teacherNameError(teacherName, { required: true });
+  if (nameError) return { error: nameError, status: 400 };
   if (salaryPerUnit == null || salaryPerUnit < 0) {
     return { error: "每课时薪资必须是大于或等于 0 的有效数字", status: 400 };
   }
@@ -5808,7 +6598,7 @@ function lessonOperationText(row = {}) {
 }
 
 function userOperationText(row = {}) {
-  return [row.username, row.display_name, USER_ROLES[row.role] || row.role, row.teacher_name, row.status]
+  return [row.username, row.display_name, roleLabel(row.role), row.teacher_name, row.status]
     .map(text)
     .filter(Boolean)
     .join(" ");
@@ -5939,15 +6729,321 @@ function parseCookies(req) {
   return cookies;
 }
 
+function normalizedPhoneAccount(value) {
+  return text(value).replace(/\D/g, "");
+}
+
+function rawTeacherNameList(value) {
+  const splitValue = (item) => String(item || "").split(/[,，、；;\n\r]+/);
+  const raw = Array.isArray(value) ? value.flatMap(splitValue) : splitValue(value);
+  return uniqueNames(raw.map(text));
+}
+
+function normalizeTeacherNameList(value) {
+  return rawTeacherNameList(value).filter(isValidTeacherName);
+}
+
+function invalidTeacherNameList(value) {
+  return rawTeacherNameList(value).filter((name) => !isValidTeacherName(name));
+}
+
+function teacherProfileNameSet() {
+  if (!tableExists("teachers")) return new Set();
+  return new Set(all("SELECT name FROM teachers WHERE TRIM(name) <> ''").map((row) => text(row.name)));
+}
+
+function unknownTeacherNameList(value) {
+  const known = teacherProfileNameSet();
+  return normalizeTeacherNameList(value).filter((name) => !known.has(name));
+}
+
+function userTeacherBindings(userId) {
+  if (!userId || !tableExists("user_teacher_bindings")) return [];
+  return all(`
+    SELECT teacher_name
+    FROM user_teacher_bindings
+    WHERE user_id = ?
+    ORDER BY teacher_name
+  `, [Number(userId)]).map((row) => text(row.teacher_name)).filter(Boolean);
+}
+
+function setUserTeacherBindings(userId, teacherNames = []) {
+  const names = normalizeTeacherNameList(teacherNames);
+  const insert = db.prepare("INSERT OR IGNORE INTO user_teacher_bindings(user_id, teacher_name) VALUES (?, ?)");
+  withTransaction(() => {
+    db.prepare("DELETE FROM user_teacher_bindings WHERE user_id = ?").run(Number(userId));
+    for (const name of names) insert.run(Number(userId), name);
+    db.prepare("UPDATE users SET teacher_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(names[0] || "", Number(userId));
+  });
+  return names;
+}
+
+function parseStoredJson(value, fallback = null) {
+  if (!text(value)) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function beijingDateKey(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function utcDateKey(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function resolveDatePreset(rule, fixedDate = "", now = new Date()) {
+  const config = rule && typeof rule === "object"
+    ? rule
+    : { type: rule === "fixed" ? "fixed" : "relative", value: rule };
+  const type = text(config.type);
+  const value = text(config.value);
+  if (type === "fixed" || value === "fixed") return validDateKey(fixedDate || value) ? text(fixedDate || value) : "";
+  if (!value || value === "unlimited" || !DATE_PRESET_RULES.has(value)) return "";
+
+  const today = new Date(`${beijingDateKey(now)}T00:00:00Z`);
+  const year = today.getUTCFullYear();
+  const month = today.getUTCMonth();
+  const dayOffset = (today.getUTCDay() + 6) % 7;
+  const weekDate = (weekOffset, weekdayOffset) => {
+    const date = new Date(today);
+    date.setUTCDate(today.getUTCDate() - dayOffset + weekOffset * 7 + weekdayOffset);
+    return utcDateKey(date);
+  };
+  const monthDate = (monthOffset, lastDay = false) => utcDateKey(new Date(Date.UTC(
+    year,
+    month + monthOffset + (lastDay ? 1 : 0),
+    lastDay ? 0 : 1,
+  )));
+
+  if (value === "today") return beijingDateKey(now);
+  if (value === "yesterday") return utcDateKey(new Date(today.getTime() - 86400000));
+  if (value === "tomorrow") return utcDateKey(new Date(today.getTime() + 86400000));
+  if (value === "this_week_monday") return weekDate(0, 0);
+  if (value === "last_week_monday") return weekDate(-1, 0);
+  if (value === "next_week_monday") return weekDate(1, 0);
+  if (value === "this_week_sunday") return weekDate(0, 6);
+  if (value === "last_week_sunday") return weekDate(-1, 6);
+  if (value === "next_week_sunday") return weekDate(1, 6);
+  if (value === "this_month_first") return monthDate(0);
+  if (value === "last_month_first") return monthDate(-1);
+  if (value === "next_month_first") return monthDate(1);
+  if (value === "this_month_last") return monthDate(0, true);
+  if (value === "last_month_last") return monthDate(-1, true);
+  if (value === "next_month_last") return monthDate(1, true);
+  if (value === "this_year_first") return `${year}-01-01`;
+  if (value === "this_year_last") return `${year}-12-31`;
+  return "";
+}
+
+function normalizeDatePresetValue(rawValue) {
+  if (rawValue == null || rawValue === "") return null;
+  if (typeof rawValue === "string") {
+    const value = text(rawValue);
+    if (validDateKey(value)) return { type: "fixed", value };
+    if (DATE_PRESET_RULES.has(value) && value !== "fixed" && value !== "unlimited") {
+      return { type: "relative", value };
+    }
+    return null;
+  }
+  if (typeof rawValue !== "object" || Array.isArray(rawValue)) return null;
+  const type = text(rawValue.type);
+  const value = text(rawValue.value);
+  if (type === "fixed") return validDateKey(value) ? { type: "fixed", value } : null;
+  if (type === "relative" && DATE_PRESET_RULES.has(value) && value !== "fixed" && value !== "unlimited") {
+    return { type: "relative", value };
+  }
+  return null;
+}
+
+function isBoundTeacherPreset(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && (text(value.mode) === "bound_teachers" || (text(value.type) === "dynamic" && text(value.value) === "bound_teachers"));
+}
+
+function resolveFilterPreset(preset = {}, now = new Date(), dynamicTeacherNames = []) {
+  const resolved = {};
+  for (const [filterKey, rawValue] of Object.entries(preset || {})) {
+    if (FILTER_PRESET_DATE_KEYS.has(filterKey)) {
+      const dateValue = normalizeDatePresetValue(rawValue);
+      resolved[filterKey] = dateValue
+        ? resolveDatePreset(dateValue, dateValue.type === "fixed" ? dateValue.value : "", now)
+        : "";
+      continue;
+    }
+    if (FILTER_PRESET_TEACHER_KEYS.has(filterKey) && isBoundTeacherPreset(rawValue)) {
+      resolved[filterKey] = normalizeTeacherNameList(dynamicTeacherNames);
+      continue;
+    }
+    resolved[filterKey] = rawValue;
+  }
+  return resolved;
+}
+
+function resolveFilterPresets(presets = {}, now = new Date(), dynamicTeacherNames = []) {
+  return Object.fromEntries(Object.entries(presets || {}).map(([viewKey, preset]) => [
+    viewKey,
+    resolveFilterPreset(preset, now, dynamicTeacherNames),
+  ]));
+}
+
+function storedFilterPresets(whereSql, params = []) {
+  const presets = {};
+  for (const row of all(`
+    SELECT view_key, filter_key, filter_value_json
+    FROM ${whereSql}
+    ORDER BY view_key, filter_key
+  `, params)) {
+    const viewKey = text(row.view_key);
+    const filterKey = text(row.filter_key);
+    if (!viewKey || !filterKey) continue;
+    if (!presets[viewKey]) presets[viewKey] = {};
+    presets[viewKey][filterKey] = parseStoredJson(row.filter_value_json, "");
+  }
+  return presets;
+}
+
+function userFilterPresets(userId) {
+  if (!userId || !tableExists("user_filter_presets")) return {};
+  return storedFilterPresets("user_filter_presets WHERE user_id = ?", [Number(userId)]);
+}
+
+function roleFilterPresets(role) {
+  const roleCode = canonicalRole(role);
+  if (!roleCode || !tableExists("role_filter_presets")) return {};
+  return storedFilterPresets("role_filter_presets WHERE role_code = ?", [roleCode]);
+}
+
+function normalizeFilterPresets(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  for (const [viewKey, filters] of Object.entries(source)) {
+    const cleanView = text(viewKey);
+    if (!cleanView || !FILTER_PRESET_VIEW_KEYS.includes(cleanView)) continue;
+    const filterObj = filters && typeof filters === "object" && !Array.isArray(filters) ? filters : {};
+    for (const [filterKey, rawValue] of Object.entries(filterObj)) {
+      const key = text(filterKey);
+      if (!key) continue;
+      let value = "";
+      if (FILTER_PRESET_DATE_KEYS.has(key)) {
+        value = normalizeDatePresetValue(rawValue);
+      } else if (FILTER_PRESET_TEACHER_KEYS.has(key)) {
+        value = isBoundTeacherPreset(rawValue)
+          ? { mode: "bound_teachers" }
+          : normalizeTeacherNameList(rawValue);
+      } else {
+        value = rawValue === null || rawValue === undefined ? "" : rawValue;
+      }
+      if (FILTER_PRESET_DATE_KEYS.has(key) && !value) continue;
+      if (Array.isArray(value) && !value.length) continue;
+      if (!Array.isArray(value) && !text(value)) continue;
+      if (!normalized[cleanView]) normalized[cleanView] = {};
+      normalized[cleanView][key] = value;
+    }
+  }
+  return normalized;
+}
+
+function setRoleFilterPresets(role, presets = {}) {
+  const roleCode = canonicalRole(role);
+  const normalized = normalizeFilterPresets(presets);
+  const insert = db.prepare(`
+    INSERT INTO role_filter_presets(role_code, view_key, filter_key, filter_value_json, updated_at)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(role_code, view_key, filter_key) DO UPDATE SET
+      filter_value_json = excluded.filter_value_json,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  withTransaction(() => {
+    db.prepare("DELETE FROM role_filter_presets WHERE role_code = ?").run(roleCode);
+    for (const [viewKey, filters] of Object.entries(normalized)) {
+      for (const [filterKey, value] of Object.entries(filters)) {
+        insert.run(roleCode, viewKey, filterKey, JSON.stringify(value));
+      }
+    }
+  });
+  return normalized;
+}
+
+function setUserFilterPresets(userId, presets = {}) {
+  const normalized = normalizeFilterPresets(presets);
+  const insert = db.prepare(`
+    INSERT INTO user_filter_presets(user_id, view_key, filter_key, filter_value_json, updated_at)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, view_key, filter_key) DO UPDATE SET
+      filter_value_json = excluded.filter_value_json,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  withTransaction(() => {
+    db.prepare("DELETE FROM user_filter_presets WHERE user_id = ?").run(Number(userId));
+    for (const [viewKey, filters] of Object.entries(normalized)) {
+      for (const [filterKey, value] of Object.entries(filters)) {
+        insert.run(Number(userId), viewKey, filterKey, JSON.stringify(value));
+      }
+    }
+  });
+  return normalized;
+}
+
+function setUserPermissionOverride(userId, enabled, permissions = []) {
+  const overrideEnabled = Number(enabled) === 1 || enabled === true ? 1 : 0;
+  const keys = normalizePermissionKeys(permissions);
+  const insert = db.prepare(`
+    INSERT INTO user_page_permissions(user_id, permission_key, enabled, updated_at)
+    VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, permission_key) DO UPDATE SET enabled = 1, updated_at = CURRENT_TIMESTAMP
+  `);
+  withTransaction(() => {
+    db.prepare("UPDATE users SET permission_override_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(overrideEnabled, Number(userId));
+    db.prepare("DELETE FROM user_page_permissions WHERE user_id = ?").run(Number(userId));
+    if (overrideEnabled) {
+      for (const key of keys) insert.run(Number(userId), key);
+    }
+  });
+  return overrideEnabled ? keys : null;
+}
+
 function publicUser(row) {
   if (!row) return null;
+  const role = canonicalRole(row.role);
+  const boundTeacherNames = userTeacherBindings(row.id);
+  const permissions = userPermissionKeys(row);
+  const readonly = userReadonly(row) ? 1 : 0;
+  const rolePresets = roleFilterPresets(role);
+  const legacyUserPresets = Object.keys(rolePresets).length ? {} : userFilterPresets(row.id);
+  const filterPresets = resolveFilterPresets(
+    Object.keys(rolePresets).length ? rolePresets : legacyUserPresets,
+    new Date(),
+    boundTeacherNames,
+  );
   return {
     id: row.id,
     username: row.username,
     display_name: row.display_name || row.username,
-    role: row.role,
-    role_label: USER_ROLES[row.role] || row.role,
+    role,
+    raw_role: row.role,
+    role_label: roleLabel(role),
     teacher_name: row.teacher_name || "",
+    bound_teacher_names: boundTeacherNames,
+    teacher_names: boundTeacherNames,
+    teacherNames: boundTeacherNames,
+    readonly,
+    readonly_override: row.readonly_override === null || row.readonly_override === undefined ? null : Number(row.readonly_override),
+    permission_override_enabled: Number(row.permission_override_enabled || 0),
+    permissions,
+    role_permissions: rolePermissionKeys(role),
+    filter_presets: filterPresets,
+    filter_preset_source: Object.keys(rolePresets).length ? "role" : (Object.keys(legacyUserPresets).length ? "legacy_user" : ""),
   };
 }
 
@@ -5984,24 +7080,33 @@ function loginUser(username, password) {
 
 function actorCanManageUser(actor, targetRole = "") {
   if (!actor) return false;
-  if (actor.role === "owner") return true;
-  if (actor.role === "admin") return targetRole !== "owner";
-  if (actor.role === "academic") return targetRole === "teacher";
+  const actorRole = canonicalRole(actor.role);
+  const target = canonicalRole(targetRole);
+  if (isSuperRole(actorRole)) return true;
+  if (actorRole === "academic") return target === "teacher";
   return false;
 }
 
 function userRows(actor) {
   const rows = all(`
-    SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at
+    SELECT id, username, display_name, role, teacher_name, readonly_override, permission_override_enabled, status, created_at, updated_at
     FROM users
+    WHERE status <> 'deleted'
     ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'academic' THEN 2 WHEN 'finance' THEN 3 ELSE 4 END, display_name, username
   `);
-  return actor.role === "academic" ? rows.filter((row) => row.role === "teacher") : rows;
+  const visibleRows = canonicalRole(actor.role) === "academic" ? rows.filter((row) => canonicalRole(row.role) === "teacher") : rows;
+  return visibleRows.map((row) => ({
+    ...row,
+    ...publicUser(row),
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
 }
 
 function ensureValidUserRole(role) {
-  const value = text(role || "teacher");
-  return Object.prototype.hasOwnProperty.call(USER_ROLES, value) ? value : "";
+  const value = canonicalRole(role || "teacher");
+  return roleExists(value) ? value : "";
 }
 
 function createUser(actor, body) {
@@ -6010,21 +7115,28 @@ function createUser(actor, body) {
   if (!actorCanManageUser(actor, role)) return { error: "当前角色不能任命该权限", status: 403 };
   const username = text(body.username);
   const displayName = text(body.display_name) || username;
-  const teacherName = role === "teacher" ? text(body.teacher_name || displayName) : text(body.teacher_name);
-  const password = String(body.password || "123456");
+  const invalidTeacherNames = invalidTeacherNameList(body.teacher_names || body.teacher_name);
+  if (invalidTeacherNames.length) return { error: teacherNameError(invalidTeacherNames[0]), status: 400 };
+  const unknownTeacherNames = unknownTeacherNameList(body.teacher_names || body.teacher_name);
+  if (unknownTeacherNames.length) return { error: `绑定老师必须来自教师档案：${unknownTeacherNames.join("、")}`, status: 400 };
+  const teacherNames = normalizeTeacherNameList(body.teacher_names || body.teacher_name);
+  const teacherName = text(teacherNames[0] || "");
+  const password = String(body.password || "");
   if (!username || password.length < 6) return { error: "username and password(>=6) are required", status: 400 };
   if (get("SELECT id FROM users WHERE username = ?", [username])) return { error: "username already exists", status: 409 };
-  if (role === "teacher") upsertTeacherProfileFromAccount(teacherName, username);
   const result = db.prepare(`
     INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(username, displayName, role, teacherName, passwordHash(password), text(body.status || "active"));
-  return publicUser(get("SELECT * FROM users WHERE id = ?", [Number(result.lastInsertRowid)]));
+  const userId = Number(result.lastInsertRowid);
+  setUserTeacherBindings(userId, teacherNames);
+  return publicUser(get("SELECT * FROM users WHERE id = ?", [userId]));
 }
 
 function patchUser(actor, id, body) {
   const current = get("SELECT * FROM users WHERE id = ?", [Number(id)]);
   if (!current) return { error: "user not found", status: 404 };
+  if (current.status === "deleted") return { error: "已删除账号不能直接修改", status: 409 };
   const nextRole = Object.prototype.hasOwnProperty.call(body, "role") ? ensureValidUserRole(body.role) : current.role;
   if (!nextRole) return { error: "role is invalid", status: 400 };
   if (!actorCanManageUser(actor, current.role) || !actorCanManageUser(actor, nextRole)) {
@@ -6035,25 +7147,100 @@ function patchUser(actor, id, body) {
   }
   const payload = {};
   for (const field of ["username", "display_name", "role", "teacher_name", "status"]) {
+    if (field === "teacher_name" && (Object.prototype.hasOwnProperty.call(body, "teacher_names") || Object.prototype.hasOwnProperty.call(body, "teacher_name"))) continue;
     if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
   }
-  if (payload.role === "teacher" || (!payload.role && nextRole === "teacher")) {
-    payload.teacher_name ||= text(body.teacher_name || current.teacher_name || payload.display_name || current.display_name);
-    upsertTeacherProfileFromAccount(payload.teacher_name, payload.username || current.username);
+  const hasTeacherBindingPayload = Object.prototype.hasOwnProperty.call(body, "teacher_names") || Object.prototype.hasOwnProperty.call(body, "teacher_name");
+  const invalidTeacherNames = hasTeacherBindingPayload ? invalidTeacherNameList(body.teacher_names || body.teacher_name) : [];
+  if (invalidTeacherNames.length) return { error: teacherNameError(invalidTeacherNames[0]), status: 400 };
+  const unknownTeacherNames = hasTeacherBindingPayload ? unknownTeacherNameList(body.teacher_names || body.teacher_name) : [];
+  if (unknownTeacherNames.length) return { error: `绑定老师必须来自教师档案：${unknownTeacherNames.join("、")}`, status: 400 };
+  const nextTeacherNames = hasTeacherBindingPayload ? normalizeTeacherNameList(body.teacher_names || body.teacher_name) : null;
+  if (Object.prototype.hasOwnProperty.call(body, "readonly_override")) {
+    payload.readonly_override = normalizeReadonlyOverride(body.readonly_override);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "permission_override_enabled")) {
+    payload.permission_override_enabled = Number(body.permission_override_enabled) ? 1 : 0;
   }
   payload.updated_at = new Date().toISOString();
-  patchTable("users", "id", Number(id), ["username", "display_name", "role", "teacher_name", "status", "updated_at"], payload);
+  patchTable("users", "id", Number(id), ["username", "display_name", "role", "teacher_name", "readonly_override", "permission_override_enabled", "status", "updated_at"], payload);
+  if (hasTeacherBindingPayload) setUserTeacherBindings(Number(id), nextTeacherNames || []);
   return publicUser(get("SELECT * FROM users WHERE id = ?", [Number(id)]));
 }
 
 function resetUserPassword(actor, id, password) {
   const current = get("SELECT * FROM users WHERE id = ?", [Number(id)]);
   if (!current) return { error: "user not found", status: 404 };
+  if (current.status === "deleted") return { error: "已删除账号不能重置密码", status: 409 };
   if (!actorCanManageUser(actor, current.role)) return { error: "当前角色不能重置该账号密码", status: 403 };
   const next = String(password || "");
   if (next.length < 6) return { error: "password must be at least 6 chars", status: 400 };
   db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash(next), new Date().toISOString(), Number(id));
   return { ok: true };
+}
+
+function updateUserAccessConfig(actor, id, body = {}) {
+  const current = get("SELECT * FROM users WHERE id = ?", [Number(id)]);
+  if (!current) return { error: "user not found", status: 404 };
+  if (current.status === "deleted") return { error: "已删除账号不能修改权限", status: 409 };
+  if (!actorCanManageUser(actor, current.role)) return { error: "当前角色不能修改该账号权限", status: 403 };
+  const updates = {};
+  if (Object.prototype.hasOwnProperty.call(body, "readonly_override")) {
+    updates.readonly_override = normalizeReadonlyOverride(body.readonly_override);
+  }
+  if (Object.keys(updates).length) {
+    updates.updated_at = new Date().toISOString();
+    patchTable("users", "id", Number(id), ["readonly_override", "updated_at"], updates);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "permission_override_enabled") || Object.prototype.hasOwnProperty.call(body, "permissions")) {
+    const enabled = Object.prototype.hasOwnProperty.call(body, "permission_override_enabled")
+      ? body.permission_override_enabled
+      : true;
+    setUserPermissionOverride(Number(id), enabled, body.permissions || []);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "teacher_names") || Object.prototype.hasOwnProperty.call(body, "teacher_name")) {
+    const invalidTeacherNames = invalidTeacherNameList(body.teacher_names || body.teacher_name);
+    if (invalidTeacherNames.length) return { error: teacherNameError(invalidTeacherNames[0]), status: 400 };
+    const unknownTeacherNames = unknownTeacherNameList(body.teacher_names || body.teacher_name);
+    if (unknownTeacherNames.length) return { error: `绑定老师必须来自教师档案：${unknownTeacherNames.join("、")}`, status: 400 };
+    setUserTeacherBindings(Number(id), normalizeTeacherNameList(body.teacher_names || body.teacher_name));
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "filter_presets")) {
+    setUserFilterPresets(Number(id), body.filter_presets || {});
+  }
+  return publicUser(get("SELECT * FROM users WHERE id = ?", [Number(id)]));
+}
+
+function deleteUser(actor, id) {
+  if (!isSuperRole(actor?.role)) return { error: "只有老板账号可以删除账号", status: 403 };
+  const targetId = Number(id);
+  const current = get("SELECT * FROM users WHERE id = ?", [targetId]);
+  if (!current) return { error: "user not found", status: 404 };
+  if (current.status === "deleted") return { error: "账号已删除", status: 409 };
+  if (Number(actor.id) === targetId) return { error: "不能删除当前登录账号", status: 400 };
+  if (isSuperRole(current.role)) {
+    const remainingActiveOwners = all(`
+      SELECT role
+      FROM users
+      WHERE id <> ? AND status = 'active'
+    `, [targetId]).filter((row) => isSuperRole(row.role)).length;
+    if (!remainingActiveOwners) return { error: "不能删除最后一个可登录的老板账号", status: 409 };
+  }
+  db.prepare("UPDATE users SET status = 'deleted', updated_at = ? WHERE id = ?")
+    .run(new Date().toISOString(), targetId);
+  for (const [sid, session] of sessions.entries()) {
+    if (Number(session.user_id) === targetId) sessions.delete(sid);
+  }
+  return {
+    ok: true,
+    deleted: true,
+    soft_deleted: true,
+    status: "deleted",
+    user: {
+      ...publicUser(get("SELECT * FROM users WHERE id = ?", [targetId])),
+      status: "deleted",
+    },
+  };
 }
 
 function changeOwnPassword(user, currentPassword, nextPassword) {
@@ -6065,7 +7252,7 @@ function changeOwnPassword(user, currentPassword, nextPassword) {
   return { ok: true };
 }
 
-const USER_IMPORT_HEADERS = ["账号/手机号", "显示姓名", "角色", "绑定老师", "初始密码", "状态"];
+const USER_IMPORT_HEADERS = ["手机号/账号", "显示姓名", "角色", "绑定老师", "初始密码", "是否只读", "状态"];
 
 const USER_IMPORT_HEADER_ALIASES = {
   username: [/账号|用户名|手机号|手机|电话/],
@@ -6073,6 +7260,7 @@ const USER_IMPORT_HEADER_ALIASES = {
   role: [/角色|权限/],
   teacher_name: [/绑定老师|绑定教师|授课老师|教师姓名|老师姓名|老师/],
   password: [/初始密码|密码/],
+  readonly: [/是否只读|只读|readonly/],
   status: [/状态|启用/],
 };
 
@@ -6080,16 +7268,21 @@ const USER_IMPORT_ROLE_ALIASES = new Map([
   ["boss", "owner"],
   ["owner", "owner"],
   ["qing", "owner"],
-  ["admin", "admin"],
-  ["管理员", "admin"],
+  ["老板", "owner"],
+  ["admin", "owner"],
+  ["管理员", "owner"],
   ["jiaowu", "academic"],
   ["academic", "academic"],
   ["教务", "academic"],
-  ["finance", "finance"],
-  ["财务", "finance"],
+  ["finance", "helper"],
+  ["财务", "helper"],
+  ["helper", "helper"],
+  ["小助手", "helper"],
   ["teacher", "teacher"],
   ["老师", "teacher"],
   ["教师", "teacher"],
+  ["assistant", "assistant"],
+  ["助教", "assistant"],
 ]);
 
 const USER_IMPORT_STATUS_ALIASES = new Map([
@@ -6107,18 +7300,19 @@ function userImportTemplateSheets() {
       name: "账号导入",
       rows: [
         USER_IMPORT_HEADERS,
-        ["teacher001", "张老师", "老师", "张老师", "123456", "active"],
+        ["13800000000", "张老师", "老师", "张老师", "", "是", "active"],
       ],
     },
     {
       name: "填写说明",
       rows: [
         ["字段", "说明"],
-        ["账号/手机号", "必填，建议老师账号使用手机号；旧模板中的手机号列也可以识别。"],
+        ["手机号/账号", "必填，建议老师账号使用手机号；旧模板中的手机号列也可以识别。"],
         ["显示姓名", "账号显示名称；旧模板中的教师姓名列会同时作为显示姓名和绑定老师。"],
-        ["角色", "可填 boss/owner、admin、jiaowu/academic、finance、teacher，或中文：管理员、教务、财务、老师。"],
+        ["角色", "仅保留五类：老板、教务、小助手、助教、老师。"],
         ["绑定老师", "老师账号必填，必须和课程表中的授课老师名称一致。"],
-        ["初始密码", "必填；旧模板未提供密码时，老师账号默认使用手机号后 6 位。"],
+        ["初始密码", "可填写；为空且账号是手机号时，默认使用手机号后 6 位。"],
+        ["是否只读", "老板、教务默认否；小助手、助教、老师默认是。"],
         ["状态", "可填 active/disabled，或中文：启用、停用。"],
       ],
     },
@@ -6181,6 +7375,27 @@ function normalizeImportedUserStatus(value) {
   return USER_IMPORT_STATUS_ALIASES.get(raw) || USER_IMPORT_STATUS_ALIASES.get(key) || "active";
 }
 
+function normalizeImportedReadonly(value, role) {
+  const raw = text(value);
+  if (!raw) return defaultRoleReadonly(role);
+  if (["是", "yes", "true", "1", "只读"].includes(raw.toLowerCase())) return true;
+  if (["否", "no", "false", "0", "可编辑", "不是"].includes(raw.toLowerCase())) return false;
+  return defaultRoleReadonly(role);
+}
+
+function importUsername(rawValue) {
+  const raw = text(rawValue).replace(/\s+/g, "");
+  const digits = normalizedPhoneAccount(raw);
+  return digits.length >= 6 && /^[\d\-()+]+$/.test(raw) ? digits : raw;
+}
+
+function importedInitialPassword(rawPassword, username) {
+  const explicit = String(rawPassword || "");
+  if (explicit) return explicit.length >= 6 ? explicit : "123456";
+  const phone = normalizedPhoneAccount(username);
+  return phone.length >= 6 && phone === username ? phone.slice(-6) : "123456";
+}
+
 function teacherTemplateRows() {
   const templatePath = path.join(dataDir, "templates", "teacher_template.xlsx");
   if (!fs.existsSync(templatePath)) return [];
@@ -6191,16 +7406,16 @@ function teacherTemplateRows() {
   const rows = [];
   for (const row of sheet.rows.filter((item) => item.source_row > header.source_row)) {
     if (!row.values.some((value) => text(value))) continue;
-    const rawUsername = text(userImportCell(row, header.columns, "username"));
-    const username = rawUsername.replace(/\s+/g, "");
+    const username = importUsername(userImportCell(row, header.columns, "username"));
     const displayName = text(userImportCell(row, header.columns, "display_name")) || text(userImportCell(row, header.columns, "teacher_name")) || username;
     const role = normalizeImportedUserRole(userImportCell(row, header.columns, "role"), "teacher");
     const teacherName = role === "teacher"
       ? (text(userImportCell(row, header.columns, "teacher_name")) || displayName)
       : text(userImportCell(row, header.columns, "teacher_name"));
-    let initialPassword = String(userImportCell(row, header.columns, "password") || (username ? username.slice(-6) : "") || "123456");
-    if (initialPassword.length < 6) initialPassword = "123456";
+    if (teacherName && invalidTeacherNameList(teacherName).length) continue;
+    const initialPassword = importedInitialPassword(userImportCell(row, header.columns, "password"), username);
     const status = normalizeImportedUserStatus(userImportCell(row, header.columns, "status"));
+    const readonly = normalizeImportedReadonly(userImportCell(row, header.columns, "readonly"), role);
     if (username && displayName) {
       rows.push({
         username,
@@ -6208,6 +7423,7 @@ function teacherTemplateRows() {
         role,
         teacher_name: teacherName,
         initial_password: initialPassword,
+        readonly,
         status,
         sheet: sheet.sheet_name,
         source_row: row.source_row,
@@ -6230,59 +7446,149 @@ function importTeacherUsersFromTemplate(actor, options = {}) {
   const backup = backupDb("pre_teacher_accounts");
   let created = 0;
   let updated = 0;
+  let skippedDeleted = 0;
+  let skippedMissingTeachers = 0;
   const accounts = [];
+  const knownTeachers = teacherProfileNameSet();
   for (const row of rows) {
     if (!actorCanManageUser(actor, row.role)) continue;
-    if (row.role === "teacher") upsertTeacherProfileFromAccount(row.teacher_name || row.display_name, row.username);
+    const teacherNames = normalizeTeacherNameList(row.teacher_name);
+    if (teacherNames.some((name) => !knownTeachers.has(name))) {
+      skippedMissingTeachers += 1;
+      continue;
+    }
     const username = row.username;
     const initialPassword = row.initial_password;
     const existing = get("SELECT * FROM users WHERE username = ?", [username]);
+    if (existing?.status === "deleted") {
+      skippedDeleted += 1;
+      continue;
+    }
     if (existing) {
       const payload = {
         display_name: row.display_name,
         role: row.role,
-        teacher_name: row.role === "teacher" ? (row.teacher_name || row.display_name) : row.teacher_name,
+        teacher_name: teacherNames[0] || "",
         status: row.status,
         updated_at: new Date().toISOString(),
       };
       if (resetPassword) payload.password_hash = passwordHash(initialPassword);
       patchTable("users", "id", existing.id, ["display_name", "role", "teacher_name", "status", "updated_at", "password_hash"], payload);
+      setUserTeacherBindings(Number(existing.id), teacherNames);
       updated += 1;
     } else {
-      db.prepare(`
+      const result = db.prepare(`
         INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(username, row.display_name, row.role, row.role === "teacher" ? (row.teacher_name || row.display_name) : row.teacher_name, passwordHash(initialPassword), row.status);
+      `).run(username, row.display_name, row.role, teacherNames[0] || "", passwordHash(initialPassword), row.status);
+      setUserTeacherBindings(Number(result.lastInsertRowid), teacherNames);
       created += 1;
     }
-    accounts.push({ username, display_name: row.display_name, role: row.role, teacher_name: row.teacher_name, status: row.status, initial_password: initialPassword });
+    accounts.push({ username, display_name: row.display_name, role: row.role, teacher_name: row.teacher_name, status: row.status, readonly: row.readonly });
   }
-  return { ok: true, created, updated, total: rows.length, accounts, backup };
+  return { ok: true, created, updated, skipped_deleted: skippedDeleted, skipped_missing_teachers: skippedMissingTeachers, total: rows.length, accounts, backup };
+}
+
+function syncTeacherAccountsFromProfiles(actor) {
+  if (!actorCanManageUser(actor, "teacher")) return { error: "当前角色不能创建老师账号", status: 403 };
+  const teacherRows = all("SELECT id, name, phone FROM teachers ORDER BY name");
+  const groups = new Map();
+  let skippedInvalid = 0;
+  for (const teacher of teacherRows) {
+    const phone = normalizedPhoneAccount(teacher.phone);
+    if (phone.length < 6) {
+      skippedInvalid += 1;
+      continue;
+    }
+    if (!groups.has(phone)) groups.set(phone, []);
+    groups.get(phone).push(teacher);
+  }
+
+  let created = 0;
+  let existing = 0;
+  let conflicts = 0;
+  const createdAccounts = [];
+  const conflictAccounts = [];
+  const duplicateMerged = [...groups.values()].reduce((sum, rows) => sum + Math.max(0, rows.length - 1), 0);
+  const bindTeacher = db.prepare("INSERT OR IGNORE INTO user_teacher_bindings(user_id, teacher_name) VALUES (?, ?)");
+
+  withTransaction(() => {
+    for (const [phone, teachers] of groups.entries()) {
+      const primaryTeacher = teachers[0];
+      const displayName = text(primaryTeacher.name) || phone;
+      const existingUser = get("SELECT * FROM users WHERE username = ?", [phone]);
+      if (existingUser) {
+        if (canonicalRole(existingUser.role) !== "teacher") {
+          conflicts += 1;
+          conflictAccounts.push({ username: phone, role: canonicalRole(existingUser.role), teachers: teachers.map((row) => row.name) });
+          continue;
+        }
+        for (const teacher of teachers) bindTeacher.run(Number(existingUser.id), text(teacher.name));
+        db.prepare("UPDATE users SET teacher_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(text(primaryTeacher.name), Number(existingUser.id));
+        existing += 1;
+        continue;
+      }
+      const result = db.prepare(`
+        INSERT INTO users(username, display_name, role, teacher_name, password_hash, status)
+        VALUES (?, ?, 'teacher', ?, ?, 'active')
+      `).run(phone, displayName, displayName, passwordHash(phone.slice(-6)));
+      for (const teacher of teachers) bindTeacher.run(Number(result.lastInsertRowid), text(teacher.name));
+      created += 1;
+      createdAccounts.push({
+        id: Number(result.lastInsertRowid),
+        username: phone,
+        display_name: displayName,
+        teachers: teachers.map((row) => row.name),
+      });
+    }
+  });
+
+  const skipped = skippedInvalid + existing + conflicts;
+  return {
+    ok: true,
+    total_teachers: teacherRows.length,
+    valid_phone_count: groups.size,
+    created,
+    existing,
+    conflicts,
+    skipped_invalid: skippedInvalid,
+    skipped,
+    duplicate_merged: duplicateMerged,
+    created_accounts: createdAccounts,
+    conflict_accounts: conflictAccounts,
+  };
 }
 
 function roleCan(user, area, action = "read") {
   if (!user) return false;
-  if (user.role === "owner") return true;
-  if (user.role === "admin") return true;
-  const grants = {
-    academic: new Set(["schedule", "students", "profiles", "pricing", "teacherTransport", "users"]),
-    finance: new Set(["finance", "expenses", "recharges", "studentBilling", "students"]),
-    teacher: new Set(["teacherSelf", "scheduleRead"]),
-  };
-  if (user.role === "academic") return grants.academic.has(area) && area !== "audit";
-  if (user.role === "finance") {
-    if (action !== "read" && !["expenses", "recharges"].includes(area)) return false;
-    return grants.finance.has(area);
+  const role = canonicalRole(user.role);
+  if (isSuperRole(role)) return true;
+  if (role === "teacher") {
+    if (action !== "read") return false;
+    return userCanAreaByPermissions(user, area);
   }
-  if (user.role === "teacher") {
-    if (action !== "read" && area !== "teacherSelf") return false;
-    return grants.teacher.has(area);
+  if (role === "academic") {
+    if (["roles", "audit", "coreExport", "staff", "expenses"].includes(area)) return false;
+    if (action !== "read" && ["finance", "operationLogs"].includes(area)) return false;
+    return userCanAreaByPermissions(user, area);
   }
-  return false;
+  if (role === "helper") {
+    if (action !== "read" && !["schedule", "students", "recharges"].includes(area)) return false;
+    return userCanAreaByPermissions(user, area);
+  }
+  if (role === "assistant") {
+    if (action !== "read" && !["schedule"].includes(area)) return false;
+    return userCanAreaByPermissions(user, area);
+  }
+  if (area === "roles") return false;
+  if (action !== "read" && ["finance", "teacherSalary", "staff", "audit", "coreExport", "users"].includes(area)) return false;
+  return userCanAreaByPermissions(user, area);
 }
 
 function apiArea(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/roles")) return "roles";
+  if (p === "/api/dashboard") return "dashboard";
   if (p.startsWith("/api/users")) return "users";
   if (p === "/api/export/core-workbook.xlsx") return "coreExport";
   if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
@@ -6292,7 +7598,8 @@ function apiArea(req, url) {
   if (p.startsWith("/api/staff")) return "staff";
   if (p.startsWith("/api/reconcile")) return "audit";
   if (p.startsWith("/api/audit") || p === "/api/source-workbooks" || p === "/api/import/source-workbook") return "audit";
-  if (p === "/api/recharges") return "recharges";
+  if (p === "/api/operation-logs") return "operationLogs";
+  if (p === "/api/recharges" || p.startsWith("/api/recharges/")) return "recharges";
   if (p.startsWith("/api/opening-balances")) return "students";
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
@@ -6303,25 +7610,73 @@ function apiArea(req, url) {
   return "schedule";
 }
 
+function apiPagePermissionKey(req, url) {
+  const p = url.pathname;
+  if (p === "/api/dashboard") return "dashboard";
+  if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return "userAdmin";
+  if (p.startsWith("/api/course-notice")) return "courseNotice";
+  if (p.startsWith("/api/teacher-course-notice")) return "teacherCourseNotice";
+  if (p === "/api/lessons-range" || p.startsWith("/api/lessons") || p === "/api/schedule-conflicts") return "lessons";
+  if (p.startsWith("/api/recharges")) return "recharges";
+  if (p.startsWith("/api/opening-balances")) return "openingBalances";
+  if (p.startsWith("/api/teachers")) return "teacherProfiles";
+  if (p.startsWith("/api/teacher-salary-rules")) return "teacherSalaryRules";
+  if (p.startsWith("/api/finance-summary")) return "finance";
+  if (p.startsWith("/api/operation-logs")) return "operationLogs";
+  if (p.startsWith("/api/staff-salary")) return "staffPayroll";
+  if (p.startsWith("/api/staff-attendance")) return "staffAttendance";
+  if (p.startsWith("/api/operating-expenses")) return "expenses";
+  return "";
+}
+
 function authorizeApi(user, req, url) {
   const area = apiArea(req, url);
   const method = req.method;
+  const accessAction = method === "GET" || isReadonlySafeMutation(req, url) ? "read" : "write";
+  const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
-  if (user.role === "owner" || user.role === "admin") return true;
-  if (user.role === "teacher") {
-    return method === "GET" && (area === "schedule" || area === "profiles");
-  }
-  if (user.role === "finance") return roleCan(user, area, method === "GET" ? "read" : "write");
-  if (["finance", "teacherSalary", "staff", "expenses", "audit", "coreExport"].includes(area)) return false;
-  return roleCan(user, area, method === "GET" ? "read" : "write");
+  if (isSuperRole(role)) return true;
+  const pageKey = apiPagePermissionKey(req, url);
+  if (pageKey && !userHasAnyPermission(user, [pageKey])) return false;
+  if (area === "roles") return false;
+  if (area === "dashboard") return method === "GET" && userHasAnyPermission(user, ["dashboard"]);
+  return roleCan(user, area, accessAction);
+}
+
+function isWriteMethod(method) {
+  return !["GET", "HEAD", "OPTIONS"].includes(String(method || "GET").toUpperCase());
+}
+
+const READONLY_SAFE_MUTATION_PATHS = new Set([
+  "/api/course-notice/complete",
+  "/api/teacher-course-notice/complete",
+]);
+
+function isReadonlySafeMutation(req, url) {
+  return String(req.method || "").toUpperCase() === "POST"
+    && READONLY_SAFE_MUTATION_PATHS.has(url.pathname);
+}
+
+const READONLY_WRITE_MESSAGE = "当前账号为只读，不能修改数据";
+
+function teacherNamesFromUrl(url) {
+  return normalizeTeacherNameList([
+    ...url.searchParams.getAll("teacher_names"),
+    ...url.searchParams.getAll("teacher_names[]"),
+    ...url.searchParams.getAll("teacher"),
+  ]);
+}
+
+function filterLessonsByTeacherNames(rows, teacherNames = []) {
+  const names = normalizeTeacherNameList(teacherNames);
+  if (!names.length) return rows || [];
+  const allowed = new Set(names);
+  return (rows || []).filter((row) => allowed.has(text(row.teacher_name)));
 }
 
 function sanitizeLessonRows(rows, user) {
-  let output = rows || [];
-  if (user.role === "teacher") {
-    output = output.filter((row) => text(row.teacher_name) === text(user.teacher_name));
-  }
-  if (user.role === "owner" || user.role === "admin") return output;
+  const output = rows || [];
+  if (isSuperRole(user.role)) return output;
   return output.map((row) => ({
     ...row,
     teacher_salary: 0,
@@ -6331,29 +7686,32 @@ function sanitizeLessonRows(rows, user) {
 }
 
 function sanitizeBootstrap(data, user) {
-  if (user.role === "owner" || user.role === "admin") return { ...data, user };
+  const role = canonicalRole(user.role);
+  if (isSuperRole(role)) return { ...data, user };
+  const permissions = new Set(Array.isArray(user.permissions) ? user.permissions : userPermissionKeys(user));
+  const canSeeStudentMoney = ["feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "finance"]
+    .some((key) => permissions.has(key));
+  const canSeeTeacherSalary = ["teacherSalary", "teacherSalaryRules"].some((key) => permissions.has(key));
   const sanitized = {
     ...data,
     user,
     lessons: sanitizeLessonRows(data.lessons, user),
-    teachers: user.role === "teacher" && user.teacher_name
-      ? [{ id: null, name: user.teacher_name, active_this_month: true }]
-      : data.teachers,
-    recharges: user.role === "teacher" ? [] : data.recharges,
-    opening_balances: user.role === "teacher" ? [] : data.opening_balances,
-    student_pricing: user.role === "teacher" ? [] : data.student_pricing,
+    teachers: data.teachers,
+    recharges: permissions.has("recharges") ? data.recharges : [],
+    opening_balances: permissions.has("openingBalances") ? data.opening_balances : [],
+    student_pricing: permissions.has("studentPricing") ? data.student_pricing : [],
     derived: {
       ...data.derived,
-      teacher_summary: user.role === "academic"
+      teacher_summary: role === "academic"
         ? (data.derived.teacher_summary || []).map((row) => ({
           ...row,
           salary_total: 0,
           total_salary: num(row.week1_transport) + num(row.week2_transport) + num(row.week3_transport) + num(row.week4_transport),
         }))
-        : [],
+        : canSeeTeacherSalary ? data.derived.teacher_summary : [],
     },
   };
-  if (user.role === "teacher") {
+  if (!canSeeStudentMoney || role === "teacher") {
     sanitized.derived = {
       ...sanitized.derived,
       fee_details: [],
@@ -7026,7 +8384,7 @@ function sourceWorkbooks() {
     .sort((a, b) => text(b.month_key).localeCompare(text(a.month_key)) || a.filename.localeCompare(b.filename, "zh-Hans-CN"));
 }
 
-function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
+function insertRechargeFromWorkbook(row, monthKey, sourceLabel) {
   const studentName = text(row.values[0]);
   if (!studentName) return false;
   const grade = text(row.values[1]);
@@ -7039,15 +8397,6 @@ function upsertRechargeFromWorkbook(row, monthKey, sourceLabel) {
       recharge_date, notes, source, month_key
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(student_name, month_key) DO UPDATE SET
-      grade = COALESCE(NULLIF(excluded.grade, ''), recharge_records.grade),
-      prev_actual = excluded.prev_actual,
-      prev_gift = excluded.prev_gift,
-      cur_recharge = excluded.cur_recharge,
-      cur_gift = excluded.cur_gift,
-      recharge_date = excluded.recharge_date,
-      notes = excluded.notes,
-      source = excluded.source
   `).run(
     studentName,
     grade,
@@ -7069,7 +8418,7 @@ function importRechargesFromWorkbook(buffer, monthKey, sourceLabel, replace = tr
   if (replace && sheet.rows.length) db.prepare("DELETE FROM recharge_records WHERE month_key = ?").run(monthKey);
   let count = 0;
   for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
-    if (upsertRechargeFromWorkbook(row, monthKey, sourceLabel)) count += 1;
+    if (insertRechargeFromWorkbook(row, monthKey, sourceLabel)) count += 1;
   }
   return count;
 }
@@ -7178,7 +8527,7 @@ function importPricingStandardsFromWorkbook(buffer) {
 
 function validTeacherName(value) {
   const name = text(value);
-  if (!name || name === "合计" || name.startsWith("#")) return "";
+  if (!isValidTeacherName(name) || name === "合计" || name.startsWith("#")) return "";
   if (/^\d{1,2}\.\d{1,2}[-－~～]\d{1,2}\.\d{1,2}$/.test(name)) return "";
   if (/^\d+月/.test(name) || /学生费用汇总$/.test(name)) return "";
   return name;
@@ -8030,6 +9379,8 @@ function createLessonsBatch(rows) {
   return withTransaction(() => {
     const created = [];
     for (const item of items) {
+      const nameError = teacherNameError(item.teacher_name);
+      if (nameError) return { error: nameError, status: 400 };
       if (!validDateKey(text(item.date))) {
         return { error: `目标日期无效：${text(item.date) || "空"}`, status: 400 };
       }
@@ -8044,7 +9395,7 @@ function createLessonsBatch(rows) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
-    return sendJson(res, { user: currentUser(req), roles: USER_ROLES });
+    return sendJson(res, { user: currentUser(req), roles: roleLabels(), permission_tree: PERMISSION_TREE });
   }
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await readBody(req);
@@ -8071,8 +9422,87 @@ async function handleApi(req, res, url) {
     writeOperationLog(user, { operation_type: "修改密码", operation_content: `修改了账号 ${user.username} 的登录密码`, target_type: "users", target_id: String(user.id) });
     return sendJson(res, result);
   }
+  if (isWriteMethod(req.method) && userReadonly(user) && !isReadonlySafeMutation(req, url)) {
+    return sendError(res, 403, READONLY_WRITE_MESSAGE);
+  }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
   if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
+
+  if (req.method === "GET" && url.pathname === "/api/roles") {
+    return sendJson(res, {
+      roles: roleRows().map((role) => ({
+        ...role,
+        permissions: rolePermissionKeys(role.code),
+        filter_presets: roleFilterPresets(role.code),
+        user_count: roleUsageCount(role.code),
+      })),
+      permission_tree: PERMISSION_TREE,
+      role_permissions: rolePermissionMap(),
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/roles") {
+    const result = createRole(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "create", entity_type: "roles", entity_id: result.code, before: null, after: result });
+    writeOperationLog(user, { operation_type: "新增角色", operation_content: `${result.name} (${result.code})`, target_type: "roles", target_id: result.code });
+    return sendJson(res, result, 201);
+  }
+  const roleMatch = url.pathname.match(/^\/api\/roles\/([A-Za-z0-9_-]+)$/);
+  if (roleMatch && req.method === "PATCH") {
+    const roleCode = canonicalRole(roleMatch[1]);
+    const before = get("SELECT * FROM roles WHERE code = ?", [roleCode]);
+    const beforePermissions = rolePermissionKeys(roleCode);
+    const beforeFilterPresets = roleFilterPresets(roleCode);
+    const body = await readBody(req);
+    const result = updateRole(roleCode, body);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "update",
+      entity_type: "roles",
+      entity_id: roleCode,
+      before: { ...before, permissions: beforePermissions, filter_presets: beforeFilterPresets },
+      after: result,
+    });
+    if (Object.prototype.hasOwnProperty.call(body, "permissions")) {
+      writeOperationLog(user, {
+        operation_type: "修改角色权限",
+        operation_content: `${result.name} (${result.code}) 权限 ${result.permissions.length} 项`,
+        target_type: "roles",
+        target_id: result.code,
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "filter_presets")) {
+      writeOperationLog(user, {
+        operation_type: "修改角色预筛选",
+        operation_content: `${result.name} (${result.code}) 预筛选 ${Object.keys(result.filter_presets || {}).length} 页`,
+        target_type: "roles",
+        target_id: result.code,
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "readonly")) {
+      writeOperationLog(user, {
+        operation_type: "修改角色只读",
+        operation_content: `${result.name} (${result.code}) ${Number(result.readonly) ? "只读" : "可编辑"}`,
+        target_type: "roles",
+        target_id: result.code,
+      });
+    }
+    return sendJson(res, result);
+  }
+  if (roleMatch && req.method === "DELETE") {
+    const roleCode = canonicalRole(roleMatch[1]);
+    const before = get("SELECT * FROM roles WHERE code = ?", [roleCode]);
+    const result = deleteRole(roleCode);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "delete", entity_type: "roles", entity_id: roleCode, before, after: result });
+    writeOperationLog(user, { operation_type: "删除角色", operation_content: `${before?.name || roleCode} (${roleCode})`, target_type: "roles", target_id: roleCode });
+    return sendJson(res, result);
+  }
+  if (req.method === "GET" && url.pathname === "/api/dashboard") {
+    const result = dashboardData(url, user);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    return sendJson(res, result);
+  }
 
   if (req.method === "GET" && url.pathname === "/api/teacher-salary-rules") {
     return sendJson(res, { rules: teacherSalaryRules() });
@@ -8161,7 +9591,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/users") {
-    return sendJson(res, { users: userRows(user), roles: USER_ROLES });
+    return sendJson(res, { users: userRows(user), roles: Object.fromEntries(manageableRoles(user).map((role) => [role.code, role.name])), all_roles: roleRows() });
   }
   if (req.method === "GET" && url.pathname === "/api/users/import-template.xlsx") {
     return sendBuffer(
@@ -8190,6 +9620,33 @@ async function handleApi(req, res, url) {
     });
     return sendJson(res, result);
   }
+  if (req.method === "POST" && url.pathname === "/api/users/sync-teacher-accounts") {
+    const result = syncTeacherAccountsFromProfiles(user);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "sync_teacher_accounts", entity_type: "users", entity_id: "teacher_phone", before: null, after: { created: result.created, skipped: result.skipped, duplicate_merged: result.duplicate_merged, conflicts: result.conflicts } });
+    writeOperationLog(user, {
+      operation_type: "同步老师账号",
+      operation_content: `自动创建老师账号 ${result.created || 0} 个，跳过 ${result.skipped || 0} 个，重复手机号合并 ${result.duplicate_merged || 0} 个`,
+      target_type: "users",
+      target_id: "teacher_phone",
+    });
+    return sendJson(res, result);
+  }
+  const userAccessMatch = url.pathname.match(/^\/api\/users\/(\d+)\/access$/);
+  if (userAccessMatch && req.method === "PATCH") {
+    const targetId = Number(userAccessMatch[1]);
+    const before = publicUser(get("SELECT * FROM users WHERE id = ?", [targetId]));
+    const result = updateUserAccessConfig(user, targetId, await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "update_access", entity_type: "users", entity_id: String(targetId), before, after: result });
+    writeOperationLog(user, {
+      operation_type: "修改账号权限",
+      operation_content: `${result.username} 权限 ${result.permissions.length} 项，绑定老师 ${(result.bound_teacher_names || []).join(",") || "无"}`,
+      target_type: "users",
+      target_id: String(targetId),
+    });
+    return sendJson(res, result);
+  }
   const userMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
   if (userMatch && req.method === "PATCH") {
     const before = get("SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at FROM users WHERE id = ?", [Number(userMatch[1])]);
@@ -8197,6 +9654,20 @@ async function handleApi(req, res, url) {
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "users", entity_id: String(userMatch[1]), before, after: result });
     writeOperationLog(user, { operation_type: "修改账号", operation_content: userOperationText(result), target_type: "users", target_id: String(userMatch[1]) });
+    return sendJson(res, result);
+  }
+  if (userMatch && req.method === "DELETE") {
+    const targetId = Number(userMatch[1]);
+    const before = get("SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at FROM users WHERE id = ?", [targetId]);
+    const result = deleteUser(user, targetId);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, { action: "soft_delete", entity_type: "users", entity_id: String(targetId), before, after: result.user });
+    writeOperationLog(user, {
+      operation_type: "删除账号",
+      operation_content: `${before?.username || targetId} ${before?.display_name || ""}，保留教师档案、课程和绑定历史`,
+      target_type: "users",
+      target_id: String(targetId),
+    });
     return sendJson(res, result);
   }
   const userPasswordMatch = url.pathname.match(/^\/api\/users\/(\d+)\/password$/);
@@ -8330,14 +9801,14 @@ async function handleApi(req, res, url) {
     const report = scheduleConflicts(resolveMonthKey(url), {
       ignoreRoomOneConflict: url.searchParams.get("ignore_room_one") === "1",
     });
-    if (user.role === "teacher") return sendJson(res, { ...report, issue_count: 0, ignored_room_one_count: 0, counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 }, issues: [] });
     return sendJson(res, report);
   }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     return sendJson(res, sanitizeBootstrap(bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"), user));
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
-    const lessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
+    const rangeLessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
+    const lessons = rangeLessons ? filterLessonsByTeacherNames(rangeLessons, teacherNamesFromUrl(url)) : null;
     if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
   }
@@ -8348,9 +9819,6 @@ async function handleApi(req, res, url) {
       url.searchParams.get("only_teaching") === "1",
     );
     if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
-    if (user.role === "teacher") {
-      data.send_objects = data.send_objects.filter((item) => item.lessons.some((lesson) => text(lesson.teacher_name) === text(user.teacher_name)));
-    }
     return sendJson(res, data);
   }
   if (req.method === "POST" && url.pathname === "/api/course-notice/greeting") {
@@ -8391,9 +9859,6 @@ async function handleApi(req, res, url) {
       url.searchParams.get("only_teaching") === "1",
     );
     if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
-    if (user.role === "teacher") {
-      data.send_objects = data.send_objects.filter((item) => item.lessons.some((lesson) => text(lesson.teacher_name) === text(user.teacher_name)));
-    }
     return sendJson(res, data);
   }
   if (req.method === "POST" && url.pathname === "/api/teacher-course-notice/greeting") {
@@ -8433,10 +9898,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, financeSummary(range));
   }
   if (req.method === "GET" && url.pathname === "/api/teachers") {
-    const teachers = user.role === "teacher" && user.teacher_name
-      ? teacherProfiles().filter((row) => row.name === user.teacher_name)
-      : teacherProfiles();
-    return sendJson(res, { teachers });
+    return sendJson(res, { teachers: teacherProfiles() });
   }
   if (req.method === "POST" && url.pathname === "/api/teachers") {
     const result = createTeacherProfile(await readBody(req));
@@ -8791,6 +10253,8 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/lessons") {
     const body = await readBody(req);
+    const nameError = teacherNameError(body.teacher_name);
+    if (nameError) return sendError(res, 400, nameError);
     const lessonData = { ...body };
     delete lessonData.teacher_salary_source;
     delete lessonData.teacher_salary_rule_id;
@@ -8803,6 +10267,10 @@ async function handleApi(req, res, url) {
   const lessonMatch = url.pathname.match(/^\/api\/lessons\/(\d+)$/);
   if (lessonMatch && req.method === "PATCH") {
     const body = await readBody(req);
+    if (Object.prototype.hasOwnProperty.call(body, "teacher_name")) {
+      const nameError = teacherNameError(body.teacher_name);
+      if (nameError) return sendError(res, 400, nameError);
+    }
     const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
     const payload = { ...body, updated_at: new Date().toISOString() };
     delete payload.teacher_salary_source;
@@ -8848,7 +10316,10 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const current = get("SELECT * FROM teachers WHERE id = ?", [Number(teacherIdMatch[1])]);
     if (!current) return sendError(res, 404, "teacher not found");
-    if (Object.prototype.hasOwnProperty.call(body, "name") && !text(body.name)) return sendError(res, 400, "name is required");
+    if (Object.prototype.hasOwnProperty.call(body, "name")) {
+      const nameError = teacherNameError(body.name, { required: true });
+      if (nameError) return sendError(res, 400, nameError);
+    }
     const payload = {};
     for (const field of ["name", "phone", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
@@ -8990,42 +10461,25 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ok: true });
   }
 
+  const rechargeRecordMatch = url.pathname.match(/^\/api\/recharges\/(\d+)$/);
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
     const studentName = text(body.student_name);
     if (!studentName) return sendError(res, 400, "学生姓名不能为空");
+    if (!validMonthKey(monthKey)) return sendError(res, 400, "month_key must be YYYY-MM-01");
     const curRecharge = num(body.cur_recharge);
     const curGift = num(body.cur_gift);
     if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
     if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
+    if (curRecharge === 0 && curGift === 0) return sendError(res, 400, "实际充值和赠送充值不能同时为 0");
     const canEditOpeningBalance = !previousDataMonth(monthKey);
-    const before = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [studentName, monthKey]);
-    if (curRecharge === 0 && curGift === 0) {
-      if (!before) return sendError(res, 400, "实际充值和赠送充值不能同时为 0");
-      const result = withTransaction(() => {
-        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(before.id);
-        return refreshCarryOverAfter(monthKey);
-      });
-      recordAuditEvent(req, user, { action: "delete_zero_recharge", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: null, carry_over: result } });
-      writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${studentName} ${monthKey}`, target_type: "recharge_records", target_id: String(before.id) });
-      return sendJson(res, { ok: true, deleted: true, carry_over: result });
-    }
-    const result = withTransaction(() => {
-      db.prepare(`
+    const created = withTransaction(() => {
+      const result = db.prepare(`
         INSERT INTO recharge_records(
           student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(student_name, month_key) DO UPDATE SET
-          grade = excluded.grade,
-          prev_actual = CASE WHEN ? THEN excluded.prev_actual ELSE recharge_records.prev_actual END,
-          prev_gift = CASE WHEN ? THEN excluded.prev_gift ELSE recharge_records.prev_gift END,
-          cur_recharge = excluded.cur_recharge,
-          cur_gift = excluded.cur_gift,
-          recharge_date = excluded.recharge_date,
-          notes = excluded.notes,
-          source = excluded.source
       `).run(
         studentName,
         text(body.grade),
@@ -9037,15 +10491,78 @@ async function handleApi(req, res, url) {
         text(body.notes),
         text(body.source),
         monthKey,
-        canEditOpeningBalance ? 1 : 0,
-        canEditOpeningBalance ? 1 : 0,
       );
-      return refreshCarryOverAfter(monthKey);
+      upsertStudent(studentName, text(body.grade));
+      const row = get("SELECT * FROM recharge_records WHERE id = ?", [Number(result.lastInsertRowid)]);
+      return { row, carry_over: refreshCarryOverAfter(monthKey) };
     });
-    const after = get("SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ?", [studentName, monthKey]);
-    recordAuditEvent(req, user, { action: "upsert", entity_type: "recharge_records", entity_id: `${studentName}|${monthKey}`, before, after: { row: after, carry_over: result } });
-    writeOperationLog(user, { operation_type: before ? "修改充值记录" : "新增充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(after?.id || `${studentName}|${monthKey}`) });
-    return sendJson(res, { ok: true, carry_over: result });
+    recordAuditEvent(req, user, { action: "create", entity_type: "recharge_records", entity_id: String(created.row?.id || ""), before: null, after: created });
+    writeOperationLog(user, { operation_type: "新增充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(created.row?.id || "") });
+    return sendJson(res, { ok: true, row: created.row, carry_over: created.carry_over }, 201);
+  }
+
+  if (rechargeRecordMatch && req.method === "PATCH") {
+    const id = Number(rechargeRecordMatch[1]);
+    const before = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
+    if (!before) return sendError(res, 404, "充值记录不存在");
+    const body = await readBody(req);
+    const monthKey = text(body.month_key || before.month_key || getSetting("month_key"));
+    const studentName = text(body.student_name || before.student_name);
+    if (!studentName) return sendError(res, 400, "学生姓名不能为空");
+    if (!validMonthKey(monthKey)) return sendError(res, 400, "month_key must be YYYY-MM-01");
+    const curRecharge = body.cur_recharge === undefined ? num(before.cur_recharge) : num(body.cur_recharge);
+    const curGift = body.cur_gift === undefined ? num(before.cur_gift) : num(body.cur_gift);
+    if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
+    if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
+    const grade = body.grade === undefined ? text(before.grade) : text(body.grade);
+    const source = body.source === undefined ? text(before.source) : text(body.source);
+    const rechargeDate = body.recharge_date === undefined ? text(before.recharge_date) : text(body.recharge_date);
+    const notes = body.notes === undefined ? text(before.notes) : text(body.notes);
+    if (curRecharge === 0 && curGift === 0) {
+      const deleted = withTransaction(() => {
+        db.prepare("DELETE FROM recharge_records WHERE id = ?").run(id);
+        return refreshCarryOverAfter(monthKey);
+      });
+      recordAuditEvent(req, user, { action: "delete_zero_recharge", entity_type: "recharge_records", entity_id: String(id), before, after: { row: null, carry_over: deleted } });
+      writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${before.student_name} ${before.month_key}`, target_type: "recharge_records", target_id: String(id) });
+      return sendJson(res, { ok: true, deleted: true, carry_over: deleted });
+    }
+    const updated = withTransaction(() => {
+      db.prepare(`
+        UPDATE recharge_records
+        SET student_name = ?,
+            grade = ?,
+            cur_recharge = ?,
+            cur_gift = ?,
+            recharge_date = ?,
+            notes = ?,
+            source = ?,
+            month_key = ?
+        WHERE id = ?
+      `).run(studentName, grade, curRecharge, curGift, rechargeDate, notes, source, monthKey, id);
+      upsertStudent(studentName, grade);
+      const row = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
+      const carryOver = [before.month_key, monthKey]
+        .filter((item, index, list) => validMonthKey(item) && list.indexOf(item) === index)
+        .map((item) => refreshCarryOverAfter(item));
+      return { row, carry_over: carryOver };
+    });
+    recordAuditEvent(req, user, { action: "update", entity_type: "recharge_records", entity_id: String(id), before, after: updated });
+    writeOperationLog(user, { operation_type: "修改充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(id) });
+    return sendJson(res, { ok: true, row: updated.row, carry_over: updated.carry_over });
+  }
+
+  if (rechargeRecordMatch && req.method === "DELETE") {
+    const id = Number(rechargeRecordMatch[1]);
+    const before = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
+    if (!before) return sendError(res, 404, "充值记录不存在");
+    const result = withTransaction(() => {
+      db.prepare("DELETE FROM recharge_records WHERE id = ?").run(id);
+      return refreshCarryOverAfter(before.month_key);
+    });
+    recordAuditEvent(req, user, { action: "delete", entity_type: "recharge_records", entity_id: String(id), before, after: { row: null, carry_over: result } });
+    writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${before.student_name} ${before.month_key}`, target_type: "recharge_records", target_id: String(id) });
+    return sendJson(res, { ok: true, deleted: true, carry_over: result });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fee-overrides") {

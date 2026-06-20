@@ -133,6 +133,9 @@ def valid_teacher_name(value):
     name = text(value)
     if not name or name == "合计" or name.startswith("#"):
         return ""
+    compact = re.sub(r"\s+", "", name)
+    if re.fullmatch(r"[?？�]+", compact) or "�" in compact:
+        return ""
     if name in KNOWN_SHEET_NAMES or re.fullmatch(r"\d+月.*", name) or re.fullmatch(r".*学生费用汇总", name):
         return ""
     if re.fullmatch(r"\d{1,2}\.\d{1,2}[-－~～]\d{1,2}\.\d{1,2}", name):
