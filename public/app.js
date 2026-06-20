@@ -1142,7 +1142,7 @@ async function load(options = {}) {
   ].some((key) => canView(key));
   const lessonRange = lessonLoadRange();
   if (needsLessonRange && lessonRange) {
-    const lessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(lessonRange.start)}&end=${encodeURIComponent(lessonRange.end)}`);
+    const lessonsResult = await request(lessonsRangeUrl(lessonRange, lessonDataViewKey()));
     if (loadGeneration !== thisGeneration) return;
     state.lessons = (lessonsResult.lessons || []);
     state.lesson_loaded_range = lessonRange;
@@ -1152,7 +1152,8 @@ async function load(options = {}) {
   const matrixStart = matrixRange.start && (!weekSpan || matrixRange.start < weekSpan.start) ? matrixRange.start : weekSpan?.start;
   const matrixEnd = matrixRange.end && (!weekSpan || matrixRange.end > weekSpan.end) ? matrixRange.end : weekSpan?.end;
   if ((canView("week") || canView("weekMatrix")) && matrixStart && matrixEnd) {
-    const weekLessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(matrixStart)}&end=${encodeURIComponent(matrixEnd)}`);
+    const weekViewKey = view === "weekMatrix" ? "weekMatrix" : "week";
+    const weekLessonsResult = await request(lessonsRangeUrl({ start: matrixStart, end: matrixEnd }, weekViewKey));
     if (loadGeneration !== thisGeneration) return;
     state.week_lessons = weekLessonsResult.lessons || [];
   } else {
@@ -2078,61 +2079,29 @@ function userFilterPreset(viewKey) {
   return preset && typeof preset === "object" && !Array.isArray(preset) ? preset : null;
 }
 
+function rolePrefilterDateRange(viewKey = view) {
+  const preset = userFilterPreset(viewKey) || {};
+  return {
+    start: isDateValue(preset.start_date) ? preset.start_date : "",
+    end: isDateValue(preset.end_date) ? preset.end_date : "",
+  };
+}
+
+function lessonDataViewKey(viewKey = view) {
+  return ["lessons", "week", "weekMatrix", "teacherDetail"].includes(viewKey) ? viewKey : "lessons";
+}
+
+function lessonsRangeUrl(range, viewKey = lessonDataViewKey()) {
+  const params = new URLSearchParams();
+  params.set("start", range.start);
+  params.set("end", range.end);
+  params.set("view", viewKey);
+  return `/api/lessons-range?${params.toString()}`;
+}
+
 function applyUserFilterPreset(viewKey) {
-  if (!auth.user || appliedUserFilterPresetViews.has(viewKey)) return false;
-  const preset = userFilterPreset(viewKey);
   appliedUserFilterPresetViews.add(viewKey);
-  if (!preset || !Object.keys(preset).length) return false;
-  if (["lessons", "week", "weekMatrix"].includes(viewKey)) {
-    const nextFilter = {
-      ...lessonFilter,
-      month_key: state?.settings?.month_key || activeMonth || lessonFilter.month_key,
-      ...["student", "status", "classroom", "grade", "subject", "query", "start_date", "end_date"].reduce((next, key) => (
-        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
-      ), {}),
-      date_preset_initialized: true,
-    };
-    if (Object.prototype.hasOwnProperty.call(preset, "teacher_names") || Object.prototype.hasOwnProperty.call(preset, "teacher")) {
-      const teacherNames = normalizeNameList(preset.teacher_names || preset.teacher || []);
-      nextFilter.teacher = teacherNames.join("、");
-      nextFilter.teacher_names = teacherNames;
-    }
-    lessonFilter = nextFilter;
-    saveLessonFilter();
-    return true;
-  }
-  if (viewKey === "recharges") {
-    if (Object.prototype.hasOwnProperty.call(preset, "source")) rechargeSourceFilter = String(preset.source || "all") || "all";
-    if (Object.prototype.hasOwnProperty.call(preset, "student")) rechargeStudentFilter = String(preset.student || "");
-    if (Object.prototype.hasOwnProperty.call(preset, "grade")) rechargeGradeFilter = String(preset.grade || "");
-    localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
-    return true;
-  }
-  if (viewKey === "summary") {
-    summaryFilter = {
-      ...summaryFilter,
-      ...["student", "grade", "balance"].reduce((next, key) => (
-        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
-      ), {}),
-    };
-    return true;
-  }
-  if (viewKey === "teacherDetail") {
-    const teacherNames = normalizeNameList(preset.teacher_names || []);
-    if (teacherNames.length) selectedTeacher = teacherNames[0];
-    teacherDetailFilter = {
-      ...teacherDetailFilter,
-      ...["grade", "subject", "student", "source", "rule_status"].reduce((next, key) => (
-        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
-      ), {}),
-    };
-    return true;
-  }
-  if (viewKey === "teacherProfiles" && Object.prototype.hasOwnProperty.call(preset, "status")) {
-    profileStatusFilter = { ...profileStatusFilter, teachers: String(preset.status || "") };
-    localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
-    return true;
-  }
+  // 角色预筛选是隐形基础数据池，不再写入用户可见筛选框。
   return false;
 }
 
@@ -2379,7 +2348,6 @@ function monthDeleteModal() {
 
 function ensureLessonFilterDates() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const bounds = monthBounds(monthKey);
   const nextFilter = { ...lessonFilter, month_key: monthKey };
   let changed = nextFilter.month_key !== lessonFilter.month_key;
   const teacherNames = normalizeNameList(nextFilter.teacher_names || (nextFilter.teacher ? [nextFilter.teacher] : []));
@@ -2388,18 +2356,12 @@ function ensureLessonFilterDates() {
     nextFilter.teacher = teacherNames.join("、");
     changed = true;
   }
-  if (!nextFilter.date_preset_initialized) {
-    nextFilter.start_date = bounds.start;
-    nextFilter.end_date = bounds.end;
-    nextFilter.date_preset_initialized = true;
-    changed = true;
-  }
   if (!isDateValue(nextFilter.start_date)) {
-    nextFilter.start_date = bounds.start;
+    nextFilter.start_date = "";
     changed = true;
   }
   if (!isDateValue(nextFilter.end_date)) {
-    nextFilter.end_date = bounds.end;
+    nextFilter.end_date = "";
     changed = true;
   }
   if (changed) {
@@ -2410,8 +2372,13 @@ function ensureLessonFilterDates() {
 
 function lessonLoadRange({ includeActiveMonth = view !== "lessons" } = {}) {
   const bounds = monthBounds(state?.settings?.month_key || activeMonth);
-  const start = isDateValue(lessonFilter.start_date) ? lessonFilter.start_date : bounds.start;
-  const end = isDateValue(lessonFilter.end_date) ? lessonFilter.end_date : bounds.end;
+  const prefilterRange = rolePrefilterDateRange(lessonDataViewKey());
+  const start = isDateValue(lessonFilter.start_date)
+    ? lessonFilter.start_date
+    : (prefilterRange.start || (prefilterRange.end && prefilterRange.end < bounds.start ? prefilterRange.end : bounds.start));
+  const end = isDateValue(lessonFilter.end_date)
+    ? lessonFilter.end_date
+    : (prefilterRange.end || (prefilterRange.start && prefilterRange.start > bounds.end ? prefilterRange.start : bounds.end));
   if (!start || !end || start > end) return null;
   // 课程总表的主数据源只由页面内部日期范围决定；顶部全局月份仅用于首次默认值。
   if (!includeActiveMonth) return { start, end };
@@ -2431,15 +2398,14 @@ function lessonRangeLoaded() {
 async function loadLessonRangeOnly() {
   const range = lessonLoadRange();
   if (!range) return;
-  const result = await request(`/api/lessons-range?start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`);
+  const result = await request(lessonsRangeUrl(range));
   state.lessons = result.lessons || [];
   state.lesson_loaded_range = range;
 }
 
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
-  const bounds = monthBounds(monthKey);
-  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: bounds.start, end_date: bounds.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
+  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
