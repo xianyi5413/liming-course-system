@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.06.20-permissions-2";
+const APP_VERSION = "2026.06.20-student-balance-1";
 const secureCookies = process.env.SESSION_COOKIE_SECURE !== "0" && process.env.SESSION_COOKIE_SECURE !== "false";
 const sessions = new Map();
 
@@ -901,6 +901,7 @@ const derivedCaches = {
   studentSummaryToDate: new Map(),
   teacherSummary: new Map(),
   studentBalanceThroughDate: new Map(),
+  financeBase: new Map(),
 };
 
 function cacheKey(...parts) {
@@ -1118,6 +1119,16 @@ function importOpeningBalancesFromWorkbook(buffer) {
       if (!actual.ok || !gift.ok) {
         failed += 1;
         details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "金额格式错误" });
+        continue;
+      }
+      if (gift.value < 0) {
+        failed += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "期初赠送余额不能为负数" });
+        continue;
+      }
+      if (actual.value < 0 && gift.value > 0) {
+        failed += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "期初现金欠费与赠送余额不能同时存在" });
         continue;
       }
       if (actual.value === 0 && gift.value === 0) {
@@ -2960,6 +2971,49 @@ function studentAccountBatchBalance(batches) {
   }), { actual: 0, gift: 0 });
 }
 
+function normalizeStudentAccountLedger(batches) {
+  const warnings = [];
+  for (const batch of batches) {
+    const rawActual = Number(batch.actual_balance);
+    const rawGift = Number(batch.gift_balance);
+    if (!Number.isFinite(rawActual)) {
+      const invalidActual = batch.actual_balance;
+      batch.actual_balance = 0;
+      warnings.push({ type: "cash_balance_not_numeric", value: String(invalidActual), source_id: batch.id || 0, event_date: batch.date || "" });
+    }
+    if (!Number.isFinite(rawGift)) {
+      const invalidGift = batch.gift_balance;
+      batch.gift_balance = 0;
+      warnings.push({ type: "gift_balance_not_numeric", value: String(invalidGift), source_id: batch.id || 0, event_date: batch.date || "" });
+      continue;
+    }
+    if (rawGift < 0) {
+      batch.actual_balance = moneyRound(num(batch.actual_balance) + rawGift);
+      batch.gift_balance = 0;
+      warnings.push({
+        type: "negative_gift_balance_converted_to_cash",
+        amount: moneyRound(Math.abs(rawGift)),
+        source_id: batch.id || 0,
+        event_date: batch.date || "",
+      });
+    }
+  }
+  return warnings;
+}
+
+function reduceStudentAccountBalance(batches, field, amount) {
+  let remaining = moneyRound(Math.max(0, num(amount)));
+  for (const batch of batches) {
+    if (remaining <= 0) break;
+    const available = Math.max(num(batch[field]), 0);
+    if (available <= 0) continue;
+    const reduction = moneyRound(Math.min(available, remaining));
+    batch[field] = moneyRound(available - reduction);
+    remaining = moneyRound(remaining - reduction);
+  }
+  return remaining;
+}
+
 function settleStudentCashDebt(batches) {
   for (let debtIndex = 0; debtIndex < batches.length; debtIndex += 1) {
     let debt = Math.max(-num(batches[debtIndex].actual_balance), 0);
@@ -2979,59 +3033,65 @@ function settleStudentCashDebt(batches) {
 function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
   const actual = moneyRound(row.actual_balance ?? row.cur_recharge);
   const gift = moneyRound(row.gift_balance ?? row.cur_gift);
-  if (actual === 0 && gift === 0) return;
-  let batchActual = actual;
-  let batchGift = gift;
+  const warnings = [];
+  if (actual === 0 && gift === 0) return warnings;
+  let batchActual = 0;
+  let batchGift = 0;
 
   if (actual > 0) {
-    const current = studentAccountBatchBalance(batches);
-    let remainingOffset = Math.min(Math.max(-current.actual, 0), actual);
+    let remainingActual = actual;
     for (const batch of batches) {
-      if (remainingOffset <= 0) break;
+      if (remainingActual <= 0) break;
       const debt = Math.max(-num(batch.actual_balance), 0);
       if (debt <= 0) continue;
-      const offset = Math.min(debt, remainingOffset);
+      const offset = moneyRound(Math.min(debt, remainingActual));
       batch.actual_balance = moneyRound(num(batch.actual_balance) + offset);
-      remainingOffset = moneyRound(remainingOffset - offset);
+      remainingActual = moneyRound(remainingActual - offset);
     }
-    batchActual = moneyRound(actual - Math.min(Math.max(-current.actual, 0), actual));
+    batchActual = remainingActual;
   } else if (actual < 0) {
-    let remainingReduction = Math.abs(actual);
-    for (const batch of batches) {
-      if (remainingReduction <= 0) break;
-      const available = Math.max(num(batch.actual_balance), 0);
-      if (available <= 0) continue;
-      const reduction = Math.min(available, remainingReduction);
-      batch.actual_balance = moneyRound(num(batch.actual_balance) - reduction);
-      remainingReduction = moneyRound(remainingReduction - reduction);
-    }
+    const remainingReduction = reduceStudentAccountBalance(batches, "actual_balance", Math.abs(actual));
     batchActual = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
   }
 
-  if (gift < 0) {
-    let remainingReduction = Math.abs(gift);
-    for (const batch of batches) {
-      if (remainingReduction <= 0) break;
-      const available = Math.max(num(batch.gift_balance), 0);
-      if (available <= 0) continue;
-      const reduction = Math.min(available, remainingReduction);
-      batch.gift_balance = moneyRound(num(batch.gift_balance) - reduction);
-      remainingReduction = moneyRound(remainingReduction - reduction);
+  if (gift > 0) {
+    batchGift = gift;
+  } else if (gift < 0) {
+    let remainingReduction = reduceStudentAccountBalance(batches, "gift_balance", Math.abs(gift));
+    const giftShortfall = remainingReduction;
+    if (remainingReduction > 0) {
+      remainingReduction = reduceStudentAccountBalance(batches, "actual_balance", remainingReduction);
+      const pendingCash = Math.max(batchActual, 0);
+      const pendingReduction = moneyRound(Math.min(pendingCash, remainingReduction));
+      batchActual = moneyRound(batchActual - pendingReduction);
+      remainingReduction = moneyRound(remainingReduction - pendingReduction);
     }
-    batchGift = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
+    if (remainingReduction > 0) {
+      batchActual = moneyRound(batchActual - remainingReduction);
+    }
+    if (giftShortfall > 0) {
+      warnings.push({
+        type: "gift_overdraw_converted_to_cash",
+        amount: giftShortfall,
+        source_id: row.id || 0,
+        event_date: studentAccountEventDate(row, fallbackDate),
+      });
+    }
   }
-  if (batchActual === 0 && batchGift === 0) return;
+  if (batchActual === 0 && batchGift === 0) return warnings;
   batches.push({
     date: studentAccountEventDate(row, fallbackDate),
     id: row.id || 0,
     actual_balance: batchActual,
-    gift_balance: batchGift,
+    gift_balance: Math.max(0, batchGift),
   });
   settleStudentCashDebt(batches);
+  return warnings;
 }
 
 function consumeStudentBalance(ledger, lessonFee) {
   const batches = Array.isArray(ledger) ? ledger : [];
+  const balanceWarnings = normalizeStudentAccountLedger(batches);
   settleStudentCashDebt(batches);
   let remaining = moneyRound(Math.max(0, num(lessonFee)));
   let cashUsed = 0;
@@ -3058,12 +3118,19 @@ function consumeStudentBalance(ledger, lessonFee) {
   if (remaining > 0) {
     batches.push({ date: "", id: 0, actual_balance: moneyRound(-debt), gift_balance: 0 });
   }
+  const after = studentAccountBatchBalance(batches);
   return {
+    cashUsed: moneyRound(cashUsed),
+    giftUsed: moneyRound(bonusUsed),
+    bonusUsed: moneyRound(bonusUsed),
     cash_used: moneyRound(cashUsed),
     bonus_used: moneyRound(bonusUsed),
     debt,
+    afterCashBalance: moneyRound(after.actual),
+    afterGiftBalance: moneyRound(Math.max(0, after.gift)),
     actual_consumption: moneyRound(cashUsed + debt),
     gift_consumption: moneyRound(bonusUsed),
+    balanceWarnings,
     updatedLedger: batches,
   };
 }
@@ -3075,7 +3142,7 @@ function applyStudentLessonCharge(batches, feeValue) {
 function calculateStudentAccountTimeline(options = {}) {
   const monthKey = text(options.monthKey);
   const batches = [];
-  addStudentAccountBatch(batches, {
+  const balanceWarnings = addStudentAccountBatch(batches, {
     event_date: "",
     id: 0,
     actual_balance: options.openingActual,
@@ -3101,7 +3168,9 @@ function calculateStudentAccountTimeline(options = {}) {
     actual_consumption: 0,
     gift_consumption: 0,
     actual_balance: moneyRound(options.openingActual),
-    gift_balance: moneyRound(options.openingGift),
+    gift_balance: moneyRound(Math.max(0, num(options.openingGift))),
+    debt: 0,
+    balance_warnings: balanceWarnings,
   };
 
   for (const event of events) {
@@ -3110,7 +3179,7 @@ function calculateStudentAccountTimeline(options = {}) {
       const gift = moneyRound(event.row.cur_gift);
       result.cur_recharge = moneyRound(result.cur_recharge + actual);
       result.cur_gift = moneyRound(result.cur_gift + gift);
-      addStudentAccountBatch(batches, event.row, monthKey);
+      result.balance_warnings.push(...addStudentAccountBatch(batches, event.row, monthKey));
       continue;
     }
     const fee = moneyRound(Math.max(0, num(event.row.unit_price)));
@@ -3119,12 +3188,70 @@ function calculateStudentAccountTimeline(options = {}) {
     const charge = applyStudentLessonCharge(batches, fee);
     result.actual_consumption = moneyRound(result.actual_consumption + charge.actual_consumption);
     result.gift_consumption = moneyRound(result.gift_consumption + charge.gift_consumption);
+    result.balance_warnings.push(...(charge.balanceWarnings || []));
   }
 
+  result.balance_warnings.push(...normalizeStudentAccountLedger(batches));
   const balance = studentAccountBatchBalance(batches);
   result.actual_balance = moneyRound(balance.actual);
-  result.gift_balance = moneyRound(balance.gift);
+  result.gift_balance = moneyRound(Math.max(0, balance.gift));
+  result.debt = moneyRound(Math.max(0, -balance.actual));
+  if (balance.gift < 0) {
+    result.balance_warnings.push({
+      type: "negative_gift_balance_clamped",
+      amount: moneyRound(Math.abs(balance.gift)),
+      source_id: 0,
+      event_date: monthKey,
+    });
+  }
   return result;
+}
+
+function studentBalanceInvariantIssues(rows, monthKey = "") {
+  const issues = [];
+  for (const row of rows || []) {
+    const rawCash = Number(row?.actual_balance);
+    const rawGift = Number(row?.gift_balance);
+    const studentName = text(row?.student_name) || "未命名学生";
+    if (!Number.isFinite(rawCash)) {
+      issues.push({
+        type: "cash_balance_not_numeric",
+        month_key: monthKey,
+        student_name: studentName,
+        actual_balance: row?.actual_balance,
+        gift_balance: row?.gift_balance,
+      });
+    }
+    if (!Number.isFinite(rawGift)) {
+      issues.push({
+        type: "gift_balance_not_numeric",
+        month_key: monthKey,
+        student_name: studentName,
+        actual_balance: row?.actual_balance,
+        gift_balance: row?.gift_balance,
+      });
+      continue;
+    }
+    if (rawGift < 0) {
+      issues.push({
+        type: rawCash > 0 ? "cash_positive_gift_negative" : "gift_balance_negative",
+        month_key: monthKey,
+        student_name: studentName,
+        actual_balance: rawCash,
+        gift_balance: rawGift,
+      });
+    }
+    if (Number.isFinite(rawCash) && rawCash < 0 && rawGift > 0) {
+      issues.push({
+        type: "cash_negative_gift_positive",
+        month_key: monthKey,
+        student_name: studentName,
+        actual_balance: rawCash,
+        gift_balance: rawGift,
+      });
+    }
+  }
+  return issues;
 }
 
 function previousCarryOverBalances(monthKey, cache = new Map()) {
@@ -3151,6 +3278,7 @@ function buildStudentSummary(details, monthKey, includeInactive = false, carryOv
   const active = activeStudentNames(monthKey);
   const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [row.name, row]));
   const carryOverBalances = previousCarryOverBalances(monthKey, carryOverCache);
+  const rechargeRows = all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL}`, [monthKey]);
   for (const detail of details) {
     const profile = profiles.get(detail.student_name) || {};
     if (!byStudent.has(detail.student_name)) {
@@ -3170,7 +3298,7 @@ function buildStudentSummary(details, monthKey, includeInactive = false, carryOv
       row.total_fee = moneyRound(row.total_fee + num(detail.unit_price));
     }
   }
-  for (const recharge of all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL}`, [monthKey])) {
+  for (const recharge of rechargeRows) {
     const profile = profiles.get(recharge.student_name) || {};
     if (!byStudent.has(recharge.student_name)) {
       byStudent.set(recharge.student_name, {
@@ -3214,7 +3342,6 @@ function buildStudentSummary(details, monthKey, includeInactive = false, carryOv
 
   const rows = [...byStudent.values()]
     .sort((a, b) => a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
-  const rechargeRows = all(`SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL}`, [monthKey]);
   const rechargesByStudent = new Map();
   for (const recharge of rechargeRows) {
     if (!rechargesByStudent.has(recharge.student_name)) rechargesByStudent.set(recharge.student_name, []);
@@ -3267,6 +3394,8 @@ function buildStudentSummary(details, monthKey, includeInactive = false, carryOv
       gift_consumption: account.gift_consumption,
       actual_balance: account.actual_balance,
       gift_balance: account.gift_balance,
+      debt: account.debt,
+      balance_warnings: account.balance_warnings,
     };
   }).filter((row) => shouldShowStudentSummaryRow(row, includeInactive));
 }
@@ -3363,6 +3492,10 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
 
 function buildTeacherSummary(monthKey, includeInactive = false) {
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
+  const adjustments = new Map(all(
+    "SELECT * FROM teacher_adjustments_monthly WHERE month_key = ?",
+    [monthKey],
+  ).map((row) => [row.teacher_name, row]));
   const byTeacher = new Map();
   const active = activeTeacherNames(monthKey);
   const seedTeachers = includeInactive
@@ -3391,10 +3524,7 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
     }
   }
   return [...byTeacher.values()].filter((row) => includeInactive || row.active_this_month).map((row) => {
-    const adj = get(
-      "SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?",
-      [row.teacher_name, monthKey],
-    ) || {};
+    const adj = adjustments.get(row.teacher_name) || {};
     const week1 = num(adj.week1_transport);
     const week2 = num(adj.week2_transport);
     const week3 = num(adj.week3_transport);
@@ -4072,7 +4202,7 @@ function studentBalanceThroughDate(studentName, dateKeyValue) {
   );
 }
 
-function financeBase(range) {
+function buildFinanceBase(range) {
   const monthKeys = monthsCovered(range.start, range.end);
   const details = [];
   const monthlySummaries = new Map();
@@ -4136,13 +4266,15 @@ function financeBase(range) {
   const cashIn = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_recharge), 0));
   const giftIssued = moneyRound(recharges.reduce((sum, row) => sum + num(row.cur_gift), 0));
   const grossProfit = moneyRound(revenue - teacherCost - transport.total - operatingCost.total);
+  const endMonthKey = monthKeyFromDate(range.end);
+  const endMonthSummaries = [...(monthlySummaries.get(endMonthKey)?.values() || [])];
 
   return {
     range,
     details,
     effective_details: effectiveDetails,
-    end_month_key: monthKeyFromDate(range.end),
-    end_month_summaries: studentSummary(feeDetails(monthKeyFromDate(range.end)), monthKeyFromDate(range.end), true),
+    end_month_key: endMonthKey,
+    end_month_summaries: endMonthSummaries,
     recharges,
     teacher_salary_by_teacher: teacherSalary,
     transport_by_teacher: transport.by_teacher,
@@ -4165,6 +4297,15 @@ function financeBase(range) {
       net_cash_flow: moneyRound(cashIn - (teacherCost + transport.total + operatingCost.total)),
     },
   };
+}
+
+function financeBase(range) {
+  return cachedDerived(
+    "financeBase",
+    cacheKey(range?.start, range?.end),
+    `financeBase start=${range?.start || ""} end=${range?.end || ""}`,
+    () => buildFinanceBase(range),
+  );
 }
 
 function metricOverview(current, previous) {
@@ -4450,11 +4591,11 @@ function dashboardMonthData(monthKey, user) {
   return { details, summaries, range, lessons };
 }
 
-function dashboardMetricItems(monthKey, user) {
+function dashboardMetricItems(monthKey, user, monthData = dashboardMonthData(monthKey, user)) {
   const today = todayKey();
   const role = canonicalRole(user.role);
   const canMoney = dashboardCanSeeMoney(user);
-  const { details, summaries, range, lessons } = dashboardMonthData(monthKey, user);
+  const { details, summaries, range, lessons } = monthData;
   const todayLessons = lessons.filter((row) => row.date === today);
   const completedToday = todayLessons.filter(isCompletedLesson).length;
   const leaveToday = todayLessons.filter((row) => deriveStatus(row) === "请假").length;
@@ -4492,11 +4633,11 @@ function dashboardMetricItems(monthKey, user) {
   return items.filter((item) => item.visible);
 }
 
-function dashboardTodos(monthKey, user) {
+function dashboardTodos(monthKey, user, monthData = dashboardMonthData(monthKey, user)) {
   const role = canonicalRole(user.role);
   const canMoney = dashboardCanSeeMoney(user);
   const today = todayKey();
-  const { details, summaries, lessons } = dashboardMonthData(monthKey, user);
+  const { details, summaries, lessons } = monthData;
   const todayLessons = lessons.filter((row) => row.date === today);
   const todos = [
     { key: "today_pending_lessons", label: "今日待上课程数", count: todayLessons.filter((row) => deriveStatus(row) === "待上").length, view: "lessons", filter: { start_date: today, end_date: today, status: "待上" } },
@@ -4596,11 +4737,12 @@ function dashboardData(url, user) {
   const end = text(url.searchParams.get("end")) || weekEnd;
   const trend = dashboardTrend(start, end, user);
   if (!trend) return { error: "start/end must be YYYY-MM-DD and start must be before end", status: 400 };
+  const monthData = dashboardMonthData(monthKey, user);
   return {
     month_key: monthKey,
     range: { start, end },
-    metrics: dashboardMetricItems(monthKey, user),
-    todos: dashboardTodos(monthKey, user),
+    metrics: dashboardMetricItems(monthKey, user, monthData),
+    todos: dashboardTodos(monthKey, user, monthData),
     trend,
     student_pie: dashboardStudentPie(user),
     role: canonicalRole(user.role),
@@ -4949,7 +5091,35 @@ function internalAudit(monthKey, { log = true } = {}) {
     }
   }
 
-  for (const row of studentSummary(feeDetails(monthKey), monthKey, true)) {
+  const balanceRows = studentSummary(feeDetails(monthKey), monthKey, true);
+  for (const balanceIssue of studentBalanceInvariantIssues(balanceRows, monthKey)) {
+    issues.push(auditIssue({
+      severity: "CRITICAL",
+      type: balanceIssue.type,
+      entity: `student_${balanceIssue.student_name}`,
+      field: "balance",
+      before_value: `现金 ${balanceIssue.actual_balance} / 赠送 ${balanceIssue.gift_balance}`,
+      message: `${balanceIssue.student_name} 的学生余额违反账本不变量：${balanceIssue.type}`,
+      data: balanceIssue,
+    }));
+  }
+  for (const row of balanceRows) {
+    for (const warning of row.balance_warnings || []) {
+      const warningValue = warning.amount ?? warning.value ?? "";
+      const warningMessage = warning.type.includes("gift")
+        ? `${row.student_name} 存在异常赠送扣减，已将 ${warningValue} 转入现金侧或归零处理`
+        : `${row.student_name} 存在非数值余额，已归零并记录诊断`;
+      issues.push(auditIssue({
+        severity: "CRITICAL",
+        type: warning.type,
+        entity: `student_${row.student_name}`,
+        field: warning.type.startsWith("cash_") ? "actual_balance" : "gift_balance",
+        before_value: warningValue,
+        after_value: 0,
+        message: warningMessage,
+        data: { student_name: row.student_name, ...warning },
+      }));
+    }
     if (inactiveStudentStatus(row.status) && studentBalanceOpen(row)) {
       issues.push(auditIssue({
         severity: "HIGH",
@@ -6748,6 +6918,10 @@ function normalizedOpeningBalancePayload(body) {
   };
   if (Math.abs(payload.opening_actual_balance) > 100000) return { error: "期初现金余额超出合理范围", status: 400 };
   if (Math.abs(payload.opening_gift_balance) > 100000) return { error: "期初赠送余额超出合理范围", status: 400 };
+  if (payload.opening_gift_balance < 0) return { error: "期初赠送余额不能为负数", status: 400 };
+  if (payload.opening_actual_balance < 0 && payload.opening_gift_balance > 0) {
+    return { error: "期初现金欠费与赠送余额不能同时存在，请先核对历史账本", status: 400 };
+  }
   return { payload };
 }
 
@@ -10996,6 +11170,162 @@ function serveStatic(req, res, url) {
   }
   res.writeHead(200, headers);
   res.end(body);
+}
+
+function verifyStudentBalanceCases() {
+  const lesson = (unitPrice, date = "2026-06-20", id = 1) => ({
+    id: `${id}:1`,
+    lesson_id: id,
+    student_index: 1,
+    date,
+    time_slot: "10:00-12:00",
+    unit_price: unitPrice,
+    effective: true,
+  });
+  const runCase = (name, options, expected) => {
+    const result = calculateStudentAccountTimeline({
+      studentName: name,
+      monthKey: "2026-06-01",
+      details: [lesson(options.fee)],
+      recharges: options.recharges || [],
+      openingActual: options.cash,
+      openingGift: options.gift,
+    });
+    const actual = {
+      actual_balance: result.actual_balance,
+      gift_balance: result.gift_balance,
+      debt: result.debt,
+    };
+    if (actual.actual_balance !== expected.actual_balance || actual.gift_balance !== expected.gift_balance) {
+      throw new Error(`${name} failed: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+    if (expected.warningType && !result.balance_warnings.some((warning) => warning.type === expected.warningType)) {
+      throw new Error(`${name} failed: missing warning ${expected.warningType}`);
+    }
+    return { name, ...actual, warnings: result.balance_warnings };
+  };
+
+  const results = [
+    runCase("A_negative_gift_repair", {
+      cash: 0,
+      gift: 0,
+      fee: 0,
+      recharges: [
+        { id: 1, recharge_date: "2026-06-01", cur_recharge: 250, cur_gift: 0 },
+        { id: 2, recharge_date: "2026-06-02", cur_recharge: 0, cur_gift: -250 },
+      ],
+    }, {
+      actual_balance: 0,
+      gift_balance: 0,
+      warningType: "gift_overdraw_converted_to_cash",
+    }),
+    runCase("B_cash_250_fee_500", { cash: 250, gift: 0, fee: 500 }, { actual_balance: -250, gift_balance: 0 }),
+    runCase("C_cash_250_gift_250_fee_500", { cash: 250, gift: 250, fee: 500 }, { actual_balance: 0, gift_balance: 0 }),
+    runCase("D_cash_250_gift_250_fee_600", { cash: 250, gift: 250, fee: 600 }, { actual_balance: -100, gift_balance: 0 }),
+    runCase("E_cash_120_gift_250_fee_370", { cash: 120, gift: 250, fee: 370 }, { actual_balance: 0, gift_balance: 0 }),
+    runCase("F_cash_100_gift_300_fee_250", { cash: 100, gift: 300, fee: 250 }, { actual_balance: 0, gift_balance: 150 }),
+  ];
+
+  const ledger = [];
+  addStudentAccountBatch(ledger, {
+    id: 1,
+    recharge_date: "2026-06-01",
+    cur_recharge: 100,
+    cur_gift: 50,
+  }, "2026-06-01");
+  addStudentAccountBatch(ledger, {
+    id: 2,
+    recharge_date: "2026-06-02",
+    cur_recharge: 200,
+    cur_gift: 100,
+  }, "2026-06-01");
+  const charge = consumeStudentBalance(ledger, 180);
+  const balance = studentAccountBatchBalance(ledger);
+  const fcfsPassed = ledger.length === 2
+    && num(ledger[0].actual_balance) === 0
+    && num(ledger[0].gift_balance) === 0
+    && num(ledger[1].actual_balance) === 170
+    && num(ledger[1].gift_balance) === 100
+    && balance.actual === 170
+    && balance.gift === 100;
+  if (!fcfsPassed) throw new Error(`G_fcfs failed: ${JSON.stringify({ ledger, charge, balance })}`);
+  results.push({
+    name: "G_fcfs",
+    actual_balance: balance.actual,
+    gift_balance: balance.gift,
+    ledger,
+    cashUsed: charge.cashUsed,
+    giftUsed: charge.giftUsed,
+    debt: charge.debt,
+  });
+  const invariantTypes = new Set(studentBalanceInvariantIssues([
+    { student_name: "正现负赠", actual_balance: 250, gift_balance: -250 },
+    { student_name: "负现正赠", actual_balance: -100, gift_balance: 100 },
+    { student_name: "现金非数值", actual_balance: "invalid", gift_balance: 0 },
+    { student_name: "赠送非数值", actual_balance: 0, gift_balance: "invalid" },
+  ], "2026-06-01").map((issue) => issue.type));
+  const expectedInvariantTypes = [
+    "cash_positive_gift_negative",
+    "cash_negative_gift_positive",
+    "cash_balance_not_numeric",
+    "gift_balance_not_numeric",
+  ];
+  if (!expectedInvariantTypes.every((type) => invariantTypes.has(type))) {
+    throw new Error(`H_invariant_scanner failed: ${JSON.stringify([...invariantTypes])}`);
+  }
+  results.push({ name: "H_invariant_scanner", issue_types: [...invariantTypes].sort() });
+  return results;
+}
+
+function scanAllStudentBalances() {
+  const months = allPartitionedMonths().sort((a, b) => a.localeCompare(b));
+  const results = [];
+  const issues = [];
+  const normalizedWarnings = [];
+  for (const monthKey of months) {
+    const rows = studentSummary(feeDetails(monthKey), monthKey, true);
+    const monthIssues = studentBalanceInvariantIssues(rows, monthKey);
+    const monthWarnings = rows.flatMap((row) => (row.balance_warnings || []).map((warning) => ({
+      month_key: monthKey,
+      student_name: row.student_name,
+      ...warning,
+    })));
+    issues.push(...monthIssues);
+    normalizedWarnings.push(...monthWarnings);
+    results.push({
+      month_key: monthKey,
+      students: rows.length,
+      issue_count: monthIssues.length,
+      normalized_warning_count: monthWarnings.length,
+    });
+  }
+  return {
+    ok: issues.length === 0,
+    months: results,
+    issue_count: issues.length,
+    normalized_warning_count: normalizedWarnings.length,
+    issues,
+    normalized_warnings: normalizedWarnings,
+  };
+}
+
+if (process.argv.includes("--verify-student-balances")) {
+  try {
+    console.log(JSON.stringify({ ok: true, cases: verifyStudentBalanceCases() }, null, 2));
+    db.close();
+    process.exit(0);
+  } catch (error) {
+    console.error(error.stack || error.message || error);
+    db.close();
+    process.exit(1);
+  }
+}
+
+if (process.argv.includes("--audit-student-balances")) {
+  const report = scanAllStudentBalances();
+  console.log(JSON.stringify(report, null, 2));
+  db.close();
+  process.exit(report.ok ? 0 : 1);
 }
 
 const server = http.createServer(async (req, res) => {
