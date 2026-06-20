@@ -2960,6 +2960,22 @@ function studentAccountBatchBalance(batches) {
   }), { actual: 0, gift: 0 });
 }
 
+function settleStudentCashDebt(batches) {
+  for (let debtIndex = 0; debtIndex < batches.length; debtIndex += 1) {
+    let debt = Math.max(-num(batches[debtIndex].actual_balance), 0);
+    if (debt <= 0) continue;
+    for (let cashIndex = debtIndex + 1; cashIndex < batches.length && debt > 0; cashIndex += 1) {
+      const available = Math.max(num(batches[cashIndex].actual_balance), 0);
+      if (available <= 0) continue;
+      const offset = moneyRound(Math.min(available, debt));
+      batches[debtIndex].actual_balance = moneyRound(num(batches[debtIndex].actual_balance) + offset);
+      batches[cashIndex].actual_balance = moneyRound(num(batches[cashIndex].actual_balance) - offset);
+      debt = moneyRound(debt - offset);
+    }
+  }
+  return batches;
+}
+
 function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
   const actual = moneyRound(row.actual_balance ?? row.cur_recharge);
   const gift = moneyRound(row.gift_balance ?? row.cur_gift);
@@ -3011,12 +3027,15 @@ function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
     actual_balance: batchActual,
     gift_balance: batchGift,
   });
+  settleStudentCashDebt(batches);
 }
 
-function applyStudentLessonCharge(batches, feeValue) {
-  let remaining = moneyRound(Math.max(0, num(feeValue)));
-  let actualUse = 0;
-  let giftUse = 0;
+function consumeStudentBalance(ledger, lessonFee) {
+  const batches = Array.isArray(ledger) ? ledger : [];
+  settleStudentCashDebt(batches);
+  let remaining = moneyRound(Math.max(0, num(lessonFee)));
+  let cashUsed = 0;
+  let bonusUsed = 0;
 
   for (const batch of batches) {
     if (remaining <= 0) break;
@@ -3024,25 +3043,33 @@ function applyStudentLessonCharge(batches, feeValue) {
     if (cashUse > 0) {
       batch.actual_balance = moneyRound(num(batch.actual_balance) - cashUse);
       remaining = moneyRound(remaining - cashUse);
-      actualUse = moneyRound(actualUse + cashUse);
+      cashUsed = moneyRound(cashUsed + cashUse);
     }
     if (remaining <= 0) break;
-    const giftUseValue = moneyRound(Math.min(Math.max(num(batch.gift_balance), 0), remaining));
-    if (giftUseValue > 0) {
-      batch.gift_balance = moneyRound(num(batch.gift_balance) - giftUseValue);
-      remaining = moneyRound(remaining - giftUseValue);
-      giftUse = moneyRound(giftUse + giftUseValue);
+    const bonusUse = moneyRound(Math.min(Math.max(num(batch.gift_balance), 0), remaining));
+    if (bonusUse > 0) {
+      batch.gift_balance = moneyRound(num(batch.gift_balance) - bonusUse);
+      remaining = moneyRound(remaining - bonusUse);
+      bonusUsed = moneyRound(bonusUsed + bonusUse);
     }
   }
 
+  const debt = moneyRound(Math.max(0, remaining));
   if (remaining > 0) {
-    batches.push({ date: "", id: 0, actual_balance: moneyRound(-remaining), gift_balance: 0 });
-    actualUse = moneyRound(actualUse + remaining);
+    batches.push({ date: "", id: 0, actual_balance: moneyRound(-debt), gift_balance: 0 });
   }
   return {
-    actual_consumption: moneyRound(actualUse),
-    gift_consumption: moneyRound(giftUse),
+    cash_used: moneyRound(cashUsed),
+    bonus_used: moneyRound(bonusUsed),
+    debt,
+    actual_consumption: moneyRound(cashUsed + debt),
+    gift_consumption: moneyRound(bonusUsed),
+    updatedLedger: batches,
   };
+}
+
+function applyStudentLessonCharge(batches, feeValue) {
+  return consumeStudentBalance(batches, feeValue);
 }
 
 function calculateStudentAccountTimeline(options = {}) {
