@@ -137,6 +137,117 @@
 6. **保留只读写操作限制**
    截图复制完成后的打勾记录接口加入只读安全白名单；新增、修改、删除课程，导入数据，修改档案，重置密码等写操作仍然被禁止。
 
+### 2026-06-20 权限登录兜底与线上权限自修复
+
+#### 背景问题
+
+线上部署后，小助手账号登录时出现“当前角色无权访问此功能”提示。该问题会使账号在登录后直接停留于无权限页面，属于严重的权限兜底异常。
+
+系统要求所有角色均可正常完成登录，并自动进入当前账号拥有权限的第一个页面；如果账号暂未配置任何可访问页面，也应显示明确、友好的空状态，而不是卡死或持续请求无权限接口。
+
+#### 主要原因
+
+1. **历史角色代码未完全兼容**
+   部分小助手账号可能仍使用 `xiaozhushou` 等历史角色值，旧逻辑未将其映射到当前标准角色 `helper`。
+2. **角色权限记录存在但实际无效**
+   `helper` 角色可能没有权限记录，或者已有记录全部被禁用、权限 key 已失效，导致登录接口最终返回空权限。
+3. **初始化检查条件不完整**
+   旧初始化逻辑只判断角色是否存在权限记录，没有进一步确认记录是否处于启用状态且属于当前有效页面权限。
+4. **前端空权限回退错误**
+   当前账号权限为空时，前端曾错误回退到 `week` 等无权访问的页面，随后请求课程接口并触发 403。
+5. **线上静态资源缓存**
+   浏览器或中间缓存可能继续使用旧版 `app.js`，使已经部署的新权限逻辑未能及时生效。
+
+#### 修复内容
+
+1. **补充历史角色映射**
+   新增 `xiaozhushou -> helper` 映射，同时保留 `boss -> owner`、`admin -> owner`、`jiaowu -> academic`、`finance -> helper` 等已有兼容关系。
+2. **确保五个内置角色存在**
+   系统启动时确认老板 `owner`、教务 `academic`、小助手 `helper`、助教 `assistant` 和老师 `teacher` 五个内置角色均已初始化。
+3. **增加角色权限自修复**
+   如果内置角色没有任何“启用且有效”的页面权限，启动时自动补齐该角色的默认权限；已有人工配置的有效权限不会被覆盖。执行修复时会输出启动日志，例如：
+
+   ```text
+   role=helper restored=11 reason=no-enabled-valid-permissions
+   ```
+
+4. **修复登录后的页面兜底**
+   登录成功后清理上一个账号遗留的页面、导航和筛选缓存，不再沿用旧页面；系统根据当前账号权限计算首个可访问页面。账号没有任何可访问页面时，显示“当前账号尚未配置可访问页面，请联系管理员”，并停止请求课程、教师等业务接口。
+5. **补充登录权限诊断字段**
+   `/api/auth/me` 增加 `status`、`first_accessible_view` 和 `app_version`，用于确认账号状态、登录后目标页面及当前部署版本。
+6. **新增老板专用权限诊断接口**
+   新增 `GET /api/debug/permissions`，用于检查角色、账号、有效权限、首个可访问页面、空权限角色、无效权限 key 和历史角色映射。接口仅允许老板账号访问，且不返回密码或密码哈希。
+7. **修复共用读取接口的权限匹配**
+   调整课程、教师等共用读取接口与页面权限的对应关系，避免账号已经拥有相关页面权限，但接口仍因只校验单一权限 key 而返回 403。只读账号可以读取已授权页面的数据，写操作仍按只读规则返回 403。
+8. **降低旧静态资源缓存影响**
+   前端入口增加版本参数，例如 `/app.js?v=20260620-permissions-1`，同时为 HTML、CSS 和 JavaScript 静态资源增加禁缓存响应头，减少线上继续加载旧权限逻辑的情况。
+
+#### 验证结果
+
+本地使用数据库副本验证五类账号均可正常登录，并进入各自的首个可访问页面：
+
+| 账号 | 角色 | 首个页面 |
+| --- | --- | --- |
+| `boss` | 老板 `owner` | `dashboard` |
+| `jiaowu` | 教务 `academic` | `dashboard` |
+| `xiaozhushou` | 小助手 `helper` | `dashboard` |
+| `zhujiao` | 助教 `assistant` | `dashboard` |
+| `teacher` | 老师 `teacher` | `lessons` |
+
+同时确认：
+
+1. 历史角色值 `xiaozhushou` 可以正常映射到 `helper`。
+2. `helper` 权限清空并重启后会自动恢复默认权限。
+3. 权限为空的账号不会卡死，而是进入友好空状态。
+4. 小助手读取课程接口返回 200。
+5. 小助手写入课程接口返回 403，只读写入限制仍然有效。
+6. 老板账号可以访问 `/api/debug/permissions`。
+7. 新版 `/app.js?v=20260620-permissions-1` 可以正常加载。
+
+#### 线上排查建议
+
+如果线上再次出现角色登录后无权限，可按以下顺序检查：
+
+1. 清理当前浏览器保存的旧页面和静态资源缓存：
+
+   ```js
+   localStorage.clear();
+   location.reload();
+   ```
+
+2. 检查 `/api/auth/me` 返回的 `role`、`permissions`、`first_accessible_view` 和 `app_version`。
+3. 使用老板账号访问 `/api/debug/permissions`，检查空权限角色、无效权限 key、账号状态和历史角色映射警告。
+4. 检查线上数据库中的账号、角色和权限数据：
+
+   ```sql
+   SELECT username, role, status, readonly_override, permission_override_enabled
+   FROM users
+   WHERE username = 'xiaozhushou';
+
+   SELECT code, name, readonly
+   FROM roles
+   ORDER BY code;
+
+   SELECT role_code, permission_key, enabled
+   FROM role_permissions
+   WHERE role_code = 'helper';
+
+   SELECT upp.*
+   FROM user_page_permissions upp
+   JOIN users u ON u.id = upp.user_id
+   WHERE u.username = 'xiaozhushou';
+   ```
+
+5. 如果账号级权限覆盖被误开启且没有配置任何页面权限，可关闭该账号的权限覆盖：
+
+   ```sql
+   UPDATE users
+   SET permission_override_enabled = 0
+   WHERE username = 'xiaozhushou';
+   ```
+
+6. 在浏览器网络请求中确认线上加载的是 `/app.js?v=20260620-permissions-1`，而不是旧版无版本参数的前端资源。
+
 ## 技术栈
 
 - 后端：Node.js 24，使用内置 `http` 服务和 `node:sqlite`。

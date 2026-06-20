@@ -582,6 +582,8 @@ function saveLoginRemember({ username, password, rememberUsername, rememberPassw
 }
 
 function firstAllowedView() {
+  const serverView = auth.user?.first_accessible_view || auth.user?.firstAccessibleView || "";
+  if (serverView && canView(serverView)) return serverView;
   const role = auth.user?.role || "";
   const preferred = role === "teacher"
     ? ["lessons", "teacherDetail", "teacherProfiles", "appearance"]
@@ -594,7 +596,7 @@ function firstAllowedView() {
       if (canView(key)) return key;
     }
   }
-  return "week";
+  return "";
 }
 
 function resetPagePositionForCurrentUser() {
@@ -605,10 +607,12 @@ function resetPagePositionForCurrentUser() {
   selectedTeacher = "";
   teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
   view = firstAllowedView();
-  activeNavGroup = groupForView(view).key;
+  activeNavGroup = view ? groupForView(view).key : "";
   userAdminTab = "accounts";
-  localStorage.setItem("liming:view", view);
-  localStorage.setItem("liming:nav-group", activeNavGroup);
+  if (view) {
+    localStorage.setItem("liming:view", view);
+    localStorage.setItem("liming:nav-group", activeNavGroup);
+  }
 }
 
 function debounce(fn, delay = 200) {
@@ -1054,9 +1058,15 @@ async function load(options = {}) {
   if (!auth.user) return renderLogin();
   if (!canView(view)) {
     view = firstAllowedView();
-    activeNavGroup = groupForView(view).key;
-    localStorage.setItem("liming:view", view);
-    localStorage.setItem("liming:nav-group", activeNavGroup);
+    activeNavGroup = view ? groupForView(view).key : "";
+    if (view) {
+      localStorage.setItem("liming:view", view);
+      localStorage.setItem("liming:nav-group", activeNavGroup);
+    } else {
+      clearPagePositionCache();
+      state = null;
+      return renderNoAccessibleViews();
+    }
   }
   if (refreshGlobal || !months.length) {
     months = await request("/api/months");
@@ -1085,8 +1095,18 @@ async function load(options = {}) {
   applyUserFilterPreset(view);
   ensureActiveWeekDefault();
   ensureLessonFilterDates();
+  const needsLessonRange = [
+    "lessons",
+    "week",
+    "weekMatrix",
+    "feeDetails",
+    "summary",
+    "studentQuery",
+    "teacherSalary",
+    "teacherDetail",
+  ].some((key) => canView(key));
   const lessonRange = lessonLoadRange();
-  if (lessonRange) {
+  if (needsLessonRange && lessonRange) {
     const lessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(lessonRange.start)}&end=${encodeURIComponent(lessonRange.end)}`);
     if (loadGeneration !== thisGeneration) return;
     state.lessons = (lessonsResult.lessons || []);
@@ -1096,7 +1116,7 @@ async function load(options = {}) {
   ensureMatrixRange();
   const matrixStart = matrixRange.start && (!weekSpan || matrixRange.start < weekSpan.start) ? matrixRange.start : weekSpan?.start;
   const matrixEnd = matrixRange.end && (!weekSpan || matrixRange.end > weekSpan.end) ? matrixRange.end : weekSpan?.end;
-  if (matrixStart && matrixEnd) {
+  if ((canView("week") || canView("weekMatrix")) && matrixStart && matrixEnd) {
     const weekLessonsResult = await request(`/api/lessons-range?start=${encodeURIComponent(matrixStart)}&end=${encodeURIComponent(matrixEnd)}`);
     if (loadGeneration !== thisGeneration) return;
     state.week_lessons = weekLessonsResult.lessons || [];
@@ -1160,8 +1180,10 @@ async function load(options = {}) {
   if (expenseFilter.q) expenseParams.set("q", expenseFilter.q);
   state.expenses = canArea("expenses") ? ((await request(`/api/operating-expenses?${expenseParams.toString()}`)).expenses || []) : [];
   if (loadGeneration !== thisGeneration) return;
-  state.schedule_conflicts = await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`)
-    .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }));
+  state.schedule_conflicts = (canView("lessons") || canView("week") || canView("weekMatrix"))
+    ? await request(`/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`)
+      .catch(() => ({ issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }))
+    : { issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } };
   if (loadGeneration !== thisGeneration) return;
   const students = uniqueSorted((state.profile_students || [])
     .map((row) => String(row.name || "").trim())
@@ -3602,7 +3624,7 @@ function renderUserMenu() {
             <span>${escapeHtml(role)}</span>
           </div>
           <div class="user-menu-divider"></div>
-          <button class="user-menu-item appearance-settings-link" type="button" role="menuitem">外观设置</button>
+          ${canView("appearance") ? '<button class="user-menu-item appearance-settings-link" type="button" role="menuitem">外观设置</button>' : ""}
           <button class="user-menu-item open-password-modal" type="button" role="menuitem">修改密码</button>
           <button class="user-menu-item logout-btn danger" type="button" role="menuitem">退出系统</button>
         </div>
@@ -9021,7 +9043,38 @@ function applyReadonlyUi() {
   });
 }
 
+function renderNoAccessibleViews() {
+  closeOpenMultiSelectMenus();
+  appEl?.classList.remove("login-mode");
+  appEl?.classList.toggle("readonly-mode", isReadonlyUser());
+  applySidebarState();
+  navEl.innerHTML = "";
+  topbarEl.innerHTML = `
+    <div class="topbar-title-side">
+      <button class="sidebar-toggle" type="button" aria-label="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" title="${sidebarCollapsed ? "展开侧栏" : "收起侧栏"}" aria-pressed="${sidebarCollapsed ? "true" : "false"}">☰</button>
+      <div class="title-block">
+        <div class="page-title">暂无可访问页面</div>
+        <div class="page-meta">${escapeHtml(auth.user?.role_label || auth.user?.role || "")}</div>
+      </div>
+    </div>
+    <div class="toolbar">
+      ${renderUserMenu()}
+    </div>
+    ${passwordModal()}
+  `;
+  contentEl.innerHTML = `
+    <section class="band">
+      <div class="empty">
+        当前账号尚未配置可访问页面，请联系管理员。
+      </div>
+    </section>
+  `;
+  applyReadonlyUi();
+  wireEvents();
+}
+
 function render() {
+  if (auth.user && !firstAllowedView()) return renderNoAccessibleViews();
   closeOpenMultiSelectMenus();
   appEl?.classList.remove("login-mode");
   appEl?.classList.toggle("readonly-mode", isReadonlyUser());
