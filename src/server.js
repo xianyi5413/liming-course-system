@@ -7921,6 +7921,60 @@ function filterLessonsByTeacherNames(rows, teacherNames = []) {
   return (rows || []).filter((row) => allowed.has(text(row.teacher_name)));
 }
 
+function rolePrefilterForView(user, viewKey) {
+  const presets = user?.filter_presets || {};
+  const preset = presets[text(viewKey)];
+  return preset && typeof preset === "object" && !Array.isArray(preset) ? preset : {};
+}
+
+function prefilterHas(preset, key) {
+  return Object.prototype.hasOwnProperty.call(preset || {}, key);
+}
+
+function textIncludes(value, filter) {
+  const needle = text(filter).toLowerCase();
+  if (!needle) return true;
+  return text(value).toLowerCase().includes(needle);
+}
+
+function listIncludesText(values, filter) {
+  const needle = text(filter).toLowerCase();
+  if (!needle) return true;
+  return (values || []).some((value) => text(value).toLowerCase().includes(needle));
+}
+
+function lessonMatchesRolePrefilter(row, preset = {}) {
+  if (!preset || !Object.keys(preset).length) return true;
+  if (prefilterHas(preset, "teacher_names") || prefilterHas(preset, "teacher")) {
+    const teacherNames = normalizeTeacherNameList(preset.teacher_names || preset.teacher || []);
+    if (!teacherNames.length) return false;
+    if (!teacherNames.includes(text(row.teacher_name))) return false;
+  }
+  if (prefilterHas(preset, "start_date") && validDateKey(preset.start_date) && (!row.date || row.date < preset.start_date)) return false;
+  if (prefilterHas(preset, "end_date") && validDateKey(preset.end_date) && (!row.date || row.date > preset.end_date)) return false;
+  if (prefilterHas(preset, "student") && !listIncludesText(splitStudents(row.student_names), preset.student)) return false;
+  if (prefilterHas(preset, "classroom") && !textIncludes(row.classroom, preset.classroom)) return false;
+  if (prefilterHas(preset, "grade") && !textIncludes(row.grade, preset.grade)) return false;
+  if (prefilterHas(preset, "subject") && !textIncludes(row.subject, preset.subject)) return false;
+  if (prefilterHas(preset, "status") && !textIncludes(deriveStatus(row), preset.status)) return false;
+  if (prefilterHas(preset, "query")) {
+    const haystack = [row.student_names, row.notes, row.classroom, row.subject].join(" ");
+    if (!textIncludes(haystack, preset.query)) return false;
+  }
+  return true;
+}
+
+function filterLessonsByRolePrefilter(rows, user, viewKey) {
+  const preset = rolePrefilterForView(user, viewKey);
+  if (!Object.keys(preset).length) return rows || [];
+  return (rows || []).filter((row) => lessonMatchesRolePrefilter(row, preset));
+}
+
+function prefilterViewFromUrl(url, fallback = "lessons") {
+  const viewKey = text(url.searchParams.get("view"));
+  return FILTER_PRESET_VIEW_KEYS.includes(viewKey) ? viewKey : fallback;
+}
+
 function sanitizeLessonRows(rows, user) {
   const output = rows || [];
   if (isSuperRole(user.role)) return output;
@@ -10069,8 +10123,11 @@ async function handleApi(req, res, url) {
     return sendJson(res, sanitizeBootstrap(bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"), user));
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
+    const viewKey = prefilterViewFromUrl(url, "lessons");
     const rangeLessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
-    const lessons = rangeLessons ? filterLessonsByTeacherNames(rangeLessons, teacherNamesFromUrl(url)) : null;
+    const lessons = rangeLessons
+      ? filterLessonsByTeacherNames(filterLessonsByRolePrefilter(rangeLessons, user, viewKey), teacherNamesFromUrl(url))
+      : null;
     if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
   }
