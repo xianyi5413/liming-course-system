@@ -248,6 +248,156 @@
 
 6. 在浏览器网络请求中确认线上加载的是 `/app.js?v=20260620-permissions-1`，而不是旧版无版本参数的前端资源。
 
+### 20260620 小助手登录无权限页修复
+
+#### 背景问题
+
+线上部署后，小助手账号登录时仍然出现“当前角色无权访问此功能”，页面几乎空白，只显示这一行文字。该问题属于严重权限兜底问题。
+
+系统要求所有账号、所有角色都应该能正常登录，并自动进入自己有权限的第一个页面；即使账号没有任何页面权限，也不应该出现空白死页，而应该显示完整系统框架下的友好提示。
+
+#### 根因说明
+
+本轮排查确认：
+
+1. “当前角色无权访问此功能”不是前端写死的页面，而是后端 `authorizeApi(user, req, url)` 授权失败后返回的 403 错误。
+2. 旧前端在 `load().catch` 中直接把 `error.message` 写入 `contentEl`，导致 app shell、sidebar、topbar 没完整渲染时，只剩顶部一行错误。
+3. 线上小助手触发该问题的可能原因包括：
+   - 线上仍加载旧版 `app.js`；
+   - 旧 `localStorage` 还保留上一个账号的 `liming:view`；
+   - 小助手账号被错误地带到无权限页面；
+   - 小助手账号开启了账号级权限覆盖，但覆盖权限为空；
+   - 线上权限数据和本地初始化逻辑不一致。
+
+#### 修复内容
+
+1. **修复登录后的页面选择逻辑**
+   登录后清理旧页面状态，不再沿用上一个账号的 view，并根据当前账号权限重新计算首个可访问页面。
+2. **优化小助手和助教首屏**
+   `helper` / 小助手、`assistant` / 助教优先进入 `lessons`，避免默认进入不稳定或依赖较多权限的 dashboard。
+3. **修复空权限兜底**
+   如果账号没有任何可访问页面，不再 fallback 到无权限页面；显示“当前账号尚未配置可访问页面，请联系管理员。”，并停止请求业务 API，避免连环 403。
+4. **修复 403 渲染方式**
+   新增 `renderLoadFailure()`；任何漏出的 403 都显示在完整系统框架内，不再出现页面只剩一行“当前角色无权访问此功能”的空白页。
+5. **处理账号级空权限覆盖**
+   如果账号级权限覆盖开启但为空，自动回退角色权限，避免账号因误配置空覆盖而无法进入系统；debug 接口会提示 `empty_permission_override` warning。
+6. **补充 `/api/auth/me` 诊断字段**
+   `/api/auth/me` 增加 `role`、`role_label`、`permissions`、`first_accessible_view` 和 `app_version`。
+7. **增强 `/api/debug/permissions`**
+   诊断接口返回 `normalized_role`、`permission_override_enabled`、权限来源和空覆盖 warning，便于线上排查账号和角色权限问题。
+8. **更新前端资源版本**
+   app 版本更新为 `2026.06.20-permissions-2`，前端资源升级为 `/app.js?v=20260620-permissions-2`，用于减少线上浏览器继续加载旧版 `app.js` 的概率。
+
+#### 验证结果
+
+本地验证结果：
+
+1. `xiaozhushou / 123456` 登录成功。
+2. `/api/auth/me` 返回：
+   - `role=helper`
+   - 权限数非空
+   - `first_accessible_view=lessons`
+3. 小助手关键读取接口均返回 200：
+   - `/api/months`
+   - `/api/bootstrap`
+   - `/api/dashboard`
+   - `/api/teachers`
+   - `/api/students`
+   - `/api/lessons-range`
+4. 小助手写入课程仍返回 403：“当前账号为只读，不能修改数据”，说明只读限制仍然有效。
+5. 五类账号均可登录并获得首个可访问页面：
+   - `boss`
+   - `jiaowu`
+   - `xiaozhushou`
+   - `zhujiao`
+   - `teacher`
+6. 测试库中清空 helper 角色权限后，重启会自动补齐默认权限。
+7. 测试库中开启小助手账号级空覆盖后，小助手仍回退角色权限，debug 接口显示 warning。
+
+#### 线上排查步骤
+
+如果线上再次出现小助手或其他角色登录后无权限，请按以下顺序检查：
+
+1. 浏览器控制台执行：
+
+   ```js
+   localStorage.clear();
+   location.reload();
+   ```
+
+2. Network 中确认加载新版前端资源：
+
+   ```text
+   /app.js?v=20260620-permissions-2
+   ```
+
+3. 小助手登录后检查：
+
+   ```text
+   /api/auth/me
+   ```
+
+   重点查看：
+
+   - `role`
+   - `permissions`
+   - `first_accessible_view`
+   - `app_version`
+
+   正常应看到：
+
+   ```text
+   role=helper
+   permissions 非空
+   first_accessible_view=lessons
+   ```
+
+4. 老板账号访问诊断接口：
+
+   ```text
+   /api/debug/permissions
+   ```
+
+   重点查看小助手账号：
+
+   - `role`
+   - `normalized_role`
+   - `permission_override_enabled`
+   - `permission_count`
+   - `first_accessible_view`
+   - `warnings`
+
+5. 数据库检查：
+
+   ```sql
+   SELECT username, role, status, permission_override_enabled
+   FROM users
+   WHERE username = 'xiaozhushou';
+
+   SELECT role_code, permission_key, enabled
+   FROM role_permissions
+   WHERE role_code = 'helper';
+
+   SELECT *
+   FROM user_page_permissions
+   WHERE user_id = (SELECT id FROM users WHERE username='xiaozhushou');
+   ```
+
+6. 如果线上账号级权限覆盖为空，可临时修复：
+
+   ```sql
+   UPDATE users
+   SET permission_override_enabled = 0
+   WHERE username = 'xiaozhushou';
+   ```
+
+#### 注意事项
+
+1. “当前角色无权访问此功能”仍可用于真正访问无权限页面时的提示，但不能作为登录后的空白死页出现。
+2. 所有角色都必须能登录系统，并进入有权限的第一个页面。
+3. 只读只限制写操作，不影响登录和查看页面。
+4. 线上部署后应确认浏览器没有继续缓存旧版 `app.js`。
+
 ## 技术栈
 
 - 后端：Node.js 24，使用内置 `http` 服务和 `node:sqlite`。

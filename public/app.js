@@ -221,9 +221,9 @@ const ROLE_VIEWS = {
   boss: null,
   academic: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
   jiaowu: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
-  helper: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles"]),
-  finance: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles"]),
-  assistant: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "studentQuery", "studentProfiles", "teacherProfiles"]),
+  helper: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
+  finance: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
+  assistant: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
   teacher: new Set(["lessons", "teacherDetail", "teacherProfiles", "appearance"]),
 };
 const PALETTES = [
@@ -431,7 +431,10 @@ async function request(path, options = {}) {
   const readonlySafeMutation = method === "POST" && READONLY_SAFE_MUTATION_PATHS.has(String(path).split("?")[0]);
   if (isReadonlyUser() && method !== "GET" && !readonlySafeMutation && !String(path).startsWith("/api/auth/")) {
     showToast(READONLY_WRITE_MESSAGE, "error");
-    throw new Error(READONLY_WRITE_MESSAGE);
+    const error = new Error(READONLY_WRITE_MESSAGE);
+    error.status = 403;
+    error.path = path;
+    throw error;
   }
   const config = {
     method,
@@ -446,7 +449,11 @@ async function request(path, options = {}) {
       auth.user = null;
       renderLogin(data.error || "请先登录");
     }
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const error = new Error(data.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    error.path = path;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -587,7 +594,9 @@ function firstAllowedView() {
   const role = auth.user?.role || "";
   const preferred = role === "teacher"
     ? ["lessons", "teacherDetail", "teacherProfiles", "appearance"]
-    : (["owner", "boss", "admin", "academic", "jiaowu"].includes(role) ? ["dashboard"] : []);
+    : (["owner", "boss", "admin", "academic", "jiaowu"].includes(role)
+      ? ["dashboard"]
+      : (["helper", "finance", "assistant"].includes(role) ? ["lessons", "studentQuery", "dashboard", "appearance"] : []));
   for (const key of preferred) {
     if (canView(key)) return key;
   }
@@ -599,6 +608,48 @@ function firstAllowedView() {
   return "";
 }
 
+function setActiveView(nextView) {
+  view = nextView || "";
+  activeNavGroup = view ? groupForView(view).key : "";
+  if (view) {
+    localStorage.setItem("liming:view", view);
+    localStorage.setItem("liming:nav-group", activeNavGroup);
+  } else {
+    clearPagePositionCache();
+  }
+}
+
+function ensureAccessibleView() {
+  if (!auth.user) return true;
+  if (view && canView(view)) return true;
+  const nextView = firstAllowedView();
+  if (!nextView) {
+    clearPagePositionCache();
+    state = null;
+    renderNoAccessibleViews();
+    return false;
+  }
+  setActiveView(nextView);
+  return true;
+}
+
+function debugPermissionSelection(context, details = {}) {
+  try {
+    console.debug("[permissions]", {
+      context,
+      username: auth.user?.username || "",
+      role: auth.user?.role || "",
+      role_label: auth.user?.role_label || "",
+      permissions: auth.user?.permissions || [],
+      firstAccessibleView: firstAllowedView(),
+      chosenView: view || "",
+      ...details,
+    });
+  } catch {
+    // Ignore debug logging failures in older browsers.
+  }
+}
+
 function resetPagePositionForCurrentUser() {
   clearPagePositionCache();
   appliedUserFilterPresetViews = new Set();
@@ -606,13 +657,8 @@ function resetPagePositionForCurrentUser() {
   lessonFilter = defaultLessonFilter();
   selectedTeacher = "";
   teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
-  view = firstAllowedView();
-  activeNavGroup = view ? groupForView(view).key : "";
+  setActiveView(firstAllowedView());
   userAdminTab = "accounts";
-  if (view) {
-    localStorage.setItem("liming:view", view);
-    localStorage.setItem("liming:nav-group", activeNavGroup);
-  }
 }
 
 function debounce(fn, delay = 200) {
@@ -1056,18 +1102,7 @@ async function load(options = {}) {
     auth = { ...auth, ...authResult };
   }
   if (!auth.user) return renderLogin();
-  if (!canView(view)) {
-    view = firstAllowedView();
-    activeNavGroup = view ? groupForView(view).key : "";
-    if (view) {
-      localStorage.setItem("liming:view", view);
-      localStorage.setItem("liming:nav-group", activeNavGroup);
-    } else {
-      clearPagePositionCache();
-      state = null;
-      return renderNoAccessibleViews();
-    }
-  }
+  if (!ensureAccessibleView()) return;
   if (refreshGlobal || !months.length) {
     months = await request("/api/months");
     if (loadGeneration !== thisGeneration) return;
@@ -3531,7 +3566,14 @@ function renderLogin(error = "") {
         rememberPassword: document.querySelector(".login-remember-password")?.checked,
       });
       auth.user = result.user;
+      const oldView = localStorage.getItem("liming:view") || "";
       resetPagePositionForCurrentUser();
+      debugPermissionSelection("login", {
+        oldView,
+        clearedOldView: Boolean(oldView),
+        chosenView: view,
+        app_version: result.app_version || "",
+      });
       await load();
     } catch (err) {
       renderLogin(err.message);
@@ -9073,8 +9115,44 @@ function renderNoAccessibleViews() {
   wireEvents();
 }
 
+function currentViewTitle() {
+  const group = groupForView(view);
+  return groupViews(group).find(([key]) => key === view)?.[1] || "页面加载失败";
+}
+
+function isPermissionError(error) {
+  return Number(error?.status || 0) === 403 || String(error?.message || "").includes("无权访问");
+}
+
+function renderLoadFailure(error) {
+  console.error("[load]", error);
+  if (!auth.user) {
+    renderLogin(error?.message || "加载失败");
+    return;
+  }
+  if (!ensureAccessibleView()) return;
+  closeOpenMultiSelectMenus();
+  appEl?.classList.remove("login-mode");
+  appEl?.classList.toggle("readonly-mode", isReadonlyUser());
+  applySidebarState();
+  renderNav();
+  const permissionError = isPermissionError(error);
+  renderTopbar(currentViewTitle(), permissionError ? "权限配置异常" : "加载失败");
+  contentEl.innerHTML = `
+    <section class="band">
+      <div class="empty">
+        ${escapeHtml(permissionError
+          ? "当前页面的部分数据接口暂无访问权限，请联系管理员检查账号权限。"
+          : (error?.message || "页面加载失败，请稍后重试。"))}
+      </div>
+    </section>
+  `;
+  applyReadonlyUi();
+  wireEvents();
+}
+
 function render() {
-  if (auth.user && !firstAllowedView()) return renderNoAccessibleViews();
+  if (auth.user && !ensureAccessibleView()) return;
   closeOpenMultiSelectMenus();
   appEl?.classList.remove("login-mode");
   appEl?.classList.toggle("readonly-mode", isReadonlyUser());
@@ -12246,5 +12324,5 @@ function wireEvents() {
 }
 
 load().catch((error) => {
-  contentEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+  renderLoadFailure(error);
 });
