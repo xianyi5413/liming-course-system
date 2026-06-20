@@ -1,4 +1,5 @@
 const navGroups = [
+  { key: "home", label: "首页", views: [["dashboard", "首页"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
@@ -6,7 +7,7 @@ const navGroups = [
     views: [["feeDetails", "费用明细"], ["summary", "费用汇总"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
     moreViews: [["studentPricing", "学生单价"], ["studentProfiles", "学生档案"]],
   },
-  { key: "teachers", label: "教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "教师明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "老师档案"]] },
+  { key: "teachers", label: "教师", views: [["teacherSalary", "教师薪资"], ["teacherDetail", "薪资明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "教师档案"]] },
   { key: "operations", label: "运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "经营概览", views: [["finance", "期间概览"]] },
   { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
@@ -74,7 +75,19 @@ const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
 const SIDEBAR_COLLAPSED_KEY = "liming:sidebar-collapsed";
 const SHOT_FOLLOW_PALETTE_KEY = "liming:shot-follow-palette";
+const DASHBOARD_METRICS_KEY = "liming:dashboard-metrics";
+const DASHBOARD_SHORTCUTS_KEY = "liming:dashboard-shortcuts";
+const DASHBOARD_RANGE_KEY = "liming:dashboard-range";
+const DASHBOARD_DEFAULT_MIGRATED_KEY = "liming:dashboard-default-migrated";
+const PAGE_POSITION_KEYS = ["liming:view", "liming:nav-group", "liming:user-admin-tab", "liming:profile-tab"];
+const READONLY_WRITE_MESSAGE = "当前账号为只读，不能修改数据";
+const READONLY_SAFE_MUTATION_PATHS = new Set([
+  "/api/course-notice/complete",
+  "/api/teacher-course-notice/complete",
+]);
+const TEACHER_ALL_VALUE = "__all_teacher_scope__";
 const NAV_ICONS = {
+  home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"></path><path d="M6.5 10v9h11v-9"></path><path d="M10 19v-5h4v5"></path></svg>`,
   schedule: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M8 3.5v3M16 3.5v3M4 10h16"></path></svg>`,
   students: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 19c.7-3.4 2.6-5 5.5-5s4.8 1.6 5.5 5"></path><path d="M16 10.5c1.7.2 3 1.5 3.4 3.2M17 19h3.5"></path></svg>`,
   teachers: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="2.5"></circle><path d="M3.8 19c.6-3.2 2-4.8 4.2-4.8 1.6 0 2.7.8 3.5 2.3M12.5 5h7v9h-6M14 8.5h4M13 12l3-2"></path></svg>`,
@@ -82,13 +95,136 @@ const NAV_ICONS = {
   finance: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V5"></path><path d="M5 19h15"></path><rect x="8" y="11" width="2.8" height="5"></rect><rect x="13" y="8" width="2.8" height="8"></rect><rect x="18" y="5" width="2.8" height="11"></rect></svg>`,
   settings: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 13.6a7.9 7.9 0 0 0 0-3.2l2-1.2-2-3.4-2.3 1a8.2 8.2 0 0 0-2.8-1.6L14 2.7h-4l-.3 2.5a8.2 8.2 0 0 0-2.8 1.6l-2.3-1-2 3.4 2 1.2a7.9 7.9 0 0 0 0 3.2l-2 1.2 2 3.4 2.3-1a8.2 8.2 0 0 0 2.8 1.6l.3 2.5h4l.3-2.5a8.2 8.2 0 0 0 2.8-1.6l2.3 1 2-3.4-2-1.2Z"></path></svg>`,
 };
-const ROLE_LABELS = { owner: "Qing", admin: "管理员", academic: "教务", finance: "财务", teacher: "老师" };
+const ROLE_LABELS = {
+  owner: "老板",
+  boss: "老板",
+  admin: "老板",
+  academic: "教务",
+  jiaowu: "教务",
+  helper: "小助手",
+  finance: "小助手",
+  assistant: "助教",
+  teacher: "老师",
+};
+const ACCOUNT_ROLE_CODES = ["owner", "academic", "helper", "assistant", "teacher"];
+const START_DATE_PRESET_OPTIONS = [
+  ["unlimited", "无限制"],
+  ["today", "今天"],
+  ["yesterday", "昨天"],
+  ["tomorrow", "明天"],
+  ["this_week_monday", "本周周一"],
+  ["last_week_monday", "上周周一"],
+  ["next_week_monday", "下周周一"],
+  ["this_month_first", "本月 1 号"],
+  ["last_month_first", "上月 1 号"],
+  ["next_month_first", "下月 1 号"],
+  ["this_year_first", "本年 1 月 1 日"],
+  ["fixed", "固定日期"],
+];
+const END_DATE_PRESET_OPTIONS = [
+  ["unlimited", "无限制"],
+  ["today", "今天"],
+  ["yesterday", "昨天"],
+  ["tomorrow", "明天"],
+  ["this_week_sunday", "本周周日"],
+  ["last_week_sunday", "上周周日"],
+  ["next_week_sunday", "下周周日"],
+  ["this_month_last", "本月最后一天"],
+  ["last_month_last", "上月最后一天"],
+  ["next_month_last", "下月最后一天"],
+  ["this_year_last", "本年 12 月 31 日"],
+  ["fixed", "固定日期"],
+];
+const ACCOUNT_FILTER_PRESET_DEFS = [
+  {
+    view: "lessons",
+    label: "课程总表",
+    fields: [
+      { key: "teacher_names", label: "预筛选老师", type: "teachers" },
+      { key: "student", label: "预筛选学生" },
+      { key: "status", label: "预筛选状态" },
+      { key: "classroom", label: "预筛选教室" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "subject", label: "预筛选科目" },
+      { key: "query", label: "预筛选搜索" },
+      { key: "start_date", label: "开始时间", type: "date-rule", bound: "start" },
+      { key: "end_date", label: "结束时间", type: "date-rule", bound: "end" },
+    ],
+  },
+  {
+    view: "week",
+    label: "周课表",
+    fields: [
+      { key: "teacher_names", label: "预筛选老师", type: "teachers" },
+      { key: "student", label: "预筛选学生" },
+      { key: "classroom", label: "预筛选教室" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "subject", label: "预筛选科目" },
+      { key: "start_date", label: "开始时间", type: "date-rule", bound: "start" },
+      { key: "end_date", label: "结束时间", type: "date-rule", bound: "end" },
+    ],
+  },
+  {
+    view: "weekMatrix",
+    label: "矩阵课表",
+    fields: [
+      { key: "teacher_names", label: "预筛选老师", type: "teachers" },
+      { key: "student", label: "预筛选学生" },
+      { key: "classroom", label: "预筛选教室" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "subject", label: "预筛选科目" },
+      { key: "start_date", label: "开始时间", type: "date-rule", bound: "start" },
+      { key: "end_date", label: "结束时间", type: "date-rule", bound: "end" },
+    ],
+  },
+  {
+    view: "summary",
+    label: "学生费用汇总",
+    fields: [
+      { key: "student", label: "预筛选学生" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "balance", label: "预筛选余额状态" },
+    ],
+  },
+  {
+    view: "recharges",
+    label: "充值记录",
+    fields: [
+      { key: "student", label: "预筛选学生" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "source", label: "预筛选来源" },
+    ],
+  },
+  {
+    view: "teacherDetail",
+    label: "教师薪资明细",
+    fields: [
+      { key: "teacher_names", label: "预筛选老师", type: "teachers" },
+      { key: "grade", label: "预筛选年级" },
+      { key: "subject", label: "预筛选科目" },
+      { key: "student", label: "预筛选学生" },
+      { key: "source", label: "预筛选薪资状态" },
+      { key: "rule_status", label: "预筛选规则状态" },
+    ],
+  },
+  {
+    view: "teacherProfiles",
+    label: "教师档案",
+    fields: [
+      { key: "status", label: "预筛选状态" },
+    ],
+  },
+];
 const ROLE_VIEWS = {
   owner: null,
   admin: null,
-  academic: new Set(["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "studentQuery", "recharges", "openingBalances", "teacherSalary", "studentProfiles", "teacherProfiles", "appearance", "pricing", "userAdmin"]),
-  finance: new Set(["finance", "recharges", "studentQuery", "expenses", "appearance"]),
-  teacher: new Set(["weekMatrix", "teacherDetail", "appearance"]),
+  boss: null,
+  academic: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
+  jiaowu: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
+  helper: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles"]),
+  finance: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles"]),
+  assistant: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "studentQuery", "studentProfiles", "teacherProfiles"]),
+  teacher: new Set(["lessons", "teacherDetail", "teacherProfiles", "appearance"]),
 };
 const PALETTES = [
   { key: "liming-blue", label: "黎明蓝", colors: ["#002147", "#00172F", "#EAF0F7", "#C8D6E5"] },
@@ -107,7 +243,13 @@ const PALETTES = [
 let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
-let view = localStorage.getItem("liming:view") || "lessons";
+const storedInitialView = localStorage.getItem("liming:view");
+const shouldMigrateDashboardDefault = localStorage.getItem(DASHBOARD_DEFAULT_MIGRATED_KEY) !== "1" && (!storedInitialView || storedInitialView === "lessons");
+let view = shouldMigrateDashboardDefault ? "dashboard" : (storedInitialView || "dashboard");
+if (shouldMigrateDashboardDefault) {
+  localStorage.setItem("liming:view", "dashboard");
+  localStorage.setItem(DASHBOARD_DEFAULT_MIGRATED_KEY, "1");
+}
 let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
 let activeWeek = readActiveWeek();
@@ -141,7 +283,12 @@ let teacherSalaryRuleModalOpen = false;
 let passwordModalOpen = false;
 let userMenuOpen = false;
 let userAdminNotice = "";
+let userAdminTab = localStorage.getItem("liming:user-admin-tab") || "accounts";
+let rolePermissionModal = null;
+let userAccessModal = null;
+let roleCreateDraft = null;
 let lessonFilter = readLessonFilter();
+let appliedUserFilterPresetViews = new Set();
 let scheduleMode = false;
 let selectedLessonIds = new Set();
 let lessonBatchDeleting = false;
@@ -198,9 +345,15 @@ let expenseFilter = (() => {
 })();
 let auditState = { xlsxReport: null, internalReport: null, logs: [], events: [], busy: false, notice: "" };
 let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") || "";
+let dashboardRange = readDashboardRange();
+let dashboardMetricModalOpen = false;
+let dashboardMetricDraft = null;
+let dashboardShortcutModalOpen = false;
+let dashboardShortcutDraft = null;
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
 let filterComboEventsBound = false;
+let multiSelectEventsBound = false;
 let userMenuEventsBound = false;
 let customDatePickerEl = null;
 let activeCustomDateInput = null;
@@ -274,8 +427,14 @@ function showToast(message, type = 'success') {
 }
 
 async function request(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const readonlySafeMutation = method === "POST" && READONLY_SAFE_MUTATION_PATHS.has(String(path).split("?")[0]);
+  if (isReadonlyUser() && method !== "GET" && !readonlySafeMutation && !String(path).startsWith("/api/auth/")) {
+    showToast(READONLY_WRITE_MESSAGE, "error");
+    throw new Error(READONLY_WRITE_MESSAGE);
+  }
   const config = {
-    method: options.method || "GET",
+    method,
     headers: { "content-type": "application/json" },
     cache: "no-store",
   };
@@ -293,8 +452,14 @@ async function request(path, options = {}) {
 }
 
 async function requestWithStatus(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const readonlySafeMutation = method === "POST" && READONLY_SAFE_MUTATION_PATHS.has(String(path).split("?")[0]);
+  if (isReadonlyUser() && method !== "GET" && !readonlySafeMutation && !String(path).startsWith("/api/auth/")) {
+    showToast(READONLY_WRITE_MESSAGE, "error");
+    return { ok: false, status: 403, data: { error: READONLY_WRITE_MESSAGE } };
+  }
   const config = {
-    method: options.method || "GET",
+    method,
     headers: { "content-type": "application/json" },
   };
   if (options.body !== undefined) config.body = JSON.stringify(options.body);
@@ -345,18 +510,54 @@ async function downloadBlob(path, fallbackFilename) {
 
 function canView(viewKey) {
   if (!auth.user) return false;
+  if (Array.isArray(auth.user.permissions)) return auth.user.permissions.includes(viewKey);
   const allowed = ROLE_VIEWS[auth.user.role];
   return !allowed || allowed.has(viewKey);
 }
 
+const AREA_VIEW_KEYS = {
+  dashboard: ["dashboard"],
+  schedule: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  scheduleRead: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  students: ["feeDetails", "summary", "studentQuery", "studentProfiles", "studentPricing", "recharges", "openingBalances"],
+  profiles: ["studentProfiles", "teacherProfiles"],
+  pricing: ["pricing", "studentPricing"],
+  teacherTransport: ["teacherSalary"],
+  salary: ["teacherSalary", "teacherSalaryRules"],
+  finance: ["finance"],
+  expenses: ["expenses"],
+  recharges: ["recharges"],
+  studentBilling: ["feeDetails", "summary", "studentQuery"],
+  staff: ["staffPayroll", "staffAttendance"],
+  audit: ["audit"],
+  operationLogs: ["operationLogs"],
+  users: ["userAdmin"],
+};
+
 function canArea(area) {
   if (!auth.user) return false;
-  if (auth.user.role === "owner" || auth.user.role === "admin") return true;
-  if (auth.user.role === "academic") return ["schedule", "students", "profiles", "pricing", "teacherTransport", "users"].includes(area);
-  if (auth.user.role === "finance") return ["finance", "expenses", "recharges", "studentBilling", "students"].includes(area);
+  if (Array.isArray(auth.user.permissions)) {
+    return (AREA_VIEW_KEYS[area] || []).some((key) => auth.user.permissions.includes(key));
+  }
+  if (["owner", "admin", "boss"].includes(auth.user.role)) return true;
+  if (["academic", "jiaowu"].includes(auth.user.role)) return ["schedule", "students", "profiles", "pricing", "teacherTransport", "salary", "finance", "operationLogs"].includes(area);
+  if (["helper", "finance"].includes(auth.user.role)) return ["schedule", "students", "profiles", "recharges", "studentBilling"].includes(area);
   if (auth.user.role === "teacher") return ["scheduleRead", "teacherSelf", "profiles"].includes(area);
+  if (auth.user.role === "assistant") return ["schedule", "scheduleRead", "students", "profiles"].includes(area);
   if (area === "salary" || area === "finance" || area === "staff" || area === "audit") return false;
   return false;
+}
+
+function isReadonlyUser() {
+  return Number(auth.user?.readonly || 0) === 1;
+}
+
+function canWriteData() {
+  return !isReadonlyUser();
+}
+
+function clearPagePositionCache() {
+  PAGE_POSITION_KEYS.forEach((key) => localStorage.removeItem(key));
 }
 
 function loginRemember() {
@@ -381,12 +582,33 @@ function saveLoginRemember({ username, password, rememberUsername, rememberPassw
 }
 
 function firstAllowedView() {
+  const role = auth.user?.role || "";
+  const preferred = role === "teacher"
+    ? ["lessons", "teacherDetail", "teacherProfiles", "appearance"]
+    : (["owner", "boss", "admin", "academic", "jiaowu"].includes(role) ? ["dashboard"] : []);
+  for (const key of preferred) {
+    if (canView(key)) return key;
+  }
   for (const group of navGroups) {
     for (const [key] of [...group.views, ...(group.moreViews || [])]) {
       if (canView(key)) return key;
     }
   }
   return "week";
+}
+
+function resetPagePositionForCurrentUser() {
+  clearPagePositionCache();
+  appliedUserFilterPresetViews = new Set();
+  localStorage.removeItem(LESSON_FILTER_KEY);
+  lessonFilter = defaultLessonFilter();
+  selectedTeacher = "";
+  teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
+  view = firstAllowedView();
+  activeNavGroup = groupForView(view).key;
+  userAdminTab = "accounts";
+  localStorage.setItem("liming:view", view);
+  localStorage.setItem("liming:nav-group", activeNavGroup);
 }
 
 function debounce(fn, delay = 200) {
@@ -820,16 +1042,22 @@ function enhanceCustomDateInputs() {
 async function load(options = {}) {
   const previousState = state || {};
   const refreshGlobal = options.refreshGlobal !== false || !auth.user || !previousState.settings;
+  let authResult = {};
   dirtyFlags = {};                   /* [C档] 全量 load 重置所有脏标记 */
   lessonWarningsMap = {};            /* [约束5] 全量重绘时清空 warnings 缓存 */
   const thisGeneration = ++loadGeneration;
   if (refreshGlobal) {
-    const authResult = await request("/api/auth/me");
+    authResult = await request("/api/auth/me");
     if (loadGeneration !== thisGeneration) return;
     auth = { ...auth, ...authResult };
   }
   if (!auth.user) return renderLogin();
-  if (!canView(view)) view = firstAllowedView();
+  if (!canView(view)) {
+    view = firstAllowedView();
+    activeNavGroup = groupForView(view).key;
+    localStorage.setItem("liming:view", view);
+    localStorage.setItem("liming:nav-group", activeNavGroup);
+  }
   if (refreshGlobal || !months.length) {
     months = await request("/api/months");
     if (loadGeneration !== thisGeneration) return;
@@ -847,11 +1075,14 @@ async function load(options = {}) {
     state.teacher_salary_rules = previousState.teacher_salary_rules || [];
     state.source_workbooks = previousState.source_workbooks || [];
     state.users = previousState.users || [];
+    state.roles = previousState.roles || [];
+    state.permission_tree = previousState.permission_tree || [];
     state.staff = previousState.staff || [];
   }
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
+  applyUserFilterPreset(view);
   ensureActiveWeekDefault();
   ensureLessonFilterDates();
   const lessonRange = lessonLoadRange();
@@ -873,6 +1104,12 @@ async function load(options = {}) {
     state.week_lessons = state.lessons;
   }
   ensureFinanceRangeDates();
+  const dashboardParams = new URLSearchParams();
+  dashboardParams.set("month", activeMonth || state.settings.month_key);
+  dashboardParams.set("start", dashboardRange.start);
+  dashboardParams.set("end", dashboardRange.end);
+  state.dashboard = canView("dashboard") ? await request(`/api/dashboard?${dashboardParams.toString()}`) : null;
+  if (loadGeneration !== thisGeneration) return;
   state.finance = canArea("finance") ? await request(`/api/finance-summary?${financeRangeQuery()}`) : null;
   if (loadGeneration !== thisGeneration) return;
   if (refreshGlobal) {
@@ -880,13 +1117,21 @@ async function load(options = {}) {
     if (loadGeneration !== thisGeneration) return;
     state.profile_students = canArea("students") ? ((await request("/api/students")).students || []) : [];
     if (loadGeneration !== thisGeneration) return;
-    state.opening_balances = canArea("students") ? ((await request("/api/opening-balances")).opening_balances || []) : [];
+    state.opening_balances = canView("openingBalances") ? ((await request("/api/opening-balances")).opening_balances || []) : [];
     if (loadGeneration !== thisGeneration) return;
-    state.teacher_salary_rules = canArea("salary") ? ((await request("/api/teacher-salary-rules")).rules || []) : [];
+    state.teacher_salary_rules = canView("teacherSalaryRules") ? ((await request("/api/teacher-salary-rules")).rules || []) : [];
     if (loadGeneration !== thisGeneration) return;
     state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
     if (loadGeneration !== thisGeneration) return;
-    state.users = canArea("users") ? ((await request("/api/users")).users || []) : [];
+    const usersResult = canArea("users") ? await request("/api/users") : { users: [], roles: {} };
+    state.users = usersResult.users || [];
+    auth.roles = usersResult.roles || auth.roles || ROLE_LABELS;
+    if (loadGeneration !== thisGeneration) return;
+    const rolesResult = auth.user?.role === "owner"
+      ? await request("/api/roles")
+      : { roles: [], permission_tree: authResult.permission_tree || [] };
+    state.roles = rolesResult.roles || [];
+    state.permission_tree = rolesResult.permission_tree || authResult.permission_tree || [];
     if (loadGeneration !== thisGeneration) return;
   }
   if (canArea("audit") && refreshGlobal) {
@@ -931,7 +1176,11 @@ async function load(options = {}) {
   if (loadGeneration !== thisGeneration) return;
   const teachers = state.teachers.map((row) => row.name);
   if (auth.user.role === "teacher") {
-    selectedTeacher = auth.user.teacher_name || teachers[0] || "";
+    selectedTeacher = teachers.length > 1 && (!selectedTeacher || selectedTeacher === TEACHER_ALL_VALUE || !teachers.includes(selectedTeacher))
+      ? TEACHER_ALL_VALUE
+      : teachers.includes(selectedTeacher)
+      ? selectedTeacher
+      : (teachers[0] || "");
   } else if (!selectedTeacher || !teachers.includes(selectedTeacher)) {
     selectedTeacher = teachers[0] || "";
   }
@@ -1005,6 +1254,17 @@ function currentWeekRange() {
   const sunday = new Date(monday);
   sunday.setDate(monday.getDate() + 6);
   return { start: dateKey(monday), end: dateKey(sunday) };
+}
+
+function readDashboardRange() {
+  const fallback = currentWeekRange();
+  try {
+    const saved = { ...fallback, ...JSON.parse(localStorage.getItem(DASHBOARD_RANGE_KEY) || "{}") };
+    if (isDateValue(saved.start) && isDateValue(saved.end) && saved.start <= saved.end) return saved;
+  } catch {
+    // fall through
+  }
+  return fallback;
 }
 
 function storedActiveWeekValue() {
@@ -1736,10 +1996,16 @@ function financePresetRange(preset) {
   return { ...financeRange, preset: "custom" };
 }
 
+function defaultLessonFilter() {
+  return { month_key: "", teacher: "", teacher_names: [], student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
+}
+
 function readLessonFilter() {
-  const defaults = { month_key: "", teacher: "", student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
+  const defaults = defaultLessonFilter();
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(LESSON_FILTER_KEY) || "{}") };
+    const parsed = { ...defaults, ...JSON.parse(localStorage.getItem(LESSON_FILTER_KEY) || "{}") };
+    parsed.teacher_names = normalizeNameList(parsed.teacher_names || (parsed.teacher ? [parsed.teacher] : []));
+    return parsed;
   } catch {
     return defaults;
   }
@@ -1747,6 +2013,70 @@ function readLessonFilter() {
 
 function saveLessonFilter() {
   localStorage.setItem(LESSON_FILTER_KEY, JSON.stringify(lessonFilter));
+}
+
+function userFilterPreset(viewKey) {
+  const presets = auth.user?.filter_presets || {};
+  const preset = presets?.[viewKey];
+  return preset && typeof preset === "object" && !Array.isArray(preset) ? preset : null;
+}
+
+function applyUserFilterPreset(viewKey) {
+  if (!auth.user || appliedUserFilterPresetViews.has(viewKey)) return false;
+  const preset = userFilterPreset(viewKey);
+  appliedUserFilterPresetViews.add(viewKey);
+  if (!preset || !Object.keys(preset).length) return false;
+  if (["lessons", "week", "weekMatrix"].includes(viewKey)) {
+    const nextFilter = {
+      ...lessonFilter,
+      month_key: state?.settings?.month_key || activeMonth || lessonFilter.month_key,
+      ...["student", "status", "classroom", "grade", "subject", "query", "start_date", "end_date"].reduce((next, key) => (
+        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
+      ), {}),
+      date_preset_initialized: true,
+    };
+    if (Object.prototype.hasOwnProperty.call(preset, "teacher_names") || Object.prototype.hasOwnProperty.call(preset, "teacher")) {
+      const teacherNames = normalizeNameList(preset.teacher_names || preset.teacher || []);
+      nextFilter.teacher = teacherNames.join("、");
+      nextFilter.teacher_names = teacherNames;
+    }
+    lessonFilter = nextFilter;
+    saveLessonFilter();
+    return true;
+  }
+  if (viewKey === "recharges") {
+    if (Object.prototype.hasOwnProperty.call(preset, "source")) rechargeSourceFilter = String(preset.source || "all") || "all";
+    if (Object.prototype.hasOwnProperty.call(preset, "student")) rechargeStudentFilter = String(preset.student || "");
+    if (Object.prototype.hasOwnProperty.call(preset, "grade")) rechargeGradeFilter = String(preset.grade || "");
+    localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
+    return true;
+  }
+  if (viewKey === "summary") {
+    summaryFilter = {
+      ...summaryFilter,
+      ...["student", "grade", "balance"].reduce((next, key) => (
+        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
+      ), {}),
+    };
+    return true;
+  }
+  if (viewKey === "teacherDetail") {
+    const teacherNames = normalizeNameList(preset.teacher_names || []);
+    if (teacherNames.length) selectedTeacher = teacherNames[0];
+    teacherDetailFilter = {
+      ...teacherDetailFilter,
+      ...["grade", "subject", "student", "source", "rule_status"].reduce((next, key) => (
+        Object.prototype.hasOwnProperty.call(preset, key) ? { ...next, [key]: String(preset[key] || "") } : next
+      ), {}),
+    };
+    return true;
+  }
+  if (viewKey === "teacherProfiles" && Object.prototype.hasOwnProperty.call(preset, "status")) {
+    profileStatusFilter = { ...profileStatusFilter, teachers: String(preset.status || "") };
+    localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
+    return true;
+  }
+  return false;
 }
 
 function readExpandedSummaryStudents() {
@@ -1807,7 +2137,9 @@ function rechargeRows() {
         recharge_notes: row.notes || "",
       };
     })
-    .sort(compareStudentGradeName);
+    .sort((a, b) => compareStudentGradeName(a, b)
+      || String(a.recharge_date || "").localeCompare(String(b.recharge_date || ""))
+      || Number(a.id || 0) - Number(b.id || 0));
 }
 
 function defaultRechargeDate() {
@@ -1823,7 +2155,7 @@ function rechargeModalMarkup() {
   const grades = uniqueSorted([...gradeOrder, ...usedLessonLookupValues("grades")]);
   return `
     <div class="modal-backdrop recharge-modal">
-      <div class="modal-panel">
+      <div class="modal-panel recharge-modal-panel">
         <div class="modal-head">
           <div>
             <div class="modal-title">新增充值记录</div>
@@ -1831,7 +2163,7 @@ function rechargeModalMarkup() {
           </div>
           <button class="btn recharge-modal-cancel" type="button">取消</button>
         </div>
-        <div class="lesson-create-form">
+        <div class="lesson-create-form recharge-form-grid">
           <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
           <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-field="recharge_date" type="date" value="${escapeHtml(defaultRechargeDate())}"></label>
@@ -1993,6 +2325,12 @@ function ensureLessonFilterDates() {
   const bounds = monthBounds(monthKey);
   const nextFilter = { ...lessonFilter, month_key: monthKey };
   let changed = nextFilter.month_key !== lessonFilter.month_key;
+  const teacherNames = normalizeNameList(nextFilter.teacher_names || (nextFilter.teacher ? [nextFilter.teacher] : []));
+  if (teacherNames.join("\n") !== normalizeNameList(nextFilter.teacher_names || []).join("\n")) {
+    nextFilter.teacher_names = teacherNames;
+    nextFilter.teacher = teacherNames.join("、");
+    changed = true;
+  }
   if (!nextFilter.date_preset_initialized) {
     nextFilter.start_date = bounds.start;
     nextFilter.end_date = bounds.end;
@@ -2044,7 +2382,7 @@ async function loadLessonRangeOnly() {
 function resetLessonFilter() {
   const monthKey = state?.settings?.month_key || activeMonth;
   const bounds = monthBounds(monthKey);
-  lessonFilter = { month_key: monthKey, teacher: "", student: "", start_date: bounds.start, end_date: bounds.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
+  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: bounds.start, end_date: bounds.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
@@ -2093,8 +2431,15 @@ function uniqueSorted(values) {
     .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
 }
 
+function normalizeNameList(value) {
+  const splitValue = (item) => String(item || "").split(/[,，、；;\n\r]+/);
+  const raw = Array.isArray(value) ? value.flatMap(splitValue) : splitValue(value);
+  return uniqueSorted(raw);
+}
+
 function lessonRowsForOption(rows, filter, excludeField, options = {}) {
   const optionFilter = { ...filter, [excludeField]: "" };
+  if (excludeField === "teacher") optionFilter.teacher_names = [];
   return rows.filter((row) => lessonMatchesFilter(row, optionFilter, options));
 }
 
@@ -2111,7 +2456,9 @@ function dynamicLessonFilterOptions(rows, filter, options = {}) {
 
 function lessonMatchesFilter(row, filter, options = {}) {
   const { includeDate = true, includeStatus = true, includeQuery = true } = options;
-  if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
+  const teacherNames = normalizeNameList(filter.teacher_names || []);
+  if (teacherNames.length && !teacherNames.includes(String(row.teacher_name || "").trim())) return false;
+  if (!teacherNames.length && filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
   if (filter.student) {
     const needle = filter.student.toLowerCase();
     if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
@@ -2176,6 +2523,116 @@ function filterComboControl({ id = "", className, field, value, values, placehol
   `;
 }
 
+function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false }) {
+  const selectedList = normalizeNameList(selected);
+  const selectedSet = new Set(selectedList);
+  const normalized = uniqueSorted([...(values || []), ...(includeSelected ? selectedList : [])]);
+  const dataName = dataAttr === "field" ? "data-field" : "data-filter-field";
+  const label = selectedList.length ? selectedList.join("、") : placeholder;
+  return `
+    <span class="multi-select" data-field="${escapeHtml(field)}" data-placeholder="${escapeHtml(placeholder)}">
+      <button ${id ? `id="${escapeHtml(id)}"` : ""} class="control multi-select-toggle ${className}" type="button" aria-expanded="false">
+        <span class="multi-select-label">${escapeHtml(label)}</span>
+        <span class="multi-select-caret">⌄</span>
+      </button>
+      <input class="multi-select-value ${className}" ${dataName}="${escapeHtml(field)}" type="hidden" value="${escapeHtml(selectedList.join("\n"))}">
+      <span class="multi-select-menu">
+        ${searchable ? `<input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索老师">` : ""}
+        <button class="multi-select-clear" type="button">${escapeHtml(clearLabel)}</button>
+        ${normalized.map((item) => `
+          <button class="multi-select-option ${selectedSet.has(item) ? "selected" : ""}" type="button" data-value="${escapeHtml(item)}">
+            <span class="multi-select-check">${selectedSet.has(item) ? "✓" : ""}</span>
+            <span>${escapeHtml(item)}</span>
+          </button>
+        `).join("")}
+        ${normalized.length ? "" : `<span class="multi-select-empty">暂无选项</span>`}
+      </span>
+    </span>
+  `;
+}
+
+const FLOATING_MULTI_SELECT_TOGGLE_SELECTOR = [
+  ".user-row-teachers",
+  ".new-user-teachers",
+  ".user-access-teachers",
+].join(",");
+
+function usesFloatingMultiSelectMenu(select) {
+  return Boolean(select?.querySelector(FLOATING_MULTI_SELECT_TOGGLE_SELECTOR));
+}
+
+function multiSelectMenuFor(select) {
+  return select?._floatingMenu || select?.querySelector(".multi-select-menu") || null;
+}
+
+function mountFloatingMultiSelectMenu(select) {
+  const menu = select?.querySelector(".multi-select-menu");
+  if (!menu || !usesFloatingMultiSelectMenu(select)) return menu;
+  select._floatingMenu = menu;
+  menu._multiSelectOwner = select;
+  menu.classList.add("floating-multi-select-menu");
+  document.body.appendChild(menu);
+  return menu;
+}
+
+function closeMultiSelectMenu(select) {
+  if (!select) return;
+  const menu = multiSelectMenuFor(select);
+  select.classList.remove("open", "floating-menu");
+  select.querySelector(".multi-select-toggle")?.setAttribute("aria-expanded", "false");
+  if (menu?._multiSelectOwner === select) {
+    menu.classList.remove("floating-multi-select-menu");
+    menu.removeAttribute("style");
+    if (select.isConnected) select.appendChild(menu);
+    else menu.remove();
+    delete menu._multiSelectOwner;
+    delete select._floatingMenu;
+  }
+}
+
+function closeOpenMultiSelectMenus() {
+  document.querySelectorAll(".multi-select.open").forEach(closeMultiSelectMenu);
+}
+
+function positionFloatingMultiSelectMenu(select) {
+  if (!select?.classList.contains("open") || !usesFloatingMultiSelectMenu(select)) return;
+  const toggle = select.querySelector(".multi-select-toggle");
+  const menu = multiSelectMenuFor(select);
+  if (!toggle || !menu) return;
+  const rect = toggle.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) {
+    closeMultiSelectMenu(select);
+    return;
+  }
+
+  select.classList.add("floating-menu");
+  const viewportGap = 8;
+  const menuGap = 6;
+  const width = Math.min(Math.max(rect.width, 188), Math.max(188, window.innerWidth - viewportGap * 2));
+  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportGap - menuGap);
+  const spaceAbove = Math.max(0, rect.top - viewportGap - menuGap);
+  const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
+  const availableHeight = openAbove ? spaceAbove : spaceBelow;
+  const maxHeight = Math.max(80, Math.min(260, availableHeight || 260));
+  const measuredHeight = Math.min(menu.scrollHeight || maxHeight, maxHeight);
+  const left = Math.min(
+    Math.max(viewportGap, rect.left),
+    Math.max(viewportGap, window.innerWidth - width - viewportGap),
+  );
+  const top = openAbove
+    ? Math.max(viewportGap, rect.top - measuredHeight - menuGap)
+    : Math.min(window.innerHeight - measuredHeight - viewportGap, rect.bottom + menuGap);
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(Math.max(viewportGap, top))}px`;
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.maxHeight = `${Math.round(maxHeight)}px`;
+}
+
+function positionOpenFloatingMultiSelectMenus() {
+  document.querySelectorAll(".multi-select.open").forEach(positionFloatingMultiSelectMenu);
+}
+
 function rowsForFilterOption(rows, filter, excludeField, matcher) {
   const optionFilter = { ...filter, [excludeField]: "" };
   return rows.filter((row) => matcher(row, optionFilter));
@@ -2209,7 +2666,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
   const teacherSelect = `
     <label class="filter-field">
       <span>老师</span>
-      ${filterComboControl({ className: "lesson-filter-input", field: "teacher", value: lessonFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
+      ${multiSelectControl({ className: "lesson-filter-multi", field: "teacher_names", selected: lessonFilter.teacher_names || [], values: opts.teachers, placeholder: "全部老师" })}
     </label>
   `;
   const studentInput = `
@@ -2987,8 +3444,16 @@ function navLabelText(group) {
   return String(group.label || "").replace(/^\S+\s+/, "").trim() || group.label || "";
 }
 
+function passwordEyeIcon(visible) {
+  return visible
+    ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.8 12s3.4-6 9.2-6 9.2 6 9.2 6-3.4 6-9.2 6-9.2-6-9.2-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>`
+    : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"></path><path d="M10.6 5.2A9.8 9.8 0 0 1 12 5c5.8 0 9.2 7 9.2 7a15.9 15.9 0 0 1-3 3.7"></path><path d="M14.1 14.1A3 3 0 0 1 9.9 9.9"></path><path d="M6.5 6.8A16.3 16.3 0 0 0 2.8 12s3.4 7 9.2 7a9.6 9.6 0 0 0 4.4-1.1"></path></svg>`;
+}
+
 function renderLogin(error = "") {
   const remembered = loginRemember();
+  appEl?.classList.add("login-mode");
+  appEl?.classList.remove("readonly-mode");
   navEl.innerHTML = "";
   topbarEl.innerHTML = "";
   contentEl.innerHTML = `
@@ -2999,21 +3464,35 @@ function renderLogin(error = "") {
         ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
         <label class="login-field">
           <span>账号</span>
-          <input class="control login-username" autocomplete="username" value="${escapeHtml(remembered.username || "boss")}">
+          <input class="control login-username" autocomplete="username" value="${escapeHtml(remembered.username || "")}" placeholder="请输入手机号或账号">
         </label>
         <label class="login-field">
           <span>密码</span>
-          <input class="control login-password" type="password" autocomplete="current-password" value="${escapeHtml(remembered.password || "")}">
+          <span class="login-password-wrap">
+            <input class="control login-password" type="password" autocomplete="current-password" value="${escapeHtml(remembered.password || "")}" placeholder="请输入密码">
+            <button class="login-password-toggle" type="button" aria-label="显示密码" title="显示密码" data-visible="0">${passwordEyeIcon(false)}</button>
+          </span>
         </label>
         <div class="login-checks">
           <label><input class="login-remember-username" type="checkbox" ${remembered.rememberUsername ? "checked" : ""}> 记住账号</label>
           <label><input class="login-remember-password" type="checkbox" ${remembered.rememberPassword ? "checked" : ""}> 记住密码</label>
         </div>
         <button class="btn primary login-submit" type="submit">登录</button>
-        <div class="login-tip">首次默认账号：boss / admin / jiaowu，初始密码均为 123456。记住密码只保存在本机浏览器。</div>
+        <div class="login-tip">首次默认账号为自己的手机号，初始密码为手机号后6位。</div>
       </form>
     </div>
   `;
+  document.querySelector(".login-password-toggle")?.addEventListener("click", () => {
+    const input = document.querySelector(".login-password");
+    const button = document.querySelector(".login-password-toggle");
+    if (!input || !button) return;
+    const visible = input.type === "password";
+    input.type = visible ? "text" : "password";
+    button.dataset.visible = visible ? "1" : "0";
+    button.setAttribute("aria-label", visible ? "隐藏密码" : "显示密码");
+    button.title = visible ? "隐藏密码" : "显示密码";
+    button.innerHTML = passwordEyeIcon(visible);
+  });
   document.querySelector(".login-panel")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -3030,6 +3509,7 @@ function renderLogin(error = "") {
         rememberPassword: document.querySelector(".login-remember-password")?.checked,
       });
       auth.user = result.user;
+      resetPagePositionForCurrentUser();
       await load();
     } catch (err) {
       renderLogin(err.message);
@@ -3146,7 +3626,7 @@ function renderNav() {
             <span class="nav-icon" aria-hidden="true">${NAV_ICONS[group.key] || ""}</span>
             <span class="nav-label">${escapeHtml(navLabelText(group))}</span>
           </button>
-          ${currentGroup.key === group.key && groupViews(group).length > 1 ? renderSecondaryNav(group) : ""}
+          ${currentGroup.key === group.key ? renderSecondaryNav(group) : ""}
         </div>
       `).join("")}
     </div>
@@ -4556,8 +5036,6 @@ function renderSummary() {
   const visibleRows = rows.filter((row) => summaryMatchesFilter(row));
   const totalFee = rows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
   const totalBalance = rows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
-  const filteredFee = visibleRows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
-  const filteredBalance = visibleRows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
   const isToDate = summaryScope === "toDate";
   renderTopbar(
     `${isToDate ? `截至${monthLabel()}` : monthLabel()} 学生费用汇总`,
@@ -4590,9 +5068,6 @@ function renderSummary() {
               `).join("") || `<tr><td colspan="12" class="empty">暂无学生费用汇总</td></tr>`}
           </tbody>
         </table>
-      </div>
-      <div class="filter-summary table-filter-summary">
-        <span>已筛选 <b>${visibleRows.length}</b> 条，课程费用 ¥${money(filteredFee)}，余额 ¥${money(filteredBalance)}</span>
       </div>
     </div>
   `;
@@ -5222,7 +5697,7 @@ function renderRecharges() {
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="recharge-row" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" style="background:${gradeColor(row.grade)}">
+              <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" style="background:${gradeColor(row.grade)}">
                 <td class="text-cell">${escapeHtml(row.student_name)} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 ${rechargePrevCell(row, "prev_actual")}
@@ -5575,18 +6050,19 @@ function studentStatementCanvas(report = studentStatementReport()) {
   const details = report?.details || [];
   const monthRows = report?.month_rows || [];
   const dateRange = studentStatementDateRange(report);
-  const width = 1120;
-  const contentWidth = width - 96;
+  const width = 1160;
+  const contentX = 64;
+  const contentWidth = width - contentX - 56;
   const monthTableHeight = 40 + Math.max(1, monthRows.length) * 36;
   const detailTableHeight = 42 + Math.max(1, details.length) * 38;
   const height = 48 + 96 + 104 + 96 + 36 + monthTableHeight + 54 + detailTableHeight + 54;
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
   drawStudentStatementHeader(ctx, colors, report?.student_name || selectedStudent || "未选择学生", dateRange, width);
   const metricCards = studentStatementMetricCards(summary);
-  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), 48, 142, contentWidth);
-  drawShotMetricCards(ctx, colors, metricCards.slice(4), 48, 238, contentWidth);
+  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), contentX, 142, contentWidth);
+  drawShotMetricCards(ctx, colors, metricCards.slice(4), contentX, 238, contentWidth);
   let y = 342;
-  drawShotSectionTitle(ctx, colors, "月份汇总", 48, y, contentWidth);
+  drawShotSectionTitle(ctx, colors, "月份汇总", contentX, y, contentWidth);
   y += 18;
   y += drawShotTable(ctx, colors, [
     { label: "月份", value: (row) => formatMonthOption(row.month_key), align: "left" },
@@ -5596,9 +6072,9 @@ function studentStatementCanvas(report = studentStatementReport()) {
     { label: "赠送充值", value: (row) => `¥${money2(row.cur_gift || 0)}`, align: "right" },
     { label: "月末现金", value: (row) => `¥${money2(row.actual_balance || 0)}`, align: "right", negative: (row) => numberValue(row.actual_balance) < 0 },
     { label: "月末赠送", value: (row) => `¥${money2(row.gift_balance || 0)}`, align: "right" },
-  ], monthRows, 48, y, [150, 110, 145, 145, 145, 145, 145], { rowHeight: 36, emptyText: "暂无月份汇总" });
+  ], monthRows, contentX, y, [150, 110, 150, 150, 150, 150, 180], { rowHeight: 36, emptyText: "暂无月份汇总" });
   y += 42;
-  drawShotSectionTitle(ctx, colors, "明细课程表", 48, y, contentWidth);
+  drawShotSectionTitle(ctx, colors, "明细课程表", contentX, y, contentWidth);
   y += 18;
   drawShotTable(ctx, colors, [
     { label: "日期", value: (row) => row.date, align: "left" },
@@ -5610,7 +6086,7 @@ function studentStatementCanvas(report = studentStatementReport()) {
     { label: "科目", value: (row) => row.subject },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "费用", value: (row) => `¥${money2(row.unit_price || 0)}`, align: "right" },
-  ], details, 48, y, [96, 68, 62, 116, 86, 72, 80, 342, 102], { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
+  ], details, contentX, y, [112, 68, 62, 116, 86, 72, 80, 346, 98], { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
   return canvas;
 }
 
@@ -5973,21 +6449,35 @@ function renderAudit() {
 }
 
 function roleSelectOptions(value) {
-  const roles = auth.user?.role === "academic" ? ["teacher"] : Object.keys(ROLE_LABELS);
-  return roles.map((role) => `<option value="${role}" ${role === value ? "selected" : ""}>${escapeHtml(ROLE_LABELS[role])}</option>`).join("");
+  const labels = { ...ROLE_LABELS, ...(auth.roles || {}) };
+  const roles = ACCOUNT_ROLE_CODES.filter((role) => Object.prototype.hasOwnProperty.call(auth.roles || labels, role));
+  return roles.map((role) => `<option value="${escapeHtml(role)}" ${role === value ? "selected" : ""}>${escapeHtml(labels[role] || role)}</option>`).join("");
 }
 
-function renderUserAdmin() {
+function renderUserAdminTabs() {
+  const tabs = [
+    ["roles", "角色管理"],
+    ["accounts", "账号管理"],
+  ];
+  return `
+    <div class="user-admin-tabs">
+      ${tabs.map(([key, label]) => `
+        <button class="user-admin-tab ${userAdminTab === key ? "active" : ""}" type="button" data-tab="${key}">${escapeHtml(label)}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderUserAccountsPanel() {
   const users = state.users || [];
   const canImportTeachers = canArea("users");
-  renderTopbar(
-    "账号权限",
-    auth.user?.role === "academic" ? "教务仅可维护老师账号" : "维护账号、角色和绑定老师",
-    `<button class="btn download-user-import-template" type="button" ${canImportTeachers ? "" : "disabled"}>下载导入模板</button>
-     <button class="btn primary import-teacher-users" type="button" ${canImportTeachers ? "" : "disabled"}>从模板导入账号</button>`,
-  );
-  contentEl.innerHTML = `
-    ${userAdminNotice ? `<div class="audit-inline-notice">${escapeHtml(userAdminNotice)}</div>` : ""}
+  const teacherValues = uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean));
+  return `
+    <div class="user-admin-actions">
+      <button class="btn download-user-import-template" type="button" ${canImportTeachers ? "" : "disabled"}>下载导入模板</button>
+      <button class="btn primary import-teacher-users" type="button" ${canImportTeachers ? "" : "disabled"}>从模板导入账号</button>
+      <button class="btn sync-teacher-accounts" type="button" ${canImportTeachers ? "" : "disabled"}>同步老师账号</button>
+    </div>
     <div class="band user-admin-panel">
       <div class="section-head">
         <div>
@@ -5996,32 +6486,39 @@ function renderUserAdmin() {
         </div>
       </div>
       <div class="user-create-grid">
-        <input class="control new-user-field" data-field="username" placeholder="账号/手机号">
-        <input class="control new-user-field" data-field="display_name" placeholder="显示姓名">
+        <input class="control new-user-field" data-field="username" name="new_account_id" autocomplete="off" placeholder="账号/手机号">
+        <input class="control new-user-field" data-field="display_name" name="new_account_display_name" autocomplete="off" placeholder="显示姓名">
         <select class="control new-user-field" data-field="role">${roleSelectOptions(auth.user?.role === "academic" ? "teacher" : "teacher")}</select>
-        <input class="control new-user-field" data-field="teacher_name" placeholder="绑定老师姓名">
-        <input class="control new-user-field" data-field="password" type="password" placeholder="初始密码，至少 6 位">
+        ${multiSelectControl({ className: "new-user-teachers", field: "teacher_names", selected: [], values: teacherValues, placeholder: "绑定老师", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}
+        <input class="control new-user-field" data-field="password" name="new_account_secret" type="password" autocomplete="new-password" placeholder="初始密码，至少 6 位">
         <button class="btn primary create-user" type="button">新增账号</button>
       </div>
     </div>
     <div class="band user-admin-panel">
       <div class="table-wrap">
         <table class="user-table">
-          <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th></tr></thead>
+          <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
           <tbody>
-            ${users.map((user) => `
+            ${users.map((user) => {
+              const teacherNames = normalizeNameList(user.bound_teacher_names || user.teacher_names || user.teacher_name);
+              const canDelete = auth.user?.role === "owner" && Number(auth.user?.id) !== Number(user.id);
+              return `
               <tr class="user-row" data-id="${user.id}">
                 <td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
                 <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
                 <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
-                <td><input class="cell-input user-field" data-field="teacher_name" value="${escapeHtml(user.teacher_name || "")}" placeholder="老师账号必填"></td>
+                <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
                 <td><select class="cell-select user-field" data-field="status">${options(["active", "disabled"], user.status || "active")}</select></td>
-                <td class="readonly user-password-cell">
-                  <input class="control user-reset-password-value" type="password" placeholder="新密码">
+                <td class="readonly user-actions-cell">
+                  <input class="control user-reset-password-value" type="password" autocomplete="new-password" placeholder="新密码">
                   <button class="btn user-reset-password" type="button">重置</button>
                 </td>
+                <td class="readonly">
+                  <button class="btn danger user-delete" type="button" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}" ${canDelete ? "" : "disabled"} title="${Number(auth.user?.id) === Number(user.id) ? "不能删除当前登录账号" : "软删除账号"}">删除</button>
+                </td>
               </tr>
-            `).join("") || `<tr><td colspan="6" class="empty">暂无账号</td></tr>`}
+            `;
+            }).join("") || `<tr><td colspan="7" class="empty">暂无账号</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -6148,6 +6645,327 @@ function baseDataCard(def) {
       </div>
     </div>
   `;
+}
+
+function flattenPermissionTree(nodes = state.permission_tree || []) {
+  const keys = [];
+  const visit = (node) => {
+    if (node.children?.length) node.children.forEach(visit);
+    else keys.push(node.key);
+  };
+  nodes.forEach(visit);
+  return keys;
+}
+
+function roleCanDelete(role) {
+  return !Number(role.is_system) && Number(role.user_count || 0) === 0;
+}
+
+function renderRoleManagementPanel() {
+  const roles = state.roles || [];
+  const canManageRoles = auth.user?.role === "owner";
+  if (!canManageRoles) {
+    return `<div class="band"><div class="empty">当前账号无权限维护角色。</div></div>`;
+  }
+  return `
+    <div class="band user-admin-panel role-admin-panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">角色管理</div>
+          <div class="section-subtitle">五类内置角色名称固定，可编辑各角色的页面权限。</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="user-table role-table">
+          <thead><tr><th>角色名称</th><th>是否只读</th><th>编辑</th><th>删除</th></tr></thead>
+          <tbody>
+            ${roles.map((role) => `
+              <tr class="role-row" data-code="${escapeHtml(role.code)}">
+                <td class="text-cell">
+                  <strong>${escapeHtml(role.name)}</strong>
+                  <span class="role-code">${escapeHtml(role.code)}</span>
+                  ${Number(role.is_system) ? `<span class="neutral-chip">系统</span>` : ""}
+                  <div class="muted-tip">${escapeHtml(role.description || "")}</div>
+                </td>
+                <td class="text-cell">${Number(role.readonly) ? "是" : "否"}</td>
+                <td><button class="btn role-edit" type="button" data-code="${escapeHtml(role.code)}">编辑</button></td>
+                <td><button class="btn danger role-delete" type="button" data-code="${escapeHtml(role.code)}" ${roleCanDelete(role) ? "" : "disabled"} title="${Number(role.is_system) ? "系统内置角色不能删除" : Number(role.user_count || 0) ? "该角色下仍有关联账号，不能删除" : "删除角色"}">删除</button></td>
+              </tr>
+            `).join("") || `<tr><td colspan="4" class="empty">暂无角色</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ${rolePermissionModalMarkup()}
+  `;
+}
+
+function permissionNodeMarkup(node, selectedSet) {
+  if (node.children?.length) {
+    const childKeys = [];
+    const collect = (item) => {
+      if (item.children?.length) item.children.forEach(collect);
+      else childKeys.push(item.key);
+    };
+    node.children.forEach(collect);
+    const checked = childKeys.every((key) => selectedSet.has(key));
+    const partial = !checked && childKeys.some((key) => selectedSet.has(key));
+    return `
+      <details class="permission-tree-group" open>
+        <summary>
+          <input class="permission-parent" type="checkbox" data-children="${escapeHtml(childKeys.join(","))}" ${checked ? "checked" : ""} data-partial="${partial ? "1" : "0"}">
+          <span>${escapeHtml(node.label)}</span>
+        </summary>
+        <div class="permission-tree-children">
+          ${node.children.map((child) => permissionNodeMarkup(child, selectedSet)).join("")}
+        </div>
+      </details>
+    `;
+  }
+  return `
+    <label class="permission-leaf">
+      <input class="permission-child" type="checkbox" value="${escapeHtml(node.key)}" ${selectedSet.has(node.key) ? "checked" : ""}>
+      <span>${escapeHtml(node.label)}</span>
+    </label>
+  `;
+}
+
+function rolePermissionModalMarkup() {
+  if (!rolePermissionModal) return "";
+  const role = rolePermissionModal;
+  const selectedSet = new Set(role.permissions || []);
+  const isOwner = role.code === "owner" || role.code === "boss";
+  const isSystem = Number(role.is_system) === 1;
+  const teacherValues = uniqueSorted((state.profile_teachers || []).map((row) => row.name));
+  const presets = role.filter_presets || {};
+  return `
+    <div class="modal-backdrop role-permission-modal">
+      <div class="modal-panel role-permission-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">编辑角色权限</div>
+            <div class="modal-subtitle">${escapeHtml(role.code)}${isOwner ? " · 老板角色默认拥有全部权限" : ""}</div>
+          </div>
+          <button class="btn role-permission-cancel" type="button">关闭</button>
+        </div>
+        <div class="role-modal-tabs">
+          <button class="role-modal-tab active" type="button" data-panel="permissions">基本权限</button>
+          <button class="role-modal-tab" type="button" data-panel="presets">预筛选</button>
+        </div>
+        <div class="role-modal-body">
+          <section class="role-modal-panel active" data-panel="permissions">
+            <div class="role-edit-fields">
+              <label>角色名称<input class="control role-modal-field" data-field="name" value="${escapeHtml(role.name || "")}" ${isSystem ? "disabled" : ""}></label>
+              <label>说明<input class="control role-modal-field" data-field="description" value="${escapeHtml(role.description || "")}"></label>
+              <label class="history-toggle role-readonly-toggle">
+                <input class="role-readonly-field" type="checkbox" ${Number(role.readonly) ? "checked" : ""} ${isOwner ? "disabled" : ""}>
+                <span>是否只读</span>
+              </label>
+            </div>
+            <div class="permission-tree ${isOwner ? "readonly" : ""}">
+              ${(state.permission_tree || []).map((node) => permissionNodeMarkup(node, selectedSet)).join("")}
+            </div>
+          </section>
+          <section class="role-modal-panel" data-panel="presets">
+            <div class="role-preset-grid">
+              ${ACCOUNT_FILTER_PRESET_DEFS.map((viewDef) => `
+                <div class="role-preset-card">
+                  <div class="account-preset-title">${escapeHtml(viewDef.label)}</div>
+                  <div class="account-preset-fields">
+                    ${viewDef.fields.map((fieldDef) => rolePresetFieldMarkup(viewDef, fieldDef, presets, teacherValues)).join("")}
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          </section>
+        </div>
+        <div class="modal-actions">
+          <button class="btn role-permission-cancel" type="button">取消</button>
+          <button class="btn primary role-permission-save" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function rolePresetFieldMarkup(viewDef, fieldDef, presets, teacherValues) {
+  const viewPreset = presets?.[viewDef.view] || {};
+  const value = viewPreset[fieldDef.key];
+  if (fieldDef.type === "teachers") {
+    const dynamicBound = isBoundTeacherPresetValue(value);
+    const selectedTeachers = dynamicBound ? [] : normalizeNameList(value || []);
+    const mode = dynamicBound ? "bound" : (selectedTeachers.length ? "specific" : "");
+    return `
+      <label class="account-preset-field-wrap role-preset-field-wrap" data-view="${escapeHtml(viewDef.view)}" data-key="${escapeHtml(fieldDef.key)}" data-type="teachers">
+        <span>${escapeHtml(fieldDef.label)}</span>
+        <select class="control role-preset-teacher-mode">
+          <option value="" ${mode === "" ? "selected" : ""}>不预设</option>
+          <option value="bound" ${mode === "bound" ? "selected" : ""}>绑定老师</option>
+          <option value="specific" ${mode === "specific" ? "selected" : ""}>指定老师</option>
+        </select>
+        <span class="role-preset-teachers-wrap" ${mode === "specific" ? "" : "hidden"}>
+          ${multiSelectControl({ className: "role-preset-field role-preset-teachers", field: `${viewDef.view}.${fieldDef.key}`, selected: selectedTeachers, values: teacherValues, placeholder: "不预设", clearLabel: "清空" })}
+        </span>
+      </label>
+    `;
+  }
+  if (fieldDef.type === "date-rule") {
+    const config = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const selectedRule = config.type === "fixed" ? "fixed" : (config.value || "unlimited");
+    const fixedDate = config.type === "fixed" ? config.value : "";
+    const ruleOptions = fieldDef.bound === "end" ? END_DATE_PRESET_OPTIONS : START_DATE_PRESET_OPTIONS;
+    return `
+      <label class="account-preset-field-wrap role-preset-field-wrap role-preset-date-wrap" data-view="${escapeHtml(viewDef.view)}" data-key="${escapeHtml(fieldDef.key)}" data-type="date-rule">
+        <span>${escapeHtml(fieldDef.label)}</span>
+        <select class="control role-preset-date-rule">
+          ${ruleOptions.map(([rule, label]) => `<option value="${escapeHtml(rule)}" ${selectedRule === rule ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select>
+        <input class="control role-preset-fixed-date" type="date" value="${escapeHtml(fixedDate)}" ${selectedRule === "fixed" ? "" : "hidden"}>
+      </label>
+    `;
+  }
+  return `
+    <label class="account-preset-field-wrap role-preset-field-wrap" data-view="${escapeHtml(viewDef.view)}" data-key="${escapeHtml(fieldDef.key)}">
+      <span>${escapeHtml(fieldDef.label)}</span>
+      <input class="control role-preset-field" value="${escapeHtml(value || "")}" placeholder="不预设">
+    </label>
+  `;
+}
+
+function isBoundTeacherPresetValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && (value.mode === "bound_teachers" || (value.type === "dynamic" && value.value === "bound_teachers"));
+}
+
+function userAccessModalMarkup() {
+  if (!userAccessModal) return "";
+  const user = userAccessModal;
+  const isOverride = Number(user.permission_override_enabled || 0) === 1;
+  const selectedSet = new Set(isOverride ? (user.permissions || []) : (user.role_permissions || user.permissions || []));
+  const readonlyValue = user.readonly_override === null || user.readonly_override === undefined ? "" : String(Number(user.readonly_override));
+  const teacherValues = uniqueSorted([
+    ...(state.profile_teachers || []).map((row) => row.name),
+    ...normalizeNameList(user.bound_teacher_names || user.teacher_names || user.teacher_name),
+  ]);
+  return `
+    <div class="modal-backdrop user-access-modal">
+      <div class="modal-panel user-access-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">账号权限配置</div>
+            <div class="modal-subtitle">${escapeHtml(user.display_name || user.username)} · ${escapeHtml(user.username || "")}</div>
+          </div>
+          <button class="btn user-access-cancel" type="button">关闭</button>
+        </div>
+        <div class="user-access-grid">
+          <section class="user-access-section">
+            <div class="section-title compact">只读与绑定</div>
+            <div class="user-access-fields">
+              <label>
+                <span>是否只读</span>
+                <select class="control user-access-readonly">
+                  <option value="" ${readonlyValue === "" ? "selected" : ""}>跟随角色</option>
+                  <option value="0" ${readonlyValue === "0" ? "selected" : ""}>可编辑</option>
+                  <option value="1" ${readonlyValue === "1" ? "selected" : ""}>只读</option>
+                </select>
+              </label>
+              <label>
+                <span>绑定老师</span>
+                ${multiSelectControl({ className: "user-access-teachers", field: "teacher_names", selected: user.bound_teacher_names || user.teacher_names || user.teacher_name, values: teacherValues, placeholder: "未绑定", clearLabel: "清空" })}
+              </label>
+            </div>
+          </section>
+          <section class="user-access-section">
+            <div class="section-title compact">页面权限</div>
+            <label class="history-toggle user-access-override-toggle">
+              <input class="user-access-permission-override" type="checkbox" ${isOverride ? "checked" : ""}>
+              <span>使用账号级页面权限</span>
+            </label>
+            <div class="permission-tree user-access-permission-tree">
+              ${(state.permission_tree || []).map((node) => permissionNodeMarkup(node, selectedSet)).join("")}
+            </div>
+          </section>
+        </div>
+        <div class="modal-actions">
+          <button class="btn user-access-cancel" type="button">取消</button>
+          <button class="btn primary user-access-save" type="button" data-id="${escapeHtml(user.id)}">保存配置</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function collectRoleModalPermissions() {
+  if (rolePermissionModal?.code === "owner" || rolePermissionModal?.code === "boss") return flattenPermissionTree();
+  return [...document.querySelectorAll(".permission-child:checked")].map((input) => input.value);
+}
+
+function collectRoleFilterPresets() {
+  const presets = {};
+  document.querySelectorAll(".role-preset-field-wrap").forEach((wrap) => {
+    const viewKey = wrap.dataset.view || "";
+    const key = wrap.dataset.key || "";
+    if (!viewKey || !key) return;
+    let value = "";
+    if (wrap.dataset.type === "teachers") {
+      const mode = wrap.querySelector(".role-preset-teacher-mode")?.value || "";
+      if (mode === "bound") value = { mode: "bound_teachers" };
+      else if (mode === "specific") value = normalizeNameList(wrap.querySelector(".multi-select-value")?.value || "");
+    } else if (wrap.dataset.type === "date-rule") {
+      const rule = wrap.querySelector(".role-preset-date-rule")?.value || "unlimited";
+      if (rule === "fixed") {
+        const fixedDate = wrap.querySelector(".role-preset-fixed-date")?.value || "";
+        value = fixedDate ? { type: "fixed", value: fixedDate } : "";
+      } else if (rule !== "unlimited") {
+        value = { type: "relative", value: rule };
+      }
+    } else {
+      value = String(wrap.querySelector(".role-preset-field")?.value || "").trim();
+    }
+    if (Array.isArray(value) ? !value.length : !value) return;
+    if (!presets[viewKey]) presets[viewKey] = {};
+    presets[viewKey][key] = value;
+  });
+  return presets;
+}
+
+function collectUserAccessPayload() {
+  const modal = document.querySelector(".user-access-modal");
+  if (!modal) return {};
+  const readonlyValue = modal.querySelector(".user-access-readonly")?.value ?? "";
+  const permissions = [...modal.querySelectorAll(".permission-child:checked")].map((input) => input.value);
+  const teacherNames = normalizeNameList(modal.querySelector(".multi-select-value.user-access-teachers")?.value || "");
+  return {
+    readonly_override: readonlyValue === "" ? null : Number(readonlyValue),
+    permission_override_enabled: modal.querySelector(".user-access-permission-override")?.checked ? 1 : 0,
+    permissions,
+    teacher_names: teacherNames,
+  };
+}
+
+function updatePermissionParentStates() {
+  document.querySelectorAll(".permission-parent").forEach((parent) => {
+    const children = String(parent.dataset.children || "").split(",").filter(Boolean);
+    const childInputs = children.map((key) => document.querySelector(`.permission-child[value="${selectorEscape(key)}"]`)).filter(Boolean);
+    const checkedCount = childInputs.filter((input) => input.checked).length;
+    parent.checked = childInputs.length > 0 && checkedCount === childInputs.length;
+    parent.indeterminate = checkedCount > 0 && checkedCount < childInputs.length;
+  });
+}
+
+function renderUserAdmin() {
+  renderTopbar(
+    "账号权限",
+    userAdminTab === "roles" ? "维护角色和页面可见权限" : (auth.user?.role === "academic" ? "教务仅可维护老师账号" : "维护账号、角色和绑定老师"),
+  );
+  contentEl.innerHTML = `
+    ${userAdminNotice ? `<div class="audit-inline-notice">${escapeHtml(userAdminNotice)}</div>` : ""}
+    ${renderUserAdminTabs()}
+    ${userAdminTab === "roles" ? renderRoleManagementPanel() : renderUserAccountsPanel()}
+  `;
+  document.querySelectorAll(".permission-parent").forEach((input) => {
+    input.indeterminate = input.dataset.partial === "1";
+  });
 }
 
 function renderBaseData() {
@@ -7285,7 +8103,10 @@ function renderTeacherSalaryRules() {
 
 function renderTeacherDetail() {
   const teachers = state.teachers.map((row) => row.name);
-  const rows = sortedLessons().filter((row) => row.teacher_name === selectedTeacher);
+  const teacherAllSelected = auth.user?.role === "teacher" && selectedTeacher === TEACHER_ALL_VALUE;
+  const monthKey = state?.settings?.month_key || activeMonth;
+  const monthRows = sortedLessons().filter((row) => (row.month_key || monthKeyFromDateValue(row.date)) === monthKey);
+  const rows = monthRows.filter((row) => teacherAllSelected ? teachers.includes(row.teacher_name) : row.teacher_name === selectedTeacher);
   const filterOptions = dynamicTeacherDetailFilterOptions(rows);
   const visibleRows = rows.filter((row) => teacherDetailMatchesFilter(row));
   const count = rows.filter(isCompletedLesson).length;
@@ -7299,15 +8120,16 @@ function renderTeacherDetail() {
   const selectedCount = selectedTeacherSalaryLessonIds.size;
   const allSelected = eligibleRows.length > 0 && eligibleRows.every((row) => selectedTeacherSalaryLessonIds.has(Number(row.id)));
   renderTopbar(
-    `${monthLabel()} 教师个人课程明细`,
-    selectedTeacher ? (showSalary ? `${selectedTeacher} · 在这里录入课时薪资` : selectedTeacher) : "未选择教师",
-    `<button class="btn export-teacher-detail-image" type="button" ${selectedTeacher ? "" : "disabled"}>复制图片</button>`,
+    `${monthLabel()} 教师薪资明细`,
+    teacherAllSelected ? "全部老师" : (selectedTeacher ? (showSalary ? `${selectedTeacher} · 在这里录入课时薪资` : selectedTeacher) : "未选择教师"),
+    `<button class="btn export-teacher-detail-image" type="button" ${selectedTeacher && !teacherAllSelected ? "" : "disabled"}>复制图片</button>`,
   );
   contentEl.innerHTML = `
     <div class="query-head">
       <div class="metric">
         <div class="metric-label">教师姓名</div>
-        ${auth.user?.role === "teacher" ? `<div class="metric-value small">${escapeHtml(selectedTeacher || "未绑定老师")}</div>` : `<select class="control teacher-select" style="margin-top:8px;width:100%">
+        ${auth.user?.role === "teacher" && teachers.length <= 1 ? `<div class="metric-value small">${escapeHtml(selectedTeacher || "未绑定老师")}</div>` : `<select class="control teacher-select" style="margin-top:8px;width:100%">
+          ${auth.user?.role === "teacher" && teachers.length > 1 ? `<option value="${TEACHER_ALL_VALUE}" ${selectedTeacher === TEACHER_ALL_VALUE ? "selected" : ""}>全部老师</option>` : ""}
           ${options(teachers, selectedTeacher, "选择教师")}
         </select>`}
       </div>
@@ -7817,15 +8639,402 @@ async function copyCourseNoticeImage(item, mode = "parent", title = "课程通�
   render();
 }
 
+function dashboardMetricCatalog() {
+  return state?.dashboard?.metrics || [];
+}
+
+function storedJsonArray(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function dashboardDefaultMetricKeys() {
+  const available = new Set(dashboardMetricCatalog().map((item) => item.key));
+  const preferred = [
+    "month_course_fee",
+    "month_receivable",
+    "today_completed_lessons",
+    "today_leave_count",
+    "student_debt_amount",
+    "month_completed_lessons",
+    "today_pending_lessons",
+    "month_consumption_hours",
+    "active_student_count",
+  ];
+  return preferred.filter((key) => available.has(key)).slice(0, 5);
+}
+
+function dashboardSelectedMetricKeys(source = storedJsonArray(DASHBOARD_METRICS_KEY)) {
+  const available = new Set(dashboardMetricCatalog().map((item) => item.key));
+  const keys = source.filter((key) => available.has(key));
+  return (keys.length ? keys : dashboardDefaultMetricKeys()).slice(0, 5);
+}
+
+function dashboardMetricValue(item = {}) {
+  if (item.format === "money") return `¥${money2(item.value)}`;
+  if (item.format === "hours") return `${Number(item.value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 小时`;
+  return Number(item.value || 0).toLocaleString("zh-CN");
+}
+
+function dashboardShortcutCatalog() {
+  return [
+    { key: "studentProfiles", label: "学生档案", view: "studentProfiles", group: "学生管理", icon: NAV_ICONS.students },
+    { key: "lessons", label: "课程总表", view: "lessons", group: "教务管理", icon: NAV_ICONS.schedule },
+    { key: "week", label: "周课表", view: "week", group: "教务管理", icon: NAV_ICONS.schedule },
+    { key: "weekMatrix", label: "矩阵课表", view: "weekMatrix", group: "教务管理", icon: NAV_ICONS.schedule },
+    { key: "newLesson", label: "新增课程", view: "lessons", group: "常用功能", icon: NAV_ICONS.schedule, action: "newLesson" },
+    { key: "teacherProfiles", label: "教师管理", view: "teacherProfiles", group: "教师管理", icon: NAV_ICONS.teachers },
+    { key: "recharges", label: "充值记录", view: "recharges", group: "财务管理", icon: NAV_ICONS.students },
+    { key: "summary", label: "费用汇总", view: "summary", group: "财务管理", icon: NAV_ICONS.finance },
+    { key: "pricing", label: "费用标准", view: "pricing", group: "设置管理", icon: NAV_ICONS.settings },
+    { key: "operationLogs", label: "操作日志", view: "operationLogs", group: "设置管理", icon: NAV_ICONS.settings },
+    { key: "userAdmin", label: "账号权限", view: "userAdmin", group: "设置管理", icon: NAV_ICONS.settings },
+  ].filter((item) => canView(item.view));
+}
+
+function dashboardDefaultShortcutKeys() {
+  const available = new Set(dashboardShortcutCatalog().map((item) => item.key));
+  return ["studentProfiles", "lessons", "week", "teacherProfiles", "recharges", "summary", "newLesson", "weekMatrix"]
+    .filter((key) => available.has(key))
+    .slice(0, 8);
+}
+
+function dashboardSelectedShortcutKeys(source = storedJsonArray(DASHBOARD_SHORTCUTS_KEY)) {
+  const available = new Set(dashboardShortcutCatalog().map((item) => item.key));
+  const keys = source.filter((key) => available.has(key));
+  return keys.length ? keys : dashboardDefaultShortcutKeys();
+}
+
+function dashboardGoTo(viewKey, filter = {}) {
+  if (!canView(viewKey)) return alert("无权限访问");
+  if (viewKey === "lessons") {
+    const nextFilter = { ...lessonFilter, month_key: state.settings.month_key, ...filter, date_preset_initialized: true };
+    nextFilter.teacher_names = normalizeNameList(nextFilter.teacher_names || (nextFilter.teacher ? [nextFilter.teacher] : []));
+    nextFilter.teacher = nextFilter.teacher_names.join("、");
+    lessonFilter = nextFilter;
+    saveLessonFilter();
+  }
+  if (viewKey === "summary") summaryFilter = { ...summaryFilter, ...filter };
+  if (viewKey === "feeDetails") feeDetailsFilter = { ...feeDetailsFilter, ...filter };
+  view = viewKey;
+  activeNavGroup = groupForView(viewKey).key;
+  localStorage.setItem("liming:view", view);
+  localStorage.setItem("liming:nav-group", activeNavGroup);
+  load({ refreshGlobal: false });
+}
+
+function dashboardTrendSvg(rows = []) {
+  const width = 760;
+  const height = 238;
+  const pad = { left: 42, right: 18, top: 20, bottom: 36 };
+  const values = rows.map((row) => Number(row.lesson_count || 0));
+  const max = Math.max(1, Math.ceil(Math.max(...values)));
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  if (!rows.length || values.every((value) => value === 0)) {
+    return `<div class="dashboard-empty-chart">暂无课程数据</div>`;
+  }
+  const step = rows.length > 1 ? plotW / (rows.length - 1) : plotW;
+  const points = rows.map((row, index) => {
+    const x = pad.left + index * step;
+    const y = pad.top + plotH - (Number(row.lesson_count || 0) / max) * plotH;
+    return { x, y, row };
+  });
+  const linePath = points.reduce((path, point, index) => {
+    if (index === 0) return `M ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+    const previous = points[index - 1];
+    const midX = (previous.x + point.x) / 2;
+    return `${path} C ${midX.toFixed(1)} ${previous.y.toFixed(1)}, ${midX.toFixed(1)} ${point.y.toFixed(1)}, ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+  }, "");
+  const baseline = pad.top + plotH;
+  const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${baseline} L ${points[0].x.toFixed(1)} ${baseline} Z`;
+  const labelStep = Math.max(1, Math.ceil((rows.length - 1) / 5));
+  const labels = points.map((point, index) => {
+    if (index !== 0 && index !== rows.length - 1 && index % labelStep !== 0) return "";
+    return `<text class="dashboard-chart-label" x="${point.x.toFixed(1)}" y="${height - 12}" text-anchor="middle">${escapeHtml(point.row.date.slice(5))}</text>`;
+  }).join("");
+  const gridLines = [0, 0.5, 1].map((ratio) => {
+    const y = pad.top + plotH * ratio;
+    return `<line class="dashboard-chart-grid" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}"></line>`;
+  }).join("");
+  return `
+    <svg class="dashboard-trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="课程趋势图">
+      ${gridLines}
+      <text class="dashboard-chart-y-label" x="${pad.left - 10}" y="${pad.top + 4}" text-anchor="end">${max}</text>
+      <text class="dashboard-chart-y-label" x="${pad.left - 10}" y="${baseline + 4}" text-anchor="end">0</text>
+      <path class="dashboard-trend-area" d="${areaPath}"></path>
+      <path class="dashboard-trend-line" d="${linePath}"></path>
+      ${labels}
+    </svg>
+  `;
+}
+
+function dashboardPieSvg(pie = {}) {
+  const items = (pie.items || []).filter((item) => Number(item.value || 0) > 0);
+  const total = Number(pie.total || items.reduce((sum, item) => sum + Number(item.value || 0), 0));
+  if (!items.length || !total) return `<div class="dashboard-empty-chart">暂无学员数据</div>`;
+  const colors = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#64748b"];
+  let acc = 0;
+  const radius = 76;
+  const circumference = 2 * Math.PI * radius;
+  const segments = items.map((item, index) => {
+    const value = Number(item.value || 0);
+    const length = (value / total) * circumference;
+    const dash = `${length} ${circumference - length}`;
+    const offset = -acc;
+    acc += length;
+    return `<circle class="dashboard-pie-segment" cx="110" cy="110" r="${radius}" fill="none" stroke="${colors[index % colors.length]}" stroke-width="28" stroke-dasharray="${dash}" stroke-dashoffset="${offset}"><title>${escapeHtml(item.name)}：${value}</title></circle>`;
+  }).join("");
+  return `
+    <div class="dashboard-pie-wrap ${items.length === 1 ? "single" : ""}">
+      <svg class="dashboard-pie-svg" viewBox="0 0 220 220" role="img" aria-label="学员数量饼图">
+        <circle cx="110" cy="110" r="${radius}" fill="none" stroke="var(--line)" stroke-width="28"></circle>
+        ${segments}
+        <text class="dashboard-pie-total" x="110" y="104" text-anchor="middle">${total}</text>
+        <text class="dashboard-pie-caption" x="110" y="130" text-anchor="middle">学员</text>
+      </svg>
+      <div class="dashboard-pie-legend">
+        ${items.map((item, index) => `
+          <div class="dashboard-legend-item">
+            <span style="background:${colors[index % colors.length]}"></span>
+            <div class="dashboard-legend-copy">
+              <b>${escapeHtml(item.name)}</b>
+              <em>${Number(item.value || 0)}</em>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function dashboardMetricModal() {
+  if (!dashboardMetricModalOpen) return "";
+  const catalog = dashboardMetricCatalog();
+  const selected = dashboardMetricDraft || dashboardSelectedMetricKeys();
+  const selectedSet = new Set(selected);
+  return `
+    <div class="modal-backdrop dashboard-config-modal">
+      <div class="modal-panel dashboard-config-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">自定义数据</div>
+            <div class="modal-subtitle">最多选择 5 个首页机构数据。</div>
+          </div>
+          <button class="btn dashboard-metric-cancel" type="button">关闭</button>
+        </div>
+        <div class="dashboard-config-columns">
+          <div class="dashboard-config-column">
+            <div class="section-title small">已选数据</div>
+            <div class="dashboard-config-list">
+              ${selected.map((key) => {
+                const item = catalog.find((metric) => metric.key === key);
+                if (!item) return "";
+                return `<div class="dashboard-config-item"><span>${escapeHtml(item.label)}</span><button class="btn ghost dashboard-metric-remove" type="button" data-key="${escapeHtml(key)}">移除</button></div>`;
+              }).join("") || `<div class="empty">暂无已选数据</div>`}
+            </div>
+          </div>
+          <div class="dashboard-config-column">
+            <div class="section-title small">可选数据</div>
+            <div class="dashboard-config-list">
+              ${catalog.filter((item) => !selectedSet.has(item.key)).map((item) => `
+                <div class="dashboard-config-item"><span>${escapeHtml(item.label)}</span><button class="btn dashboard-metric-add" type="button" data-key="${escapeHtml(item.key)}" ${selected.length >= 5 ? "disabled" : ""}>添加</button></div>
+              `).join("") || `<div class="empty">没有更多可选数据</div>`}
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn dashboard-metric-cancel" type="button">取消</button>
+          <button class="btn primary dashboard-metric-save" type="button">确认</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function dashboardShortcutModal() {
+  if (!dashboardShortcutModalOpen) return "";
+  const catalog = dashboardShortcutCatalog();
+  const selected = dashboardShortcutDraft || dashboardSelectedShortcutKeys();
+  const selectedSet = new Set(selected);
+  const grouped = new Map();
+  catalog.forEach((item) => {
+    if (!grouped.has(item.group)) grouped.set(item.group, []);
+    grouped.get(item.group).push(item);
+  });
+  return `
+    <div class="modal-backdrop dashboard-config-modal">
+      <div class="modal-panel dashboard-config-panel dashboard-feature-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">自定义常用功能</div>
+            <div class="modal-subtitle">仅展示当前账号可访问的功能入口。</div>
+          </div>
+          <button class="btn dashboard-shortcut-cancel" type="button">关闭</button>
+        </div>
+        <div class="dashboard-selected-shortcuts">
+          ${selected.map((key) => {
+            const item = catalog.find((shortcut) => shortcut.key === key);
+            if (!item) return "";
+            return `<span class="dashboard-selected-chip">${item.icon}<b>${escapeHtml(item.label)}</b><button class="dashboard-shortcut-remove" type="button" data-key="${escapeHtml(key)}">×</button></span>`;
+          }).join("") || `<span class="muted-tip">暂无已选功能</span>`}
+        </div>
+        <div class="dashboard-feature-groups">
+          ${[...grouped.entries()].map(([group, items]) => `
+            <div class="dashboard-feature-group">
+              <div class="section-title small">${escapeHtml(group)}</div>
+              <div class="dashboard-feature-options">
+                ${items.map((item) => `
+                  <button class="dashboard-feature-option ${selectedSet.has(item.key) ? "selected" : ""}" type="button" data-key="${escapeHtml(item.key)}">
+                    ${item.icon}
+                    <span>${escapeHtml(item.label)}</span>
+                  </button>
+                `).join("")}
+              </div>
+            </div>
+          `).join("")}
+        </div>
+        <div class="modal-actions">
+          <button class="btn dashboard-shortcut-reset" type="button">重置</button>
+          <button class="btn dashboard-shortcut-cancel" type="button">取消</button>
+          <button class="btn primary dashboard-shortcut-save" type="button">确认</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDashboard() {
+  const dashboard = state.dashboard || { metrics: [], todos: [], trend: [], student_pie: { items: [], total: 0 } };
+  const metricMap = new Map(dashboardMetricCatalog().map((item) => [item.key, item]));
+  const selectedMetrics = dashboardSelectedMetricKeys().map((key) => metricMap.get(key)).filter(Boolean);
+  const shortcuts = dashboardShortcutCatalog();
+  const shortcutMap = new Map(shortcuts.map((item) => [item.key, item]));
+  const selectedShortcuts = dashboardSelectedShortcutKeys().map((key) => shortcutMap.get(key)).filter(Boolean);
+  renderTopbar("首页");
+  contentEl.innerHTML = `
+    <div class="dashboard-page">
+      <section class="band dashboard-metrics-section">
+        <div class="section-head">
+          <div>
+            <div class="section-title">机构数据</div>
+            <div class="section-subtitle">基于当前业务数据自动更新。</div>
+          </div>
+          <button class="btn icon-btn dashboard-open-metric-config" type="button" title="自定义数据" aria-label="自定义数据">${NAV_ICONS.settings}</button>
+        </div>
+        <div class="dashboard-metric-grid">
+          ${selectedMetrics.map((item) => `
+            <div class="dashboard-metric-card">
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${escapeHtml(dashboardMetricValue(item))}</strong>
+            </div>
+          `).join("") || `<div class="empty">暂无可显示数据</div>`}
+        </div>
+      </section>
+
+      <section class="band dashboard-shortcuts-section">
+        <div class="section-head">
+          <div>
+            <div class="section-title">常用功能</div>
+          </div>
+          <button class="btn icon-btn dashboard-open-shortcut-config" type="button" title="自定义常用功能" aria-label="自定义常用功能">${NAV_ICONS.settings}</button>
+        </div>
+        <div class="dashboard-shortcut-grid">
+          ${selectedShortcuts.map((item) => `
+            <button class="dashboard-shortcut" type="button" data-key="${escapeHtml(item.key)}">
+              ${item.icon}
+              <span>${escapeHtml(item.label)}</span>
+            </button>
+          `).join("") || `<div class="empty">暂无常用功能</div>`}
+        </div>
+      </section>
+
+      <div class="dashboard-main-grid">
+        <section class="band dashboard-todo-section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">待办事项</div>
+            </div>
+          </div>
+          <div class="dashboard-todo-list">
+            ${(dashboard.todos || []).map((item) => `
+              <button class="dashboard-todo-item" type="button" data-view="${escapeHtml(item.view || "dashboard")}" data-filter="${escapeHtml(JSON.stringify(item.filter || {}))}">
+                <span>${escapeHtml(item.label)}</span>
+                <strong>${Number(item.count || 0).toLocaleString("zh-CN")}</strong>
+              </button>
+            `).join("") || `<div class="empty">暂无待办</div>`}
+          </div>
+        </section>
+
+        <section class="band dashboard-trend-section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">课程趋势</div>
+            </div>
+            <div class="dashboard-date-controls">
+              <input class="control dashboard-range-field" data-field="start" type="date" value="${escapeHtml(dashboardRange.start)}">
+              <input class="control dashboard-range-field" data-field="end" type="date" value="${escapeHtml(dashboardRange.end)}">
+            </div>
+          </div>
+          ${dashboardTrendSvg(dashboard.trend || [])}
+        </section>
+
+        <section class="band dashboard-pie-section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">学员总数量</div>
+              <div class="section-subtitle">${escapeHtml(dashboard.student_pie?.dimension || "")}</div>
+            </div>
+          </div>
+          ${dashboardPieSvg(dashboard.student_pie || {})}
+        </section>
+      </div>
+    </div>
+    ${dashboardMetricModal()}
+    ${dashboardShortcutModal()}
+  `;
+}
+
+function applyReadonlyUi() {
+  if (!isReadonlyUser()) return;
+  const selectors = [
+    ".new-month", ".delete-month", ".add-lesson", ".lesson-field", ".delete-lesson", ".batch-delete-lessons", ".batch-complete-lessons",
+    ".batch-copy-lessons", ".week-copy-btn", ".schedule-add-btn", ".lesson-create-confirm", ".lesson-create-field",
+    ".lesson-create-manual-field", ".lesson-create-student-existing", ".lesson-create-new-students",
+    ".batch-copy-confirm", ".batch-copy-field", ".profile-field", ".delete-profile", ".profile-modal-save",
+    ".create-user", ".new-user-field", ".user-field", ".user-reset-password", ".user-reset-password-value",
+    ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
+    ".base-data-add", ".base-data-delete", ".staff-field", ".delete-staff", ".staff-modal-save",
+    ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
+    ".pricing-field", ".recharge-field", ".opening-balance-field", ".student-pricing-field",
+    ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field",
+    ".course-notice-tail", ".notice-greeting", ".course-notice-clear-completions",
+    ".teacher-course-notice-tail", ".teacher-notice-greeting", ".teacher-course-notice-clear-completions",
+  ];
+  document.querySelectorAll(selectors.join(",")).forEach((element) => {
+    element.disabled = true;
+    element.title = element.title || READONLY_WRITE_MESSAGE;
+  });
+}
+
 function render() {
+  closeOpenMultiSelectMenus();
+  appEl?.classList.remove("login-mode");
+  appEl?.classList.toggle("readonly-mode", isReadonlyUser());
   applySidebarState();
   const previousView = lastRenderedView;
   const viewChanged = previousView && previousView !== view;
   const enteringTeacherSalaryRules = view === "teacherSalaryRules" && previousView !== "teacherSalaryRules";
   if (enteringTeacherSalaryRules) resetTeacherSalaryRuleCandidateSync();
+  applyUserFilterPreset(view);
   lastRenderedView = view;
   renderNav();
   const renderers = {
+    dashboard: renderDashboard,
     lessons: renderLessons,
     week: renderWeek,
     weekMatrix: renderWeekMatrix,
@@ -7854,6 +9063,7 @@ function render() {
     teacherSalaryRules: renderTeacherSalaryRules,
   };
   (renderers[view] || renderLessons)();
+  applyReadonlyUi();
   wireEvents();
   if (viewChanged) {
     requestAnimationFrame(() => {
@@ -7971,6 +9181,197 @@ async function applyAttendanceBulk({ weekday = "all", status = "上班", mode = 
 }
 
 function wireEvents() {
+  document.querySelectorAll(".dashboard-open-metric-config").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardMetricDraft = dashboardSelectedMetricKeys();
+      dashboardMetricModalOpen = true;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-metric-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardMetricModalOpen = false;
+      dashboardMetricDraft = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-metric-add").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardMetricDraft = dashboardMetricDraft || dashboardSelectedMetricKeys();
+      if (dashboardMetricDraft.length >= 5) return;
+      if (!dashboardMetricDraft.includes(button.dataset.key)) dashboardMetricDraft.push(button.dataset.key);
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-metric-remove").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardMetricDraft = (dashboardMetricDraft || dashboardSelectedMetricKeys()).filter((key) => key !== button.dataset.key);
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-metric-save").forEach((button) => {
+    button.addEventListener("click", () => {
+      localStorage.setItem(DASHBOARD_METRICS_KEY, JSON.stringify(dashboardSelectedMetricKeys(dashboardMetricDraft || [])));
+      dashboardMetricModalOpen = false;
+      dashboardMetricDraft = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-open-shortcut-config").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardShortcutDraft = dashboardSelectedShortcutKeys();
+      dashboardShortcutModalOpen = true;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-shortcut-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardShortcutModalOpen = false;
+      dashboardShortcutDraft = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-feature-option").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardShortcutDraft = dashboardShortcutDraft || dashboardSelectedShortcutKeys();
+      if (dashboardShortcutDraft.includes(button.dataset.key)) {
+        dashboardShortcutDraft = dashboardShortcutDraft.filter((key) => key !== button.dataset.key);
+      } else {
+        dashboardShortcutDraft.push(button.dataset.key);
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-shortcut-remove").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardShortcutDraft = (dashboardShortcutDraft || dashboardSelectedShortcutKeys()).filter((key) => key !== button.dataset.key);
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-shortcut-reset").forEach((button) => {
+    button.addEventListener("click", () => {
+      dashboardShortcutDraft = dashboardDefaultShortcutKeys();
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-shortcut-save").forEach((button) => {
+    button.addEventListener("click", () => {
+      localStorage.setItem(DASHBOARD_SHORTCUTS_KEY, JSON.stringify(dashboardShortcutDraft || dashboardDefaultShortcutKeys()));
+      dashboardShortcutModalOpen = false;
+      dashboardShortcutDraft = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".dashboard-shortcut").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = dashboardShortcutCatalog().find((shortcut) => shortcut.key === button.dataset.key);
+      if (!item) return;
+      if (item.action === "newLesson") lessonCreateDraft = { date: todayDate() };
+      dashboardGoTo(item.view);
+    });
+  });
+  document.querySelectorAll(".dashboard-todo-item").forEach((button) => {
+    button.addEventListener("click", () => {
+      let filter = {};
+      try {
+        filter = JSON.parse(button.dataset.filter || "{}");
+      } catch {
+        filter = {};
+      }
+      dashboardGoTo(button.dataset.view || "dashboard", filter);
+    });
+  });
+  document.querySelectorAll(".dashboard-range-field").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const next = { ...dashboardRange, [input.dataset.field]: input.value };
+      if (!isDateValue(next.start) || !isDateValue(next.end) || next.start > next.end) return alert("请选择有效的开始和结束日期");
+      dashboardRange = next;
+      localStorage.setItem(DASHBOARD_RANGE_KEY, JSON.stringify(dashboardRange));
+      await load({ refreshGlobal: false });
+    });
+  });
+
+  document.querySelectorAll(".multi-select").forEach((select) => {
+    const toggle = select.querySelector(".multi-select-toggle");
+    const hidden = select.querySelector(".multi-select-value");
+    const label = select.querySelector(".multi-select-label");
+    const menu = select.querySelector(".multi-select-menu");
+    const searchInput = select.querySelector(".multi-select-search");
+    const selectedValues = () => normalizeNameList(hidden?.value || "");
+    const syncSearch = () => {
+      const keyword = String(searchInput?.value || "").trim().toLowerCase();
+      menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+        const value = String(option.dataset.value || "").toLowerCase();
+        option.hidden = Boolean(keyword) && !value.includes(keyword);
+      });
+    };
+    const syncUi = () => {
+      const selected = selectedValues();
+      const selectedSet = new Set(selected);
+      if (label) label.textContent = selected.length ? selected.join("、") : (select.dataset.placeholder || "全部");
+      menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+        const active = selectedSet.has(option.dataset.value || "");
+        option.classList.toggle("selected", active);
+        const check = option.querySelector(".multi-select-check");
+        if (check) check.textContent = active ? "✓" : "";
+      });
+      syncSearch();
+    };
+    const commit = (values) => {
+      if (!hidden) return;
+      hidden.value = normalizeNameList(values).join("\n");
+      syncUi();
+      hidden.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    toggle?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.querySelectorAll(".multi-select.open").forEach((item) => {
+        if (item !== select) closeMultiSelectMenu(item);
+      });
+      const isOpen = !select.classList.contains("open");
+      if (!isOpen) closeMultiSelectMenu(select);
+      else {
+        select.classList.add("open");
+        mountFloatingMultiSelectMenu(select);
+      }
+      toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      if (isOpen) {
+        searchInput?.focus({ preventScroll: true });
+        positionFloatingMultiSelectMenu(select);
+        requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
+      }
+    });
+    searchInput?.addEventListener("click", (event) => event.stopPropagation());
+    searchInput?.addEventListener("input", syncSearch);
+    select.querySelector(".multi-select-clear")?.addEventListener("click", () => {
+      closeMultiSelectMenu(select);
+      if (searchInput) searchInput.value = "";
+      commit([]);
+    });
+    menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+      option.addEventListener("click", () => {
+        const value = option.dataset.value || "";
+        const next = selectedValues();
+        const index = next.indexOf(value);
+        if (index >= 0) next.splice(index, 1);
+        else next.push(value);
+        commit(next);
+      });
+    });
+    syncUi();
+  });
+
+  if (!multiSelectEventsBound) {
+    multiSelectEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".multi-select") && !event.target.closest(".floating-multi-select-menu")) {
+        closeOpenMultiSelectMenus();
+      }
+    });
+    window.addEventListener("resize", positionOpenFloatingMultiSelectMenus);
+    window.addEventListener("scroll", positionOpenFloatingMultiSelectMenus, true);
+  }
+
   document.querySelectorAll(".filter-combo").forEach((combo) => {
     const input = combo.querySelector(".filter-combo-input");
     const menu = combo.querySelector(".filter-combo-menu");
@@ -8263,6 +9664,12 @@ function wireEvents() {
       userMenuOpen = false;
       await request("/api/auth/logout", { method: "POST" });
       auth.user = null;
+      state = null;
+      clearPagePositionCache();
+      appliedUserFilterPresetViews = new Set();
+      view = "dashboard";
+      activeNavGroup = "";
+      userAdminTab = "accounts";
       renderLogin();
     });
   });
@@ -9120,6 +10527,124 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".user-admin-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      userAdminTab = button.dataset.tab || "accounts";
+      localStorage.setItem("liming:user-admin-tab", userAdminTab);
+      render();
+    });
+  });
+
+  document.querySelectorAll(".role-create-open").forEach((button) => {
+    button.addEventListener("click", () => {
+      roleCreateDraft = { code: "", name: "", description: "" };
+      render();
+    });
+  });
+  document.querySelectorAll(".role-create-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      roleCreateDraft = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".role-create-submit").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const payload = {};
+      document.querySelectorAll(".role-create-field").forEach((input) => {
+        payload[input.dataset.field] = input.value;
+      });
+      payload.permissions = ["dashboard"];
+      try {
+        const result = await request("/api/roles", { method: "POST", body: payload });
+        roleCreateDraft = null;
+        userAdminNotice = `已新增角色 ${result.name}`;
+        await load();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
+  document.querySelectorAll(".role-edit").forEach((button) => {
+    button.addEventListener("click", () => {
+      const role = (state.roles || []).find((item) => item.code === button.dataset.code);
+      if (!role) return;
+      rolePermissionModal = JSON.parse(JSON.stringify({ ...role, permissions: [...(role.permissions || [])] }));
+      render();
+    });
+  });
+  document.querySelectorAll(".role-delete").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const role = (state.roles || []).find((item) => item.code === button.dataset.code);
+      if (!role || !confirm(`删除角色：${role.name}？`)) return;
+      try {
+        await request(`/api/roles/${encodeURIComponent(role.code)}`, { method: "DELETE" });
+        userAdminNotice = `已删除角色 ${role.name}`;
+        await load();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
+  document.querySelectorAll(".role-permission-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      rolePermissionModal = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".role-modal-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      const panelKey = button.dataset.panel;
+      document.querySelectorAll(".role-modal-tab").forEach((item) => item.classList.toggle("active", item === button));
+      document.querySelectorAll(".role-modal-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === panelKey));
+    });
+  });
+  document.querySelectorAll(".role-preset-date-rule").forEach((select) => {
+    select.addEventListener("change", () => {
+      const fixedInput = select.closest(".role-preset-date-wrap")?.querySelector(".role-preset-fixed-date");
+      if (fixedInput) fixedInput.hidden = select.value !== "fixed";
+    });
+  });
+  document.querySelectorAll(".role-preset-teacher-mode").forEach((select) => {
+    select.addEventListener("change", () => {
+      const teacherPicker = select.closest(".role-preset-field-wrap")?.querySelector(".role-preset-teachers-wrap");
+      if (teacherPicker) teacherPicker.hidden = select.value !== "specific";
+    });
+  });
+  document.querySelectorAll(".permission-parent").forEach((input) => {
+    input.addEventListener("change", () => {
+      const children = String(input.dataset.children || "").split(",").filter(Boolean);
+      children.forEach((key) => {
+        const child = document.querySelector(`.permission-child[value="${selectorEscape(key)}"]`);
+        if (child) child.checked = input.checked;
+      });
+      updatePermissionParentStates();
+    });
+  });
+  document.querySelectorAll(".permission-child").forEach((input) => {
+    input.addEventListener("change", updatePermissionParentStates);
+  });
+  document.querySelectorAll(".role-permission-save").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!rolePermissionModal) return;
+      const payload = {
+        permissions: collectRoleModalPermissions(),
+        filter_presets: collectRoleFilterPresets(),
+      };
+      document.querySelectorAll(".role-modal-field").forEach((input) => {
+        payload[input.dataset.field] = input.value;
+      });
+      payload.readonly = document.querySelector(".role-readonly-field")?.checked ? 1 : 0;
+      try {
+        const result = await request(`/api/roles/${encodeURIComponent(rolePermissionModal.code)}`, { method: "PATCH", body: payload });
+        rolePermissionModal = null;
+        userAdminNotice = `已保存角色 ${result.name} 的权限和预筛选`;
+        await load();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
+
   document.querySelectorAll(".download-user-import-template").forEach((button) => {
     button.addEventListener("click", async () => {
       button.disabled = true;
@@ -9142,13 +10667,25 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".sync-teacher-accounts").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("将根据教师档案中的手机号自动创建老师账号，初始密码为手机号后6位。相同手机号只创建一个账号。")) return;
+      const result = await request("/api/users/sync-teacher-accounts", { method: "POST", body: {} });
+      userAdminNotice = `已同步老师账号：新增 ${result.created || 0} 个，已有 ${result.existing || 0} 个，跳过 ${result.skipped || 0} 个，重复手机号合并 ${result.duplicate_merged || 0} 个。`;
+      if (result.conflicts) userAdminNotice += ` ${result.conflicts} 个手机号已被非老师账号占用。`;
+      await load();
+    });
+  });
+
   document.querySelectorAll(".create-user").forEach((button) => {
     button.addEventListener("click", async () => {
       const payload = {};
       document.querySelectorAll(".new-user-field").forEach((input) => {
+        if (!input.dataset.field) return;
         payload[input.dataset.field] = input.value;
       });
-      if (!payload.password) payload.password = "123456";
+      payload.teacher_names = normalizeNameList(document.querySelector(".multi-select-value.new-user-teachers")?.value || "");
+      if (!payload.username || !payload.password) return alert("请填写账号和初始密码");
       await request("/api/users", { method: "POST", body: payload });
       userAdminNotice = `已新增账号 ${payload.username}`;
       await load();
@@ -9165,6 +10702,43 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".multi-select-value.user-row-teachers").forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = input.closest(".user-row");
+      const teacherNames = normalizeNameList(input.value || "");
+      refreshAfter(() => request(`/api/users/${row.dataset.id}`, {
+        method: "PATCH",
+        body: { teacher_names: teacherNames },
+      }));
+    });
+  });
+
+  document.querySelectorAll(".user-access-open").forEach((button) => {
+    button.addEventListener("click", () => {
+      const user = (state.users || []).find((item) => String(item.id) === String(button.dataset.id));
+      if (!user) return;
+      userAccessModal = JSON.parse(JSON.stringify(user));
+      render();
+    });
+  });
+
+  document.querySelectorAll(".user-access-cancel").forEach((button) => {
+    button.addEventListener("click", () => {
+      userAccessModal = null;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".user-access-save").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const payload = collectUserAccessPayload();
+      await request(`/api/users/${button.dataset.id}/access`, { method: "PATCH", body: payload });
+      userAccessModal = null;
+      userAdminNotice = "账号权限配置已保存。";
+      await load();
+    });
+  });
+
   document.querySelectorAll(".user-reset-password").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest(".user-row");
@@ -9173,6 +10747,37 @@ function wireEvents() {
       await request(`/api/users/${row.dataset.id}/password`, { method: "POST", body: { password } });
       userAdminNotice = "密码已重置。";
       await load();
+    });
+  });
+  document.querySelectorAll(".user-delete").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const username = button.dataset.username || "";
+      if (!confirm(`确定删除账号 ${username} 吗？删除后该账号将无法登录，但不会删除教师档案和课程数据。`)) return;
+      try {
+        await request(`/api/users/${button.dataset.id}`, { method: "DELETE" });
+        userAdminNotice = `已删除账号 ${username}`;
+        await load();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll(".lesson-filter-multi").forEach((input) => {
+    input.addEventListener("change", () => {
+      const field = input.dataset.filterField;
+      if (field !== "teacher_names") return;
+      focusedLessonIds = [];
+      const teacherNames = normalizeNameList(input.value || "");
+      lessonFilter = {
+        ...lessonFilter,
+        month_key: state.settings.month_key,
+        teacher: teacherNames.join("、"),
+        teacher_names: teacherNames,
+        date_preset_initialized: true,
+      };
+      saveLessonFilter();
+      render();
     });
   });
 
@@ -9996,8 +11601,13 @@ function wireEvents() {
         load();
         return;
       }
-      refreshAfter(() => request("/api/recharges", {
-        method: "POST",
+      if (!row.dataset.id) {
+        alert("缺少充值记录 ID，请刷新后重试");
+        load();
+        return;
+      }
+      refreshAfter(() => request(`/api/recharges/${encodeURIComponent(row.dataset.id)}`, {
+        method: "PATCH",
         body: {
           student_name: row.dataset.studentName,
           grade: row.dataset.grade || summary.grade || "",
