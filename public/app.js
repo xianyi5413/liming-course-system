@@ -1694,6 +1694,21 @@ function compareStudentPricingRule(a = {}, b = {}) {
     || Number(a.id || 0) - Number(b.id || 0);
 }
 
+function compareTeacherProfile(a = {}, b = {}) {
+  const statusRank = (status) => ({ 在职: 0, 离职: 2 }[String(status || "")] ?? 1);
+  return statusRank(a.status) - statusRank(b.status)
+    || String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN")
+    || Number(a.id || 0) - Number(b.id || 0);
+}
+
+function compareUserRow(a = {}, b = {}) {
+  const roleRank = (role) => ({ owner: 0, boss: 0, admin: 1, academic: 2, jiaowu: 2, finance: 3 }[String(role || "")] ?? 4);
+  return roleRank(a.role) - roleRank(b.role)
+    || String(a.display_name || "").localeCompare(String(b.display_name || ""), "zh-Hans-CN")
+    || String(a.username || "").localeCompare(String(b.username || ""), "zh-Hans-CN")
+    || Number(a.id || 0) - Number(b.id || 0);
+}
+
 function teacherSalaryRuleDisplayNotes(rule) {
   const notes = String(rule.notes || "");
   return notes.startsWith("自动候选：请填写每2小时薪资") ? "" : notes;
@@ -3339,6 +3354,11 @@ function gradeColor(grade) {
   if (isDarkThemeActive() && darkGradeColors[grade]) return darkGradeColors[grade];
   const match = state.lookups.grades.find((row) => row.name === grade);
   return match ? match.color : "";
+}
+
+function gradeRowStyle(grade) {
+  const color = gradeColor(grade);
+  return color ? ` style="background:${color}"` : "";
 }
 
 function options(values, current, emptyText = "") {
@@ -5081,7 +5101,7 @@ function renderSummary() {
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-                <tr class="summary-master-row" style="background:${gradeColor(row.grade)}">
+                <tr class="summary-master-row"${gradeRowStyle(row.grade)}>
                   <td class="text-cell">${escapeHtml(row.student_name)}</td>
                   <td class="text-cell grade-cell">${escapeHtml(row.grade)}</td>
                   <td class="text-cell right">${Math.round(numberValue(row.lesson_count))}</td>
@@ -5727,7 +5747,7 @@ function renderRecharges() {
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" style="background:${gradeColor(row.grade)}">
+              <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}"${gradeRowStyle(row.grade)}>
                 <td class="text-cell">${escapeHtml(row.student_name)} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 ${rechargePrevCell(row, "prev_actual")}
@@ -5779,7 +5799,7 @@ function renderOpeningBalances() {
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" style="background:${gradeColor(row.grade)}">
+              <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}"${gradeRowStyle(row.grade)}>
                 <td class="text-cell">${escapeHtml(row.student_name)}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 <td><input class="cell-input number opening-balance-field" data-field="opening_actual_balance" type="number" value="${moneyInput(row.opening_actual_balance)}"></td>
@@ -7181,7 +7201,7 @@ function renderStudentPricing() {
           <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
+              <tr class="student-pricing-rule-row" data-rule-id="${row.id}"${gradeRowStyle(row.grade)}>
                 <td class="text-cell">${escapeHtml(row.student_name)}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 <td class="text-cell">${escapeHtml(row.subject)}</td>
@@ -7250,16 +7270,8 @@ function studentPromotionPreview(plan) {
 }
 
 function studentProfileTableRows(rows) {
-  let currentGrade = null;
-  return rows.map((row) => {
-    const grade = row.grade || "未选年级";
-    const group = grade !== currentGrade ? (() => {
-      currentGrade = grade;
-      return `<tr class="profile-grade-row"><td colspan="9">${escapeHtml(grade)}</td></tr>`;
-    })() : "";
-    return `
-      ${group}
-      <tr class="profile-row" data-kind="students" data-id="${row.id}">
+  return rows.map((row) => `
+      <tr class="profile-row" data-kind="students" data-id="${row.id}"${gradeRowStyle(row.grade)}>
         <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
         <td><select class="cell-select profile-field" data-field="grade">${options(studentGradeOptions(), row.grade || "", "未选")}</select></td>
         <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
@@ -7270,8 +7282,7 @@ function studentProfileTableRows(rows) {
         <td><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
         <td class="readonly"><button class="btn danger delete-profile" data-kind="students" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
       </tr>
-    `;
-  }).join("");
+    `).join("");
 }
 
 function profileModalMarkup() {
@@ -9171,13 +9182,57 @@ function render() {
   }
 }
 
-async function refreshAfter(action) {
+function rerenderContent(renderAction) {
+  closeOpenMultiSelectMenus();
+  renderAction();
+  applyReadonlyUi();
+  wireEvents();
+}
+
+function upsertById(rows = [], row = {}) {
+  if (row == null || row.id == null) return rows;
+  const next = [...rows];
+  const index = next.findIndex((item) => String(item.id) === String(row.id));
+  if (index === -1) next.push(row);
+  else next[index] = { ...next[index], ...row };
+  return next;
+}
+
+function patchProfileState(kind, row) {
+  if (!row || row.id == null) return;
+  if (kind === "teachers") {
+    state.profile_teachers = upsertById(state.profile_teachers || [], row).sort(compareTeacherProfile);
+    markDirty("teacherSalary");
+    return;
+  }
+  state.profile_students = upsertById(state.profile_students || [], row);
+  for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+}
+
+function patchUserState(row) {
+  if (!row || row.id == null) return;
+  state.users = upsertById(state.users || [], row).sort(compareUserRow);
+  if (Number(row.id) === Number(auth.user?.id)) auth.user = { ...auth.user, ...row };
+}
+
+async function refreshStudentPricingModule() {
+  const params = new URLSearchParams();
+  if (activeMonth) params.set("month", activeMonth);
+  if (includeInactive) params.set("include_inactive", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const data = await request(`/api/bootstrap${query}`);
+  state.student_pricing = data.student_pricing || [];
+  for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+  rerenderContent(renderStudentPricing);
+}
+
+async function refreshAfter(action, after = () => load()) {
   try {
     const result = await action();
     if (result?.warnings?.length) {
       alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
     }
-    await load();
+    await after(result);
   } catch (error) {
     alert(error.message);
   }
@@ -10211,9 +10266,11 @@ function wireEvents() {
       });
       if (!String(payload.name || "").trim()) return alert("姓名必填");
       try {
-        await request(`/api/${kind}`, { method: "POST", body: payload });
+        const result = await request(`/api/${kind}`, { method: "POST", body: payload });
+        if (result?.warnings?.length) alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
         profileModal = null;
-        await load();
+        patchProfileState(kind, result);
+        rerenderContent(() => renderProfileDirectory(kind));
       } catch (error) {
         alert(error.message);
       }
@@ -10228,7 +10285,10 @@ function wireEvents() {
       refreshAfter(() => request(`/api/${kind}/${row.dataset.id}`, {
         method: "PATCH",
         body: payload,
-      }));
+      }), (result) => {
+        patchProfileState(kind, result);
+        rerenderContent(() => renderProfileDirectory(kind));
+      });
     });
   });
 
@@ -10795,7 +10855,11 @@ function wireEvents() {
       refreshAfter(() => request(`/api/users/${row.dataset.id}`, {
         method: "PATCH",
         body: { [input.dataset.field]: input.value },
-      }));
+      }), async (result) => {
+        patchUserState(result);
+        if (Number(result.id) === Number(auth.user?.id)) await load();
+        else rerenderContent(renderUserAdmin);
+      });
     });
   });
 
@@ -10806,7 +10870,11 @@ function wireEvents() {
       refreshAfter(() => request(`/api/users/${row.dataset.id}`, {
         method: "PATCH",
         body: { teacher_names: teacherNames },
-      }));
+      }), async (result) => {
+        patchUserState(result);
+        if (Number(result.id) === Number(auth.user?.id)) await load();
+        else rerenderContent(renderUserAdmin);
+      });
     });
   });
 
@@ -10829,10 +10897,12 @@ function wireEvents() {
   document.querySelectorAll(".user-access-save").forEach((button) => {
     button.addEventListener("click", async () => {
       const payload = collectUserAccessPayload();
-      await request(`/api/users/${button.dataset.id}/access`, { method: "PATCH", body: payload });
+      const result = await request(`/api/users/${button.dataset.id}/access`, { method: "PATCH", body: payload });
       userAccessModal = null;
       userAdminNotice = "账号权限配置已保存。";
-      await load();
+      patchUserState(result);
+      if (Number(result.id) === Number(auth.user?.id)) await load();
+      else rerenderContent(renderUserAdmin);
     });
   });
 
@@ -10843,7 +10913,7 @@ function wireEvents() {
       if (password.length < 6) return alert("新密码至少 6 位");
       await request(`/api/users/${row.dataset.id}/password`, { method: "POST", body: { password } });
       userAdminNotice = "密码已重置。";
-      await load();
+      rerenderContent(renderUserAdmin);
     });
   });
   document.querySelectorAll(".user-delete").forEach((button) => {
@@ -11829,7 +11899,7 @@ function wireEvents() {
       refreshAfter(() => request(`/api/student-pricing/${input.dataset.id}`, {
         method: "PATCH",
         body: { [input.dataset.field]: value },
-      }));
+      }), () => refreshStudentPricingModule());
     });
   });
 
@@ -11872,7 +11942,7 @@ function wireEvents() {
           body: { student_name: studentName, grade, subject, student_names: studentNames, custom_price: customPrice === "" ? 0 : customPrice, notes },
         });
         studentPricingModalOpen = false;
-        await load();
+        await refreshStudentPricingModule();
       } catch (error) {
         button.disabled = false;
         alert(`新增学生单价规则失败：${error.message}`);
@@ -11883,7 +11953,7 @@ function wireEvents() {
   document.querySelectorAll(".delete-student-price").forEach((button) => {
     button.addEventListener("click", () => {
       if (!confirm("删除这条学生单价规则？")) return;
-      refreshAfter(() => request(`/api/student-pricing/${button.dataset.id}`, { method: "DELETE" }));
+      refreshAfter(() => request(`/api/student-pricing/${button.dataset.id}`, { method: "DELETE" }), () => refreshStudentPricingModule());
     });
   });
 
