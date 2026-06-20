@@ -10,6 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
+const APP_VERSION = "2026.06.20-permissions-1";
 const secureCookies = process.env.SESSION_COOKIE_SECURE !== "0" && process.env.SESSION_COOKIE_SECURE !== "false";
 const sessions = new Map();
 
@@ -59,6 +60,7 @@ const ROLE_ALIASES = new Map([
   ["finance", "helper"],
   ["财务", "helper"],
   ["helper", "helper"],
+  ["xiaozhushou", "helper"],
   ["小助手", "helper"],
   ["teacher", "teacher"],
   ["老师", "teacher"],
@@ -142,6 +144,35 @@ const PAGE_PERMISSION_KEYS = (() => {
   PERMISSION_TREE.forEach(visit);
   return keys;
 })();
+const FIRST_ACCESSIBLE_VIEW_ORDER = [
+  "dashboard",
+  "lessons",
+  "week",
+  "weekMatrix",
+  "courseNotice",
+  "teacherCourseNotice",
+  "feeDetails",
+  "summary",
+  "recharges",
+  "openingBalances",
+  "studentQuery",
+  "studentPricing",
+  "studentProfiles",
+  "teacherSalary",
+  "teacherDetail",
+  "teacherSalaryRules",
+  "teacherProfiles",
+  "staffPayroll",
+  "staffAttendance",
+  "expenses",
+  "finance",
+  "appearance",
+  "baseData",
+  "pricing",
+  "audit",
+  "operationLogs",
+  "userAdmin",
+];
 const FILTER_PRESET_VIEW_KEYS = [
   "lessons",
   "week",
@@ -1182,6 +1213,18 @@ function normalizePermissionKeys(keys) {
     .filter((key) => allowed.has(key)))];
 }
 
+function firstAccessibleViewFor(role, permissions) {
+  const allowed = new Set(normalizePermissionKeys(permissions));
+  const canonical = canonicalRole(role);
+  const preferred =
+    canonical === "teacher"
+      ? ["lessons", "teacherDetail", "teacherSalary", "week", "weekMatrix"]
+      : canonical === "owner" || canonical === "academic"
+        ? ["dashboard"]
+        : [];
+  return [...preferred, ...FIRST_ACCESSIBLE_VIEW_ORDER].find((key) => allowed.has(key)) || "";
+}
+
 function seedDefaultRolesAndPermissions() {
   const roleStmt = db.prepare(`
     INSERT INTO roles(code, name, description, is_system, readonly)
@@ -1197,16 +1240,26 @@ function seedDefaultRolesAndPermissions() {
   }
 
   const permissionStmt = db.prepare(`
-    INSERT OR IGNORE INTO role_permissions(role_code, permission_key, enabled)
+    INSERT INTO role_permissions(role_code, permission_key, enabled)
     VALUES (?, ?, 1)
+    ON CONFLICT(role_code, permission_key)
+    DO UPDATE SET enabled = 1, updated_at = CURRENT_TIMESTAMP
   `);
   const defaultsMigrationKey = "role_defaults_five_roles_v1";
   const defaultsMigrated = text(get("SELECT value FROM settings WHERE key = ?", [defaultsMigrationKey])?.value) === "1";
   for (const role of SYSTEM_ROLE_DEFS) {
-    const existing = num(get("SELECT COUNT(*) AS count FROM role_permissions WHERE role_code = ?", [role.code])?.count);
-    if (existing && defaultsMigrated) continue;
-    if (!defaultsMigrated) db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run(role.code);
-    for (const key of DEFAULT_ROLE_PERMISSIONS[role.code] || []) permissionStmt.run(role.code, key);
+    const enabledKeys = normalizePermissionKeys(
+      all("SELECT permission_key FROM role_permissions WHERE role_code = ? AND enabled = 1", [role.code])
+        .map((row) => row.permission_key),
+    );
+    if (enabledKeys.length) continue;
+    const defaultKeys = DEFAULT_ROLE_PERMISSIONS[role.code] || [];
+    for (const key of defaultKeys) permissionStmt.run(role.code, key);
+    if (defaultKeys.length) {
+      console.warn(
+        `[permissions][self-heal] role=${role.code} restored=${defaultKeys.length} reason=no-enabled-valid-permissions`,
+      );
+    }
   }
   if (!defaultsMigrated) {
     db.prepare(`
@@ -1217,8 +1270,13 @@ function seedDefaultRolesAndPermissions() {
   const teacherScopeMigrationKey = "role_teacher_scope_lessons_detail_v2";
   const teacherScopeMigrated = text(get("SELECT value FROM settings WHERE key = ?", [teacherScopeMigrationKey])?.value) === "1";
   if (!teacherScopeMigrated) {
-    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run("teacher");
-    for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    const teacherKeys = normalizePermissionKeys(
+      all("SELECT permission_key FROM role_permissions WHERE role_code = 'teacher' AND enabled = 1")
+        .map((row) => row.permission_key),
+    );
+    if (!teacherKeys.length) {
+      for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    }
     db.prepare(`
       INSERT INTO settings(key, value) VALUES (?, '1')
       ON CONFLICT(key) DO UPDATE SET value = '1'
@@ -1227,8 +1285,13 @@ function seedDefaultRolesAndPermissions() {
   const teacherProfilesMigrationKey = "role_teacher_scope_profiles_v3";
   const teacherProfilesMigrated = text(get("SELECT value FROM settings WHERE key = ?", [teacherProfilesMigrationKey])?.value) === "1";
   if (!teacherProfilesMigrated) {
-    db.prepare("DELETE FROM role_permissions WHERE role_code = ?").run("teacher");
-    for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    const teacherKeys = normalizePermissionKeys(
+      all("SELECT permission_key FROM role_permissions WHERE role_code = 'teacher' AND enabled = 1")
+        .map((row) => row.permission_key),
+    );
+    if (!teacherKeys.length) {
+      for (const key of DEFAULT_ROLE_PERMISSIONS.teacher || []) permissionStmt.run("teacher", key);
+    }
     db.prepare(`
       INSERT INTO settings(key, value) VALUES (?, '1')
       ON CONFLICT(key) DO UPDATE SET value = '1'
@@ -7030,6 +7093,7 @@ function publicUser(row) {
     id: row.id,
     username: row.username,
     display_name: row.display_name || row.username,
+    status: row.status || "active",
     role,
     raw_role: row.role,
     role_label: roleLabel(role),
@@ -7042,8 +7106,144 @@ function publicUser(row) {
     permission_override_enabled: Number(row.permission_override_enabled || 0),
     permissions,
     role_permissions: rolePermissionKeys(role),
+    first_accessible_view: firstAccessibleViewFor(role, permissions),
+    firstAccessibleView: firstAccessibleViewFor(role, permissions),
     filter_presets: filterPresets,
     filter_preset_source: Object.keys(rolePresets).length ? "role" : (Object.keys(legacyUserPresets).length ? "legacy_user" : ""),
+  };
+}
+
+function permissionDiagnostics(current) {
+  const warnings = [];
+  const validPermissionKeys = permissionKeySet();
+  const roleRecords = tableExists("roles")
+    ? all("SELECT code, name, description, is_system, readonly FROM roles ORDER BY code")
+    : SYSTEM_ROLE_DEFS;
+  const invalidRolePermissions = tableExists("role_permissions")
+    ? all("SELECT role_code, permission_key FROM role_permissions WHERE enabled = 1 ORDER BY role_code, permission_key")
+      .filter((row) => !validPermissionKeys.has(text(row.permission_key)))
+    : [];
+  const invalidUserPermissions = tableExists("user_page_permissions")
+    ? all(`
+      SELECT u.username, upp.permission_key
+      FROM user_page_permissions upp
+      JOIN users u ON u.id = upp.user_id
+      WHERE upp.enabled = 1
+      ORDER BY u.username, upp.permission_key
+    `).filter((row) => !validPermissionKeys.has(text(row.permission_key)))
+    : [];
+
+  for (const row of invalidRolePermissions) {
+    warnings.push({
+      type: "unknown_permission_key",
+      role: text(row.role_code),
+      permission_key: text(row.permission_key),
+      message: `角色 ${text(row.role_code)} 包含前端不存在的权限 key：${text(row.permission_key)}`,
+    });
+  }
+  for (const row of invalidUserPermissions) {
+    warnings.push({
+      type: "unknown_permission_key",
+      username: text(row.username),
+      permission_key: text(row.permission_key),
+      message: `账号 ${text(row.username)} 包含前端不存在的权限 key：${text(row.permission_key)}`,
+    });
+  }
+
+  const roles = roleRecords.map((row) => {
+    const code = text(row.code);
+    const canonicalCode = canonicalRole(code);
+    const mapped = SYSTEM_ROLE_CODES.includes(canonicalCode);
+    const permissions = mapped ? rolePermissionKeys(canonicalCode) : [];
+    if (!mapped) {
+      warnings.push({
+        type: "unmapped_role_code",
+        role: code,
+        message: `角色 code ${code} 不是内置角色，且没有历史角色映射`,
+      });
+    }
+    if (!permissions.length) {
+      warnings.push({
+        type: "role_without_permissions",
+        role: code,
+        canonical_role: canonicalCode,
+        message: `角色 ${code} 没有任何可用页面权限`,
+      });
+    }
+    return {
+      code,
+      canonical_code: canonicalCode,
+      name: row.name || roleLabel(canonicalCode),
+      readonly: mapped ? (roleReadonly(canonicalCode) ? 1 : 0) : Number(row.readonly || 0),
+      permission_count: permissions.length,
+      permissions,
+      first_accessible_view: firstAccessibleViewFor(canonicalCode, permissions),
+      is_legacy_code: mapped && code !== canonicalCode,
+    };
+  });
+
+  const accounts = (tableExists("users") ? all("SELECT * FROM users ORDER BY username") : []).map((row) => {
+    const rawRole = text(row.role);
+    const role = canonicalRole(rawRole);
+    const validRole = SYSTEM_ROLE_CODES.includes(role);
+    const permissions = validRole ? userPermissionKeys(row) : [];
+    const firstAccessibleView = firstAccessibleViewFor(role, permissions);
+    if (!validRole) {
+      warnings.push({
+        type: "account_role_missing",
+        username: text(row.username),
+        role: rawRole,
+        message: `账号 ${text(row.username)} 的角色 ${rawRole} 不存在且没有兼容映射`,
+      });
+    }
+    if (text(row.status) !== "active") {
+      warnings.push({
+        type: "account_inactive",
+        username: text(row.username),
+        status: text(row.status),
+        message: `账号 ${text(row.username)} 当前状态不是 active`,
+      });
+    }
+    if (!firstAccessibleView) {
+      warnings.push({
+        type: "account_without_accessible_view",
+        username: text(row.username),
+        role,
+        message: `账号 ${text(row.username)} 没有任何可访问页面`,
+      });
+    }
+    return {
+      username: row.username,
+      raw_role: rawRole,
+      role,
+      role_label: roleLabel(role),
+      status: row.status,
+      readonly: userReadonly(row) ? 1 : 0,
+      permission_count: permissions.length,
+      permissions,
+      first_accessible_view: firstAccessibleView,
+    };
+  });
+
+  const currentPermissions = normalizePermissionKeys(current?.permissions || []);
+  return {
+    app_version: APP_VERSION,
+    current_user: current
+      ? {
+        username: current.username,
+        raw_role: current.raw_role,
+        role: current.role,
+        role_label: current.role_label,
+        status: current.status,
+        readonly: current.readonly,
+        permission_count: currentPermissions.length,
+        permissions: currentPermissions,
+        first_accessible_view: firstAccessibleViewFor(current.role, currentPermissions),
+      }
+      : null,
+    roles,
+    accounts,
+    warnings,
   };
 }
 
@@ -7277,6 +7477,7 @@ const USER_IMPORT_ROLE_ALIASES = new Map([
   ["finance", "helper"],
   ["财务", "helper"],
   ["helper", "helper"],
+  ["xiaozhushou", "helper"],
   ["小助手", "helper"],
   ["teacher", "teacher"],
   ["老师", "teacher"],
@@ -7610,23 +7811,39 @@ function apiArea(req, url) {
   return "schedule";
 }
 
-function apiPagePermissionKey(req, url) {
+function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
-  if (p === "/api/dashboard") return "dashboard";
-  if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return "userAdmin";
-  if (p.startsWith("/api/course-notice")) return "courseNotice";
-  if (p.startsWith("/api/teacher-course-notice")) return "teacherCourseNotice";
-  if (p === "/api/lessons-range" || p.startsWith("/api/lessons") || p === "/api/schedule-conflicts") return "lessons";
-  if (p.startsWith("/api/recharges")) return "recharges";
-  if (p.startsWith("/api/opening-balances")) return "openingBalances";
-  if (p.startsWith("/api/teachers")) return "teacherProfiles";
-  if (p.startsWith("/api/teacher-salary-rules")) return "teacherSalaryRules";
-  if (p.startsWith("/api/finance-summary")) return "finance";
-  if (p.startsWith("/api/operation-logs")) return "operationLogs";
-  if (p.startsWith("/api/staff-salary")) return "staffPayroll";
-  if (p.startsWith("/api/staff-attendance")) return "staffAttendance";
-  if (p.startsWith("/api/operating-expenses")) return "expenses";
-  return "";
+  if (p === "/api/dashboard") return ["dashboard"];
+  if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
+  if (p.startsWith("/api/course-notice")) return ["courseNotice"];
+  if (p.startsWith("/api/teacher-course-notice")) return ["teacherCourseNotice"];
+  if (p === "/api/lessons-range") {
+    return ["lessons", "week", "weekMatrix", "feeDetails", "summary", "studentQuery", "teacherSalary", "teacherDetail"];
+  }
+  if (p === "/api/schedule-conflicts") return ["lessons", "week", "weekMatrix"];
+  if (p.startsWith("/api/lessons")) return ["lessons"];
+  if (p.startsWith("/api/recharges")) return ["recharges"];
+  if (p.startsWith("/api/opening-balances")) return ["openingBalances"];
+  if (p.startsWith("/api/teachers")) {
+    return [
+      "teacherProfiles",
+      "lessons",
+      "week",
+      "weekMatrix",
+      "courseNotice",
+      "teacherCourseNotice",
+      "teacherSalary",
+      "teacherDetail",
+      "teacherSalaryRules",
+    ];
+  }
+  if (p.startsWith("/api/teacher-salary-rules")) return ["teacherSalaryRules"];
+  if (p.startsWith("/api/finance-summary")) return ["finance"];
+  if (p.startsWith("/api/operation-logs")) return ["operationLogs"];
+  if (p.startsWith("/api/staff-salary")) return ["staffPayroll"];
+  if (p.startsWith("/api/staff-attendance")) return ["staffAttendance"];
+  if (p.startsWith("/api/operating-expenses")) return ["expenses"];
+  return [];
 }
 
 function authorizeApi(user, req, url) {
@@ -7636,8 +7853,9 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
-  const pageKey = apiPagePermissionKey(req, url);
-  if (pageKey && !userHasAnyPermission(user, [pageKey])) return false;
+  const pageKeys = apiPagePermissionKeys(req, url);
+  if (pageKeys.length && !userHasAnyPermission(user, pageKeys)) return false;
+  if (pageKeys.length && accessAction === "read") return true;
   if (area === "roles") return false;
   if (area === "dashboard") return method === "GET" && userHasAnyPermission(user, ["dashboard"]);
   return roleCan(user, area, accessAction);
@@ -9395,7 +9613,12 @@ function createLessonsBatch(rows) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
-    return sendJson(res, { user: currentUser(req), roles: roleLabels(), permission_tree: PERMISSION_TREE });
+    return sendJson(res, {
+      app_version: APP_VERSION,
+      user: currentUser(req),
+      roles: roleLabels(),
+      permission_tree: PERMISSION_TREE,
+    });
   }
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await readBody(req);
@@ -9404,7 +9627,7 @@ async function handleApi(req, res, url) {
     const sid = crypto.randomBytes(32).toString("hex");
     sessions.set(sid, { user_id: row.id, expires_at: Date.now() + 7 * 86400000 });
     setSessionCookie(res, sid);
-    return sendJson(res, { user: publicUser(row) });
+    return sendJson(res, { app_version: APP_VERSION, user: publicUser(row) });
   }
   if (req.method === "POST" && url.pathname === "/api/auth/logout") {
     const sid = parseCookies(req).liming_session;
@@ -9421,6 +9644,10 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: "change_password", entity_type: "users", entity_id: String(user.id), before: null, after: { id: user.id, username: user.username } });
     writeOperationLog(user, { operation_type: "修改密码", operation_content: `修改了账号 ${user.username} 的登录密码`, target_type: "users", target_id: String(user.id) });
     return sendJson(res, result);
+  }
+  if (req.method === "GET" && url.pathname === "/api/debug/permissions") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板账号可查看权限诊断");
+    return sendJson(res, permissionDiagnostics(user));
   }
   if (isWriteMethod(req.method) && userReadonly(user) && !isReadonlySafeMutation(req, url)) {
     return sendError(res, 403, READONLY_WRITE_MESSAGE);
@@ -10641,7 +10868,14 @@ function serveStatic(req, res, url) {
     ".json": "application/json; charset=utf-8",
   }[ext] || "application/octet-stream";
   const body = fs.readFileSync(filePath);
-  res.writeHead(200, { "content-type": mime, "content-length": body.length });
+  const headers = {
+    "content-type": mime,
+    "content-length": body.length,
+  };
+  if ([".html", ".css", ".js"].includes(ext)) {
+    headers["cache-control"] = "no-cache, no-store, must-revalidate";
+  }
+  res.writeHead(200, headers);
   res.end(body);
 }
 
@@ -10658,6 +10892,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
+  console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
 });
