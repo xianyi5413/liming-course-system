@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.06.20-permissions-1";
+const APP_VERSION = "2026.06.20-permissions-2";
 const secureCookies = process.env.SESSION_COOKIE_SECURE !== "0" && process.env.SESSION_COOKIE_SECURE !== "false";
 const sessions = new Map();
 
@@ -215,11 +215,11 @@ const DEFAULT_ROLE_PERMISSIONS = {
   ],
   helper: [
     "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
-    "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles",
+    "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance",
   ],
   assistant: [
     "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
-    "studentQuery", "studentProfiles", "teacherProfiles",
+    "studentQuery", "studentProfiles", "teacherProfiles", "appearance",
   ],
   teacher: ["lessons", "teacherDetail", "teacherProfiles", "appearance"],
 };
@@ -1221,7 +1221,9 @@ function firstAccessibleViewFor(role, permissions) {
       ? ["lessons", "teacherDetail", "teacherSalary", "week", "weekMatrix"]
       : canonical === "owner" || canonical === "academic"
         ? ["dashboard"]
-        : [];
+        : canonical === "helper" || canonical === "assistant"
+          ? ["lessons", "studentQuery", "dashboard", "week", "weekMatrix", "appearance"]
+          : [];
   return [...preferred, ...FIRST_ACCESSIBLE_VIEW_ORDER].find((key) => allowed.has(key)) || "";
 }
 
@@ -1389,7 +1391,9 @@ function userPermissionKeys(row = {}) {
       WHERE user_id = ? AND enabled = 1
       ORDER BY permission_key
     `, [Number(row.id)]).map((item) => item.permission_key);
-    return normalizePermissionKeys(rows);
+    const overrideKeys = normalizePermissionKeys(rows);
+    if (overrideKeys.length) return overrideKeys;
+    return rolePermissionKeys(role);
   }
   return rolePermissionKeys(role);
 }
@@ -7186,6 +7190,16 @@ function permissionDiagnostics(current) {
     const rawRole = text(row.role);
     const role = canonicalRole(rawRole);
     const validRole = SYSTEM_ROLE_CODES.includes(role);
+    const overrideEnabled = Number(row.permission_override_enabled || 0) === 1;
+    const overridePermissions = overrideEnabled && tableExists("user_page_permissions")
+      ? normalizePermissionKeys(all(`
+        SELECT permission_key
+        FROM user_page_permissions
+        WHERE user_id = ? AND enabled = 1
+        ORDER BY permission_key
+      `, [Number(row.id)]).map((item) => item.permission_key))
+      : [];
+    const rolePermissions = validRole ? rolePermissionKeys(role) : [];
     const permissions = validRole ? userPermissionKeys(row) : [];
     const firstAccessibleView = firstAccessibleViewFor(role, permissions);
     if (!validRole) {
@@ -7212,13 +7226,26 @@ function permissionDiagnostics(current) {
         message: `账号 ${text(row.username)} 没有任何可访问页面`,
       });
     }
+    if (overrideEnabled && !overridePermissions.length) {
+      warnings.push({
+        type: "empty_permission_override",
+        username: text(row.username),
+        role,
+        message: `账号 ${text(row.username)} 已开启账号级权限覆盖但没有有效页面权限，系统已回退到角色权限`,
+      });
+    }
     return {
       username: row.username,
       raw_role: rawRole,
-      role,
+      role: rawRole,
+      normalized_role: role,
       role_label: roleLabel(role),
       status: row.status,
       readonly: userReadonly(row) ? 1 : 0,
+      permission_override_enabled: Number(row.permission_override_enabled || 0),
+      permission_source: overrideEnabled && overridePermissions.length ? "user_override" : "role",
+      user_permission_count: overridePermissions.length,
+      role_permission_count: rolePermissions.length,
       permission_count: permissions.length,
       permissions,
       first_accessible_view: firstAccessibleView,
@@ -7233,9 +7260,11 @@ function permissionDiagnostics(current) {
         username: current.username,
         raw_role: current.raw_role,
         role: current.role,
+        normalized_role: canonicalRole(current.role),
         role_label: current.role_label,
         status: current.status,
         readonly: current.readonly,
+        permission_override_enabled: Number(current.permission_override_enabled || 0),
         permission_count: currentPermissions.length,
         permissions: currentPermissions,
         first_accessible_view: firstAccessibleViewFor(current.role, currentPermissions),
@@ -9613,9 +9642,15 @@ function createLessonsBatch(rows) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
+    const user = currentUser(req);
     return sendJson(res, {
       app_version: APP_VERSION,
-      user: currentUser(req),
+      user,
+      role: user?.role || "",
+      role_label: user?.role_label || "",
+      permissions: user?.permissions || [],
+      first_accessible_view: user?.first_accessible_view || "",
+      firstAccessibleView: user?.firstAccessibleView || "",
       roles: roleLabels(),
       permission_tree: PERMISSION_TREE,
     });
