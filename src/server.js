@@ -10,7 +10,10 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.06.20-student-balance-1";
+const APP_VERSION = "2026.06.20-student-balance-2";
+const readOnlyBalanceCli = process.argv.includes("--verify-student-balances")
+  || process.argv.includes("--audit-student-balances")
+  || process.argv.some((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
 const secureCookies = process.env.SESSION_COOKIE_SECURE !== "0" && process.env.SESSION_COOKIE_SECURE !== "false";
 const sessions = new Map();
 
@@ -271,14 +274,21 @@ const NEXT_GRADE = {
 };
 
 fs.mkdirSync(dataDir, { recursive: true });
-const db = new DatabaseSync(dbPath);
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
-  PRAGMA temp_store = MEMORY;
-  PRAGMA locking_mode = NORMAL;
-  PRAGMA foreign_keys = ON;
-`);
+const db = new DatabaseSync(dbPath, { readOnly: readOnlyBalanceCli });
+if (readOnlyBalanceCli) {
+  db.exec(`
+    PRAGMA query_only = ON;
+    PRAGMA foreign_keys = ON;
+  `);
+} else {
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA temp_store = MEMORY;
+    PRAGMA locking_mode = NORMAL;
+    PRAGMA foreign_keys = ON;
+  `);
+}
 
 function initDb() {
   db.exec(`
@@ -882,7 +892,7 @@ function initDb() {
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
 }
 
-initDb();
+if (!readOnlyBalanceCli) initDb();
 
 if (process.argv.includes("--init-db")) {
   console.log(`Database initialized: ${dbPath}`);
@@ -1991,12 +2001,20 @@ function priceBucket(grade, studentCount) {
   return studentCount >= 4 ? 4 : studentCount;
 }
 
-function activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames }) {
+function activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames }, lookups = null) {
   const name = text(studentName);
   const gradeValue = text(grade);
   const subjectValue = text(subject);
   const studentNamesValue = normalizedStudents(studentNames);
   if (!name || !gradeValue || !subjectValue || !studentNamesValue) return null;
+  if (lookups?.studentPricingRules) {
+    return lookups.studentPricingRules.get(studentPricingRuleKey({
+      student_name: name,
+      grade: gradeValue,
+      subject: subjectValue,
+      student_names: studentNamesValue,
+    })) || null;
+  }
   return all(`
     SELECT *
     FROM student_pricing
@@ -2008,22 +2026,39 @@ function activeStudentPricingRuleForLesson({ studentName, grade, subject, studen
   `, [name, gradeValue, subjectValue]).find((rule) => normalizedStudents(rule.student_names) === studentNamesValue) || null;
 }
 
-function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status, studentNames }) {
+function feePricingLookups() {
+  const feeOverrides = new Map(all("SELECT lesson_id, student_name, unit_price FROM fee_overrides")
+    .map((row) => [`${Number(row.lesson_id)}\u0001${text(row.student_name)}`, row]));
+  const studentPricingRules = new Map();
+  for (const row of all("SELECT * FROM student_pricing WHERE custom_price > 0 ORDER BY id DESC")) {
+    const key = studentPricingRuleKey(row);
+    if (!studentPricingRules.has(key)) studentPricingRules.set(key, row);
+  }
+  const pricingStandards = new Map(all("SELECT grade, student_count, unit_price FROM pricing_standards")
+    .map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, row]));
+  return { feeOverrides, studentPricingRules, pricingStandards };
+}
+
+function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status, studentNames }, lookups = null) {
   if (status !== "已上") return { unit_price: 0, source: "auto", rule_price: 0, pricing_rule_id: null };
 
-  const override = get(
-    "SELECT unit_price FROM fee_overrides WHERE lesson_id = ? AND student_name = ?",
-    [lessonId, studentName],
-  );
+  const override = lookups?.feeOverrides
+    ? lookups.feeOverrides.get(`${Number(lessonId)}\u0001${text(studentName)}`)
+    : get(
+      "SELECT unit_price FROM fee_overrides WHERE lesson_id = ? AND student_name = ?",
+      [lessonId, studentName],
+    );
 
-  const rule = activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames });
+  const rule = activeStudentPricingRuleForLesson({ studentName, grade, subject, studentNames }, lookups);
   const rulePrice = rule ? num(rule.custom_price) : 0;
 
   const bucket = priceBucket(grade, studentCount);
-  const standard = get(
-    "SELECT unit_price FROM pricing_standards WHERE grade = ? AND student_count = ?",
-    [grade, bucket],
-  );
+  const standard = lookups?.pricingStandards
+    ? lookups.pricingStandards.get(`${text(grade)}\u0001${Number(bucket)}`)
+    : get(
+      "SELECT unit_price FROM pricing_standards WHERE grade = ? AND student_count = ?",
+      [grade, bucket],
+    );
   const currentPrice = override
     ? num(override.unit_price)
     : (standard ? num(standard.unit_price) : 0);
@@ -2855,6 +2890,7 @@ function patchExpense(id, body) {
 
 function buildFeeDetails(monthKey) {
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
+  const pricingLookups = feePricingLookups();
   const details = [];
   for (const lesson of lessons) {
     const names = splitStudents(lesson.student_names);
@@ -2869,7 +2905,7 @@ function buildFeeDetails(monthKey) {
         lessonId: lesson.id,
         status,
         studentNames: lesson.student_names,
-      });
+      }, pricingLookups);
       const detail = {
         status,
         unit_price: price.unit_price,
@@ -3014,7 +3050,16 @@ function reduceStudentAccountBalance(batches, field, amount) {
   return remaining;
 }
 
+function emptyStudentDebtSettlement() {
+  return {
+    cash_offset: 0,
+    gift_offset: 0,
+    gift_lesson_debt_offset: 0,
+  };
+}
+
 function settleStudentCashDebt(batches) {
+  const settlement = emptyStudentDebtSettlement();
   for (let debtIndex = 0; debtIndex < batches.length; debtIndex += 1) {
     let debt = Math.max(-num(batches[debtIndex].actual_balance), 0);
     if (debt <= 0) continue;
@@ -3025,30 +3070,45 @@ function settleStudentCashDebt(batches) {
       batches[debtIndex].actual_balance = moneyRound(num(batches[debtIndex].actual_balance) + offset);
       batches[cashIndex].actual_balance = moneyRound(num(batches[cashIndex].actual_balance) - offset);
       debt = moneyRound(debt - offset);
+      settlement.cash_offset = moneyRound(settlement.cash_offset + offset);
+    }
+    for (let giftIndex = 0; giftIndex < batches.length && debt > 0; giftIndex += 1) {
+      const available = Math.max(num(batches[giftIndex].gift_balance), 0);
+      if (available <= 0) continue;
+      const offset = moneyRound(Math.min(available, debt));
+      const lessonDebtOffset = moneyRound(Math.min(
+        Math.max(num(batches[debtIndex].lesson_debt_balance), 0),
+        offset,
+      ));
+      batches[debtIndex].actual_balance = moneyRound(num(batches[debtIndex].actual_balance) + offset);
+      batches[debtIndex].lesson_debt_balance = moneyRound(
+        Math.max(0, num(batches[debtIndex].lesson_debt_balance) - lessonDebtOffset),
+      );
+      batches[giftIndex].gift_balance = moneyRound(num(batches[giftIndex].gift_balance) - offset);
+      debt = moneyRound(debt - offset);
+      settlement.gift_offset = moneyRound(settlement.gift_offset + offset);
+      settlement.gift_lesson_debt_offset = moneyRound(
+        settlement.gift_lesson_debt_offset + lessonDebtOffset,
+      );
     }
   }
-  return batches;
+  return settlement;
 }
 
 function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
   const actual = moneyRound(row.actual_balance ?? row.cur_recharge);
   const gift = moneyRound(row.gift_balance ?? row.cur_gift);
   const warnings = [];
-  if (actual === 0 && gift === 0) return warnings;
+  warnings.debtSettlement = emptyStudentDebtSettlement();
+  if (actual === 0 && gift === 0) {
+    warnings.debtSettlement = settleStudentCashDebt(batches);
+    return warnings;
+  }
   let batchActual = 0;
   let batchGift = 0;
 
   if (actual > 0) {
-    let remainingActual = actual;
-    for (const batch of batches) {
-      if (remainingActual <= 0) break;
-      const debt = Math.max(-num(batch.actual_balance), 0);
-      if (debt <= 0) continue;
-      const offset = moneyRound(Math.min(debt, remainingActual));
-      batch.actual_balance = moneyRound(num(batch.actual_balance) + offset);
-      remainingActual = moneyRound(remainingActual - offset);
-    }
-    batchActual = remainingActual;
+    batchActual = actual;
   } else if (actual < 0) {
     const remainingReduction = reduceStudentAccountBalance(batches, "actual_balance", Math.abs(actual));
     batchActual = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
@@ -3078,21 +3138,24 @@ function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
       });
     }
   }
-  if (batchActual === 0 && batchGift === 0) return warnings;
-  batches.push({
-    date: studentAccountEventDate(row, fallbackDate),
-    id: row.id || 0,
-    actual_balance: batchActual,
-    gift_balance: Math.max(0, batchGift),
-  });
-  settleStudentCashDebt(batches);
+  if (batchActual !== 0 || batchGift !== 0) {
+    batches.push({
+      date: studentAccountEventDate(row, fallbackDate),
+      id: row.id || 0,
+      source_type: text(row.source_type) || "account",
+      actual_balance: batchActual,
+      gift_balance: Math.max(0, batchGift),
+      lesson_debt_balance: 0,
+    });
+  }
+  warnings.debtSettlement = settleStudentCashDebt(batches);
   return warnings;
 }
 
-function consumeStudentBalance(ledger, lessonFee) {
+function consumeStudentBalance(ledger, lessonFee, context = {}) {
   const batches = Array.isArray(ledger) ? ledger : [];
   const balanceWarnings = normalizeStudentAccountLedger(batches);
-  settleStudentCashDebt(batches);
+  const preChargeSettlement = settleStudentCashDebt(batches);
   let remaining = moneyRound(Math.max(0, num(lessonFee)));
   let cashUsed = 0;
   let bonusUsed = 0;
@@ -3116,7 +3179,14 @@ function consumeStudentBalance(ledger, lessonFee) {
 
   const debt = moneyRound(Math.max(0, remaining));
   if (remaining > 0) {
-    batches.push({ date: "", id: 0, actual_balance: moneyRound(-debt), gift_balance: 0 });
+    batches.push({
+      date: studentAccountLessonDate(context, text(context.month_key)),
+      id: context.lesson_id || context.id || 0,
+      source_type: "lesson_debt",
+      actual_balance: moneyRound(-debt),
+      gift_balance: 0,
+      lesson_debt_balance: debt,
+    });
   }
   const after = studentAccountBatchBalance(batches);
   return {
@@ -3131,23 +3201,60 @@ function consumeStudentBalance(ledger, lessonFee) {
     actual_consumption: moneyRound(cashUsed + debt),
     gift_consumption: moneyRound(bonusUsed),
     balanceWarnings,
+    debtSettlement: preChargeSettlement,
     updatedLedger: batches,
   };
 }
 
-function applyStudentLessonCharge(batches, feeValue) {
-  return consumeStudentBalance(batches, feeValue);
+function applyStudentLessonCharge(batches, feeValue, context = {}) {
+  return consumeStudentBalance(batches, feeValue, context);
+}
+
+function reclassifyStudentGiftDebtConsumption(result, settlement = {}) {
+  const amount = moneyRound(Math.min(
+    Math.max(0, num(result.actual_consumption)),
+    Math.max(0, num(settlement.gift_lesson_debt_offset)),
+  ));
+  if (amount <= 0) return 0;
+  result.actual_consumption = moneyRound(result.actual_consumption - amount);
+  result.gift_consumption = moneyRound(result.gift_consumption + amount);
+  return amount;
+}
+
+function studentAccountInvariantTypes(batches) {
+  const balance = studentAccountBatchBalance(batches);
+  const issues = [];
+  if (balance.gift < 0) issues.push("gift_balance_negative");
+  if (balance.actual < 0 && balance.gift > 0) issues.push("cash_negative_gift_positive");
+  if (balance.actual > 0 && balance.gift < 0) issues.push("cash_positive_gift_negative");
+  return issues;
 }
 
 function calculateStudentAccountTimeline(options = {}) {
   const monthKey = text(options.monthKey);
   const batches = [];
-  const balanceWarnings = addStudentAccountBatch(batches, {
+  const traceEnabled = options.trace === true;
+  const trace = [];
+  const openingWarnings = addStudentAccountBatch(batches, {
     event_date: "",
     id: 0,
+    source_type: "opening",
     actual_balance: options.openingActual,
     gift_balance: options.openingGift,
   }, monthKey);
+  const openingBalance = studentAccountBatchBalance(batches);
+  if (traceEnabled) {
+    trace.push({
+      type: "opening",
+      date: monthKey,
+      actual_change: moneyRound(options.openingActual),
+      gift_change: moneyRound(options.openingGift),
+      actual_balance: openingBalance.actual,
+      gift_balance: openingBalance.gift,
+      debt_settlement: openingWarnings.debtSettlement,
+      invariant_issues: studentAccountInvariantTypes(batches),
+    });
+  }
   const details = (options.details || []).filter((row) => row.effective);
   const recharges = (options.recharges || []).filter(isRealRechargeRecord);
   const events = [
@@ -3167,10 +3274,10 @@ function calculateStudentAccountTimeline(options = {}) {
     cur_gift: 0,
     actual_consumption: 0,
     gift_consumption: 0,
-    actual_balance: moneyRound(options.openingActual),
-    gift_balance: moneyRound(Math.max(0, num(options.openingGift))),
+    actual_balance: openingBalance.actual,
+    gift_balance: moneyRound(Math.max(0, openingBalance.gift)),
     debt: 0,
-    balance_warnings: balanceWarnings,
+    balance_warnings: openingWarnings,
   };
 
   for (const event of events) {
@@ -3179,19 +3286,68 @@ function calculateStudentAccountTimeline(options = {}) {
       const gift = moneyRound(event.row.cur_gift);
       result.cur_recharge = moneyRound(result.cur_recharge + actual);
       result.cur_gift = moneyRound(result.cur_gift + gift);
-      result.balance_warnings.push(...addStudentAccountBatch(batches, event.row, monthKey));
+      const rechargeWarnings = addStudentAccountBatch(batches, {
+        ...event.row,
+        source_type: "recharge",
+      }, monthKey);
+      result.balance_warnings.push(...rechargeWarnings);
+      const giftDebtReclassified = reclassifyStudentGiftDebtConsumption(
+        result,
+        rechargeWarnings.debtSettlement,
+      );
+      if (traceEnabled) {
+        const balance = studentAccountBatchBalance(batches);
+        trace.push({
+          type: "recharge",
+          id: event.row.id || 0,
+          date: event.date,
+          actual_change: actual,
+          gift_change: gift,
+          remark: text(event.row.notes),
+          actual_balance: balance.actual,
+          gift_balance: balance.gift,
+          debt_settlement: rechargeWarnings.debtSettlement,
+          gift_debt_reclassified: giftDebtReclassified,
+          warnings: rechargeWarnings,
+          invariant_issues: studentAccountInvariantTypes(batches),
+        });
+      }
       continue;
     }
     const fee = moneyRound(Math.max(0, num(event.row.unit_price)));
     result.lesson_count += 1;
     result.total_fee = moneyRound(result.total_fee + fee);
-    const charge = applyStudentLessonCharge(batches, fee);
+    const charge = applyStudentLessonCharge(batches, fee, {
+      ...event.row,
+      month_key: monthKey,
+    });
+    reclassifyStudentGiftDebtConsumption(result, charge.debtSettlement);
     result.actual_consumption = moneyRound(result.actual_consumption + charge.actual_consumption);
     result.gift_consumption = moneyRound(result.gift_consumption + charge.gift_consumption);
     result.balance_warnings.push(...(charge.balanceWarnings || []));
+    if (traceEnabled) {
+      trace.push({
+        type: "lesson",
+        id: event.row.lesson_id || event.row.id || 0,
+        date: event.date,
+        time: text(event.row.time_slot),
+        teacher: text(event.row.teacher_name),
+        subject: text(event.row.subject),
+        status: text(event.row.status),
+        fee,
+        cash_used: charge.cashUsed,
+        gift_used: charge.giftUsed,
+        debt: charge.debt,
+        actual_balance: charge.afterCashBalance,
+        gift_balance: charge.afterGiftBalance,
+        invariant_issues: studentAccountInvariantTypes(batches),
+      });
+    }
   }
 
   result.balance_warnings.push(...normalizeStudentAccountLedger(batches));
+  const finalSettlement = settleStudentCashDebt(batches);
+  reclassifyStudentGiftDebtConsumption(result, finalSettlement);
   const balance = studentAccountBatchBalance(batches);
   result.actual_balance = moneyRound(balance.actual);
   result.gift_balance = moneyRound(Math.max(0, balance.gift));
@@ -3203,6 +3359,20 @@ function calculateStudentAccountTimeline(options = {}) {
       source_id: 0,
       event_date: monthKey,
     });
+  }
+  if (traceEnabled) {
+    trace.push({
+      type: "month_end",
+      date: monthEndKey(monthKey),
+      actual_balance: result.actual_balance,
+      gift_balance: result.gift_balance,
+      debt: result.debt,
+      actual_consumption: result.actual_consumption,
+      gift_consumption: result.gift_consumption,
+      debt_settlement: finalSettlement,
+      invariant_issues: studentAccountInvariantTypes(batches),
+    });
+    result.trace = trace;
   }
   return result;
 }
@@ -5851,14 +6021,16 @@ function studentHistoryRows(studentName) {
   const earliest = earliestDataMonth();
   if (earliest) withTransaction(() => refreshCarryOverAfter(earliest));
   const rows = [];
+  const rechargeMonths = new Set(all(
+    `SELECT DISTINCT month_key
+     FROM recharge_records
+     WHERE student_name = ? AND ${REAL_RECHARGE_SQL}`,
+    [name],
+  ).map((row) => row.month_key));
   for (const monthKey of allPartitionedMonths()) {
     const details = feeDetails(monthKey);
     const studentDetails = details.filter((row) => row.student_name === name);
-    const recharge = get(
-      `SELECT * FROM recharge_records WHERE student_name = ? AND month_key = ? AND ${REAL_RECHARGE_SQL}`,
-      [name, monthKey],
-    );
-    if (!studentDetails.length && !recharge) continue;
+    if (!studentDetails.length && !rechargeMonths.has(monthKey)) continue;
     const summary = studentSummary(details, monthKey, true).find((row) => row.student_name === name) || {};
     rows.push({
       month_key: monthKey,
@@ -11226,6 +11398,58 @@ function verifyStudentBalanceCases() {
     runCase("F_cash_100_gift_300_fee_250", { cash: 100, gift: 300, fee: 250 }, { actual_balance: 0, gift_balance: 150 }),
   ];
 
+  const realSequence = calculateStudentAccountTimeline({
+    studentName: "秦小沫",
+    monthKey: "2026-06-01",
+    openingActual: -1270,
+    openingGift: 0,
+    details: [
+      lesson(370, "2026-06-07", 2814),
+      lesson(370, "2026-06-10", 2845),
+      lesson(370, "2026-06-12", 2847),
+      lesson(370, "2026-06-13", 2853),
+    ],
+    recharges: [
+      {
+        id: 807,
+        recharge_date: "2026-06-19",
+        cur_recharge: 2500,
+        cur_gift: 250,
+      },
+    ],
+    trace: true,
+  });
+  const realSequenceExpected = {
+    total_fee: 1480,
+    actual_consumption: 1230,
+    gift_consumption: 250,
+    actual_balance: 0,
+    gift_balance: 0,
+  };
+  for (const [field, expected] of Object.entries(realSequenceExpected)) {
+    if (num(realSequence[field]) !== expected) {
+      throw new Error(`G_qin_xiaomo_real_sequence failed: ${field} expected ${expected}, got ${realSequence[field]}`);
+    }
+  }
+  const realSequenceInvariant = (realSequence.trace || [])
+    .flatMap((event) => event.invariant_issues || []);
+  if (realSequenceInvariant.length) {
+    throw new Error(`G_qin_xiaomo_real_sequence invariant failed: ${JSON.stringify(realSequenceInvariant)}`);
+  }
+  const repairEvent = (realSequence.trace || []).find((event) => (
+    event.type === "recharge"
+    && event.id === 807
+    && num(event.debt_settlement?.gift_offset) === 250
+  ));
+  if (!repairEvent) {
+    throw new Error(`G_qin_xiaomo_real_sequence missing recharge debt settlement: ${JSON.stringify(realSequence.trace)}`);
+  }
+  results.push({
+    name: "G_qin_xiaomo_real_sequence",
+    ...realSequenceExpected,
+    recharge_debt_settlement: repairEvent.debt_settlement,
+  });
+
   const ledger = [];
   addStudentAccountBatch(ledger, {
     id: 1,
@@ -11248,9 +11472,9 @@ function verifyStudentBalanceCases() {
     && num(ledger[1].gift_balance) === 100
     && balance.actual === 170
     && balance.gift === 100;
-  if (!fcfsPassed) throw new Error(`G_fcfs failed: ${JSON.stringify({ ledger, charge, balance })}`);
+  if (!fcfsPassed) throw new Error(`H_fcfs failed: ${JSON.stringify({ ledger, charge, balance })}`);
   results.push({
-    name: "G_fcfs",
+    name: "H_fcfs",
     actual_balance: balance.actual,
     gift_balance: balance.gift,
     ledger,
@@ -11271,10 +11495,136 @@ function verifyStudentBalanceCases() {
     "gift_balance_not_numeric",
   ];
   if (!expectedInvariantTypes.every((type) => invariantTypes.has(type))) {
-    throw new Error(`H_invariant_scanner failed: ${JSON.stringify([...invariantTypes])}`);
+    throw new Error(`I_invariant_scanner failed: ${JSON.stringify([...invariantTypes])}`);
   }
-  results.push({ name: "H_invariant_scanner", issue_types: [...invariantTypes].sort() });
+  results.push({ name: "I_invariant_scanner", issue_types: [...invariantTypes].sort() });
+
+  const pricingLookups = feePricingLookups();
+  let pricingComparisonCount = 0;
+  for (const lessonRow of all("SELECT * FROM lessons ORDER BY id")) {
+    const studentNames = splitStudents(lessonRow.student_names);
+    for (const studentName of studentNames) {
+      const input = {
+        studentName,
+        subject: lessonRow.subject,
+        grade: lessonRow.grade,
+        studentCount: studentNames.length,
+        lessonId: lessonRow.id,
+        status: deriveStatus(lessonRow),
+        studentNames: lessonRow.student_names,
+      };
+      const direct = unitPriceFor(input);
+      const preloaded = unitPriceFor(input, pricingLookups);
+      const fields = ["unit_price", "source", "rule_price", "pricing_rule_id"];
+      if (fields.some((field) => direct[field] !== preloaded[field])) {
+        throw new Error(`J_fee_pricing_lookup_parity failed: ${JSON.stringify({ input, direct, preloaded })}`);
+      }
+      pricingComparisonCount += 1;
+    }
+  }
+  results.push({ name: "J_fee_pricing_lookup_parity", compared_student_lessons: pricingComparisonCount });
   return results;
+}
+
+function buildStudentBalanceTrace(studentName) {
+  const name = text(studentName);
+  if (!name) return null;
+  const profile = get("SELECT id, name, grade, status, joined_at, left_at FROM students WHERE name = ?", [name]);
+  const openingRows = all(
+    `SELECT id, month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes, created_at, updated_at
+     FROM student_opening_balances
+     WHERE student_name = ?
+     ORDER BY month_key, id`,
+    [name],
+  );
+  const recharges = all(
+    `SELECT id, month_key, recharge_date, student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, notes, source
+     FROM recharge_records
+     WHERE student_name = ? AND ${REAL_RECHARGE_SQL}
+     ORDER BY month_key, recharge_date, id`,
+    [name],
+  );
+  const opening = openingBalanceMap().get(name) || {};
+  let actualBalance = moneyRound(opening.actual_balance);
+  let giftBalance = moneyRound(opening.gift_balance);
+  const months = [];
+  const courseRows = [];
+  const allInvariantEvents = [];
+  const monthKeys = allPartitionedMonths().sort((a, b) => a.localeCompare(b));
+  const rechargesByMonth = new Map();
+  for (const recharge of recharges) {
+    if (!rechargesByMonth.has(recharge.month_key)) rechargesByMonth.set(recharge.month_key, []);
+    rechargesByMonth.get(recharge.month_key).push(recharge);
+  }
+
+  for (const monthKey of monthKeys) {
+    const details = feeDetails(monthKey).filter((row) => row.student_name === name);
+    courseRows.push(...details.map((row) => ({
+      id: row.lesson_id,
+      date: row.date,
+      status: row.status,
+      lesson_status: row.lesson_status,
+      course_status: row.course_status,
+      time: row.time_slot,
+      teacher: row.teacher_name,
+      subject: row.subject,
+      grade: row.grade,
+      fee: row.unit_price,
+      effective: row.effective,
+      price_source: row.price_source,
+    })));
+    const monthRecharges = rechargesByMonth.get(monthKey) || [];
+    const account = calculateStudentAccountTimeline({
+      studentName: name,
+      monthKey,
+      details,
+      recharges: monthRecharges,
+      openingActual: actualBalance,
+      openingGift: giftBalance,
+      trace: true,
+    });
+    const events = account.trace || [];
+    for (const event of events) {
+      for (const issueType of event.invariant_issues || []) {
+        allInvariantEvents.push({
+          month_key: monthKey,
+          student_name: name,
+          issue_type: issueType,
+          event,
+        });
+      }
+    }
+    months.push({
+      month_key: monthKey,
+      prev_actual: actualBalance,
+      prev_gift: giftBalance,
+      cur_recharge: account.cur_recharge,
+      cur_gift: account.cur_gift,
+      lesson_count: account.lesson_count,
+      total_fee: account.total_fee,
+      actual_consumption: account.actual_consumption,
+      gift_consumption: account.gift_consumption,
+      actual_balance: account.actual_balance,
+      gift_balance: account.gift_balance,
+      debt: account.debt,
+      warnings: account.balance_warnings,
+      events,
+    });
+    actualBalance = account.actual_balance;
+    giftBalance = account.gift_balance;
+  }
+
+  return {
+    student_name: name,
+    profile: profile || null,
+    opening_balances: openingRows,
+    recharges,
+    courses: courseRows,
+    months,
+    invariant_issue_count: allInvariantEvents.length,
+    invariant_events: allInvariantEvents,
+    first_invariant_event: allInvariantEvents[0] || null,
+  };
 }
 
 function scanAllStudentBalances() {
@@ -11282,9 +11632,20 @@ function scanAllStudentBalances() {
   const results = [];
   const issues = [];
   const normalizedWarnings = [];
+  const traceCache = new Map();
+  const traceFor = (studentName) => {
+    if (!traceCache.has(studentName)) traceCache.set(studentName, buildStudentBalanceTrace(studentName));
+    return traceCache.get(studentName);
+  };
   for (const monthKey of months) {
     const rows = studentSummary(feeDetails(monthKey), monthKey, true);
-    const monthIssues = studentBalanceInvariantIssues(rows, monthKey);
+    const monthIssues = studentBalanceInvariantIssues(rows, monthKey).map((issue) => {
+      const trace = traceFor(issue.student_name);
+      return {
+        ...issue,
+        key_events: trace?.months.find((item) => item.month_key === monthKey)?.events || [],
+      };
+    });
     const monthWarnings = rows.flatMap((row) => (row.balance_warnings || []).map((warning) => ({
       month_key: monthKey,
       student_name: row.student_name,
@@ -11299,6 +11660,36 @@ function scanAllStudentBalances() {
       normalized_warning_count: monthWarnings.length,
     });
   }
+  const realDataRegressions = [];
+  for (const studentName of ["秦小沫"]) {
+    if (!get("SELECT id FROM students WHERE name = ?", [studentName])) continue;
+    const trace = traceFor(studentName);
+    const finalMonth = trace?.months[trace.months.length - 1] || {};
+    const passed = !trace?.invariant_issue_count
+      && !(num(finalMonth.actual_balance) < 0 && num(finalMonth.gift_balance) > 0)
+      && num(finalMonth.gift_balance) >= 0;
+    realDataRegressions.push({
+      student_name: studentName,
+      passed,
+      final_month: finalMonth.month_key || "",
+      actual_balance: num(finalMonth.actual_balance),
+      gift_balance: num(finalMonth.gift_balance),
+      invariant_issue_count: num(trace?.invariant_issue_count),
+      repair_events: (trace?.months || []).flatMap((month) => month.events
+        .filter((event) => num(event.debt_settlement?.gift_offset) > 0)
+        .map((event) => ({ month_key: month.month_key, ...event }))),
+    });
+    if (!passed) {
+      issues.push({
+        type: "real_data_regression_failed",
+        student_name: studentName,
+        month_key: finalMonth.month_key || "",
+        actual_balance: num(finalMonth.actual_balance),
+        gift_balance: num(finalMonth.gift_balance),
+        key_events: finalMonth.events || [],
+      });
+    }
+  }
   return {
     ok: issues.length === 0,
     months: results,
@@ -11306,6 +11697,7 @@ function scanAllStudentBalances() {
     normalized_warning_count: normalizedWarnings.length,
     issues,
     normalized_warnings: normalizedWarnings,
+    real_data_regressions: realDataRegressions,
   };
 }
 
@@ -11326,6 +11718,18 @@ if (process.argv.includes("--audit-student-balances")) {
   console.log(JSON.stringify(report, null, 2));
   db.close();
   process.exit(report.ok ? 0 : 1);
+}
+
+const traceStudentArgument = process.argv.find((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
+if (traceStudentArgument) {
+  const inlineName = traceStudentArgument.includes("=") ? traceStudentArgument.slice(traceStudentArgument.indexOf("=") + 1) : "";
+  const argumentIndex = process.argv.indexOf(traceStudentArgument);
+  const followingName = argumentIndex >= 0 ? text(process.argv[argumentIndex + 1]) : "";
+  const studentName = text(inlineName) || (followingName.startsWith("--") ? "" : followingName) || "秦小沫";
+  const report = buildStudentBalanceTrace(studentName);
+  console.log(JSON.stringify(report || { student_name: studentName, error: "student not found" }, null, 2));
+  db.close();
+  process.exit(report?.profile ? 0 : 1);
 }
 
 const server = http.createServer(async (req, res) => {
