@@ -1959,7 +1959,7 @@ th {
   font-weight: 600;
   font-size: 0.8125rem;
   line-height: 1.5;
-  text-align: left;
+  text-align: center;
   padding: 10px 12px;
 }
 
@@ -1975,18 +1975,18 @@ td.text-cell {
 }
 
 .teacher-detail-table .select-col {
-  width: 44px;
-  min-width: 44px;
-  max-width: 44px;
-  padding: 6px 8px;
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  padding: 6px 4px;
   text-align: center;
 }
 
 .fee-detail-table .select-col {
-  width: 44px;
-  min-width: 44px;
-  max-width: 44px;
-  padding: 6px 8px;
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  padding: 6px 4px;
   text-align: center;
 }
 
@@ -2706,6 +2706,22 @@ select.control,
   border-color: var(--danger-hover-border);
 }
 
+.btn:disabled,
+.btn:disabled:hover,
+.btn.primary:disabled,
+.btn.primary:disabled:hover,
+.btn.danger:disabled,
+.btn.danger:disabled:hover {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--line-soft) 78%, var(--panel));
+  color: var(--muted);
+  box-shadow: none;
+  cursor: not-allowed;
+  filter: grayscale(0.2);
+  opacity: 0.68;
+  transform: none;
+}
+
 .icon-btn {
   min-width: 36px;
   padding-inline: 10px;
@@ -2789,8 +2805,9 @@ select.control,
 
 .course-table.lesson-table .lesson-select-head,
 .course-table.lesson-table .lesson-select-cell {
-  width: 44px;
-  min-width: 44px;
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
   text-align: center;
   vertical-align: middle;
 }
@@ -3069,39 +3086,91 @@ select.control,
 }
 
 .batch-copy-preview table {
-  min-width: 1360px;
+  min-width: 1120px;
 }
 
 .batch-copy-edit-table {
-  min-width: 1360px;
+  min-width: 1040px;
+  table-layout: fixed;
 }
 
 .batch-copy-edit-table th,
 .batch-copy-edit-table td {
-  min-width: 118px;
-  padding: 6px 8px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 6px 7px;
+}
+
+.batch-copy-edit-table .control,
+.batch-copy-edit-table .custom-select-control,
+.batch-copy-edit-table .custom-select-button {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .batch-copy-edit-table .control {
-  min-width: 108px;
   min-height: 30px;
-  padding: 4px 8px;
+  padding: 4px 7px;
   font-size: var(--text-table);
+  font-weight: 400;
+}
+
+.batch-copy-edit-table .custom-select-button {
+  min-height: 30px;
+  padding: 4px 26px 4px 7px;
+  font-size: var(--text-table);
+  font-weight: 400;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.batch-copy-edit-table th:nth-child(1),
+.batch-copy-edit-table td:nth-child(1) {
+  width: 118px;
+}
+
+.batch-copy-edit-table th:nth-child(2),
+.batch-copy-edit-table td:nth-child(2) {
+  width: 112px;
 }
 
 .batch-copy-edit-table th:nth-child(3),
-.batch-copy-edit-table td:nth-child(3),
-.batch-copy-edit-table th:nth-child(4),
-.batch-copy-edit-table td:nth-child(4) {
-  min-width: 72px;
+.batch-copy-edit-table td:nth-child(3) {
+  width: 86px;
   text-align: center;
 }
 
+.batch-copy-edit-table th:nth-child(4),
+.batch-copy-edit-table td:nth-child(4) {
+  width: 68px;
+  text-align: center;
+}
+
+.batch-copy-edit-table th:nth-child(5),
+.batch-copy-edit-table td:nth-child(5) {
+  width: 116px;
+}
+
+.batch-copy-edit-table th:nth-child(6),
+.batch-copy-edit-table td:nth-child(6),
+.batch-copy-edit-table th:nth-child(7),
+.batch-copy-edit-table td:nth-child(7) {
+  width: 84px;
+}
+
+.batch-copy-edit-table th:nth-child(8),
+.batch-copy-edit-table td:nth-child(8) {
+  width: 92px;
+}
+
 .batch-copy-edit-table th:nth-child(9),
-.batch-copy-edit-table td:nth-child(9),
+.batch-copy-edit-table td:nth-child(9) {
+  width: 250px;
+}
+
 .batch-copy-edit-table th:nth-child(10),
 .batch-copy-edit-table td:nth-child(10) {
-  min-width: 220px;
+  width: 220px;
 }
 
 .batch-copy-panel .modal-actions {
@@ -3183,6 +3252,56 @@ select.control,
 
 .recharge-modal .modal-actions {
   gap: var(--space-3);
+}
+
+.opening-balance-modal .opening-balance-modal-panel {
+  width: min(640px, calc(100vw - 32px));
+  max-height: 92vh;
+  overflow: auto;
+}
+
+.opening-balance-modal .modal-head {
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.opening-balance-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.opening-balance-form-grid label {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-table);
+  font-weight: 800;
+}
+
+.opening-balance-form-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.opening-balance-form-grid :is(.control, .filter-combo) {
+  width: 100%;
+}
+
+.opening-balance-form-grid :is(.control, .filter-combo .control) {
+  min-height: 42px;
+}
+
+.opening-balance-modal .modal-actions {
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+@media (max-width: 720px) {
+  .opening-balance-form-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .statement-panel {
@@ -5207,6 +5326,618 @@ td.empty {
   text-align: right;
 }
 
+.smooth-table-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable both-edges;
+  contain: layout paint;
+}
+
+.uniform-table {
+  table-layout: auto;
+  width: max-content;
+  min-width: 0;
+}
+
+.nowrap-table th,
+.nowrap-table td {
+  white-space: nowrap;
+}
+
+.uniform-table th {
+  text-align: center !important;
+}
+
+.uniform-table td {
+  text-align: center;
+}
+
+.uniform-table td.col-left,
+.uniform-table td.wide,
+.uniform-table td.text-left {
+  text-align: left !important;
+}
+
+.uniform-table td.col-right,
+.uniform-table td.right,
+.uniform-table td:has(> .cell-input.number) {
+  text-align: right !important;
+}
+
+.uniform-table .select-col,
+.uniform-table .lesson-select-head,
+.uniform-table .lesson-select-cell {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  padding-left: 4px;
+  padding-right: 4px;
+  text-align: center !important;
+}
+
+.uniform-table .wide {
+  min-width: 180px;
+  max-width: 360px;
+}
+
+.course-table.lesson-table :is(td, th):nth-child(10),
+.course-table.lesson-table :is(td, th):nth-child(11),
+.course-table.week-detail-table :is(td, th):nth-child(9),
+.course-table.week-detail-table :is(td, th):nth-child(10),
+.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(11),
+.student-query-detail-table :is(td, th):nth-child(10),
+.recharge-table:not(.opening-balance-table) :is(td, th):nth-child(9),
+.opening-balance-table :is(td, th):nth-child(6),
+.student-pricing-table :is(td, th):nth-child(4),
+.student-pricing-table :is(td, th):nth-child(7),
+.teacher-salary-rule-table :is(td, th):nth-child(4),
+.teacher-salary-rule-table :is(td, th):nth-child(7),
+.profile-table :is(td, th).profile-notes-col,
+.pricing-table :is(td, th):nth-child(5) {
+  text-align: left !important;
+}
+
+.teacher-salary-rule-table :is(td, th):nth-child(5) {
+  text-align: right !important;
+}
+
+.student-summary-table :is(td, th),
+.student-summary-table .right,
+.course-table.lesson-table :is(td, th):nth-child(12),
+.course-table.lesson-table :is(td, th):nth-child(13),
+.course-table.week-detail-table :is(td, th):last-child,
+.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(12),
+.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(13),
+.student-query-detail-table :is(td, th):nth-child(11),
+.recharge-table .cell-input.number,
+.opening-balance-table .cell-input.number {
+  text-align: center !important;
+}
+
+.course-table.lesson-table.uniform-table :is(td, th):not(:nth-child(10)):not(:nth-child(11)),
+.course-table.week-detail-table.uniform-table :is(td, th):not(:nth-child(9)):not(:nth-child(10)),
+.fee-detail-table.uniform-table:not(.student-query-detail-table) :is(td, th):not(:nth-child(11)),
+.student-query-detail-table.uniform-table :is(td, th):not(:nth-child(10)),
+.recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(9)),
+.opening-balance-table.uniform-table :is(td, th):not(:nth-child(6)),
+.student-pricing-table.uniform-table :is(td, th):not(:nth-child(4)):not(:nth-child(7)),
+.pricing-table.uniform-table :is(td, th):not(:nth-child(5)),
+.teacher-salary-table.uniform-table :is(td, th):nth-child(1),
+.profile-table.uniform-table :is(td, th):not(.profile-notes-col),
+.operation-log-table.uniform-table th,
+.audit-table.uniform-table th,
+.user-table.uniform-table th {
+  text-align: center !important;
+}
+
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(1),
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(2),
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(3),
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(6) {
+  text-align: center !important;
+}
+
+/* Table UI alignment pass: headers stay centered; body cells follow field semantics. */
+table th,
+.uniform-table th {
+  text-align: center !important;
+}
+
+.uniform-table td {
+  text-align: center;
+}
+
+.uniform-table td.right,
+.uniform-table td.col-right,
+.uniform-table td:has(> .cell-input.number) {
+  text-align: right !important;
+}
+
+.course-table.lesson-table td:nth-child(10),
+.course-table.lesson-table td:nth-child(11),
+.course-table.week-detail-table td:nth-child(9),
+.course-table.week-detail-table td:nth-child(10),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(11),
+.student-query-detail-table td:nth-child(10),
+.recharge-table:not(.opening-balance-table) td:nth-child(9),
+.opening-balance-table td:nth-child(6),
+.student-pricing-table td:nth-child(4),
+.student-pricing-table td:nth-child(7),
+.teacher-salary-rule-table td:nth-child(4),
+.teacher-salary-rule-table td:nth-child(7),
+.teacher-profile-table td.profile-notes-col,
+.pricing-table td:nth-child(5) {
+  text-align: left !important;
+}
+
+.course-table.lesson-table td:nth-child(12),
+.course-table.lesson-table td:nth-child(13),
+.course-table.week-detail-table td:last-child,
+.student-summary-table td:nth-child(1),
+.student-summary-table td:nth-child(2),
+.student-summary-table td:nth-child(3),
+.student-history-table td:nth-child(1),
+.student-history-table td:nth-child(2),
+.student-profile-table td,
+.teacher-profile-table td:not(.profile-notes-col),
+.teacher-salary-rule-table td:nth-child(1),
+.teacher-salary-rule-table td:nth-child(2),
+.teacher-salary-rule-table td:nth-child(3),
+.teacher-salary-rule-table td:nth-child(6) {
+  text-align: center !important;
+}
+
+.student-summary-table td:nth-child(n + 4),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(13),
+.student-query-detail-table td:nth-child(11),
+.student-history-table td:nth-child(n + 3),
+.recharge-table:not(.opening-balance-table) td:nth-child(4),
+.recharge-table:not(.opening-balance-table) td:nth-child(5),
+.recharge-table:not(.opening-balance-table) td:nth-child(6),
+.recharge-table:not(.opening-balance-table) td:nth-child(7),
+.opening-balance-table td:nth-child(4),
+.opening-balance-table td:nth-child(5),
+.student-pricing-table td:nth-child(5),
+.teacher-salary-rule-table td:nth-child(5),
+.teacher-detail-table td:nth-child(12),
+.teacher-detail-table td:nth-child(13),
+.pricing-table td:nth-child(3) {
+  text-align: right !important;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(3),
+.course-table.week-detail-table :is(th, td):nth-child(2),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(4),
+.student-query-detail-table :is(th, td):nth-child(3),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(8) {
+  width: 116px;
+  min-width: 116px;
+  max-width: 116px;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(6),
+.course-table.week-detail-table :is(th, td):nth-child(5),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7),
+.student-query-detail-table :is(th, td):nth-child(6) {
+  width: 112px;
+  min-width: 112px;
+  max-width: 112px;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(10) {
+  min-width: 260px;
+  max-width: 520px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(9),
+.student-pricing-table :is(th, td):nth-child(4),
+.teacher-salary-rule-table :is(th, td):nth-child(4) {
+  min-width: 240px;
+  max-width: 460px;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(11),
+.course-table.week-detail-table :is(th, td):nth-child(10),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11),
+.student-query-detail-table :is(th, td):nth-child(10),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(9),
+.opening-balance-table :is(th, td):nth-child(6),
+.student-pricing-table :is(th, td):nth-child(7),
+.teacher-salary-rule-table :is(th, td):nth-child(7),
+.teacher-profile-table :is(th, td).profile-notes-col,
+.student-profile-table :is(th, td).profile-notes-col {
+  min-width: 150px;
+  max-width: 280px;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(12),
+.course-table.lesson-table :is(th, td):nth-child(13),
+.course-table.week-detail-table :is(th, td):last-child {
+  width: 76px;
+  min-width: 76px;
+  max-width: 84px;
+}
+
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(4),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(5),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(6),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(7),
+.opening-balance-table :is(th, td):nth-child(4),
+.opening-balance-table :is(th, td):nth-child(5),
+.student-pricing-table :is(th, td):nth-child(5),
+.teacher-salary-rule-table :is(th, td):nth-child(5),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(13),
+.student-query-detail-table :is(th, td):nth-child(11) {
+  min-width: 112px;
+  max-width: 132px;
+}
+
+.course-table.lesson-table :is(th, td):nth-child(4),
+.course-table.week-detail-table :is(th, td):nth-child(3),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5),
+.student-query-detail-table :is(th, td):nth-child(4) {
+  min-width: 84px;
+  max-width: 104px;
+}
+
+.course-table.lesson-table.uniform-table thead th,
+.course-table.week-detail-table.uniform-table thead th,
+.fee-detail-table.uniform-table thead th,
+.student-summary-table.uniform-table thead th,
+.recharge-table.uniform-table thead th,
+.student-history-table.uniform-table thead th,
+.student-pricing-table.uniform-table thead th,
+.profile-table.uniform-table thead th,
+.teacher-salary-rule-table.uniform-table thead th,
+.teacher-detail-table.uniform-table thead th,
+.pricing-table.uniform-table thead th,
+.teacher-salary-table.uniform-table thead th,
+.operation-log-table.uniform-table thead th,
+.audit-table.uniform-table thead th,
+.user-table.uniform-table thead th {
+  text-align: center !important;
+}
+
+.fee-detail-table.uniform-table:not(.student-query-detail-table) td:nth-child(12),
+.fee-detail-table.uniform-table:not(.student-query-detail-table) td:nth-child(13),
+.student-query-detail-table.uniform-table td:nth-child(11),
+.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(4),
+.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(5),
+.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(6),
+.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(7),
+.opening-balance-table.uniform-table td:nth-child(4),
+.opening-balance-table.uniform-table td:nth-child(5),
+.student-pricing-table.uniform-table td:nth-child(5),
+.teacher-salary-rule-table.uniform-table td:nth-child(5),
+.teacher-detail-table.uniform-table td:nth-child(12),
+.teacher-detail-table.uniform-table td:nth-child(13),
+.pricing-table.uniform-table td:nth-child(3) {
+  text-align: right !important;
+}
+
+.profile-table.student-profile-table.uniform-table td.profile-notes-col {
+  text-align: center !important;
+}
+
+.profile-table.teacher-profile-table.uniform-table td.profile-notes-col {
+  text-align: left !important;
+}
+
+.student-profile-table .cell-input,
+.student-profile-table .cell-select,
+.teacher-profile-table td:not(.profile-notes-col) .cell-input,
+.teacher-profile-table td:not(.profile-notes-col) .cell-select,
+.course-table.lesson-table td:not(:nth-child(10)):not(:nth-child(11)) .cell-input,
+.course-table.lesson-table td:not(:nth-child(10)):not(:nth-child(11)) .cell-select,
+.recharge-table:not(.opening-balance-table) td:nth-child(8) .cell-input {
+  text-align: inherit;
+}
+
+.teacher-profile-table td.profile-notes-col .cell-input,
+.recharge-table:not(.opening-balance-table) td:nth-child(9) .cell-input,
+.opening-balance-table td:nth-child(6) .cell-input,
+.student-pricing-table td:nth-child(7) .cell-input,
+.teacher-salary-rule-table td:nth-child(7) .cell-input {
+  text-align: left;
+}
+
+.uniform-table .cell-input.number {
+  text-align: right !important;
+}
+
+.lesson-table-scroll {
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+  scrollbar-gutter: auto;
+  contain: layout paint;
+}
+
+.course-table.lesson-table {
+  width: max-content;
+  min-width: 0;
+  table-layout: auto;
+}
+
+.course-table.lesson-table :is(th, td) {
+  box-sizing: border-box;
+  min-width: 0;
+  transition: none;
+}
+
+.course-table.lesson-table :is(.col-select, .lesson-select-head, .lesson-select-cell) {
+  width: 40px !important;
+  min-width: 40px !important;
+  max-width: 40px !important;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  text-align: center !important;
+}
+
+.course-table.lesson-table .lesson-select-cell {
+  position: relative;
+}
+
+.course-table.lesson-table .lesson-warning-icon {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  width: 15px;
+  height: 15px;
+  margin-left: 0;
+  font-size: 9px;
+}
+
+.course-table.lesson-table .col-teacher {
+  width: 112px;
+  min-width: 96px;
+  max-width: 132px;
+}
+
+.course-table.lesson-table .col-date {
+  width: 108px;
+  min-width: 108px;
+  max-width: 108px;
+}
+
+.course-table.lesson-table .col-status {
+  width: 86px;
+  min-width: 78px;
+  max-width: 96px;
+}
+
+.course-table.lesson-table .col-weekday {
+  width: 62px;
+  min-width: 58px;
+  max-width: 72px;
+}
+
+.course-table.lesson-table .col-time {
+  width: 112px;
+  min-width: 108px;
+  max-width: 118px;
+}
+
+.course-table.lesson-table .col-room,
+.course-table.lesson-table .col-grade {
+  width: 76px;
+  min-width: 70px;
+  max-width: 86px;
+}
+
+.course-table.lesson-table .col-subject {
+  width: 86px;
+  min-width: 76px;
+  max-width: 96px;
+}
+
+.course-table.lesson-table .col-students {
+  width: 300px;
+  min-width: 220px;
+  max-width: 360px;
+  text-align: left !important;
+}
+
+.course-table.lesson-table .col-note {
+  width: 170px;
+  min-width: 120px;
+  max-width: 220px;
+  text-align: left !important;
+}
+
+.course-table.lesson-table .col-count,
+.course-table.lesson-table .col-index {
+  width: 76px;
+  min-width: 72px;
+  max-width: 82px;
+  text-align: center !important;
+}
+
+.course-table.lesson-table .lesson-cell-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-table.lesson-table .col-students .lesson-cell-text,
+.course-table.lesson-table .col-note .lesson-cell-text {
+  max-width: 100%;
+}
+
+.course-table.lesson-table .cell-input,
+.course-table.lesson-table .cell-select,
+.course-table.lesson-table .custom-select-cell,
+.course-table.lesson-table .custom-select-cell .custom-select-button {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.course-table.lesson-table .cell-input,
+.course-table.lesson-table .cell-select {
+  height: 34px;
+  padding: 6px 8px;
+}
+
+.course-table.lesson-table .custom-select-cell .custom-select-button {
+  min-height: 34px;
+  padding: 6px 28px 6px 8px;
+  box-shadow: none;
+}
+
+.course-table.lesson-table tbody td,
+.course-table.lesson-table tbody tr.exam-row td,
+.course-table.lesson-table tbody .lesson-cell-text,
+.course-table.lesson-table tbody .cell-input,
+.course-table.lesson-table tbody .cell-select,
+.course-table.lesson-table tbody .status-select,
+.course-table.lesson-table tbody .status-badge,
+.course-table.lesson-table tbody .custom-select-cell .custom-select-button {
+  font-weight: 400;
+}
+
+.compact-table-scroll {
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+  scrollbar-gutter: auto;
+  contain: layout paint;
+}
+
+.compact-table-scroll > .uniform-table,
+.course-table.week-detail-table,
+.fee-detail-table.uniform-table:not(.student-query-detail-table) {
+  width: max-content;
+  min-width: 0;
+  table-layout: auto;
+}
+
+.course-table.week-detail-table :is(th, td),
+.fee-detail-table.uniform-table:not(.student-query-detail-table) :is(th, td) {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(1),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(3) {
+  width: 112px;
+  min-width: 96px;
+  max-width: 132px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(2),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(4) {
+  width: 108px;
+  min-width: 108px;
+  max-width: 108px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(3),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5) {
+  width: 86px;
+  min-width: 78px;
+  max-width: 96px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(4),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6) {
+  width: 62px;
+  min-width: 58px;
+  max-width: 72px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(5),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7) {
+  width: 112px;
+  min-width: 108px;
+  max-width: 118px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(6),
+.course-table.week-detail-table :is(th, td):nth-child(7),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(8),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(9) {
+  width: 76px;
+  min-width: 70px;
+  max-width: 86px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(8),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(10) {
+  width: 86px;
+  min-width: 76px;
+  max-width: 96px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(9) {
+  width: 300px;
+  min-width: 220px;
+  max-width: 360px;
+  text-align: left !important;
+}
+
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(2) {
+  width: 128px;
+  min-width: 112px;
+  max-width: 160px;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(10),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11) {
+  width: 168px;
+  min-width: 120px;
+  max-width: 220px;
+}
+
+.course-table.week-detail-table td:nth-child(9),
+.course-table.week-detail-table td:nth-child(10),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(11) {
+  overflow: hidden;
+  text-align: left !important;
+  text-overflow: ellipsis;
+}
+
+.course-table.week-detail-table :is(th, td):last-child {
+  width: 76px;
+  min-width: 72px;
+  max-width: 84px;
+  text-align: center !important;
+}
+
+.course-table.week-detail-table td:nth-child(11):not(:last-child),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(13) {
+  text-align: right !important;
+}
+
+.course-table.week-detail-table :is(th, td):nth-child(11):not(:last-child),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(13) {
+  width: 118px;
+  min-width: 112px;
+  max-width: 132px;
+}
+
+.fee-detail-table:not(.student-query-detail-table) :is(.select-col, th.select-col, td.select-col) {
+  width: 40px !important;
+  min-width: 40px !important;
+  max-width: 40px !important;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  text-align: center !important;
+}
+
 .wide {
   min-width: 180px;
 }
@@ -6470,13 +7201,13 @@ td.empty {
 
 .notice-shot-table td:nth-child(5) {
   color: var(--shot-brand-dark);
-  font-weight: 850;
+  font-weight: 400;
 }
 
 .notice-shot-table td:nth-child(7),
 .notice-shot-table td:nth-child(8) {
   color: var(--shot-tag-text);
-  font-weight: 800;
+  font-weight: 400;
 }
 
 .notice-shot-table td:last-child,
