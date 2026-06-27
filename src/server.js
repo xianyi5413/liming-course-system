@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.06.20-student-balance-2";
+const APP_VERSION = "2026.06.26-ui-perf-batch-1";
 const readOnlyBalanceCli = process.argv.includes("--verify-student-balances")
   || process.argv.includes("--audit-student-balances")
   || process.argv.some((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
@@ -6217,6 +6217,45 @@ function applyStudentPricingRulesToDetails(items) {
   });
 }
 
+function bootstrapLookups() {
+  return {
+    lesson_status: LESSON_STATUS,
+    course_status: COURSE_STATUS,
+    status: courseStatusValues(),
+    classrooms: mergeLookupValues(CLASSROOMS, "custom_classrooms"),
+    subjects: mergeLookupValues(SUBJECTS, "custom_subjects"),
+    times: mergeLookupValues([], "custom_time_slots"),
+    grades: GRADES,
+    staff_roles: STAFF_ROLES,
+    expense_categories: EXPENSE_CATEGORIES,
+    attendance_status: ATTENDANCE_STATUS,
+  };
+}
+
+function buildBootstrapLite(monthKey, includeInactive = false) {
+  const settings = Object.fromEntries(all("SELECT key, value FROM settings").map((row) => [row.key, row.value]));
+  settings.month_key = monthKey;
+  return {
+    active_month_key: monthKey,
+    settings,
+    lookups: bootstrapLookups(),
+    teachers: teachersForMonth(monthKey, includeInactive),
+    students: studentsForMonth(monthKey, includeInactive),
+    used_lesson_lookups: usedLessonLookups(),
+    pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
+    student_pricing: [],
+    lessons: [],
+    recharges: [],
+    opening_balances: [],
+    derived: {
+      fee_details: [],
+      student_summary: [],
+      student_summary_to_date: [],
+      teacher_summary: [],
+    },
+  };
+}
+
 function buildBootstrap(monthKey, includeInactive = false) {
   syncStudentsFromLessons();
   syncTeachersFromLessons();
@@ -6231,18 +6270,7 @@ function buildBootstrap(monthKey, includeInactive = false) {
   return {
     active_month_key: monthKey,
     settings,
-    lookups: {
-      lesson_status: LESSON_STATUS,
-      course_status: COURSE_STATUS,
-      status: courseStatusValues(),
-      classrooms: mergeLookupValues(CLASSROOMS, "custom_classrooms"),
-      subjects: mergeLookupValues(SUBJECTS, "custom_subjects"),
-      times: mergeLookupValues([], "custom_time_slots"),
-      grades: GRADES,
-      staff_roles: STAFF_ROLES,
-      expense_categories: EXPENSE_CATEGORIES,
-      attendance_status: ATTENDANCE_STATUS,
-    },
+    lookups: bootstrapLookups(),
     teachers: teachersForMonth(monthKey, includeInactive),
     students: studentsForMonth(monthKey, includeInactive),
     used_lesson_lookups: usedLessonLookups(),
@@ -7074,6 +7102,125 @@ function auditedDelete(req, actor, table, idField, idValue, entityType = table) 
   const result = db.prepare(`DELETE FROM ${table} WHERE ${idField} = ?`).run(idValue);
   recordAuditEvent(req, actor, { action: "delete", entity_type: entityType, entity_id: String(idValue), before, after: { deleted: (result.changes || 0) > 0 } });
   return result;
+}
+
+function uniqueSorted(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const item = typeof value === "number" && Number.isFinite(value) ? value : text(value);
+    if (item === "") continue;
+    const key = `${typeof item}:${item}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result.sort((a, b) => {
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    return String(a).localeCompare(String(b), "zh-Hans-CN", { numeric: true });
+  });
+}
+
+function normalizedIdList(values, limit = 500) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter((id) => Number.isInteger(id) && id > 0))]
+    .slice(0, limit);
+}
+
+function deleteRechargeRecordsBatch(ids) {
+  const idList = normalizedIdList(ids);
+  if (!idList.length) return { error: "ids is required", status: 400 };
+  return withTransaction(() => {
+    const placeholders = idList.map(() => "?").join(",");
+    const rows = all(`SELECT * FROM recharge_records WHERE id IN (${placeholders}) ORDER BY id`, idList);
+    const found = new Set(rows.map((row) => Number(row.id)));
+    const missing = idList.filter((id) => !found.has(id));
+    if (rows.length) {
+      db.prepare(`DELETE FROM recharge_records WHERE id IN (${placeholders})`).run(...rows.map((row) => Number(row.id)));
+    }
+    const carryOver = uniqueSorted(rows.map((row) => row.month_key).filter(validMonthKey))
+      .map((monthKey) => refreshCarryOverAfter(monthKey));
+    return {
+      ok: true,
+      deleted: rows.length,
+      missing,
+      rows,
+      carry_over: carryOver,
+    };
+  });
+}
+
+function deleteOpeningBalancesBatch(ids) {
+  const idList = normalizedIdList(ids);
+  if (!idList.length) return { error: "ids is required", status: 400 };
+  return withTransaction(() => {
+    const placeholders = idList.map(() => "?").join(",");
+    const rows = all(`SELECT * FROM student_opening_balances WHERE id IN (${placeholders}) ORDER BY id`, idList);
+    const found = new Set(rows.map((row) => Number(row.id)));
+    const missing = idList.filter((id) => !found.has(id));
+    if (rows.length) {
+      db.prepare(`DELETE FROM student_opening_balances WHERE id IN (${placeholders})`).run(...rows.map((row) => Number(row.id)));
+    }
+    return {
+      ok: true,
+      deleted: rows.length,
+      missing,
+      rows,
+    };
+  });
+}
+
+function deleteTeacherProfileCore(id) {
+  const row = get("SELECT * FROM teachers WHERE id = ?", [Number(id)]);
+  if (!row) return null;
+  const disabledAccounts = disableTeacherAccountsByName(row.name);
+  if (teacherHasHistory(row.name)) {
+    db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
+    return {
+      deleted: false,
+      soft_deleted: true,
+      row: get("SELECT * FROM teachers WHERE id = ?", [Number(id)]),
+      disabled_accounts_before: disabledAccounts.before,
+      disabled_accounts: disabledAccounts.after,
+      disabled_account_count: disabledAccounts.count,
+    };
+  }
+  db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
+  db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
+  db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
+  return {
+    deleted: true,
+    soft_deleted: false,
+    disabled_accounts_before: disabledAccounts.before,
+    disabled_accounts: disabledAccounts.after,
+    disabled_account_count: disabledAccounts.count,
+  };
+}
+
+function deleteTeacherProfilesBatch(ids) {
+  const idList = normalizedIdList(ids);
+  if (!idList.length) return { error: "ids is required", status: 400 };
+  return withTransaction(() => {
+    const before = all(`SELECT * FROM teachers WHERE id IN (${idList.map(() => "?").join(",")}) ORDER BY id`, idList);
+    const beforeById = new Map(before.map((row) => [Number(row.id), row]));
+    const results = [];
+    const missing = [];
+    for (const id of idList) {
+      if (!beforeById.has(id)) {
+        missing.push(id);
+        continue;
+      }
+      results.push({ id, before: beforeById.get(id), result: deleteTeacherProfileCore(id) });
+    }
+    return {
+      ok: true,
+      deleted: results.filter((item) => item.result?.deleted).length,
+      soft_deleted: results.filter((item) => item.result?.soft_deleted).length,
+      missing,
+      results,
+    };
+  });
 }
 
 function normalizedOpeningBalancePayload(body) {
@@ -10068,6 +10215,9 @@ function createLessonsBatch(rows) {
 }
 
 async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/version") {
+    return sendJson(res, { app_version: APP_VERSION });
+  }
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
     const user = currentUser(req);
     return sendJson(res, {
@@ -10493,7 +10643,12 @@ async function handleApi(req, res, url) {
     return sendJson(res, report);
   }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
-    return sendJson(res, sanitizeBootstrap(bootstrap(resolveMonthKey(url), url.searchParams.get("include_inactive") === "1"), user));
+    const monthKey = resolveMonthKey(url);
+    const includeInactiveRows = url.searchParams.get("include_inactive") === "1";
+    const payload = url.searchParams.get("lite") === "1"
+      ? buildBootstrapLite(monthKey, includeInactiveRows)
+      : bootstrap(monthKey, includeInactiveRows);
+    return sendJson(res, sanitizeBootstrap(payload, user));
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
     const viewKey = prefilterViewFromUrl(url, "lessons");
@@ -10868,6 +11023,25 @@ async function handleApi(req, res, url) {
     writeOperationLog(user, { operation_type: "新增学生期初余额", operation_content: studentOperationText(result.row), target_type: "student_opening_balances", target_id: String(result.id) });
     return sendJson(res, result, 201);
   }
+  if (req.method === "POST" && url.pathname === "/api/opening-balances/batch-delete") {
+    const body = await readBody(req);
+    const result = deleteOpeningBalancesBatch(body.ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "batch_delete",
+      entity_type: "student_opening_balances",
+      entity_id: "batch",
+      before: result.rows,
+      after: { deleted: result.deleted, missing: result.missing },
+    });
+    writeOperationLog(user, {
+      operation_type: "批量删除期初余额",
+      operation_content: `批量删除期初余额 ${result.deleted || 0} 条${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      target_type: "student_opening_balances",
+      target_id: result.rows.map((row) => row.id).join(","),
+    });
+    return sendJson(res, result);
+  }
   const openingBalanceMatch = url.pathname.match(/^\/api\/opening-balances\/(\d+)$/);
   if (openingBalanceMatch && req.method === "PUT") {
     const id = Number(openingBalanceMatch[1]);
@@ -11001,6 +11175,30 @@ async function handleApi(req, res, url) {
     auditedDelete(req, user, "lessons", "id", Number(lessonMatch[1]), "lessons");
     writeOperationLog(user, { operation_type: "删除课程", operation_content: `课程ID ${lessonMatch[1]}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
     return sendJson(res, { ok: true });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/teachers/batch-delete") {
+    const body = await readBody(req);
+    const result = deleteTeacherProfilesBatch(body.ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "batch_delete",
+      entity_type: "teachers",
+      entity_id: "batch",
+      before: result.results.map((item) => item.before),
+      after: {
+        deleted: result.deleted,
+        soft_deleted: result.soft_deleted,
+        missing: result.missing,
+      },
+    });
+    writeOperationLog(user, {
+      operation_type: "批量删除老师档案",
+      operation_content: `批量删除老师档案 ${result.deleted || 0} 条，改为离职 ${result.soft_deleted || 0} 条${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      target_type: "teachers",
+      target_id: result.results.map((item) => item.id).join(","),
+    });
+    return sendJson(res, result);
   }
 
   const teacherIdMatch = url.pathname.match(/^\/api\/teachers\/(\d+)$/);
@@ -11154,6 +11352,35 @@ async function handleApi(req, res, url) {
   }
 
   const rechargeRecordMatch = url.pathname.match(/^\/api\/recharges\/(\d+)$/);
+  if (req.method === "GET" && url.pathname === "/api/recharges") {
+    const monthKey = resolveMonthKey(url);
+    return sendJson(res, {
+      month_key: monthKey,
+      recharges: all(
+        `SELECT * FROM recharge_records WHERE month_key = ? AND ${REAL_RECHARGE_SQL} ORDER BY student_name, recharge_date, id`,
+        [monthKey],
+      ),
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/recharges/batch-delete") {
+    const body = await readBody(req);
+    const result = deleteRechargeRecordsBatch(body.ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "batch_delete",
+      entity_type: "recharge_records",
+      entity_id: "batch",
+      before: result.rows,
+      after: { deleted: result.deleted, missing: result.missing, carry_over: result.carry_over },
+    });
+    writeOperationLog(user, {
+      operation_type: "批量删除充值记录",
+      operation_content: `批量删除充值记录 ${result.deleted || 0} 条${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      target_type: "recharge_records",
+      target_id: result.rows.map((row) => row.id).join(","),
+    });
+    return sendJson(res, result);
+  }
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
     const monthKey = text(body.month_key || getSetting("month_key"));
