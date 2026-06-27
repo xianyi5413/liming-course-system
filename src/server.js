@@ -4913,11 +4913,15 @@ function dashboardTeacherPie(user) {
   }
   const rows = all("SELECT status FROM teachers");
   if (rows.length) {
-    const activeCount = rows.filter((row) => (text(row.status) || "在职") === "在职").length;
+    const groups = new Map();
+    for (const row of rows) {
+      const key = text(row.status) || "未设置";
+      groups.set(key, (groups.get(key) || 0) + 1);
+    }
     return {
-      dimension: "在职老师",
-      total: activeCount,
-      items: activeCount ? [{ name: "在职", value: activeCount }] : [],
+      dimension: "教师档案",
+      total: rows.length,
+      items: [...groups.entries()].map(([name, value]) => ({ name, value })),
     };
   }
   const lessonTeachers = uniqueNames(all("SELECT teacher_name FROM lessons WHERE TRIM(teacher_name) <> ''").map((row) => row.teacher_name));

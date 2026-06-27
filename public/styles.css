@@ -2604,6 +2604,65 @@ select.control,
   min-width: 96px;
 }
 
+.currency-input-cell,
+.uniform-table td.currency-input-cell {
+  text-align: right !important;
+}
+
+.currency-input-wrap {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  min-width: 88px;
+}
+
+.currency-input-wrap .currency-input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text);
+}
+
+.currency-input-wrap .currency-input:disabled {
+  opacity: 1;
+}
+
+.currency-input-wrap .currency-display {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px;
+  color: var(--text);
+  font-family: var(--font-number);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ease-out);
+}
+
+.currency-input-wrap.negative .currency-display {
+  color: var(--danger);
+  font-weight: 800;
+}
+
+.currency-input-wrap:focus-within .currency-display {
+  opacity: 0;
+}
+
+.currency-input-wrap:focus-within .currency-input {
+  color: var(--text) !important;
+  -webkit-text-fill-color: currentColor;
+}
+
+.currency-input-wrap.negative:focus-within .currency-input {
+  color: var(--danger) !important;
+}
+
 .price-inline {
   display: inline-flex;
   align-items: center;
@@ -2620,6 +2679,19 @@ select.control,
 
 .price-cell-wrap .cell-input {
   padding-right: 26px;
+}
+
+.editable-price-inline {
+  align-items: center;
+  gap: 8px;
+}
+
+.editable-price-inline .currency-input-wrap {
+  flex: 1 1 auto;
+}
+
+.price-cell-wrap .currency-input-wrap .cell-input {
+  padding-right: 8px;
 }
 
 .price-source-badge {

@@ -1663,6 +1663,17 @@ function optionalNumberValue(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function currencyInputMarkup(value, { className = "", attrs = "", inputValue = null } = {}) {
+  const n = numberValue(value);
+  const classes = ["currency-input-wrap", n < 0 ? "negative" : ""].filter(Boolean).join(" ");
+  return `
+    <span class="${classes}">
+      <span class="currency-display">${formatMoney(n)}</span>
+      <input class="cell-input number currency-input ${className}" type="number" value="${escapeHtml(inputValue ?? moneyInput(n))}" ${attrs}>
+    </span>
+  `;
+}
+
 function normalizedTeacherSalaryStudentNames(value) {
   return uniqueSorted(splitStudents(value).map((name) => name.replace(/\s+/g, "")).filter(Boolean)).join("、");
 }
@@ -2422,7 +2433,7 @@ function openingBalanceModalMarkup() {
         <div class="lesson-create-form opening-balance-form-grid">
           <label>学生姓名${filterComboControl({ id: "new-opening-student", className: "opening-balance-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-opening-grade", className: "opening-balance-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
-          <label>期初现金余额<input id="new-opening-actual" class="control opening-balance-modal-field" data-field="opening_actual_balance" type="number" step="0.01" value="0"></label>
+          <label>期初实际余额<input id="new-opening-actual" class="control opening-balance-modal-field" data-field="opening_actual_balance" type="number" step="0.01" value="0"></label>
           <label>期初赠送余额<input id="new-opening-gift" class="control opening-balance-modal-field" data-field="opening_gift_balance" type="number" step="0.01" value="0"></label>
           <label class="wide">备注<input id="new-opening-notes" class="control opening-balance-modal-field" data-field="notes" placeholder="如：承接2026年1月底余额"></label>
         </div>
@@ -3183,10 +3194,16 @@ function priceSourceBadge(row) {
 function editablePriceCell(row) {
   const title = escapeHtml(priceSourceTitle(row));
   const locked = !isCompletedLesson(row);
+  const input = currencyInputMarkup(row.unit_price, {
+    className: `fee-override ${row.price_source === "manual" ? "manual-price" : ""}`,
+    attrs: `data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" min="0" title="${title}" ${locked ? "disabled" : ""}`,
+  });
   return `
-    <td class="price-cell-wrap" title="${title}">
-      <input class="cell-input number fee-override ${row.price_source === "manual" ? "manual-price" : ""}" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" type="number" min="0" value="${moneyInput(row.unit_price)}" title="${title}" ${locked ? "disabled" : ""}>
+    <td class="text-cell right price-cell-wrap" title="${title}">
+      <span class="price-inline editable-price-inline">
+        ${input}
       ${priceSourceBadge(row)}
+      </span>
     </td>
   `;
 }
@@ -5457,7 +5474,7 @@ function renderSummary() {
       <div class="table-wrap smooth-table-wrap">
         <table class="student-summary-table uniform-table nowrap-table">
           <thead>
-            <tr><th>学生姓名</th><th>年级</th><th>上课次数</th><th>课程总费用</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送学费</th><th>本月实际消费</th><th>本月赠送消费</th><th>本月实际余额</th><th>本月赠送余额</th></tr>
+            <tr><th>学生姓名</th><th>年级</th><th>上课次数</th><th>课程总费用</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送充值</th><th>本月实际消费</th><th>本月赠送消费</th><th>本月实际余额</th><th>本月赠送余额</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -6110,7 +6127,7 @@ function renderRecharges() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送学费</th><th>充值日期</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th class="wide">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -6118,8 +6135,8 @@ function renderRecharges() {
                 <td class="select-col"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
                 <td class="text-cell">${escapeHtml(row.student_name)} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
-                <td><input class="cell-input number recharge-field" data-field="cur_recharge" type="number" value="${moneyInput(row.cur_recharge)}"></td>
-                <td><input class="cell-input number recharge-field" data-field="cur_gift" type="number" value="${moneyInput(row.cur_gift)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
                 <td><input class="cell-input recharge-field" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
@@ -6166,7 +6183,7 @@ function renderOpeningBalances() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初现金余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -6174,8 +6191,8 @@ function renderOpeningBalances() {
                 <td class="select-col"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
                 <td class="text-cell">${escapeHtml(row.student_name)}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
-                <td><input class="cell-input number opening-balance-field" data-field="opening_actual_balance" type="number" value="${moneyInput(row.opening_actual_balance)}"></td>
-                <td><input class="cell-input number opening-balance-field" data-field="opening_gift_balance" type="number" value="${moneyInput(row.opening_gift_balance)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
                 <td><input class="cell-input wide opening-balance-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
@@ -7422,7 +7439,7 @@ function renderPricing() {
               <tr>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 <td class="text-cell right">${row.student_count}</td>
-                <td><input class="cell-input number pricing-field" data-id="${row.id}" data-field="unit_price" type="number" value="${moneyInput(row.unit_price)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.unit_price, { className: "pricing-field", attrs: `data-id="${row.id}" data-field="unit_price"` })}</td>
                 <td class="text-cell">${escapeHtml(`${row.grade}-${row.student_count}`)}</td>
                 <td><input class="cell-input pricing-field wide" data-id="${row.id}" data-field="description" value="${escapeHtml(row.description)}"></td>
               </tr>
@@ -7577,7 +7594,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
                 <td class="text-cell">${escapeHtml(row.subject)}</td>
                 <td class="text-cell wide">${escapeHtml(row.student_names || "")}</td>
-                <td><input class="cell-input number student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}" data-id="${row.id}" data-field="custom_price" type="number" min="0" step="0.01" value="${moneyInput(row.custom_price)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.custom_price, { className: `student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}`, attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01"` })}</td>
                 <td class="text-cell">${priceSourceLabel(row.rule_source)}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
@@ -7889,8 +7906,8 @@ function staffProfilesPanelMarkup() {
                 <td><input class="cell-input staff-field" data-field="name" value="${escapeHtml(row.name)}"></td>
                 <td><input class="cell-input staff-field" data-field="role" list="staff-role-options" value="${escapeHtml(row.role)}"></td>
                 <td><select class="cell-select staff-field" data-field="pay_type">${options(["月薪", "日薪"], row.pay_type || "月薪")}</select></td>
-                <td><input class="cell-input number staff-field" data-field="base_salary" type="number" value="${moneyInput(row.base_salary)}"></td>
-                <td><input class="cell-input number staff-field" data-field="daily_rate" type="number" value="${moneyInput(row.daily_rate)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.base_salary, { className: "staff-field", attrs: `data-field="base_salary"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.daily_rate, { className: "staff-field", attrs: `data-field="daily_rate"` })}</td>
                 <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${moneyInput(row.standard_work_days || 26)}"></td>
                 <td><input class="cell-input staff-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
                 <td><select class="cell-select staff-field" data-field="status">${options(["在职", "暂停", "离职"], row.status || "在职")}</select></td>
@@ -8074,8 +8091,8 @@ function renderStaffPayroll() {
                   <td class="text-cell">${escapeHtml(row.pay_type || "月薪")}</td>
                   <td class="text-cell right">${row.pay_type === "日薪" ? formatMoney(row.daily_rate || row.base_salary) : formatMoney(row.base_salary)}</td>
                   <td class="text-cell right" title="${row.attendance_days ? `已登记 ${row.attendance_days} 天考勤` : "未登记考勤，按整月基础工资"}">${row.attendance_days ? money(row.pay_units) : "整月"}</td>
-                  <td><input class="cell-input number staff-salary-field" data-field="bonus" type="number" value="${moneyInput(row.bonus)}" ${disabled}></td>
-                  <td><input class="cell-input number staff-salary-field" data-field="deduction" type="number" value="${moneyInput(row.deduction)}" ${disabled}></td>
+                  <td class="currency-input-cell">${currencyInputMarkup(row.bonus, { className: "staff-salary-field", attrs: `data-field="bonus" ${disabled}` })}</td>
+                  <td class="currency-input-cell">${currencyInputMarkup(row.deduction, { className: "staff-salary-field", attrs: `data-field="deduction" ${disabled}` })}</td>
                   <td class="text-cell right ${mismatch ? "warning-cell" : ""}" title="${mismatch ? `按基础+奖金-扣款应为 ${formatMoney(row.expected_salary)}` : ""}">${mismatch ? "⚠ " : ""}${formatMoney(row.salary_actual)}</td>
                   <td><input class="cell-input wide staff-salary-field" data-field="notes" value="${escapeHtml(row.notes === "auto" ? "" : row.notes || "")}" placeholder="${row.notes === "auto" ? "auto" : ""}" ${disabled}></td>
                   <td class="readonly"><button class="btn danger delete-staff-salary" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
@@ -8174,7 +8191,7 @@ function renderExpenses() {
               <tr class="expense-row" data-id="${row.id}">
                 <td><input class="cell-input expense-field" data-field="expense_date" type="date" value="${escapeHtml(row.expense_date)}"></td>
                 <td><input class="cell-input expense-field" data-field="category" list="expense-category-options" value="${escapeHtml(row.category)}"></td>
-                <td><input class="cell-input number expense-field" data-field="amount" type="number" value="${moneyInput(row.amount)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.amount, { className: "expense-field", attrs: `data-field="amount"` })}</td>
                 <td><input class="cell-input expense-field" data-field="vendor" value="${escapeHtml(row.vendor || "")}"></td>
                 <td><input class="cell-input wide expense-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
                 <td class="readonly"><button class="btn danger delete-expense" data-id="${row.id}">删除</button></td>
@@ -8380,10 +8397,10 @@ function renderTeacherSalary() {
               <tr class="teacher-adjustment-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 ${showSalary ? `<td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">${formatMoney(row.salary_total)}</td>` : ""}
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week1_transport" type="number" value="${moneyInput(row.week1_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week2_transport" type="number" value="${moneyInput(row.week2_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week3_transport" type="number" value="${moneyInput(row.week3_transport)}"></td>
-                <td><input class="cell-input number teacher-adjustment-field" data-field="week4_transport" type="number" value="${moneyInput(row.week4_transport)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.week1_transport, { className: "teacher-adjustment-field", attrs: `data-field="week1_transport"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.week2_transport, { className: "teacher-adjustment-field", attrs: `data-field="week2_transport"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.week3_transport, { className: "teacher-adjustment-field", attrs: `data-field="week3_transport"` })}</td>
+                <td class="currency-input-cell">${currencyInputMarkup(row.week4_transport, { className: "teacher-adjustment-field", attrs: `data-field="week4_transport"` })}</td>
                 <td class="text-cell right">${formatMoney(showSalary ? row.total_salary : numberValue(row.week1_transport) + numberValue(row.week2_transport) + numberValue(row.week3_transport) + numberValue(row.week4_transport))}</td>
                 <td><input class="cell-input wide teacher-adjustment-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
@@ -8485,7 +8502,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${escapeHtml(rule.grade)}</td>
                 <td class="text-cell">${escapeHtml(rule.subject)}</td>
                 <td class="text-cell wide">${escapeHtml(rule.student_names)}</td>
-                <td><input class="cell-input number teacher-salary-rule-field" data-field="salary_per_unit" type="number" min="0" step="0.01" value="${teacherSalaryInputValue(rule.salary_per_unit)}"></td>
+                <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
                 <td class="text-cell">${teacherSalaryRuleSalaryStatus(rule)}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
@@ -8606,7 +8623,7 @@ function renderTeacherDetail() {
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${calculated ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : disabledReason)}"></td>` : ""}
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.student_names)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
-                    <td class="price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><input class="cell-input number teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}" data-id="${row.id}" data-field="teacher_salary" type="number" step="0.01" value="${escapeHtml(teacherSalaryInputValue(displayedTeacherSalary))}" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}>${teacherSalarySourceBadge(row)}</td>
+                    <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
                   ` : ""}
                 </tr>
@@ -10462,9 +10479,9 @@ function wireEvents() {
       const gift = document.querySelector("#new-opening-gift")?.value || "0";
       const notes = document.querySelector("#new-opening-notes")?.value || "";
       if (!studentName) return alert("请填写学生姓名");
-      if (optionalNumberValue(actual) === null) return alert("请填写有效的期初现金余额");
+      if (optionalNumberValue(actual) === null) return alert("请填写有效的期初实际余额");
       if (optionalNumberValue(gift) === null) return alert("请填写有效的期初赠送余额");
-      if (numberValue(actual) === 0 && numberValue(gift) === 0) return alert("期初现金余额和期初赠送余额不能同时为 0");
+      if (numberValue(actual) === 0 && numberValue(gift) === 0) return alert("期初实际余额和期初赠送余额不能同时为 0");
       button.disabled = true;
       try {
         await request("/api/opening-balances", {
@@ -10610,7 +10627,7 @@ function wireEvents() {
       const row = input.closest(".opening-balance-row");
       const payload = collectRowPayload(row, ".opening-balance-field");
       if (numberValue(payload.opening_actual_balance) === 0 && numberValue(payload.opening_gift_balance) === 0
-        && !confirm("期初现金余额和期初赠送余额都为 0，这将删除该期初余额。是否继续？")) {
+        && !confirm("期初实际余额和期初赠送余额都为 0，这将删除该期初余额。是否继续？")) {
         load();
         return;
       }
