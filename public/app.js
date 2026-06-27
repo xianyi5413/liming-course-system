@@ -86,7 +86,6 @@ const WEEK_USER_SET_KEY = "liming:week:user-set";
 const THEME_KEY = "liming:theme";
 const PALETTE_KEY = "liming:palette";
 const IGNORE_ROOM_ONE_CONFLICT_KEY = "liming:ignore-room-one-conflict";
-const SUMMARY_SCOPE_KEY = "liming:summary-scope";
 const STUDENT_QUERY_RANGE_KEY = "liming:student-query-range";
 const LOGIN_REMEMBER_KEY = "liming:login-remember";
 const SIDEBAR_COLLAPSED_KEY = "liming:sidebar-collapsed";
@@ -321,7 +320,6 @@ let selectedOpeningBalanceIds = new Set();
 let feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
 let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
-let summaryScope = localStorage.getItem(SUMMARY_SCOPE_KEY) || "month";
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
 let financeRange = readFinanceRange();
@@ -1426,8 +1424,17 @@ function money2(value) {
   });
 }
 
+function formatMoney(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "¥0.00";
+  const amount = money2(Math.abs(n));
+  return n < 0 ? `-¥${amount}` : `¥${amount}`;
+}
+
+const formatCurrency = formatMoney;
+
 function yuan2(value) {
-  return `¥${money2(value)}`;
+  return formatMoney(value);
 }
 
 function todayDate() {
@@ -1737,9 +1744,9 @@ function teacherSalarySourceLabel(lesson) {
 function teacherSalarySourceTitle(lesson) {
   if (!isCompletedLesson(lesson)) return "非已上课程教师薪资自动按 0 处理";
   const label = teacherSalarySourceLabel(lesson);
-  const amount = `¥${money(displayTeacherSalaryForLesson(lesson))}`;
+  const amount = formatMoney(displayTeacherSalaryForLesson(lesson));
   const ruleSalary = displayTeacherRuleSalaryForLesson(lesson);
-  const rule = `，规则薪资 ¥${money(ruleSalary)}`;
+  const rule = `，规则薪资 ${formatMoney(ruleSalary)}`;
   if (label === "未设置") return "已上课程未设置有效教师薪资规则";
   if (label === "手动") return `当前薪资 ${amount}${rule}，与规则不一致，视为手动`;
   return `系统自动薪资 ${amount}${rule}`;
@@ -2301,14 +2308,6 @@ function rechargeSource(row) {
 function rechargeSourceTag(source) {
   if (source === "carry_over") return `<span class="source-tag" title="该行由上月余额自动结转">结转</span>`;
   return "";
-}
-
-function rechargePrevCell(row, field) {
-  const value = field === "prev_gift" ? row.prev_gift : row.prev_actual;
-  const title = row.prev_source_month
-    ? `自动取 ${formatMonthOption(row.prev_source_month)} 的月末结余`
-    : "源表期初结转";
-  return `<td class="readonly right" title="${escapeHtml(title)}">${money(value)}</td>`;
 }
 
 function isRealRechargeRow(row) {
@@ -2888,6 +2887,24 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       ${filterComboControl({ className: "lesson-filter-input", field: "subject", value: lessonFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
     </label>
   ` : "";
+  const quickFilters = compact ? "" : `
+    <div class="filter-controls lesson-quick-row">
+      <div class="filter-field lesson-quick-field">
+        <span>快捷</span>
+        <span class="lesson-quick-buttons">
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="yesterday">昨日</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="today">今日</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="tomorrow">明日</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-week">上周</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="week">本周</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="next-week">下周</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-month">上月</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="month">本月</button>
+          <button class="btn ghost lesson-date-preset" type="button" data-preset="next-month">下月</button>
+        </span>
+      </div>
+    </div>
+  `;
   const fullFilters = compact ? "" : `
     <label class="filter-field filter-date-range">
       <span>日期</span>
@@ -2897,20 +2914,6 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
         <input class="control lesson-filter-input" data-filter-field="end_date" type="date" value="${escapeHtml(lessonFilter.end_date)}">
       </span>
     </label>
-    <div class="filter-field lesson-quick-field">
-      <span>快捷</span>
-      <span class="lesson-quick-buttons">
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="yesterday">昨日</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="today">今日</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="tomorrow">明日</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-week">上周</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="week">本周</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="next-week">下周</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="prev-month">上月</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="month">本月</button>
-        <button class="btn ghost lesson-date-preset" type="button" data-preset="next-month">下月</button>
-      </span>
-    </div>
     <label class="filter-field">
       <span>状态</span>
       ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
@@ -2934,16 +2937,19 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
   `;
   return `
     <div class="filter-bar lesson-filter-bar">
-      <div class="filter-controls">
-        ${teacherSelect}
-        ${studentInput}
-        ${compactExtraFilters}
-        ${fullFilters}
+      <div class="lesson-filter-top">
+        <div class="filter-controls">
+          ${teacherSelect}
+          ${studentInput}
+          ${compactExtraFilters}
+          ${fullFilters}
+        </div>
+        <div class="filter-summary">
+          <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 节</span>
+          <button class="btn reset-lesson-filter" type="button">重置</button>
+        </div>
       </div>
-      <div class="filter-summary">
-        <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 节</span>
-        <button class="btn reset-lesson-filter" type="button">重置</button>
-      </div>
+      ${quickFilters}
     </div>
   `;
 }
@@ -3053,9 +3059,7 @@ function summaryMatchesFilter(row, filter = summaryFilter) {
 }
 
 function summaryRows() {
-  const rows = summaryScope === "toDate"
-    ? state.derived.student_summary_to_date || state.derived.student_summary || []
-    : state.derived.student_summary || [];
+  const rows = state.derived.student_summary || [];
   return [...rows].sort(compareStudentGradeName);
 }
 
@@ -3071,10 +3075,6 @@ function renderSummaryFilterBar(rows, filteredRows) {
   const opts = dynamicSummaryFilterOptions(rows);
   return `
     <div class="filter-bar compact summary-filter-bar">
-      <div class="segmented summary-scope-toggle">
-        <button class="segmented-option summary-scope-option ${summaryScope === "month" ? "active" : ""}" type="button" data-scope="month">本月</button>
-        <button class="segmented-option summary-scope-option ${summaryScope === "toDate" ? "active" : ""}" type="button" data-scope="toDate">迄今为止</button>
-      </div>
       <label>学生姓名</label>
       ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
       <label>年级</label>
@@ -3163,8 +3163,8 @@ function priceSourceLabel(source) {
 }
 
 function priceSourceTitle(row) {
-  const amount = `¥${money(row.unit_price)}`;
-  const rule = row.rule_price == null ? "" : `，规则费用 ¥${money(row.rule_price)}`;
+  const amount = formatMoney(row.unit_price);
+  const rule = row.rule_price == null ? "" : `，规则费用 ${formatMoney(row.rule_price)}`;
   if (row.price_source === "manual") return `当前费用 ${amount}${rule}，与规则不一致，视为手动`;
   if (row.price_source === "pending") return "已上课程未设置有效学生单价规则";
   return `系统自动费用 ${amount}${rule}`;
@@ -3207,7 +3207,7 @@ function feeDetailSelectTitle(row) {
 
 function readonlyPriceCell(row) {
   const title = escapeHtml(priceSourceTitle(row));
-  return `<td class="text-cell right price-cell-wrap" title="${title}"><span>${money(row.unit_price)}</span>${priceSourceBadge(row)}</td>`;
+  return `<td class="text-cell right price-cell-wrap" title="${title}"><span class="price-inline"><span class="price-amount">${formatMoney(row.unit_price)}</span>${priceSourceBadge(row)}</span></td>`;
 }
 
 function balanceMiniCard(title, items) {
@@ -4236,7 +4236,7 @@ function lessonToolbarHtml(rows) {
   return `
     <div class="lesson-table-toolbar">
       <div class="lesson-table-actions">
-        <button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "退出排课模式" : "排课模式"}</button>
+        <button class="btn schedule-mode-toggle ${scheduleMode ? "primary" : ""}" type="button">${scheduleMode ? "结束排课" : "开始排课"}</button>
         <button class="btn week-copy-btn" type="button">整周复制</button>
         <button class="btn primary add-lesson" type="button">新增课程</button>
         <button class="btn batch-complete-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量已上${selectedCount ? `（${selectedCount}）` : ""}</button>
@@ -5359,7 +5359,7 @@ function renderWeek() {
                   <td class="text-cell">${escapeHtml(row.subject)}</td>
                   <td class="text-cell">${escapeHtml(row.student_names)}</td>
                   <td class="text-cell">${escapeHtml(row.notes)}</td>
-                  ${showSalary ? `<td class="text-cell right">${money(displayTeacherSalaryForLesson(row))}</td>` : ""}
+                  ${showSalary ? `<td class="text-cell right">${formatMoney(displayTeacherSalaryForLesson(row))}</td>` : ""}
                   <td class="text-cell">${splitStudents(row.student_names).length}</td>
                 </tr>
               `;
@@ -5397,7 +5397,7 @@ function renderFeeDetails() {
   const selectedCount = selectedFeeDetailKeys.size;
   const allSelectableChecked = selectableRows.length > 0 && selectedCount === selectableRows.length;
   const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
-  renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${money(total)} 元`);
+  renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${formatMoney(total)}`);
   contentEl.innerHTML = `
     <div class="band">
       ${renderFeeDetailsFilterBar(rows, visibleRows)}
@@ -5410,7 +5410,7 @@ function renderFeeDetails() {
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">备注</th><th>单人费用</th><th>规则费用</th>
+              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
@@ -5431,7 +5431,7 @@ function renderFeeDetails() {
                 <td class="text-cell">${escapeHtml(row.subject)}</td>
                 <td class="text-cell">${escapeHtml(row.notes)}</td>
                 ${editablePriceCell(row)}
-                <td class="text-cell right">${row.rule_price == null ? "" : money(row.rule_price)}</td>
+                <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
               </tr>
             `;
             }).join("") || `<tr><td colspan="13" class="empty">暂无费用明细</td></tr>`}
@@ -5447,10 +5447,9 @@ function renderSummary() {
   const visibleRows = rows.filter((row) => summaryMatchesFilter(row));
   const totalFee = rows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
   const totalBalance = rows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
-  const isToDate = summaryScope === "toDate";
   renderTopbar(
-    `${isToDate ? `截至${monthLabel()}` : monthLabel()} 学生费用汇总`,
-    `课程费用 ${money(totalFee)} 元，余额合计 ${money(totalBalance)} 元`,
+    `${monthLabel()} 学生费用汇总`,
+    `课程费用 ${formatMoney(totalFee)}，余额合计 ${formatMoney(totalBalance)}`,
   );
   contentEl.innerHTML = `
     <div class="band">
@@ -5466,15 +5465,15 @@ function renderSummary() {
                   <td class="text-cell">${escapeHtml(row.student_name)}</td>
                   <td class="text-cell grade-cell">${escapeHtml(row.grade)}</td>
                   <td class="text-cell">${Math.round(numberValue(row.lesson_count))}</td>
-                  <td class="text-cell right">${money(row.total_fee)}</td>
-                  <td class="text-cell right ${numberValue(row.prev_actual) < 0 ? "negative" : ""}">${money(row.prev_actual)}</td>
-                  <td class="text-cell right ${numberValue(row.prev_gift) < 0 ? "negative" : ""}">${money(row.prev_gift)}</td>
-                  <td class="text-cell right ${numberValue(row.cur_recharge) < 0 ? "negative" : ""}">${money(row.cur_recharge)}</td>
-                  <td class="text-cell right ${numberValue(row.cur_gift) < 0 ? "negative" : ""}">${money(row.cur_gift)}</td>
-                  <td class="text-cell right">${money(row.actual_consumption)}</td>
-                  <td class="text-cell right">${money(row.gift_consumption)}</td>
-                  <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${money(row.actual_balance)}</td>
-                  <td class="text-cell right ${numberValue(row.gift_balance) < 0 ? "negative" : ""}">${money(row.gift_balance)}</td>
+                  <td class="text-cell right">${formatMoney(row.total_fee)}</td>
+                  <td class="text-cell right ${numberValue(row.prev_actual) < 0 ? "negative" : ""}">${formatMoney(row.prev_actual)}</td>
+                  <td class="text-cell right ${numberValue(row.prev_gift) < 0 ? "negative" : ""}">${formatMoney(row.prev_gift)}</td>
+                  <td class="text-cell right ${numberValue(row.cur_recharge) < 0 ? "negative" : ""}">${formatMoney(row.cur_recharge)}</td>
+                  <td class="text-cell right ${numberValue(row.cur_gift) < 0 ? "negative" : ""}">${formatMoney(row.cur_gift)}</td>
+                  <td class="text-cell right">${formatMoney(row.actual_consumption)}</td>
+                  <td class="text-cell right">${formatMoney(row.gift_consumption)}</td>
+                  <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${formatMoney(row.actual_balance)}</td>
+                  <td class="text-cell right ${numberValue(row.gift_balance) < 0 ? "negative" : ""}">${formatMoney(row.gift_balance)}</td>
                 </tr>
               `).join("") || `<tr><td colspan="12" class="empty">暂无学生费用汇总</td></tr>`}
           </tbody>
@@ -5500,11 +5499,11 @@ function financeMetric(label, metric, options = {}) {
   const cls = momClass(metric?.mom_pct, reverse);
   const current = numberValue(metric?.current);
   const previous = numberValue(metric?.previous);
-  const fullValue = `¥${money2(current)}`;
-  const displayValue = Math.abs(current) >= 10000000 ? `¥${compactMoney(current)}` : fullValue;
+  const fullValue = formatMoney(current);
+  const displayValue = Math.abs(current) >= 10000000 ? `${current < 0 ? "-" : ""}¥${compactMoney(Math.abs(current))}` : fullValue;
   const delta = metric?.mom_pct == null
-    ? `无上期（上期 ¥${money2(previous)}）`
-    : `${metric.mom_pct >= 0 ? "▲" : "▼"}${metric.mom_pct >= 0 ? "+" : ""}${(metric.mom_pct * 100).toFixed(1)}%（上期 ¥${money2(previous)}）`;
+    ? `无上期（上期 ${formatMoney(previous)}）`
+    : `${metric.mom_pct >= 0 ? "▲" : "▼"}${metric.mom_pct >= 0 ? "+" : ""}${(metric.mom_pct * 100).toFixed(1)}%（上期 ${formatMoney(previous)}）`;
   const cardTitle = [title, displayValue !== fullValue ? fullValue : ""].filter(Boolean).join(" / ");
   return `
     <div class="finance-kpi" ${cardTitle ? `title="${escapeHtml(cardTitle)}"` : ""}>
@@ -5531,7 +5530,7 @@ function financeQualityNotices(summary) {
   if (debt > 0) {
     notices.push({
       title: "存在账户欠款",
-      body: `学生现金余额为负的欠款合计 ¥${money2(debt)}，已并入应收合计。`,
+      body: `学生现金余额为负的欠款合计 ${formatMoney(debt)}，已并入应收合计。`,
     });
   }
   if (!notices.length) return "";
@@ -5563,8 +5562,8 @@ function profitTable(summary) {
     return `
     <tr>
       <td class="text-cell">${escapeHtml(label)}</td>
-      <td class="text-cell right">${isMoney ? `¥${money2(metric.current)}` : percent(metric.current)}</td>
-      <td class="text-cell right">${isMoney ? `¥${money2(metric.previous)}` : percent(metric.previous)}</td>
+      <td class="text-cell right">${isMoney ? formatMoney(metric.current) : percent(metric.current)}</td>
+      <td class="text-cell right">${isMoney ? formatMoney(metric.previous) : percent(metric.previous)}</td>
       <td class="text-cell right mom ${momClass(delta, reverse)}">${escapeHtml(deltaLabel)}</td>
     </tr>
   `;
@@ -5591,7 +5590,7 @@ function stackedBar(title, segments) {
     const pct = value / total;
     const currentX = x;
     x += width;
-    const label = `${segment.label} ¥${money2(value)} (${(pct * 100).toFixed(0)}%)`;
+    const label = `${segment.label} ${formatMoney(value)} (${(pct * 100).toFixed(0)}%)`;
     return `
       <g>
         <title>${escapeHtml(label)}</title>
@@ -5609,7 +5608,6 @@ function stackedBar(title, segments) {
 }
 
 function compositionDonut(title, segments) {
-  const currency = "\u00a5";
   const clean = segments
     .map((segment) => ({ ...segment, value: Math.max(0, numberValue(segment.value)) }))
     .filter((segment) => segment.value > 0);
@@ -5633,7 +5631,7 @@ function compositionDonut(title, segments) {
     const dash = pct * circumference;
     const currentOffset = offset;
     offset += dash;
-    const label = `${segment.label} ${currency}${money2(segment.value)} (${(pct * 100).toFixed(1)}%)`;
+    const label = `${segment.label} ${formatMoney(segment.value)} (${(pct * 100).toFixed(1)}%)`;
     return `
       <circle class="donut-segment" cx="${center}" cy="${center}" r="${radius}" fill="none" stroke="${segment.color}" stroke-width="18" stroke-linecap="${clean.length > 1 ? "round" : "butt"}" stroke-dasharray="${dash.toFixed(2)} ${(circumference - dash).toFixed(2)}" stroke-dashoffset="${(-currentOffset).toFixed(2)}" transform="rotate(-90 ${center} ${center})">
         <title>${escapeHtml(label)}</title>
@@ -5646,7 +5644,7 @@ function compositionDonut(title, segments) {
       <li>
         <span class="donut-key" style="background:${segment.color}"></span>
         <span class="donut-label">${escapeHtml(segment.label)}</span>
-        <span class="donut-value">${currency}${money2(segment.value)}</span>
+        <span class="donut-value">${formatMoney(segment.value)}</span>
         <span class="donut-pct">${(pct * 100).toFixed(1)}%</span>
       </li>
     `;
@@ -5670,8 +5668,9 @@ function compositionDonut(title, segments) {
 
 function compactMoney(value) {
   const n = numberValue(value);
-  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}万`;
-  return money2(n);
+  const abs = Math.abs(n);
+  if (abs >= 10000) return `${n < 0 ? "-¥" : "¥"}${(abs / 10000).toFixed(1)}万`;
+  return formatMoney(n);
 }
 
 function chartPointPath(points) {
@@ -5745,7 +5744,7 @@ function financeTrendChart(rows) {
       : "";
     return `
       <g>
-        <title>${escapeHtml(`${month}：毛利 ¥${money2(row.gross_profit)} / 毛利率 ${percent(row.gross_margin)}`)}</title>
+        <title>${escapeHtml(`${month}：毛利 ${formatMoney(row.gross_profit)} / 毛利率 ${percent(row.gross_margin)}`)}</title>
         <circle class="trend-profit-point" cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3.8"></circle>
         <circle class="trend-rate-point" cx="${px.toFixed(1)}" cy="${ry.toFixed(1)}" r="3.4"></circle>
         ${label}
@@ -5830,14 +5829,14 @@ function renderFinance() {
       type: "账户欠款",
       name: row.student_name,
       amount: row.amount,
-      note: `现金余额 ¥${money2(row.actual_balance)}`,
+      note: `现金余额 ${formatMoney(row.actual_balance)}`,
       cls: "risk-debt",
     })),
     ...summary.top_lists.low_balance.map((row) => ({
       type: "低余额",
       name: row.student_name,
       amount: row.actual_balance,
-      note: `低于平均单次课费 ¥${money2(row.avg_unit_price)}`,
+      note: `低于平均单次课费 ${formatMoney(row.avg_unit_price)}`,
       cls: "risk-low",
     })),
     ...summary.top_lists.unpaid_lessons.map((row) => ({
@@ -5892,7 +5891,7 @@ function renderFinance() {
     <div class="finance-command-panel">
       <div class="finance-command-main ${netCashValue >= 0 ? "positive" : "negative"}">
         <span>净现金流</span>
-        <strong>¥${money2(netCashValue)}</strong>
+        <strong>${formatMoney(netCashValue)}</strong>
         <small class="mom ${momClass(netCashFlow.mom_pct)}">环比 ${momLabel(netCashFlow.mom_pct)}</small>
       </div>
     </div>
@@ -5902,7 +5901,7 @@ function renderFinance() {
       ${financeMetric("师资成本", teacherCostMetric, { reverse: true })}
       ${financeMetric("运营成本", summary.overview.operating_cost, {
         reverse: true,
-        title: `员工工资 ¥${money2(op.staff_salary_total)} / 日常开销 ¥${money2(op.operating_expense_total)}`,
+        title: `员工工资 ${formatMoney(op.staff_salary_total)} / 日常开销 ${formatMoney(op.operating_expense_total)}`,
       })}
       ${financeMetric("毛利", summary.overview.gross_profit, {
         subtitle: `毛利率 ${percent(summary.overview.gross_margin.current)}${numberValue(dataQuality.teacher_salary_missing_lessons) ? " · 暂估" : ""}`,
@@ -5954,11 +5953,11 @@ function renderFinance() {
           <table class="finance-table balance-table">
             <thead><tr><th>项目</th><th>期末金额</th></tr></thead>
             <tbody>
-              <tr><td class="text-cell">月末沉淀现金</td><td class="text-cell right">¥${money2(balanceSheet.total_actual_balance)}</td></tr>
-              <tr><td class="text-cell">月末赠送余额</td><td class="text-cell right">¥${money2(balanceSheet.total_gift_balance)}</td></tr>
-              <tr><td class="text-cell">未缴费课时</td><td class="text-cell right">¥${money2(balanceSheet.unpaid_lesson_receivable)}</td></tr>
-              <tr><td class="text-cell">账户欠款</td><td class="text-cell right negative">¥${money2(balanceSheet.account_debt_receivable)}</td></tr>
-              <tr><td class="text-cell">应收合计</td><td class="text-cell right">¥${money2(balanceSheet.accounts_receivable)}</td></tr>
+              <tr><td class="text-cell">月末沉淀现金</td><td class="text-cell right">${formatMoney(balanceSheet.total_actual_balance)}</td></tr>
+              <tr><td class="text-cell">月末赠送余额</td><td class="text-cell right">${formatMoney(balanceSheet.total_gift_balance)}</td></tr>
+              <tr><td class="text-cell">未缴费课时</td><td class="text-cell right">${formatMoney(balanceSheet.unpaid_lesson_receivable)}</td></tr>
+              <tr><td class="text-cell">账户欠款</td><td class="text-cell right negative">${formatMoney(balanceSheet.account_debt_receivable)}</td></tr>
+              <tr><td class="text-cell">应收合计</td><td class="text-cell right">${formatMoney(balanceSheet.accounts_receivable)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -5972,7 +5971,7 @@ function renderFinance() {
           <table class="finance-table teacher-rank-table">
             <thead><tr><th>老师</th><th>贡献</th><th>薪资</th><th>ROI</th></tr></thead>
             <tbody>
-              ${summary.breakdowns.by_teacher.map((row) => `<tr><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell right">¥${money2(row.revenue_contribution)}</td><td class="text-cell right">¥${money2(row.salary_total)}</td><td class="text-cell right">${row.roi == null ? "" : row.roi.toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无数据</td></tr>`}
+              ${summary.breakdowns.by_teacher.map((row) => `<tr><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell right">${formatMoney(row.revenue_contribution)}</td><td class="text-cell right">${formatMoney(row.salary_total)}</td><td class="text-cell right">${row.roi == null ? "" : row.roi.toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无数据</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -5983,7 +5982,7 @@ function renderFinance() {
           <table class="finance-table risk-table">
             <thead><tr><th>类型</th><th>对象</th><th>金额</th><th>说明</th></tr></thead>
             <tbody>
-              ${riskRows.map((row) => `<tr class="${row.cls}"><td class="text-cell">${escapeHtml(row.type)}</td><td class="text-cell">${escapeHtml(row.name)}</td><td class="text-cell right">¥${money2(row.amount)}</td><td class="text-cell">${escapeHtml(row.note)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无风险</td></tr>`}
+              ${riskRows.map((row) => `<tr class="${row.cls}"><td class="text-cell">${escapeHtml(row.type)}</td><td class="text-cell">${escapeHtml(row.name)}</td><td class="text-cell right">${formatMoney(row.amount)}</td><td class="text-cell">${escapeHtml(row.note)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">暂无风险</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -6022,7 +6021,7 @@ function renderFinance() {
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "line" },
-          valueFormatter: (value) => `¥${money2(value)}`,
+          valueFormatter: (value) => formatMoney(value),
         },
         legend: {
           data: [...gradeOrder],
@@ -6111,7 +6110,7 @@ function renderRecharges() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送学费</th><th>充值日期</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送学费</th><th>充值日期</th><th class="wide">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -6119,14 +6118,12 @@ function renderRecharges() {
                 <td class="select-col"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
                 <td class="text-cell">${escapeHtml(row.student_name)} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${escapeHtml(row.grade)}</td>
-                ${rechargePrevCell(row, "prev_actual")}
-                ${rechargePrevCell(row, "prev_gift")}
                 <td><input class="cell-input number recharge-field" data-field="cur_recharge" type="number" value="${moneyInput(row.cur_recharge)}"></td>
                 <td><input class="cell-input number recharge-field" data-field="cur_gift" type="number" value="${moneyInput(row.cur_gift)}"></td>
                 <td><input class="cell-input recharge-field" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无充值记录</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -6208,10 +6205,10 @@ function studentHistoryPanel() {
               <tr class="${row.month_key === state.settings.month_key ? "current-month-row" : ""}">
                 <td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td>
                 <td class="text-cell">${row.lesson_count}</td>
-                <td class="text-cell right">${money(row.total_fee)}</td>
-                <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${money(row.actual_balance)}</td>
-                <td class="text-cell right">${money(row.gift_balance)}</td>
-                <td class="text-cell right">${money(row.net_recharge)}</td>
+                <td class="text-cell right">${formatMoney(row.total_fee)}</td>
+                <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${formatMoney(row.actual_balance)}</td>
+                <td class="text-cell right">${formatMoney(row.gift_balance)}</td>
+                <td class="text-cell right">${formatMoney(row.net_recharge)}</td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无历史记录</td></tr>`}
           </tbody>
@@ -6263,7 +6260,7 @@ function studentQueryComparisonPanel(report) {
           <thead><tr><th>月份</th><th>有效课次</th><th>当月课费</th><th>现金充值</th><th>赠送充值</th></tr></thead>
           <tbody>
             ${(report.month_rows || []).map((row) => `
-              <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell">${row.lesson_count}</td><td class="text-cell right">¥${money2(row.total_fee)}</td><td class="text-cell right">¥${money2(row.cur_recharge)}</td><td class="text-cell right">¥${money2(row.cur_gift)}</td></tr>
+              <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell">${row.lesson_count}</td><td class="text-cell right">${formatMoney(row.total_fee)}</td><td class="text-cell right">${formatMoney(row.cur_recharge)}</td><td class="text-cell right">${formatMoney(row.cur_gift)}</td></tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无期间明细</td></tr>`}
           </tbody>
         </table>
@@ -6376,13 +6373,13 @@ function studentStatementDateRange(report = studentStatementReport()) {
 function studentStatementMetricCards(summary = {}) {
   return [
     { label: "有效上课次数", value: String(summary.lesson_count || 0) },
-    { label: "课程费用", value: `¥${money2(summary.total_fee || 0)}` },
-    { label: "开始日期前剩余现金", value: `¥${money2(summary.opening_actual_balance ?? 0)}`, negative: numberValue(summary.opening_actual_balance) < 0 },
-    { label: "开始日期前剩余赠送", value: `¥${money2(summary.opening_gift_balance ?? 0)}` },
-    { label: "期间充值现金", value: `¥${money2(summary.cur_recharge || 0)}` },
-    { label: "期间充值赠送", value: `¥${money2(summary.cur_gift || 0)}` },
-    { label: "结束日期后剩余现金", value: `¥${money2(summary.closing_actual_balance ?? summary.actual_balance ?? 0)}`, negative: numberValue(summary.closing_actual_balance ?? summary.actual_balance) < 0 },
-    { label: "结束日期后剩余赠送", value: `¥${money2(summary.closing_gift_balance ?? summary.gift_balance ?? 0)}` },
+    { label: "课程费用", value: formatMoney(summary.total_fee || 0) },
+    { label: "开始日期前剩余现金", value: formatMoney(summary.opening_actual_balance ?? 0), negative: numberValue(summary.opening_actual_balance) < 0 },
+    { label: "开始日期前剩余赠送", value: formatMoney(summary.opening_gift_balance ?? 0) },
+    { label: "期间充值现金", value: formatMoney(summary.cur_recharge || 0) },
+    { label: "期间充值赠送", value: formatMoney(summary.cur_gift || 0) },
+    { label: "结束日期后剩余现金", value: formatMoney(summary.closing_actual_balance ?? summary.actual_balance ?? 0), negative: numberValue(summary.closing_actual_balance ?? summary.actual_balance) < 0 },
+    { label: "结束日期后剩余赠送", value: formatMoney(summary.closing_gift_balance ?? summary.gift_balance ?? 0) },
   ];
 }
 
@@ -6491,11 +6488,11 @@ function studentStatementCanvas(report = studentStatementReport()) {
   y += drawShotTable(ctx, colors, [
     { label: "月份", value: (row) => formatMonthOption(row.month_key), align: "left" },
     { label: "有效课次", value: (row) => row.lesson_count || 0 },
-    { label: "课程费用", value: (row) => `¥${money2(row.total_fee || 0)}`, align: "right" },
-    { label: "现金充值", value: (row) => `¥${money2(row.cur_recharge || 0)}`, align: "right" },
-    { label: "赠送充值", value: (row) => `¥${money2(row.cur_gift || 0)}`, align: "right" },
-    { label: "月末现金", value: (row) => `¥${money2(row.actual_balance || 0)}`, align: "right", negative: (row) => numberValue(row.actual_balance) < 0 },
-    { label: "月末赠送", value: (row) => `¥${money2(row.gift_balance || 0)}`, align: "right" },
+    { label: "课程费用", value: (row) => formatMoney(row.total_fee || 0), align: "right" },
+    { label: "现金充值", value: (row) => formatMoney(row.cur_recharge || 0), align: "right" },
+    { label: "赠送充值", value: (row) => formatMoney(row.cur_gift || 0), align: "right" },
+    { label: "月末现金", value: (row) => formatMoney(row.actual_balance || 0), align: "right", negative: (row) => numberValue(row.actual_balance) < 0 },
+    { label: "月末赠送", value: (row) => formatMoney(row.gift_balance || 0), align: "right" },
   ], monthRows, contentX, y, [150, 110, 150, 150, 150, 150, 180], { rowHeight: 36, emptyText: "暂无月份汇总" });
   y += 42;
   drawShotSectionTitle(ctx, colors, "明细课程表", contentX, y, contentWidth);
@@ -6509,7 +6506,7 @@ function studentStatementCanvas(report = studentStatementReport()) {
     { label: "年级", value: (row) => row.grade },
     { label: "科目", value: (row) => row.subject },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
-    { label: "费用", value: (row) => `¥${money2(row.unit_price || 0)}`, align: "right" },
+    { label: "费用", value: (row) => formatMoney(row.unit_price || 0), align: "right" },
   ], details, contentX, y, [112, 68, 62, 116, 86, 72, 80, 346, 98], { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
   return canvas;
 }
@@ -6600,9 +6597,9 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
   drawShotMetricCards(ctx, colors, [
     { label: "有效课时", value: String(completedRows.length) },
     { label: "课程记录", value: String(rows.length) },
-    { label: "课时薪资", value: `¥${money2(classSalary)}` },
-    { label: "车票/交通补贴", value: `¥${money2(transportTotal)}` },
-    { label: "薪资统计", value: `¥${money2(salaryTotal)}` },
+    { label: "课时薪资", value: formatMoney(classSalary) },
+    { label: "车票/交通补贴", value: formatMoney(transportTotal) },
+    { label: "薪资统计", value: formatMoney(salaryTotal) },
   ], 48, 142, contentWidth);
   let y = 246;
   drawShotTable(ctx, colors, [
@@ -6615,7 +6612,7 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
     { label: "科目", value: (row) => row.subject },
     { label: "学生", value: (row) => row.student_names, align: "left" },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
-    { label: "教师薪资", value: (row) => `¥${money2(displayTeacherSalaryForLesson(row))}`, align: "right" },
+    { label: "教师薪资", value: (row) => formatMoney(displayTeacherSalaryForLesson(row)), align: "right" },
   ], rows, 48, y, [106, 64, 58, 110, 60, 66, 72, 200, 298, 100], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
   y += detailTableHeight + 42;
   drawShotSectionTitle(ctx, colors, "车票/交通补贴明细", 48, y, contentWidth);
@@ -6625,7 +6622,7 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
     colors,
     transportRows.map((item) => ({
       label: item.item,
-      value: () => `¥${money2(item.amount || 0)}`,
+      value: () => formatMoney(item.amount || 0),
       align: "center",
     })),
     [{}],
@@ -6670,7 +6667,7 @@ function studentStatementSvg(report) {
       <text x="420" y="${y}" class="cell">${xmlEscape(row.subject)}</text>
       <text x="520" y="${y}" class="cell">${xmlEscape(row.status)}</text>
       <text x="650" y="${y}" class="cell note">${xmlEscape(row.notes || "")}</text>
-      <text x="1048" y="${y}" class="cell num">¥${money(row.unit_price)}</text>
+      <text x="1048" y="${y}" class="cell num">${xmlEscape(formatMoney(row.unit_price))}</text>
     `;
   }).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -6685,10 +6682,10 @@ function studentStatementSvg(report) {
   <text x="48" y="108" class="muted">${xmlEscape(studentStatementRangeLabel(report))}</text>
   <g transform="translate(48 142)">
     <text class="label">有效课次</text><text y="42" class="metric">${summary.lesson_count || 0}</text>
-    <text x="190" class="label">课程费用</text><text x="190" y="42" class="metric">¥${money(summary.total_fee || 0)}</text>
-    <text x="430" class="label">期间充值</text><text x="430" y="42" class="metric">¥${money(summary.cur_recharge || 0)}</text>
-    <text x="670" class="label">最新月末现金</text><text x="670" y="42" class="metric">¥${money(summary.actual_balance || 0)}</text>
-    <text x="900" class="label">最新月末赠送</text><text x="900" y="42" class="metric">¥${money(summary.gift_balance || 0)}</text>
+    <text x="190" class="label">课程费用</text><text x="190" y="42" class="metric">${xmlEscape(formatMoney(summary.total_fee || 0))}</text>
+    <text x="430" class="label">期间充值</text><text x="430" y="42" class="metric">${xmlEscape(formatMoney(summary.cur_recharge || 0))}</text>
+    <text x="670" class="label">最新月末现金</text><text x="670" y="42" class="metric">${xmlEscape(formatMoney(summary.actual_balance || 0))}</text>
+    <text x="900" class="label">最新月末赠送</text><text x="900" y="42" class="metric">${xmlEscape(formatMoney(summary.gift_balance || 0))}</text>
   </g>
   <line x1="48" x2="${width - 48}" y1="236" y2="236" stroke="#d4e2e3"/>
   <text x="48" y="264" class="head">日期</text><text x="152" y="264" class="head">时间</text><text x="292" y="264" class="head">老师</text><text x="420" y="264" class="head">科目</text><text x="520" y="264" class="head">状态</text><text x="650" y="264" class="head">备注</text><text x="1048" y="264" class="head num">费用</text>
@@ -6753,7 +6750,7 @@ function renderStudentQuery() {
       <div class="table-wrap smooth-table-wrap">
         <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table">
           <thead>
-            <tr><th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">备注</th><th>单人费用</th></tr>
+            <tr><th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
           </thead>
           <tbody>
             ${details.map((row) => `
@@ -7463,7 +7460,7 @@ function pricingAuditModalMarkup() {
         <div class="modal-head">
           <div>
             <div class="modal-title">${escapeHtml(pricing.student_name)} · ${escapeHtml(pricing.subject)} · ${monthLabel()}影响审计</div>
-            <div class="modal-subtitle">当前规则单价 ¥${money(customPrice)}，本月命中 ${details.length} 节课，手填覆盖 ${manualCount} 条。</div>
+            <div class="modal-subtitle">当前规则单价 ${formatMoney(customPrice)}，本月命中 ${details.length} 节课，手填覆盖 ${manualCount} 条。</div>
           </div>
           <button class="btn pricing-audit-cancel" type="button">取消</button>
         </div>
@@ -7477,9 +7474,9 @@ function pricingAuditModalMarkup() {
                   <tr>
                     <td class="text-cell">${escapeHtml(row.date)}</td>
                     <td class="text-cell">${statusBadge(rowStatus(row))}</td>
-                    <td class="text-cell right price-cell-wrap">${money(row.unit_price)} ${priceSourceBadge(row)}</td>
+                    <td class="text-cell right price-cell-wrap"><span class="price-inline"><span class="price-amount">${formatMoney(row.unit_price)}</span>${priceSourceBadge(row)}</span></td>
                     <td class="text-cell">${priceSourceLabel(row.price_source)}</td>
-                    <td class="text-cell right ${diff !== 0 ? "negative" : ""}">${money(diff)}</td>
+                    <td class="text-cell right ${diff !== 0 ? "negative" : ""}">${formatMoney(diff)}</td>
                   </tr>
                 `;
               }).join("") || `<tr><td colspan="5" class="empty">本月没有命中课程</td></tr>`}
@@ -8075,11 +8072,11 @@ function renderStaffPayroll() {
                   <td class="text-cell">${escapeHtml(row.name)} ${inactiveTag}</td>
                   <td class="text-cell">${escapeHtml(row.role)}</td>
                   <td class="text-cell">${escapeHtml(row.pay_type || "月薪")}</td>
-                  <td class="text-cell right">${row.pay_type === "日薪" ? money(row.daily_rate || row.base_salary) : money(row.base_salary)}</td>
+                  <td class="text-cell right">${row.pay_type === "日薪" ? formatMoney(row.daily_rate || row.base_salary) : formatMoney(row.base_salary)}</td>
                   <td class="text-cell right" title="${row.attendance_days ? `已登记 ${row.attendance_days} 天考勤` : "未登记考勤，按整月基础工资"}">${row.attendance_days ? money(row.pay_units) : "整月"}</td>
                   <td><input class="cell-input number staff-salary-field" data-field="bonus" type="number" value="${moneyInput(row.bonus)}" ${disabled}></td>
                   <td><input class="cell-input number staff-salary-field" data-field="deduction" type="number" value="${moneyInput(row.deduction)}" ${disabled}></td>
-                  <td class="text-cell right ${mismatch ? "warning-cell" : ""}" title="${mismatch ? `按基础+奖金-扣款应为 ${money(row.expected_salary)}` : ""}">${mismatch ? "⚠ " : ""}${money(row.salary_actual)}</td>
+                  <td class="text-cell right ${mismatch ? "warning-cell" : ""}" title="${mismatch ? `按基础+奖金-扣款应为 ${formatMoney(row.expected_salary)}` : ""}">${mismatch ? "⚠ " : ""}${formatMoney(row.salary_actual)}</td>
                   <td><input class="cell-input wide staff-salary-field" data-field="notes" value="${escapeHtml(row.notes === "auto" ? "" : row.notes || "")}" placeholder="${row.notes === "auto" ? "auto" : ""}" ${disabled}></td>
                   <td class="readonly"><button class="btn danger delete-staff-salary" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
                 </tr>
@@ -8370,7 +8367,7 @@ function renderTeacherSalary() {
   )), 0);
   renderTopbar(
     showSalary ? `${monthLabel()} 教师薪资汇总` : `${monthLabel()} 教师每周车票登记`,
-    `${showSalary ? "薪资合计" : "车票合计"} ${money(total)} 元`,
+    `${showSalary ? "薪资合计" : "车票合计"} ${formatMoney(total)}`,
     showSalary ? `<button class="btn export-teacher-salary" type="button">导出本月</button>` : "",
   );
   contentEl.innerHTML = `
@@ -8382,20 +8379,20 @@ function renderTeacherSalary() {
             ${rows.map((row) => `
               <tr class="teacher-adjustment-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
-                ${showSalary ? `<td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">${money(row.salary_total)}</td>` : ""}
+                ${showSalary ? `<td class="text-cell right">${row.lesson_count}</td><td class="text-cell right">${formatMoney(row.salary_total)}</td>` : ""}
                 <td><input class="cell-input number teacher-adjustment-field" data-field="week1_transport" type="number" value="${moneyInput(row.week1_transport)}"></td>
                 <td><input class="cell-input number teacher-adjustment-field" data-field="week2_transport" type="number" value="${moneyInput(row.week2_transport)}"></td>
                 <td><input class="cell-input number teacher-adjustment-field" data-field="week3_transport" type="number" value="${moneyInput(row.week3_transport)}"></td>
                 <td><input class="cell-input number teacher-adjustment-field" data-field="week4_transport" type="number" value="${moneyInput(row.week4_transport)}"></td>
-                <td class="text-cell right">${money(showSalary ? row.total_salary : numberValue(row.week1_transport) + numberValue(row.week2_transport) + numberValue(row.week3_transport) + numberValue(row.week4_transport))}</td>
+                <td class="text-cell right">${formatMoney(showSalary ? row.total_salary : numberValue(row.week1_transport) + numberValue(row.week2_transport) + numberValue(row.week3_transport) + numberValue(row.week4_transport))}</td>
                 <td><input class="cell-input wide teacher-adjustment-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("")}
             <tr>
               <td class="text-cell"><b>合计</b></td>
-              ${showSalary ? `<td class="text-cell right"><b>${rows.reduce((sum, row) => sum + row.lesson_count, 0)}</b></td><td class="text-cell right"><b>${money(rows.reduce((sum, row) => sum + numberValue(row.salary_total), 0))}</b></td>` : ""}
+              ${showSalary ? `<td class="text-cell right"><b>${rows.reduce((sum, row) => sum + row.lesson_count, 0)}</b></td><td class="text-cell right"><b>${formatMoney(rows.reduce((sum, row) => sum + numberValue(row.salary_total), 0))}</b></td>` : ""}
               <td colspan="4"></td>
-              <td class="text-cell right"><b>${money(total)}</b></td>
+              <td class="text-cell right"><b>${formatMoney(total)}</b></td>
               <td></td>
             </tr>
           </tbody>
@@ -8558,7 +8555,7 @@ function renderTeacherDetail() {
         </select>`}
       </div>
       <div class="metric"><div class="metric-label">有效课时</div><div class="metric-value">${count}</div></div>
-      ${showSalary ? `<div class="metric"><div class="metric-label">薪资统计</div><div class="metric-value">${money(salary)}</div></div>` : ""}
+      ${showSalary ? `<div class="metric"><div class="metric-label">薪资统计</div><div class="metric-value">${formatMoney(salary)}</div></div>` : ""}
       <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${rows.length}</div></div>
     </div>
     <div class="band">
@@ -8610,7 +8607,7 @@ function renderTeacherDetail() {
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.student_names)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><input class="cell-input number teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}" data-id="${row.id}" data-field="teacher_salary" type="number" step="0.01" value="${escapeHtml(teacherSalaryInputValue(displayedTeacherSalary))}" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}>${teacherSalarySourceBadge(row)}</td>
-                    <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : money(displayedRuleSalary)}</td>
+                    <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
                   ` : ""}
                 </tr>
               `;
@@ -9099,7 +9096,7 @@ function dashboardSelectedMetricKeys(source = storedJsonArray(DASHBOARD_METRICS_
 }
 
 function dashboardMetricValue(item = {}) {
-  if (item.format === "money") return `¥${money2(item.value)}`;
+  if (item.format === "money") return formatMoney(item.value);
   if (item.format === "hours") return `${Number(item.value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 小时`;
   return Number(item.value || 0).toLocaleString("zh-CN");
 }
@@ -9197,10 +9194,13 @@ function dashboardTrendSvg(rows = []) {
   `;
 }
 
-function dashboardPieSvg(pie = {}) {
+function dashboardPieSvg(pie = {}, options = {}) {
+  const caption = options.caption || "学员";
+  const emptyText = options.emptyText || `暂无${caption}数据`;
+  const ariaLabel = options.ariaLabel || `${caption}数量圆环图`;
   const items = (pie.items || []).filter((item) => Number(item.value || 0) > 0);
   const total = Number(pie.total || items.reduce((sum, item) => sum + Number(item.value || 0), 0));
-  if (!items.length || !total) return `<div class="dashboard-empty-chart">暂无学员数据</div>`;
+  if (!items.length || !total) return `<div class="dashboard-empty-chart">${escapeHtml(emptyText)}</div>`;
   const colors = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#64748b"];
   let acc = 0;
   const radius = 76;
@@ -9215,11 +9215,11 @@ function dashboardPieSvg(pie = {}) {
   }).join("");
   return `
     <div class="dashboard-pie-wrap ${items.length === 1 ? "single" : ""}">
-      <svg class="dashboard-pie-svg" viewBox="0 0 220 220" role="img" aria-label="学员数量饼图">
+      <svg class="dashboard-pie-svg" viewBox="0 0 220 220" role="img" aria-label="${escapeHtml(ariaLabel)}">
         <circle cx="110" cy="110" r="${radius}" fill="none" stroke="var(--line)" stroke-width="28"></circle>
         ${segments}
         <text class="dashboard-pie-total" x="110" y="104" text-anchor="middle">${total}</text>
-        <text class="dashboard-pie-caption" x="110" y="130" text-anchor="middle">学员</text>
+        <text class="dashboard-pie-caption" x="110" y="130" text-anchor="middle">${escapeHtml(caption)}</text>
       </svg>
       <div class="dashboard-pie-legend">
         ${items.map((item, index) => `
@@ -9232,6 +9232,28 @@ function dashboardPieSvg(pie = {}) {
           </div>
         `).join("")}
       </div>
+    </div>
+  `;
+}
+
+function dashboardCurrentLessonsMarkup(rows = []) {
+  if (!rows.length) return `<div class="dashboard-current-empty">当前没有正在上的课程</div>`;
+  return `
+    <div class="dashboard-current-list">
+      ${rows.map((row) => `
+        <div class="dashboard-current-item">
+          <div class="dashboard-current-main">
+            <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
+            <span>${escapeHtml(row.time_slot || "未填时间")}</span>
+          </div>
+          <div class="dashboard-current-meta">
+            <span>${escapeHtml(row.classroom || "未填教室")}</span>
+            <span>${escapeHtml(`${row.grade || ""}${row.subject || ""}` || "未填课程")}</span>
+            <span>${escapeHtml(row.student_names || "未填学生")}</span>
+          </div>
+          ${statusBadge(row.status || "待上")}
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -9333,7 +9355,7 @@ function dashboardShortcutModal() {
 }
 
 function renderDashboard() {
-  const dashboard = state.dashboard || { metrics: [], todos: [], trend: [], student_pie: { items: [], total: 0 } };
+  const dashboard = state.dashboard || { metrics: [], todos: [], trend: [], student_pie: { items: [], total: 0 }, teacher_pie: { items: [], total: 0 }, current_lessons: [] };
   const metricMap = new Map(dashboardMetricCatalog().map((item) => [item.key, item]));
   const selectedMetrics = dashboardSelectedMetricKeys().map((key) => metricMap.get(key)).filter(Boolean);
   const shortcuts = dashboardShortcutCatalog();
@@ -9407,14 +9429,37 @@ function renderDashboard() {
           ${dashboardTrendSvg(dashboard.trend || [])}
         </section>
 
+        <section class="band dashboard-current-section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">正在上的课程</div>
+            </div>
+          </div>
+          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [])}
+        </section>
+
         <section class="band dashboard-pie-section">
           <div class="section-head">
             <div>
-              <div class="section-title">学员总数量</div>
-              <div class="section-subtitle">${escapeHtml(dashboard.student_pie?.dimension || "")}</div>
+              <div class="section-title">人数统计</div>
             </div>
           </div>
-          ${dashboardPieSvg(dashboard.student_pie || {})}
+          <div class="dashboard-pie-grid">
+            <div class="dashboard-pie-card">
+              <div class="dashboard-pie-card-head">
+                <strong>学员总数量</strong>
+                <span>${escapeHtml(dashboard.student_pie?.dimension || "")}</span>
+              </div>
+              ${dashboardPieSvg(dashboard.student_pie || {}, { caption: "学员", emptyText: "暂无学员数据", ariaLabel: "学员总数量圆环图" })}
+            </div>
+            <div class="dashboard-pie-card">
+              <div class="dashboard-pie-card-head">
+                <strong>老师总数量</strong>
+                <span>${escapeHtml(dashboard.teacher_pie?.dimension || "")}</span>
+              </div>
+              ${dashboardPieSvg(dashboard.teacher_pie || {}, { caption: "老师", emptyText: "暂无老师数据", ariaLabel: "老师总数量圆环图" })}
+            </div>
+          </div>
         </section>
       </div>
     </div>
@@ -10099,7 +10144,7 @@ function wireEvents() {
       resetFinanceRangeToActiveMonth();
       if (result.created) {
         const from = result.from_month ? `从 ${monthOptionShort(result.from_month)} 结转` : "未找到上一个可结转月份，创建";
-        alert(`${from} ${result.carried_students || 0} 位学生，实际余额合计 ¥${money2(result.carried_actual || 0)}，赠送余额合计 ¥${money2(result.carried_gift || 0)}`);
+        alert(`${from} ${result.carried_students || 0} 位学生，实际余额合计 ${formatMoney(result.carried_actual || 0)}，赠送余额合计 ${formatMoney(result.carried_gift || 0)}`);
       } else if (result.already_exists) {
         alert("月份已存在，已切换到该月份。");
       }
@@ -11590,14 +11635,6 @@ function wireEvents() {
     bindSafeTextInput(input, applySummaryFilter, () => render());
   });
 
-  document.querySelectorAll(".summary-scope-option").forEach((button) => {
-    button.addEventListener("click", () => {
-      summaryScope = button.dataset.scope === "toDate" ? "toDate" : "month";
-      localStorage.setItem(SUMMARY_SCOPE_KEY, summaryScope);
-      render();
-    });
-  });
-
   document.querySelectorAll(".reset-summary-filter").forEach((button) => {
     button.addEventListener("click", () => {
       summaryFilter = { student: "", grade: "", balance: "" };
@@ -11927,7 +11964,7 @@ function wireEvents() {
       const scroll = captureLessonScroll();
       scheduleMode = !scheduleMode;
       button.classList.toggle("primary", scheduleMode);
-      button.textContent = scheduleMode ? "退出排课模式" : "排课模式";
+      button.textContent = scheduleMode ? "结束排课" : "开始排课";
       reRenderLessonsTbody();
       restoreLessonScroll(scroll);
     });
@@ -12233,7 +12270,7 @@ function wireEvents() {
       const row = input.closest(".recharge-row");
       const summary = state.derived.student_summary.find((item) => item.student_name === row.dataset.studentName) || {};
       const payload = collectRowPayload(row, ".recharge-field");
-      if (numberValue(payload.cur_recharge) < 0 && !confirm(`充值金额为负数(${money(payload.cur_recharge)})，确认这是退费操作？`)) {
+      if (numberValue(payload.cur_recharge) < 0 && !confirm(`充值金额为负数(${formatMoney(payload.cur_recharge)})，确认这是退费操作？`)) {
         load();
         return;
       }

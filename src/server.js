@@ -4898,6 +4898,66 @@ function dashboardStudentPie(user) {
   return { dimension: "课程记录", total: rows.length, items: [...groups.entries()].map(([name, value]) => ({ name, value })) };
 }
 
+function dashboardTeacherPie(user) {
+  const role = canonicalRole(user.role);
+  if (role === "teacher") {
+    const boundTeachers = uniqueNames([
+      ...userTeacherBindings(user.id),
+      ...normalizeTeacherNameList(user.teacher_name),
+    ]);
+    return {
+      dimension: "绑定老师",
+      total: boundTeachers.length,
+      items: boundTeachers.length ? [{ name: "已绑定", value: boundTeachers.length }] : [],
+    };
+  }
+  const rows = all("SELECT status FROM teachers");
+  if (rows.length) {
+    const activeCount = rows.filter((row) => (text(row.status) || "在职") === "在职").length;
+    return {
+      dimension: "在职老师",
+      total: activeCount,
+      items: activeCount ? [{ name: "在职", value: activeCount }] : [],
+    };
+  }
+  const lessonTeachers = uniqueNames(all("SELECT teacher_name FROM lessons WHERE TRIM(teacher_name) <> ''").map((row) => row.teacher_name));
+  return {
+    dimension: "课程记录",
+    total: lessonTeachers.length,
+    items: lessonTeachers.length ? [{ name: "有课程记录", value: lessonTeachers.length }] : [],
+  };
+}
+
+function currentTimeMinutes() {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+function dashboardCurrentLessons(user) {
+  const today = todayKey();
+  const nowMinutes = currentTimeMinutes();
+  return all(
+    "SELECT * FROM lessons WHERE date = ? ORDER BY time_slot, teacher_name, classroom, sort_order, id",
+    [today],
+  )
+    .filter((row) => {
+      if (!isScheduleActive(row)) return false;
+      const range = parseTimeRange(row.time_slot);
+      return Boolean(range && range.start <= nowMinutes && nowMinutes <= range.end);
+    })
+    .map((row) => ({
+      id: row.id,
+      teacher_name: row.teacher_name || "",
+      date: row.date || "",
+      time_slot: row.time_slot || "",
+      classroom: row.classroom || "",
+      grade: row.grade || "",
+      subject: row.subject || "",
+      student_names: row.student_names || "",
+      status: deriveStatus(row),
+    }));
+}
+
 function dashboardData(url, user) {
   const requestedMonth = text(url.searchParams.get("month"));
   const monthKey = validMonthKey(requestedMonth) ? requestedMonth : getSetting("month_key");
@@ -4915,6 +4975,8 @@ function dashboardData(url, user) {
     todos: dashboardTodos(monthKey, user, monthData),
     trend,
     student_pie: dashboardStudentPie(user),
+    teacher_pie: dashboardTeacherPie(user),
+    current_lessons: dashboardCurrentLessons(user),
     role: canonicalRole(user.role),
     can_see_money: dashboardCanSeeMoney(user),
   };
