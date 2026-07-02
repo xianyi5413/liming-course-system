@@ -110,9 +110,10 @@ const PERMISSION_TREE = [
     label: "教师",
     children: [
       { key: "teacherProfiles", label: "教师档案" },
-      { key: "teacherSalary", label: "教师薪资" },
-      { key: "teacherDetail", label: "教师薪资明细" },
-      { key: "teacherSalaryRules", label: "教师薪资规则" },
+      { key: "teacherSalary", label: "薪资汇总" },
+      { key: "teacherTravelFees", label: "车费明细" },
+      { key: "teacherDetail", label: "薪资明细" },
+      { key: "teacherSalaryRules", label: "课时明细" },
     ],
   },
   {
@@ -162,6 +163,7 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "studentPricing",
   "studentProfiles",
   "teacherSalary",
+  "teacherTravelFees",
   "teacherDetail",
   "teacherSalaryRules",
   "teacherProfiles",
@@ -213,7 +215,7 @@ const DEFAULT_ROLE_PERMISSIONS = {
   academic: [
     "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
     "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles",
-    "teacherProfiles", "teacherSalary", "teacherDetail", "teacherSalaryRules",
+    "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules",
     "finance", "appearance", "baseData", "pricing", "operationLogs",
   ],
   helper: [
@@ -233,7 +235,7 @@ const AREA_PERMISSION_KEYS = {
   students: ["feeDetails", "summary", "studentQuery", "studentProfiles", "studentPricing", "recharges", "openingBalances"],
   profiles: ["studentProfiles", "teacherProfiles"],
   pricing: ["pricing", "studentPricing"],
-  teacherTransport: ["teacherSalary"],
+  teacherTransport: ["teacherTravelFees"],
   teacherSalary: ["teacherSalary"],
   salary: ["teacherSalary", "teacherSalaryRules"],
   finance: ["finance"],
@@ -429,6 +431,20 @@ function initDb() {
       week4_transport REAL DEFAULT 0,
       notes TEXT DEFAULT '',
       PRIMARY KEY (teacher_name, month_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS teacher_travel_fees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      month_key TEXT NOT NULL,
+      teacher_name TEXT NOT NULL,
+      week_index INTEGER NOT NULL,
+      week_start TEXT DEFAULT '',
+      week_end TEXT DEFAULT '',
+      amount REAL DEFAULT 0,
+      notes TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (month_key, teacher_name, week_index)
     );
 
     CREATE TABLE IF NOT EXISTS staff (
@@ -656,6 +672,7 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_teacher_travel_fees_month_teacher ON teacher_travel_fees(month_key, teacher_name)").run();
   db.prepare(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_salary_rules_active_key
     ON teacher_salary_rules(teacher_name, grade, subject, student_names)
@@ -880,6 +897,7 @@ function initDb() {
   for (const teacher of all("SELECT name FROM teachers ORDER BY name")) {
     db.prepare("INSERT OR IGNORE INTO teacher_adjustments_monthly(teacher_name, month_key) VALUES (?, ?)").run(teacher.name, currentMonth);
   }
+  migrateLegacyTeacherTravelFees();
   for (const row of PRICING) {
     db.prepare(`
       INSERT OR IGNORE INTO pricing_standards(grade, student_count, unit_price, description)
@@ -1319,6 +1337,17 @@ function seedDefaultRolesAndPermissions() {
       INSERT INTO settings(key, value) VALUES (?, '1')
       ON CONFLICT(key) DO UPDATE SET value = '1'
     `).run(teacherProfilesMigrationKey);
+  }
+  const travelFeesPermissionKey = "role_teacher_travel_fees_permission_v1";
+  const travelFeesPermissionMigrated = text(get("SELECT value FROM settings WHERE key = ?", [travelFeesPermissionKey])?.value) === "1";
+  if (!travelFeesPermissionMigrated) {
+    for (const roleCode of ["academic"]) {
+      permissionStmt.run(roleCode, "teacherTravelFees");
+    }
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(travelFeesPermissionKey);
   }
 }
 
@@ -2511,6 +2540,7 @@ function deleteTeacherProfile(id) {
     }
     db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
     db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
+    db.prepare("DELETE FROM teacher_travel_fees WHERE teacher_name = ?").run(row.name);
     db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
     return {
       deleted: true,
@@ -3662,10 +3692,15 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
 
 function buildTeacherSummary(monthKey, includeInactive = false) {
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
+  const weeks = teacherMonthWeeks(monthKey);
   const adjustments = new Map(all(
     "SELECT * FROM teacher_adjustments_monthly WHERE month_key = ?",
     [monthKey],
   ).map((row) => [row.teacher_name, row]));
+  const travelFees = new Map(all(
+    "SELECT * FROM teacher_travel_fees WHERE month_key = ?",
+    [monthKey],
+  ).map((row) => [`${row.teacher_name}\u0001${Number(row.week_index)}`, row]));
   const byTeacher = new Map();
   const active = activeTeacherNames(monthKey);
   const seedTeachers = includeInactive
@@ -3695,20 +3730,31 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
   }
   return [...byTeacher.values()].filter((row) => includeInactive || row.active_this_month).map((row) => {
     const adj = adjustments.get(row.teacher_name) || {};
-    const week1 = num(adj.week1_transport);
-    const week2 = num(adj.week2_transport);
-    const week3 = num(adj.week3_transport);
-    const week4 = num(adj.week4_transport);
-    return {
+    const travelWeeks = weeks.map((week) => {
+      const detail = travelFees.get(`${row.teacher_name}\u0001${week.week_index}`);
+      const legacyAmount = week.week_index <= 4 ? num(adj[teacherTravelField(week.week_index)]) : 0;
+      return {
+        ...week,
+        amount: detail ? num(detail.amount) : legacyAmount,
+        notes: text(detail?.notes),
+      };
+    });
+    const transportTotal = moneyRound(travelWeeks.reduce((sum, week) => sum + num(week.amount), 0));
+    const output = {
       ...row,
-      week1_transport: week1,
-      week2_transport: week2,
-      week3_transport: week3,
-      week4_transport: week4,
+      travel_weeks: travelWeeks,
+      transport_total: transportTotal,
       salary_total: moneyRound(row.salary_total),
-      total_salary: moneyRound(row.salary_total + week1 + week2 + week3 + week4),
+      total_salary: moneyRound(row.salary_total + transportTotal),
       notes: adj.notes || "",
     };
+    for (const week of travelWeeks) {
+      output[teacherTravelField(week.week_index)] = num(week.amount);
+    }
+    for (let index = travelWeeks.length + 1; index <= 6; index += 1) {
+      output[teacherTravelField(index)] = 0;
+    }
+    return output;
   }).sort((a, b) => a.teacher_name.localeCompare(b.teacher_name, "zh-Hans-CN"));
 }
 
@@ -3719,6 +3765,92 @@ function teacherSummary(monthKey, includeInactive = false) {
     `teacherSummary month=${monthKey} includeInactive=${includeInactive ? 1 : 0}`,
     () => buildTeacherSummary(monthKey, includeInactive),
   );
+}
+
+function teacherTravelFeeRows(monthKey, includeInactive = true) {
+  const weeks = teacherMonthWeeks(monthKey);
+  const rows = teacherSummary(monthKey, includeInactive).map((row) => ({
+    teacher_name: row.teacher_name,
+    notes: row.notes || "",
+    transport_total: num(row.transport_total),
+    travel_weeks: weeks.map((week) => ({
+      ...week,
+      amount: num(row[teacherTravelField(week.week_index)]),
+    })),
+  }));
+  return { month_key: monthKey, weeks, rows };
+}
+
+function upsertTeacherTravelFees(body = {}) {
+  const monthKey = text(body.month_key || getSetting("month_key"));
+  if (!validMonthKey(monthKey)) return { error: "month_key must be YYYY-MM-01", status: 400 };
+  const teacherName = text(body.teacher_name);
+  if (!teacherName) return { error: "老师姓名不能为空", status: 400 };
+  const weeks = teacherMonthWeeks(monthKey);
+  if (!weeks.length) return { error: "月份周信息无效", status: 400 };
+  const weekByIndex = new Map(weeks.map((week) => [Number(week.week_index), week]));
+  const incoming = Array.isArray(body.fees) ? body.fees : [];
+  const feeByIndex = new Map();
+  for (const item of incoming) {
+    const index = Number(item.week_index);
+    if (!weekByIndex.has(index)) continue;
+    const amount = num(item.amount);
+    if (amount < 0) return { error: "车费不能为负数", status: 400 };
+    if (amount > 100000) return { error: "车费超出合理范围", status: 400 };
+    feeByIndex.set(index, amount);
+  }
+  for (const week of weeks) {
+    const legacyField = teacherTravelField(week.week_index);
+    if (!feeByIndex.has(week.week_index) && Object.prototype.hasOwnProperty.call(body, legacyField)) {
+      feeByIndex.set(week.week_index, num(body[legacyField]));
+    }
+  }
+  const notes = text(body.notes);
+  return withTransaction(() => {
+    upsertTeacher(teacherName);
+    const before = {
+      monthly: get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [teacherName, monthKey]),
+      fees: all("SELECT * FROM teacher_travel_fees WHERE teacher_name = ? AND month_key = ? ORDER BY week_index", [teacherName, monthKey]),
+    };
+    const monthlyValues = [1, 2, 3, 4].map((index) => feeByIndex.has(index) ? feeByIndex.get(index) : num(before.monthly?.[teacherTravelField(index)]));
+    db.prepare(`
+      INSERT INTO teacher_adjustments_monthly(
+        teacher_name, month_key, week1_transport, week2_transport, week3_transport, week4_transport, notes
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(teacher_name, month_key) DO UPDATE SET
+        week1_transport = excluded.week1_transport,
+        week2_transport = excluded.week2_transport,
+        week3_transport = excluded.week3_transport,
+        week4_transport = excluded.week4_transport,
+        notes = excluded.notes
+    `).run(teacherName, monthKey, ...monthlyValues, notes);
+
+    const upsertFee = db.prepare(`
+      INSERT INTO teacher_travel_fees(
+        month_key, teacher_name, week_index, week_start, week_end, amount, notes, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(month_key, teacher_name, week_index) DO UPDATE SET
+        week_start = excluded.week_start,
+        week_end = excluded.week_end,
+        amount = excluded.amount,
+        notes = excluded.notes,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+    for (const week of weeks) {
+      const amount = feeByIndex.has(week.week_index) ? feeByIndex.get(week.week_index) : 0;
+      upsertFee.run(monthKey, teacherName, week.week_index, week.start, week.end, amount, notes);
+    }
+    return {
+      ok: true,
+      before,
+      after: {
+        monthly: get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [teacherName, monthKey]),
+        fees: all("SELECT * FROM teacher_travel_fees WHERE teacher_name = ? AND month_key = ? ORDER BY week_index", [teacherName, monthKey]),
+      },
+    };
+  });
 }
 
 function getSetting(key) {
@@ -3814,6 +3946,7 @@ function monthDataCounts(monthKey) {
     lessons: countByMonth("lessons", monthKey),
     recharge_records: countByMonth("recharge_records", monthKey),
     teacher_adjustments_monthly: countByMonth("teacher_adjustments_monthly", monthKey),
+    teacher_travel_fees: countByMonth("teacher_travel_fees", monthKey),
     staff_salary_monthly: countByMonth("staff_salary_monthly", monthKey),
     staff_attendance: countByMonth("staff_attendance", monthKey),
     operating_expenses: countByMonth("operating_expenses", monthKey),
@@ -3822,7 +3955,7 @@ function monthDataCounts(monthKey) {
 
 function allPartitionedMonths() {
   const months = new Set(availableMonths());
-  for (const table of ["teacher_adjustments_monthly", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
+  for (const table of ["teacher_adjustments_monthly", "teacher_travel_fees", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
     if (!tableExists(table)) continue;
     for (const row of all(`SELECT DISTINCT month_key FROM ${safeIdentifier(table)} WHERE month_key IS NOT NULL AND month_key <> ''`)) {
       months.add(row.month_key);
@@ -4075,7 +4208,7 @@ function deleteMonth(monthKey, force = false) {
 
   const backup = total > 0 ? backupDb("pre_month_delete") : "";
   return withTransaction(() => {
-    for (const table of ["lessons", "recharge_records", "teacher_adjustments_monthly", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
+    for (const table of ["lessons", "recharge_records", "teacher_adjustments_monthly", "teacher_travel_fees", "staff_salary_monthly", "staff_attendance", "operating_expenses"]) {
       if (tableExists(table)) db.prepare(`DELETE FROM ${safeIdentifier(table)} WHERE month_key = ?`).run(monthKey);
     }
     const afterMonths = allPartitionedMonths().filter((month) => month !== monthKey);
@@ -4146,6 +4279,59 @@ function monthEndKey(monthKey) {
 function monthRange(monthKey) {
   const key = validMonthKey(monthKey) ? monthKey : getSetting("month_key");
   return { start: key, end: monthEndKey(key), days: daysInclusive(key, monthEndKey(key)) };
+}
+
+function teacherMonthWeeks(monthKey) {
+  if (!validMonthKey(monthKey)) return [];
+  const month = parseDateKey(monthKey);
+  const targetMonth = month.getMonth();
+  const sunday = new Date(month.getFullYear(), month.getMonth(), 1);
+  while (sunday.getDay() !== 0) sunday.setDate(sunday.getDate() + 1);
+  const weeks = [];
+  while (sunday.getMonth() === targetMonth) {
+    const end = dateKey(sunday);
+    const start = addDays(end, -6);
+    const index = weeks.length + 1;
+    weeks.push({
+      week_index: index,
+      index,
+      week_start: start,
+      week_end: end,
+      start,
+      end,
+      label: `第${index}周车票(${start}~${end})`,
+    });
+    sunday.setDate(sunday.getDate() + 7);
+  }
+  return weeks;
+}
+
+function teacherTravelField(index) {
+  return `week${Number(index)}_transport`;
+}
+
+function migrateLegacyTeacherTravelFees() {
+  const migrationKey = "teacher_travel_fees_from_adjustments_v1";
+  if (text(get("SELECT value FROM settings WHERE key = ?", [migrationKey])?.value) === "1") return;
+  const rows = all("SELECT * FROM teacher_adjustments_monthly ORDER BY month_key, teacher_name");
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO teacher_travel_fees(
+      month_key, teacher_name, week_index, week_start, week_end, amount, notes
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const row of rows) {
+    const weeks = teacherMonthWeeks(row.month_key);
+    for (const week of weeks.slice(0, 4)) {
+      const amount = num(row[teacherTravelField(week.week_index)]);
+      if (!amount && !text(row.notes)) continue;
+      insert.run(row.month_key, row.teacher_name, week.week_index, week.start, week.end, amount, text(row.notes));
+    }
+  }
+  db.prepare(`
+    INSERT INTO settings(key, value) VALUES (?, '1')
+    ON CONFLICT(key) DO UPDATE SET value = '1'
+  `).run(migrationKey);
 }
 
 function normalizeRange(start, end) {
@@ -4227,10 +4413,8 @@ function weightedTeacherTransport(range) {
   for (const monthKey of monthsCovered(range.start, range.end)) {
     const overlap = monthOverlap(range, monthKey);
     if (!overlap.days) continue;
-    for (const row of all("SELECT * FROM teacher_adjustments_monthly WHERE month_key = ?", [monthKey])) {
-      const amount = (
-        num(row.week1_transport) + num(row.week2_transport) + num(row.week3_transport) + num(row.week4_transport)
-      ) * overlap.weight;
+    for (const row of teacherSummary(monthKey, true)) {
+      const amount = num(row.transport_total) * overlap.weight;
       total = moneyRound(total + amount);
       const name = row.teacher_name || "未填写";
       byTeacher.set(name, moneyRound((byTeacher.get(name) || 0) + amount));
@@ -5823,35 +6007,29 @@ function coreRechargeRows(monthKey, details) {
 
 function coreTeacherSalaryRows(monthKey) {
   const rows = teacherSummary(monthKey);
+  const weeks = teacherMonthWeeks(monthKey);
   const totals = rows.reduce((acc, row) => {
     acc.lesson_count += num(row.lesson_count);
     acc.salary_total = moneyRound(acc.salary_total + num(row.salary_total));
-    acc.week1_transport = moneyRound(acc.week1_transport + num(row.week1_transport));
-    acc.week2_transport = moneyRound(acc.week2_transport + num(row.week2_transport));
-    acc.week3_transport = moneyRound(acc.week3_transport + num(row.week3_transport));
-    acc.week4_transport = moneyRound(acc.week4_transport + num(row.week4_transport));
+    for (const week of weeks) {
+      const key = teacherTravelField(week.week_index);
+      acc[key] = moneyRound(num(acc[key]) + num(row[key]));
+    }
     acc.total_salary = moneyRound(acc.total_salary + num(row.total_salary));
     return acc;
   }, {
     lesson_count: 0,
     salary_total: 0,
-    week1_transport: 0,
-    week2_transport: 0,
-    week3_transport: 0,
-    week4_transport: 0,
     total_salary: 0,
   });
   const output = [
-    [`${monthLabelCn(monthKey)} 教师薪资汇总`],
-    ["教师姓名", "上课课时数", "课时合计", "第一周车票", "第二周车票", "第三周车票", "第四周车票", "薪资合计", "备注"],
+    [`${monthLabelCn(monthKey)} 薪资汇总`],
+    ["教师姓名", "上课课时数", "课时合计", ...weeks.map((week) => week.label), "薪资合计", "备注"],
     ...rows.map((row) => [
       row.teacher_name,
       row.lesson_count,
       row.salary_total,
-      row.week1_transport,
-      row.week2_transport,
-      row.week3_transport,
-      row.week4_transport,
+      ...weeks.map((week) => row[teacherTravelField(week.week_index)]),
       row.total_salary,
       row.notes,
     ]),
@@ -5861,10 +6039,7 @@ function coreTeacherSalaryRows(monthKey) {
       "合计",
       totals.lesson_count,
       totals.salary_total,
-      totals.week1_transport,
-      totals.week2_transport,
-      totals.week3_transport,
-      totals.week4_transport,
+      ...weeks.map((week) => totals[teacherTravelField(week.week_index)] || 0),
       totals.total_salary,
       "",
     ]);
@@ -5880,28 +6055,33 @@ function coreWorkbookSheets(monthKey) {
     { name: `${monthNumber}学生费用汇总`, rows: coreStudentSummaryRows(monthKey, details) },
     { name: "学生费用明细", rows: coreFeeDetailRows(monthKey, details) },
     { name: "充值记录", rows: coreRechargeRows(monthKey, details) },
-    { name: "教师薪资汇总", rows: coreTeacherSalaryRows(monthKey) },
+    { name: "薪资汇总", rows: coreTeacherSalaryRows(monthKey) },
   ];
 }
 
 function teacherSalaryRows(monthKey) {
   const rows = teacherSummary(monthKey);
+  const weeks = teacherMonthWeeks(monthKey);
   const total = rows.reduce((sum, row) => sum + num(row.total_salary), 0);
   return [
-    [`${monthKey} 教师薪资汇总`],
-    ["教师姓名", "上课课时数", "课时合计", "第一周车票", "第二周车票", "第三周车票", "第四周车票", "薪资合计", "备注"],
+    [`${monthKey} 薪资汇总`],
+    ["教师姓名", "上课课时数", "课时合计", ...weeks.map((week) => week.label), "薪资合计", "备注"],
     ...rows.map((row) => [
       row.teacher_name,
       row.lesson_count,
       row.salary_total,
-      row.week1_transport,
-      row.week2_transport,
-      row.week3_transport,
-      row.week4_transport,
+      ...weeks.map((week) => row[teacherTravelField(week.week_index)]),
       row.total_salary,
       row.notes,
     ]),
-    ["合计", rows.reduce((sum, row) => sum + num(row.lesson_count), 0), rows.reduce((sum, row) => sum + num(row.salary_total), 0), "", "", "", "", total, ""],
+    [
+      "合计",
+      rows.reduce((sum, row) => sum + num(row.lesson_count), 0),
+      rows.reduce((sum, row) => sum + num(row.salary_total), 0),
+      ...weeks.map((week) => rows.reduce((sum, row) => sum + num(row[teacherTravelField(week.week_index)]), 0)),
+      total,
+      "",
+    ],
   ];
 }
 
@@ -6318,6 +6498,7 @@ function buildBootstrapLite(monthKey, includeInactive = false) {
       student_summary: [],
       student_summary_to_date: [],
       teacher_summary: [],
+      teacher_month_weeks: teacherMonthWeeks(monthKey),
     },
   };
 }
@@ -6350,6 +6531,7 @@ function buildBootstrap(monthKey, includeInactive = false) {
       student_summary: studentSummary(details, monthKey, includeInactive),
       student_summary_to_date: studentSummaryToDate(monthKey, includeInactive),
       teacher_summary: teacherSummary(monthKey, includeInactive),
+      teacher_month_weeks: teacherMonthWeeks(monthKey),
     },
   };
 }
@@ -6495,7 +6677,7 @@ function createTeacherSalaryRule(body) {
   const rule = normalizeTeacherSalaryRuleInput(body);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule)) {
-    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的课时明细规则已存在", status: 409 };
   }
   const result = db.prepare(`
     INSERT INTO teacher_salary_rules(
@@ -6517,11 +6699,11 @@ function createTeacherSalaryRule(body) {
 
 function updateTeacherSalaryRule(id, body) {
   const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
-  if (!current) return { error: "薪资规则不存在", status: 404 };
+  if (!current) return { error: "课时明细规则不存在", status: 404 };
   const rule = normalizeTeacherSalaryRuleInput(body, current);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule, id)) {
-    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的课时明细规则已存在", status: 409 };
   }
   db.prepare(`
     UPDATE teacher_salary_rules
@@ -6545,7 +6727,7 @@ function updateTeacherSalaryRule(id, body) {
 
 function deactivateTeacherSalaryRule(id) {
   const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
-  if (!current) return { error: "薪资规则不存在", status: 404 };
+  if (!current) return { error: "课时明细规则不存在", status: 404 };
   db.prepare(`
     UPDATE teacher_salary_rules
     SET is_active = 0, updated_at = CURRENT_TIMESTAMP
@@ -6717,13 +6899,13 @@ function applyTeacherSalaryRulesToLessons(lessonIds) {
         continue;
       }
       if (!isCompletedLesson(lesson)) {
-        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与薪资规则" });
+        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与课时明细规则" });
         continue;
       }
       const rule = activeTeacherSalaryRuleForLesson(lesson);
       const calculated = calculateTeacherSalaryFromRule(rule, lesson);
       if (!calculated) {
-        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的教师薪资规则" });
+        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的课时明细规则" });
         continue;
       }
       db.prepare(`
@@ -7254,6 +7436,7 @@ function deleteTeacherProfileCore(id) {
   }
   db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
   db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
+  db.prepare("DELETE FROM teacher_travel_fees WHERE teacher_name = ?").run(row.name);
   db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
   return {
     deleted: true,
@@ -8034,12 +8217,7 @@ function deleteUser(actor, id) {
   if (current.status === "deleted") return { error: "账号已删除", status: 409 };
   if (Number(actor.id) === targetId) return { error: "不能删除当前登录账号", status: 400 };
   if (isSuperRole(current.role)) {
-    const remainingActiveOwners = all(`
-      SELECT role
-      FROM users
-      WHERE id <> ? AND status = 'active'
-    `, [targetId]).filter((row) => isSuperRole(row.role)).length;
-    if (!remainingActiveOwners) return { error: "不能删除最后一个可登录的老板账号", status: 409 };
+    return { error: "老板账号不可删除", status: 403 };
   }
   db.prepare("UPDATE users SET status = 'deleted', updated_at = ? WHERE id = ?")
     .run(new Date().toISOString(), targetId);
@@ -8408,7 +8586,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/users")) return "users";
   if (p === "/api/export/core-workbook.xlsx") return "coreExport";
   if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
-  if (p === "/api/teacher-adjustments") return "teacherTransport";
+  if (p === "/api/teacher-adjustments" || p === "/api/teacher-travel-fees") return "teacherTransport";
   if (p.includes("teacher-salary")) return "teacherSalary";
   if (p.startsWith("/api/operating-expenses")) return "expenses";
   if (p.startsWith("/api/staff")) return "staff";
@@ -8448,10 +8626,12 @@ function apiPagePermissionKeys(req, url) {
       "courseNotice",
       "teacherCourseNotice",
       "teacherSalary",
+      "teacherTravelFees",
       "teacherDetail",
       "teacherSalaryRules",
     ];
   }
+  if (p === "/api/teacher-adjustments" || p === "/api/teacher-travel-fees") return ["teacherTravelFees"];
   if (p.startsWith("/api/teacher-salary-rules")) return ["teacherSalaryRules"];
   if (p.startsWith("/api/finance-summary")) return ["finance"];
   if (p.startsWith("/api/operation-logs")) return ["operationLogs"];
@@ -8579,6 +8759,7 @@ function sanitizeBootstrap(data, user) {
   const canSeeStudentMoney = ["feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "finance"]
     .some((key) => permissions.has(key));
   const canSeeTeacherSalary = ["teacherSalary", "teacherSalaryRules"].some((key) => permissions.has(key));
+  const canSeeTeacherTransport = permissions.has("teacherTravelFees");
   const sanitized = {
     ...data,
     user,
@@ -8589,11 +8770,11 @@ function sanitizeBootstrap(data, user) {
     student_pricing: permissions.has("studentPricing") ? data.student_pricing : [],
     derived: {
       ...data.derived,
-      teacher_summary: role === "academic"
+      teacher_summary: !canSeeTeacherSalary && (role === "academic" || canSeeTeacherTransport)
         ? (data.derived.teacher_summary || []).map((row) => ({
           ...row,
           salary_total: 0,
-          total_salary: num(row.week1_transport) + num(row.week2_transport) + num(row.week3_transport) + num(row.week4_transport),
+          total_salary: num(row.transport_total),
         }))
         : canSeeTeacherSalary ? data.derived.teacher_summary : [],
     },
@@ -9593,7 +9774,23 @@ function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true, 
       transportColumns: headerMap.transport_columns.map(columnName),
     })}`);
   }
-  if (replace) db.prepare("DELETE FROM teacher_adjustments_monthly WHERE month_key = ?").run(monthKey);
+  if (replace) {
+    db.prepare("DELETE FROM teacher_adjustments_monthly WHERE month_key = ?").run(monthKey);
+    db.prepare("DELETE FROM teacher_travel_fees WHERE month_key = ?").run(monthKey);
+  }
+  const weeks = teacherMonthWeeks(monthKey);
+  const upsertTravel = db.prepare(`
+    INSERT INTO teacher_travel_fees(
+      month_key, teacher_name, week_index, week_start, week_end, amount, notes, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(month_key, teacher_name, week_index) DO UPDATE SET
+      week_start = excluded.week_start,
+      week_end = excluded.week_end,
+      amount = excluded.amount,
+      notes = excluded.notes,
+      updated_at = CURRENT_TIMESTAMP
+  `);
   let count = 0;
   for (const row of sheet.rows.filter((item) => item.source_row >= 3)) {
     const rawTeacherName = text(row.values[headerMap.teacher_name_column]);
@@ -9625,6 +9822,17 @@ function importTeacherAdjustmentsFromWorkbook(buffer, monthKey, replace = true, 
         week4_transport = excluded.week4_transport,
         notes = excluded.notes
     `).run(teacherName, monthKey, transports[0], transports[1], transports[2], transports[3], notes);
+    for (const week of weeks) {
+      upsertTravel.run(
+        monthKey,
+        teacherName,
+        week.week_index,
+        week.start,
+        week.end,
+        num(transports[week.week_index - 1]),
+        notes,
+      );
+    }
     count += 1;
   }
   return count;
@@ -10418,7 +10626,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "teacher_salary_rules", entity_id: String(rule.id), before: null, after: rule });
     writeOperationLog(user, {
-      operation_type: "新增教师薪资规则",
+      operation_type: "新增课时明细规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
       target_type: "teacher_salary_rules",
       target_id: String(rule.id),
@@ -10435,7 +10643,7 @@ async function handleApi(req, res, url) {
       after: result,
     });
     writeOperationLog(user, {
-      operation_type: "同步教师薪资规则候选",
+      operation_type: "同步课时明细候选",
       operation_content: `扫描 ${result.scannedLessonCount} 节历史课，新增 ${result.createdCount} 条，已有 ${result.existingCount} 条，跳过 ${result.skippedCount} 条`,
       target_type: "teacher_salary_rules",
       target_id: result.createdRules.map((row) => row.id).join(","),
@@ -10473,7 +10681,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
     writeOperationLog(user, {
-      operation_type: "修改教师薪资规则",
+      operation_type: "修改课时明细规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
       target_type: "teacher_salary_rules",
       target_id: String(id),
@@ -10487,7 +10695,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "deactivate", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
     writeOperationLog(user, {
-      operation_type: "停用教师薪资规则",
+      operation_type: "停用课时明细规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names}`,
       target_type: "teacher_salary_rules",
       target_id: String(id),
@@ -10565,7 +10773,17 @@ async function handleApi(req, res, url) {
     const targetId = Number(userMatch[1]);
     const before = get("SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at FROM users WHERE id = ?", [targetId]);
     const result = deleteUser(user, targetId);
-    if (result.error) return sendError(res, result.status || 400, result.error);
+    if (result.error) {
+      if (result.error.includes("老板")) {
+        writeOperationLog(user, {
+          operation_type: "拒绝删除账号",
+          operation_content: `${before?.username || targetId} ${result.error}`,
+          target_type: "users",
+          target_id: String(targetId),
+        });
+      }
+      return sendError(res, result.status || 400, result.error);
+    }
     recordAuditEvent(req, user, { action: "soft_delete", entity_type: "users", entity_id: String(targetId), before, after: result.user });
     writeOperationLog(user, {
       operation_type: "删除账号",
@@ -11000,7 +11218,7 @@ async function handleApi(req, res, url) {
     const monthKey = resolveMonthKey(url);
     return sendBuffer(
       res,
-      xlsxBuffer("教师薪资汇总", teacherSalaryRows(monthKey)),
+      xlsxBuffer("薪资汇总", teacherSalaryRows(monthKey)),
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       `teacher-salary-${monthKey}.xlsx`,
     );
@@ -11576,33 +11794,43 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ok: true });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/teacher-travel-fees") {
+    const monthKey = resolveMonthKey(url);
+    return sendJson(res, teacherTravelFeeRows(monthKey, url.searchParams.get("include_inactive") !== "0"));
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/teacher-travel-fees") {
+    const body = await readBody(req);
+    const result = upsertTeacherTravelFees(body);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    const monthKey = text(body.month_key || getSetting("month_key"));
+    const teacherName = text(body.teacher_name);
+    const total = (result.after?.fees || []).reduce((sum, row) => sum + num(row.amount), 0);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "teacher_travel_fees", entity_id: `${teacherName}|${monthKey}`, before: result.before, after: result.after });
+    writeOperationLog(user, {
+      operation_type: result.before?.fees?.length || result.before?.monthly ? "修改车费明细" : "新增车费明细",
+      operation_content: `${teacherName} ${monthKey} 合计 ${total}`,
+      target_type: "teacher_travel_fees",
+      target_id: `${teacherName}|${monthKey}`,
+    });
+    return sendJson(res, { ok: true, row: result.after });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/teacher-adjustments") {
     const body = await readBody(req);
+    const result = upsertTeacherTravelFees({
+      ...body,
+      fees: [1, 2, 3, 4].map((index) => ({
+        week_index: index,
+        amount: body[teacherTravelField(index)],
+      })),
+    });
+    if (result.error) return sendError(res, result.status || 400, result.error);
     const monthKey = text(body.month_key || getSetting("month_key"));
-    const before = get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [text(body.teacher_name), monthKey]);
-    db.prepare(`
-      INSERT INTO teacher_adjustments_monthly(
-        teacher_name, month_key, week1_transport, week2_transport, week3_transport, week4_transport, notes
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(teacher_name, month_key) DO UPDATE SET
-        week1_transport = excluded.week1_transport,
-        week2_transport = excluded.week2_transport,
-        week3_transport = excluded.week3_transport,
-        week4_transport = excluded.week4_transport,
-        notes = excluded.notes
-    `).run(
-      text(body.teacher_name),
-      monthKey,
-      num(body.week1_transport),
-      num(body.week2_transport),
-      num(body.week3_transport),
-      num(body.week4_transport),
-      text(body.notes),
-    );
-    const after = get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [text(body.teacher_name), monthKey]);
-    recordAuditEvent(req, user, { action: "upsert", entity_type: "teacher_adjustments", entity_id: `${text(body.teacher_name)}|${monthKey}`, before, after });
-    writeOperationLog(user, { operation_type: before ? "修改教师交通补贴" : "新增教师交通补贴", operation_content: `${text(body.teacher_name)} ${monthKey} 合计 ${num(after?.week1_transport) + num(after?.week2_transport) + num(after?.week3_transport) + num(after?.week4_transport)}`, target_type: "teacher_adjustments", target_id: `${text(body.teacher_name)}|${monthKey}` });
+    const teacherName = text(body.teacher_name);
+    const total = (result.after?.fees || []).reduce((sum, row) => sum + num(row.amount), 0);
+    recordAuditEvent(req, user, { action: "upsert", entity_type: "teacher_adjustments", entity_id: `${teacherName}|${monthKey}`, before: result.before, after: result.after });
+    writeOperationLog(user, { operation_type: result.before?.monthly ? "修改教师交通补贴" : "新增教师交通补贴", operation_content: `${teacherName} ${monthKey} 合计 ${total}`, target_type: "teacher_adjustments", target_id: `${teacherName}|${monthKey}` });
     return sendJson(res, { ok: true });
   }
 
