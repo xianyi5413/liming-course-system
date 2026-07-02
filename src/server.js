@@ -320,6 +320,17 @@ function initDb() {
       left_at TEXT DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS student_grade_stages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_name TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      start_date TEXT DEFAULT '',
+      end_date TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (student_name, stage)
+    );
+
     CREATE TABLE IF NOT EXISTS pricing_standards (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       grade TEXT NOT NULL,
@@ -729,6 +740,7 @@ function initDb() {
   }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_recharge_records_month_student ON recharge_records(month_key, student_name)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_opening_balances_student ON student_opening_balances(student_name)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_student_grade_stages_student ON student_grade_stages(student_name)").run();
 
   const studentPricingSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'student_pricing'")?.sql);
   if (!studentPricingSql.includes("grade TEXT") || !studentPricingSql.includes("student_names TEXT") || !studentPricingSql.includes("UNIQUE (student_name, grade, subject, student_names)")) {
@@ -2406,12 +2418,148 @@ function studentProfiles() {
   return all(`
     SELECT *
     FROM students
-  `).map((row) => ({ ...row, first_lesson_date: firstStudentLessonDate(row.name) })).sort((a, b) => (
+  `).map((row) => {
+    const gradeStages = studentGradeStages(row.name);
+    return {
+      ...row,
+      first_lesson_date: firstStudentLessonDate(row.name),
+      grade_stages: gradeStages,
+      current_grade: currentStudentGradeFromStages(gradeStages, row.grade),
+    };
+  }).sort((a, b) => (
     ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[a.status] ?? 1)
     - ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[b.status] ?? 1)
-    || compareGradeName(a.grade, b.grade)
+    || compareGradeName(a.current_grade || a.grade, b.current_grade || b.grade)
     || a.name.localeCompare(b.name, "zh-Hans-CN")
   ));
+}
+
+function studentGradeStages(studentName = "") {
+  const name = text(studentName);
+  const params = [];
+  const where = name ? "WHERE student_name = ?" : "";
+  if (name) params.push(name);
+  return all(`
+    SELECT *
+    FROM student_grade_stages
+    ${where}
+    ORDER BY
+      CASE stage
+        WHEN '初一' THEN 1
+        WHEN '初二' THEN 2
+        WHEN '初三' THEN 3
+        WHEN '高一' THEN 4
+        WHEN '高二' THEN 5
+        WHEN '高三' THEN 6
+        WHEN '已毕业' THEN 7
+        ELSE 99
+      END,
+      stage
+  `, params);
+}
+
+function currentStudentGradeFromStages(stages = [], fallbackGrade = "") {
+  const today = beijingDateKey();
+  const rows = Array.isArray(stages) ? stages : [];
+  const graduated = rows.find((row) => text(row.stage) === "已毕业" && validDateKey(row.start_date) && text(row.start_date) <= today);
+  if (graduated) return "已毕业";
+  for (const stage of GRADE_ORDER.filter((item) => item !== "已毕业")) {
+    const row = rows.find((item) => text(item.stage) === stage);
+    if (!row || !validDateKey(row.start_date) || !validDateKey(row.end_date)) continue;
+    if (text(row.start_date) <= today && today <= text(row.end_date)) return stage;
+  }
+  return text(fallbackGrade) || "未设置";
+}
+
+function normalizeStudentGradeStageInput(body = {}, current = {}) {
+  const studentName = text(body.student_name ?? body.name ?? current.student_name);
+  const stage = text(body.stage ?? current.stage);
+  const startDate = text(body.start_date ?? current.start_date);
+  const endDate = stage === "已毕业" ? "" : text(body.end_date ?? current.end_date);
+  if (!studentName) return { error: "学生姓名不能为空", status: 400 };
+  if (!GRADE_ORDER.includes(stage)) return { error: "年级阶段不正确", status: 400 };
+  if (startDate && !validDateKey(startDate)) return { error: "起始日期格式不正确", status: 400 };
+  if (endDate && !validDateKey(endDate)) return { error: "截止日期格式不正确", status: 400 };
+  if (stage !== "已毕业" && startDate && endDate && startDate > endDate) return { error: "起始日期不能晚于截止日期", status: 400 };
+  return { student_name: studentName, stage, start_date: startDate, end_date: endDate };
+}
+
+function upsertStudentGradeStage(body = {}) {
+  const payload = normalizeStudentGradeStageInput(body);
+  if (payload.error) return payload;
+  const student = get("SELECT * FROM students WHERE name = ?", [payload.student_name]);
+  if (!student) return { error: "学生档案不存在", status: 404 };
+  const before = get("SELECT * FROM student_grade_stages WHERE student_name = ? AND stage = ?", [payload.student_name, payload.stage]);
+  db.prepare(`
+    INSERT INTO student_grade_stages(student_name, stage, start_date, end_date, updated_at)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(student_name, stage) DO UPDATE SET
+      start_date = excluded.start_date,
+      end_date = excluded.end_date,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(payload.student_name, payload.stage, payload.start_date, payload.end_date);
+  const after = get("SELECT * FROM student_grade_stages WHERE student_name = ? AND stage = ?", [payload.student_name, payload.stage]);
+  const stages = studentGradeStages(payload.student_name);
+  return {
+    before,
+    after,
+    student: {
+      ...student,
+      grade_stages: stages,
+      current_grade: currentStudentGradeFromStages(stages, student.grade),
+    },
+  };
+}
+
+function batchUpdateStudentGradeStages(body = {}) {
+  const idValues = Array.isArray(body.student_ids) ? body.student_ids.map(Number).filter(Boolean) : [];
+  const requestedNames = uniqueNames(body.student_names || body.students || []);
+  let names = [...requestedNames];
+  if (idValues.length) {
+    const placeholders = idValues.map(() => "?").join(",");
+    names.push(...all(`SELECT name FROM students WHERE id IN (${placeholders})`, idValues).map((row) => row.name));
+  }
+  names = uniqueNames(names);
+  if (!names.length) return { error: "请先选择学生", status: 400 };
+  if (names.length > 500) return { error: "单次最多修改 500 名学生", status: 400 };
+  const existing = new Set(all(`SELECT name FROM students WHERE name IN (${names.map(() => "?").join(",")})`, names).map((row) => row.name));
+  names = names.filter((name) => existing.has(name));
+  if (!names.length) return { error: "选中的学生档案不存在", status: 404 };
+  const sample = normalizeStudentGradeStageInput({ ...body, student_name: names[0] });
+  if (sample.error) return sample;
+  return withTransaction(() => {
+    const rows = [];
+    const before = [];
+    for (const studentName of names) {
+      const result = upsertStudentGradeStage({
+        student_name: studentName,
+        stage: sample.stage,
+        start_date: sample.start_date,
+        end_date: sample.end_date,
+      });
+      if (result.error) throw new Error(result.error);
+      before.push(result.before);
+      rows.push(result.after);
+    }
+    return {
+      ok: true,
+      updated: rows.length,
+      stage: sample.stage,
+      start_date: sample.start_date,
+      end_date: sample.end_date,
+      before,
+      rows,
+      students: names.map((name) => {
+        const student = get("SELECT * FROM students WHERE name = ?", [name]);
+        const stages = studentGradeStages(name);
+        return {
+          ...student,
+          grade_stages: stages,
+          current_grade: currentStudentGradeFromStages(stages, student.grade),
+        };
+      }),
+    };
+  });
 }
 
 function teacherHasHistory(name) {
@@ -6588,7 +6736,6 @@ function buildBootstrap(monthKey, includeInactive = false) {
   syncStudentsFromLessons();
   syncTeachersFromLessons();
   withTransaction(() => {
-    autoPromoteStudentsForMonth(monthKey);
     ensureCarryOverChain(monthKey);
   });
   syncStudentPricingCandidatesFromLessons();
@@ -7256,13 +7403,13 @@ function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
   const personalStudents = new Set();
   for (const lesson of lessons) {
     const students = splitStudents(lesson.student_names);
-    if (students.length === 1) personalStudents.add(students[0]);
+    for (const student of students) personalStudents.add(student);
     if (students.length >= 2) {
       const key = `CLASS|${lesson.class_key}`;
       if (!dailyClassMap.has(key)) {
         dailyClassMap.set(key, {
           send_object_key: key,
-          send_object_name: `${lesson.grade}${lesson.subject}-${lesson.student_names}`,
+          send_object_name: `${lesson.grade}${lesson.subject}-${lesson.display_student_names || lesson.student_names}`,
           send_object_type: "班级群",
           students: lesson.student_names,
           teachers: [lesson.teacher_name],
@@ -8859,6 +9006,7 @@ function roleCan(user, area, action = "read") {
 function apiArea(req, url) {
   const p = url.pathname;
   if (p.startsWith("/api/roles")) return "roles";
+  if (p.startsWith("/api/student-grade-stages")) return "students";
   if (p.startsWith("/api/class-groups")) return "students";
   if (p === "/api/dashboard") return "dashboard";
   if (p.startsWith("/api/users")) return "users";
@@ -8887,6 +9035,7 @@ function apiPagePermissionKeys(req, url) {
   if (p === "/api/dashboard") return ["dashboard"];
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
   if (p.startsWith("/api/class-groups")) return ["classGroups"];
+  if (p.startsWith("/api/student-grade-stages")) return ["studentProfiles"];
   if (p.startsWith("/api/course-notice")) return ["courseNotice"];
   if (p.startsWith("/api/teacher-course-notice")) return ["teacherCourseNotice"];
   if (p === "/api/lessons-range") {
@@ -11378,6 +11527,46 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/students") return sendJson(res, { students: studentProfiles() });
+  if (req.method === "GET" && url.pathname === "/api/student-grade-stages") {
+    const studentName = text(url.searchParams.get("student") || url.searchParams.get("student_name"));
+    return sendJson(res, { student_name: studentName, stages: studentGradeStages(studentName) });
+  }
+  if ((req.method === "PUT" || req.method === "PATCH") && url.pathname === "/api/student-grade-stages") {
+    const result = upsertStudentGradeStage(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "upsert",
+      entity_type: "student_grade_stages",
+      entity_id: `${result.after.student_name}|${result.after.stage}`,
+      before: result.before,
+      after: result.after,
+    });
+    writeOperationLog(user, {
+      operation_type: "修改学生年级阶段",
+      operation_content: `${result.after.student_name} ${result.after.stage} ${result.after.start_date || "未设起始"}${result.after.end_date ? ` 至 ${result.after.end_date}` : ""}`,
+      target_type: "student_grade_stages",
+      target_id: `${result.after.student_name}|${result.after.stage}`,
+    });
+    return sendJson(res, { ok: true, row: result.after, student: result.student });
+  }
+  if (req.method === "POST" && url.pathname === "/api/student-grade-stages/batch") {
+    const result = batchUpdateStudentGradeStages(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "batch_upsert",
+      entity_type: "student_grade_stages",
+      entity_id: "batch",
+      before: result.before,
+      after: result.rows,
+    });
+    writeOperationLog(user, {
+      operation_type: "批量修改学生年级阶段",
+      operation_content: `${result.updated || 0} 名学生 ${result.stage} ${result.start_date || "未设起始"}${result.end_date ? ` 至 ${result.end_date}` : ""}`,
+      target_type: "student_grade_stages",
+      target_id: (result.rows || []).map((row) => `${row.student_name}|${row.stage}`).join(","),
+    });
+    return sendJson(res, result);
+  }
   if (req.method === "POST" && url.pathname === "/api/students") {
     const result = createStudentProfile(await readBody(req));
     if (result.error) return sendError(res, result.status || 400, result.error);
