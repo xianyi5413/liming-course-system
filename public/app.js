@@ -1,13 +1,13 @@
 const navGroups = [
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
-  { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["week", "周课表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
+  { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
     label: "学生",
-    views: [["feeDetails", "费用明细"], ["summary", "费用汇总"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
-    moreViews: [["studentPricing", "学生单价"], ["studentProfiles", "学生档案"]],
+    views: [["summary", "费用汇总"], ["feeDetails", "费用明细"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
+    moreViews: [["studentPricing", "学生单价"], ["classGroups", "班级管理"], ["studentProfiles", "学生档案"]],
   },
-  { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "薪资明细"], ["teacherSalaryRules", "课时明细"], ["teacherProfiles", "教师档案"]] },
+  { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "教师档案"]] },
   { key: "operations", label: "运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "经营概览", views: [["finance", "期间概览"]] },
   { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
@@ -168,19 +168,6 @@ const ACCOUNT_FILTER_PRESET_DEFS = [
     ],
   },
   {
-    view: "week",
-    label: "周课表",
-    fields: [
-      { key: "teacher_names", label: "预筛选老师", type: "teachers" },
-      { key: "student", label: "预筛选学生" },
-      { key: "classroom", label: "预筛选教室" },
-      { key: "grade", label: "预筛选年级" },
-      { key: "subject", label: "预筛选科目" },
-      { key: "start_date", label: "开始时间", type: "date-rule", bound: "start" },
-      { key: "end_date", label: "结束时间", type: "date-rule", bound: "end" },
-    ],
-  },
-  {
     view: "weekMatrix",
     label: "矩阵课表",
     fields: [
@@ -213,7 +200,7 @@ const ACCOUNT_FILTER_PRESET_DEFS = [
   },
   {
     view: "teacherDetail",
-    label: "薪资明细",
+    label: "课时明细",
     fields: [
       { key: "teacher_names", label: "预筛选老师", type: "teachers" },
       { key: "grade", label: "预筛选年级" },
@@ -235,11 +222,11 @@ const ROLE_VIEWS = {
   owner: null,
   admin: null,
   boss: null,
-  academic: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
-  jiaowu: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
-  helper: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
-  finance: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
-  assistant: new Set(["dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
+  academic: new Set(["dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice", "summary", "feeDetails", "recharges", "openingBalances", "studentQuery", "studentPricing", "classGroups", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
+  jiaowu: new Set(["dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice", "summary", "feeDetails", "recharges", "openingBalances", "studentQuery", "studentPricing", "classGroups", "studentProfiles", "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules", "finance", "appearance", "baseData", "pricing", "operationLogs"]),
+  helper: new Set(["dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
+  finance: new Set(["dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice", "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
+  assistant: new Set(["dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice", "studentQuery", "studentProfiles", "teacherProfiles", "appearance"]),
   teacher: new Set(["lessons", "teacherDetail", "teacherProfiles", "appearance"]),
 };
 const PALETTES = [
@@ -268,6 +255,7 @@ if (shouldMigrateDashboardDefault) {
 }
 let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
+if (view === "week") view = "lessons";
 let activeWeek = readActiveWeek();
 let matrixRange = readMatrixRange();
 let matrixView = localStorage.getItem(MATRIX_VIEW_KEY) || "time";
@@ -325,6 +313,7 @@ let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
+let classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
 let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
@@ -548,9 +537,9 @@ function canView(viewKey) {
 
 const AREA_VIEW_KEYS = {
   dashboard: ["dashboard"],
-  schedule: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
-  scheduleRead: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
-  students: ["feeDetails", "summary", "studentQuery", "studentProfiles", "studentPricing", "recharges", "openingBalances"],
+  schedule: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  scheduleRead: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  students: ["summary", "feeDetails", "studentQuery", "studentProfiles", "studentPricing", "classGroups", "recharges", "openingBalances"],
   profiles: ["studentProfiles", "teacherProfiles"],
   pricing: ["pricing", "studentPricing"],
   teacherTransport: ["teacherTravelFees"],
@@ -1169,6 +1158,7 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
     staff_salary: keepPreviousPageData ? previousState.staff_salary || [] : [],
     staff_attendance: keepPreviousPageData ? previousState.staff_attendance || [] : [],
     expenses: keepPreviousPageData ? previousState.expenses || [] : [],
+    class_groups: keepPreviousPageData ? previousState.class_groups || [] : [],
     schedule_conflicts: keepPreviousPageData
       ? previousState.schedule_conflicts || { issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } }
       : { issues: [], counts: { teacher: 0, student: 0, classroom: 0, invalid_time: 0 } },
@@ -1185,8 +1175,8 @@ function viewNeedsFullBootstrap(viewKey = view) {
 
 function viewNeedsProfileTeachers(viewKey = view) {
   return [
-    "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
-    "teacherProfiles", "teacherDetail", "teacherSalary", "teacherTravelFees", "teacherSalaryRules", "userAdmin",
+    "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "teacherProfiles", "teacherDetail", "teacherSalary", "teacherTravelFees", "teacherSalaryRules", "classGroups", "userAdmin",
   ].includes(viewKey);
 }
 
@@ -1194,7 +1184,7 @@ function viewNeedsProfileStudents(viewKey = view) {
   return [
     "lessons",
     "recharges", "openingBalances", "studentQuery", "studentProfiles",
-    "studentPricing", "teacherSalaryRules",
+    "studentPricing", "teacherSalaryRules", "classGroups",
   ].includes(viewKey);
 }
 
@@ -1203,11 +1193,11 @@ function viewNeedsLessonRange(viewKey = view) {
 }
 
 function viewNeedsWeekLessons(viewKey = view) {
-  return ["week", "weekMatrix"].includes(viewKey);
+  return ["weekMatrix"].includes(viewKey);
 }
 
 function viewNeedsScheduleConflicts(viewKey = view) {
-  return ["lessons", "week", "weekMatrix"].includes(viewKey);
+  return ["lessons", "weekMatrix"].includes(viewKey);
 }
 
 function bootstrapQuery(lite = true) {
@@ -1247,7 +1237,7 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
     const matrixStart = matrixRange.start && (!weekSpan || matrixRange.start < weekSpan.start) ? matrixRange.start : weekSpan?.start;
     const matrixEnd = matrixRange.end && (!weekSpan || matrixRange.end > weekSpan.end) ? matrixRange.end : weekSpan?.end;
     if (matrixStart && matrixEnd) {
-      const weekViewKey = view === "weekMatrix" ? "weekMatrix" : "week";
+      const weekViewKey = "weekMatrix";
       const weekLessonsResult = await request(lessonsRangeUrl({ start: matrixStart, end: matrixEnd }, weekViewKey));
       if (!stillCurrent()) return false;
       state.week_lessons = weekLessonsResult.lessons || [];
@@ -1278,6 +1268,11 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
 
   if (view === "openingBalances") {
     state.opening_balances = canView("openingBalances") ? ((await request("/api/opening-balances")).opening_balances || []) : [];
+    if (!stillCurrent()) return false;
+  }
+
+  if (view === "classGroups") {
+    state.class_groups = canView("classGroups") ? ((await request("/api/class-groups")).class_groups || []) : [];
     if (!stillCurrent()) return false;
   }
 
@@ -1526,13 +1521,14 @@ function ensureActiveWeekDefault() {
 }
 
 function readNoticeFilter(storageKey) {
-  const fallback = { ...currentWeekRange(), onlyTeaching: true };
+  const fallback = { ...currentWeekRange(), onlyTeaching: true, mode: "daily" };
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
     const filter = {
       start: isDateValue(saved.start) ? saved.start : fallback.start,
       end: isDateValue(saved.end) ? saved.end : fallback.end,
       onlyTeaching: typeof saved.onlyTeaching === "boolean" ? saved.onlyTeaching : fallback.onlyTeaching,
+      mode: saved.mode === "summer" ? "summer" : "daily",
     };
     if (filter.start > filter.end) filter.end = filter.start;
     return filter;
@@ -1663,6 +1659,8 @@ function ensureDateRangePicker() {
   dateRangePickerEl.addEventListener("mouseover", (event) => {
     const day = event.target.closest("[data-range-date]");
     if (!day || day.disabled || !activeDateRangePicker) return;
+    if (!activeDateRangePicker.anchor) return;
+    if (activeDateRangePicker.hover === day.dataset.rangeDate) return;
     activeDateRangePicker.hover = day.dataset.rangeDate || "";
     renderDateRangePickerPanel();
   });
@@ -1840,6 +1838,10 @@ async function handleDateRangeDayClick(value) {
     state.hover = value;
     if (state.pending === "end") state.start = value;
     else state.end = value;
+    activeDateRangePicker.wrapper.dataset.start = state.start || "";
+    activeDateRangePicker.wrapper.dataset.end = state.end || "";
+    activeDateRangePicker.wrapper.classList.toggle("has-value", Boolean(state.start || state.end));
+    syncDateRangeTriggerText(activeDateRangePicker.wrapper, state.start || "", state.end || "");
     renderDateRangePickerPanel();
     return;
   }
@@ -1860,6 +1862,10 @@ async function applyDateRangePickerValue(wrapper, start, end) {
 
 async function clearDateRangePickerValue(wrapper) {
   if (!wrapper) return;
+  wrapper.dataset.start = "";
+  wrapper.dataset.end = "";
+  wrapper.classList.remove("has-value");
+  syncDateRangeTriggerText(wrapper, "", "");
   closeDateRangePicker();
   await applyDateRangeToScope(wrapper.dataset.rangeScope || "", "", "");
 }
@@ -1959,6 +1965,7 @@ function courseNoticeQuery() {
   params.set("start", courseNoticeFilter.start);
   params.set("end", courseNoticeFilter.end);
   if (courseNoticeFilter.onlyTeaching) params.set("only_teaching", "1");
+  if (courseNoticeFilter.mode === "summer") params.set("mode", "summer");
   return params.toString();
 }
 
@@ -2092,6 +2099,23 @@ function normalizedTeacherSalaryStudentNames(value) {
   return uniqueSorted(splitStudents(value).map((name) => name.replace(/\s+/g, "")).filter(Boolean)).join("、");
 }
 
+function classGroupMatchesFilter(row, filter = classGroupFilter) {
+  if (filter.teacher && !textContains(row.teacher, filter.teacher)) return false;
+  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  if (filter.subject && !textContains(row.subject, filter.subject)) return false;
+  if (filter.student && !textContains(row.students_display, filter.student)) return false;
+  return true;
+}
+
+function dynamicClassGroupFilterOptions(rows, filter = classGroupFilter) {
+  return {
+    teachers: uniqueSorted(rowsForFilterOption(rows, filter, "teacher", classGroupMatchesFilter).map((row) => row.teacher)),
+    grades: uniqueSorted(rowsForFilterOption(rows, filter, "grade", classGroupMatchesFilter).map((row) => row.grade)),
+    subjects: uniqueSorted(rowsForFilterOption(rows, filter, "subject", classGroupMatchesFilter).map((row) => row.subject)),
+    students: uniqueSorted(rowsForFilterOption(rows, filter, "student", classGroupMatchesFilter).flatMap((row) => splitStudents(row.students_display))),
+  };
+}
+
 function teacherSalaryRuleKey(row) {
   return [
     String(row.teacher_name || "").trim(),
@@ -2172,7 +2196,7 @@ function teacherSalarySourceTitle(lesson) {
   const amount = formatMoney(displayTeacherSalaryForLesson(lesson));
   const ruleSalary = displayTeacherRuleSalaryForLesson(lesson);
   const rule = `，规则薪资 ${formatMoney(ruleSalary)}`;
-  if (label === "未设置") return "已上课程未设置有效课时明细规则";
+  if (label === "未设置") return "已上课程未设置有效薪资规则";
   if (label === "手动") return `当前薪资 ${amount}${rule}，与规则不一致，视为手动`;
   return `系统自动薪资 ${amount}${rule}`;
 }
@@ -2184,7 +2208,7 @@ function teacherSalarySourceBadge(lesson) {
 function teacherSalaryRuleDisableReason(lesson) {
   if (!isCompletedLesson(lesson)) return "非已上课程薪资自动按 0 处理";
   const rule = activeTeacherSalaryRuleForLesson(lesson);
-  if (!rule) return "未设置有效课时明细规则";
+  if (!rule) return "未设置有效薪资规则";
   return "未设置有效薪资金额";
 }
 
@@ -2311,7 +2335,7 @@ async function syncTeacherSalaryRuleCandidatesOnEntry() {
     if (state) state.teacher_salary_rules = rules.rules || [];
     teacherSalaryRuleCandidateSync = { requested: true, busy: false, result, error: "" };
   } catch (error) {
-    teacherSalaryRuleCandidateSync = { requested: true, busy: false, result: null, error: error.message || "同步课时明细候选失败" };
+    teacherSalaryRuleCandidateSync = { requested: true, busy: false, result: null, error: error.message || "同步薪资规则候选失败" };
   }
   if (view === "teacherSalaryRules") render();
 }
@@ -2713,7 +2737,7 @@ function rolePrefilterDateRange(viewKey = view) {
 }
 
 function lessonDataViewKey(viewKey = view) {
-  return ["lessons", "week", "weekMatrix", "teacherDetail"].includes(viewKey) ? viewKey : "lessons";
+  return ["lessons", "weekMatrix", "teacherDetail"].includes(viewKey) ? viewKey : "lessons";
 }
 
 function lessonsRangeUrl(range, viewKey = lessonDataViewKey()) {
@@ -5946,7 +5970,8 @@ function renderMatrixDateFilter() {
     <div class="filter-bar compact matrix-date-filter">
       <label>日期范围</label>
       ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}
-      <button class="btn matrix-range-reset" type="button">恢复当前周</button>
+      <button class="btn matrix-range-reset" type="button">重置</button>
+      <button class="btn matrix-current-week" type="button">当前周</button>
     </div>
   `;
 }
@@ -5957,67 +5982,13 @@ function weekDetailGroupKey(row) {
   return `${teacherName}__${date}`;
 }
 
-function renderWeek() {
-  const { ranges, range, weekRows, rows, conflicts } = weekViewData();
-  const showSalary = canArea("salary");
-  let groupIndex = -1;
-  let lastGroupKey = null;
-  const decoratedRows = rows.map((row) => {
-    const groupKey = weekDetailGroupKey(row);
-    if (groupKey !== lastGroupKey) {
-      groupIndex += 1;
-      lastGroupKey = groupKey;
-    }
-    return { row, depthClass: `lesson-row-depth-${groupIndex % 2}` };
-  });
-  renderTopbar(
-    `${monthLabel()} 周课表`,
-    `${range.label} · 已筛选 ${rows.length} / 共 ${weekRows.length} 节`,
-  );
-  contentEl.innerHTML = `
-    ${renderWeekTabs(ranges)}
-    ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
-    <div class="band">
-      <div class="table-wrap smooth-table-wrap compact-table-scroll week-detail-scroll">
-        <table class="course-table week-detail-table uniform-table nowrap-table">
-          <thead>
-            <tr><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th>" : ""}<th>学生人数</th></tr>
-          </thead>
-          <tbody>
-            ${decoratedRows.map(({ row, depthClass }) => {
-              const rowClass = [isAbnormal(row) ? "abnormal" : "", depthClass].filter(Boolean).join(" ");
-              return `
-                <tr class="${rowClass}">
-                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
-                  <td class="text-cell">${escapeHtml(row.date)}</td>
-                  <td class="text-cell">${statusBadge(rowStatus(row))}</td>
-                  <td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td>
-                  <td class="text-cell">${escapeHtml(row.time_slot)}</td>
-                  <td class="text-cell">${escapeHtml(row.classroom)}</td>
-                  <td class="text-cell">${escapeHtml(row.grade)}</td>
-                  <td class="text-cell">${escapeHtml(row.subject)}</td>
-                  <td class="text-cell">${escapeHtml(row.student_names)}</td>
-                  <td class="text-cell">${escapeHtml(row.notes)}</td>
-                  ${showSalary ? `<td class="text-cell right">${formatMoney(displayTeacherSalaryForLesson(row))}</td>` : ""}
-                  <td class="text-cell">${splitStudents(row.student_names).length}</td>
-                </tr>
-              `;
-            }).join("") || `<tr><td colspan="${showSalary ? 12 : 11}" class="empty">本周暂无课程</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-}
-
 function renderWeekMatrix() {
-  const { ranges, range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
+  const { range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
   renderTopbar(
     `${monthLabel()} 矩阵课表`,
     `${range.label} · 已筛选 ${rows.length} / 共 ${weekRows.length} 节`,
   );
   contentEl.innerHTML = `
-    ${renderWeekTabs(ranges)}
     ${renderMatrixDateFilter()}
     ${renderMatrixViewTabs()}
     ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
@@ -7198,6 +7169,19 @@ function teacherTravelField(index) {
   return `week${Number(index)}_transport`;
 }
 
+function teacherTravelHeaderMarkup(week) {
+  const title = `第${week.week_index}周车票`;
+  const start = week.start || week.week_start || "";
+  const end = week.end || week.week_end || "";
+  const dateText = start && end ? `${start}~${end}` : "";
+  return `
+    <span class="travel-week-head">
+      <span>${escapeHtml(title)}</span>
+      ${dateText ? `<small>${escapeHtml(dateText)}</small>` : ""}
+    </span>
+  `;
+}
+
 function teacherTravelAmount(row = {}, week) {
   const detail = (row.travel_weeks || []).find((item) => Number(item.week_index) === Number(week.week_index));
   return numberValue(detail ? detail.amount : row[teacherTravelField(week.week_index)]);
@@ -7235,7 +7219,7 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
   const transportTableHeight = 40 + 38;
   const height = 48 + 96 + 104 + detailTableHeight + 52 + transportTableHeight + 54;
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
-  drawShotHeader(ctx, colors, `${monthLabel()} ${teacherName || "未选择教师"} 薪资明细`, "", width);
+  drawShotHeader(ctx, colors, `${monthLabel()} ${teacherName || "未选择教师"} 课时明细`, "", width);
   drawShotMetricCards(ctx, colors, [
     { label: "有效课时", value: String(completedRows.length) },
     { label: "课程记录", value: String(rows.length) },
@@ -7279,12 +7263,12 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
 async function downloadTeacherDetailPng() {
   if (!selectedTeacher) throw new Error("请先选择教师");
   const canvas = teacherDetailCanvas(selectedTeacher);
-  await downloadCanvasPng(canvas, `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_薪资明细.png`);
+  await downloadCanvasPng(canvas, `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_课时明细.png`);
 }
 
 async function copyTeacherDetailPng() {
   if (!selectedTeacher) throw new Error("请先选择教师");
-  const filename = `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_薪资明细.png`;
+  const filename = `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_课时明细.png`;
   const canvas = teacherDetailCanvas(selectedTeacher);
   await copyOrDownloadCanvasPng(canvas, filename);
 }
@@ -8238,6 +8222,61 @@ function renderStudentPricing() {
   `;
 }
 
+function renderClassGroups() {
+  const rows = state.class_groups || [];
+  const opts = dynamicClassGroupFilterOptions(rows);
+  const visibleRows = rows.filter((row) => classGroupMatchesFilter(row));
+  renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
+  contentEl.innerHTML = `
+    <div class="band">
+      <div class="section-head">
+        <div>
+          <div class="section-title">全局班级名</div>
+          <div class="section-subtitle">唯一规则：老师 + 年级 + 科目 + 标准化学生集合。班级名为空表示未命名。</div>
+        </div>
+      </div>
+      <div class="filter-bar compact class-group-filter-bar">
+        <label class="filter-field">
+          <span>老师</span>
+          ${filterComboControl({ className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
+        </label>
+        <label class="filter-field">
+          <span>年级</span>
+          ${filterComboControl({ className: "class-group-filter-input", field: "grade", value: classGroupFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
+        </label>
+        <label class="filter-field">
+          <span>科目</span>
+          ${filterComboControl({ className: "class-group-filter-input", field: "subject", value: classGroupFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
+        </label>
+        <label class="filter-field">
+          <span>学生</span>
+          ${filterComboControl({ className: "class-group-filter-input", field: "student", value: classGroupFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
+        </label>
+        <div class="filter-summary">
+          <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
+          <button class="btn reset-class-group-filter" type="button">清空筛选</button>
+        </div>
+      </div>
+      <div class="table-wrap smooth-table-wrap">
+        <table class="class-group-table uniform-table nowrap-table">
+          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
+          <tbody>
+            ${visibleRows.map((row) => `
+              <tr class="class-group-row" data-class-group-id="${row.id}">
+                <td class="text-cell center">${escapeHtml(row.teacher)}</td>
+                <td class="text-cell center">${escapeHtml(row.grade)}</td>
+                <td class="text-cell center">${escapeHtml(row.subject)}</td>
+                <td class="text-cell wide">${escapeHtml(row.students_display || row.students_key || "")}</td>
+                <td><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
+              </tr>
+            `).join("") || `<tr><td colspan="5" class="empty">暂无班级候选</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 function profileRows(kind = profileTab) {
   const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
   const scopedRows = rows;
@@ -9006,6 +9045,7 @@ function bindOperationLogEvents() {
 function renderTeacherSalary() {
   const rows = state.derived.teacher_summary;
   const weeks = teacherTravelWeeks();
+  const disabled = canWriteData() ? "" : "disabled";
   const total = rows.reduce((sum, row) => sum + numberValue(row.total_salary), 0);
   const lessonTotal = rows.reduce((sum, row) => sum + numberValue(row.lesson_count), 0);
   const classSalaryTotal = rows.reduce((sum, row) => sum + numberValue(row.salary_total), 0);
@@ -9023,20 +9063,20 @@ function renderTeacherSalary() {
               <th>教师姓名</th>
               <th>上课课时数</th>
               <th>课时合计</th>
-              ${weeks.map((week) => `<th>${escapeHtml(week.label || `第${week.week_index}周车票`)}</th>`).join("")}
+              ${weeks.map((week) => `<th>${teacherTravelHeaderMarkup(week)}</th>`).join("")}
               <th>薪资合计</th>
               <th class="wide">备注</th>
             </tr>
           </thead>
           <tbody>
             ${rows.map((row) => `
-              <tr>
+              <tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell right">${row.lesson_count}</td>
                 <td class="text-cell right">${formatMoney(row.salary_total)}</td>
                 ${weeks.map((week) => `<td class="text-cell right">${formatMoney(teacherTravelAmount(row, week))}</td>`).join("")}
                 <td class="text-cell right">${formatMoney(row.total_salary)}</td>
-                <td class="text-cell wide">${escapeHtml(row.notes || "")}</td>
+                <td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${disabled}></td>
               </tr>
             `).join("")}
             <tr>
@@ -9086,7 +9126,7 @@ function renderTeacherTravelFees() {
           <thead>
             <tr>
               <th>教师姓名</th>
-              ${weeks.map((week) => `<th>${escapeHtml(week.label || `第${week.week_index}周车票`)}</th>`).join("")}
+              ${weeks.map((week) => `<th>${teacherTravelHeaderMarkup(week)}</th>`).join("")}
               <th>合计</th>
               <th class="wide">备注</th>
             </tr>
@@ -9152,25 +9192,25 @@ function renderTeacherSalaryRules() {
   const pendingCount = rules.filter((rule) => optionalNumberValue(rule.salary_per_unit) == null || optionalNumberValue(rule.salary_per_unit) <= 0).length;
   const sync = teacherSalaryRuleCandidateSync;
   const syncNotice = sync.busy
-    ? `<div class="section-subtitle">正在根据历史课程自动补齐课时明细候选...</div>`
+    ? `<div class="section-subtitle">正在根据历史课程自动补齐薪资规则候选...</div>`
     : sync.error
-      ? `<div class="section-subtitle">课时明细候选同步失败：${escapeHtml(sync.error)}</div>`
+      ? `<div class="section-subtitle">薪资规则候选同步失败：${escapeHtml(sync.error)}</div>`
       : sync.result
-        ? `<div class="section-subtitle">已根据历史课程补齐课时明细候选：新增 ${sync.result.createdCount || 0} 条，已有 ${sync.result.existingCount || 0} 条，跳过 ${sync.result.skippedCount || 0} 条。</div>`
+        ? `<div class="section-subtitle">已根据历史课程补齐薪资规则候选：新增 ${sync.result.createdCount || 0} 条，已有 ${sync.result.existingCount || 0} 条，跳过 ${sync.result.skippedCount || 0} 条。</div>`
         : "";
   renderTopbar(
-    "课时明细",
+    "薪资规则",
     `有效 ${effectiveCount} 条 / 待设置 ${pendingCount} 条 / 共 ${rules.length} 条`,
   );
   contentEl.innerHTML = `
     <div class="band">
       <div class="section-head">
         <div>
-          <div class="section-title">全局规则</div>
-          <div class="section-subtitle">课时薪资按每2小时计算。薪资大于 0 才会被启用；0 元记录仅作为待设置候选，不参与自动匹配。已有课程薪资不会自动覆盖，可在薪资明细中勾选后按规则更新。</div>
+          <div class="section-title">薪资规则</div>
+          <div class="section-subtitle">课时薪资按每2小时计算。薪资大于 0 才会被启用；0 元记录仅作为待设置候选，不参与自动匹配。已有课程薪资不会自动覆盖，可在课时明细中勾选后按规则更新。</div>
           ${syncNotice}
         </div>
-        <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增课时明细</button>
+        <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
       </div>
       <div class="filter-bar compact">
         <label class="filter-field">
@@ -9209,7 +9249,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${teacherSalaryRuleSalaryStatus(rule)}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的课时明细</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9220,7 +9260,7 @@ function renderTeacherSalaryRules() {
         <div class="modal-panel">
           <div class="modal-head">
             <div>
-              <div class="modal-title">新增课时明细</div>
+              <div class="modal-title">新增薪资规则</div>
               <div class="modal-subtitle">学生集合会自动规范化；薪资大于 0 后才参与匹配。</div>
             </div>
           </div>
@@ -9261,7 +9301,7 @@ function renderTeacherDetail() {
   const selectedCount = selectedTeacherSalaryLessonIds.size;
   const allSelected = eligibleRows.length > 0 && eligibleRows.every((row) => selectedTeacherSalaryLessonIds.has(Number(row.id)));
   renderTopbar(
-    `${monthLabel()} 薪资明细`,
+    `${monthLabel()} 课时明细`,
     teacherAllSelected ? "全部老师" : (selectedTeacher ? (showSalary ? `${selectedTeacher} · 在这里录入课时薪资` : selectedTeacher) : "未选择教师"),
     `<button class="btn export-teacher-detail-image" type="button" ${selectedTeacher && !teacherAllSelected ? "" : "disabled"}>复制图片</button>`,
   );
@@ -9305,7 +9345,7 @@ function renderTeacherDetail() {
       ${showSalary ? `
         <div class="teacher-detail-bulkbar">
           <button class="btn primary apply-selected-teacher-salary-rules" type="button" ${bulkActionDisabledAttr(selectedCount)}>${bulkActionText("按规则更新所选薪资", selectedCount)}</button>
-          <span class="section-subtitle">勾选课程后，可批量按当前课时明细规则更新教师薪资</span>
+          <span class="section-subtitle">勾选课程后，可批量按当前薪资规则更新教师薪资</span>
         </div>
       ` : ""}
       <div class="table-wrap">
@@ -9386,7 +9426,7 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
           <tbody>
             ${rows.map((lesson) => `
               <tr>
-                ${columns.map(([key]) => `<td>${escapeHtml(lesson[key] || (key === "weekday" ? weekdayCn(lesson.date) : ""))}</td>`).join("")}
+                ${columns.map(([key]) => `<td>${escapeHtml(courseNoticeCellValue(lesson, key))}</td>`).join("")}
               </tr>
             `).join("")}
           </tbody>
@@ -9394,6 +9434,12 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
       </div>
     </div>
   `;
+}
+
+function courseNoticeCellValue(row = {}, key = "") {
+  if (key === "weekday") return row.weekday || weekdayCn(row.date);
+  if (key === "student_names") return row.display_student_names || row.student_names || "";
+  return row[key] || "";
 }
 
 function renderCourseNotice() {
@@ -9423,6 +9469,7 @@ function renderCourseNotice() {
           <span>全局后半句</span>
           <input class="control course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
         </label>
+        <button class="btn course-notice-mode-toggle" type="button">${courseNoticeFilter.mode === "summer" ? "暑期班截图" : "日常班截图"}</button>
         <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
         <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
       </div>
@@ -9642,7 +9689,7 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   const colWidths = columns.map(([key, label]) => {
     const maxText = Math.max(
       ctx.measureText(label).width,
-      ...rows.map((row) => ctx.measureText(String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""))).width),
+      ...rows.map((row) => ctx.measureText(String(courseNoticeCellValue(row, key))).width),
     );
     return Math.ceil(Math.max(82, maxText + paddingX * 2));
   });
@@ -9718,7 +9765,7 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
       ctx.strokeStyle = colors.line;
       ctx.strokeRect(x, y, colWidths[index], rowHeight);
       ctx.fillStyle = key === "time_slot" || key === "grade" || key === "subject" ? colors.tagText : colors.title;
-      const value = String(row[key] || (key === "weekday" ? weekdayCn(row.date) : ""));
+      const value = String(courseNoticeCellValue(row, key));
       ctx.fillText(value, x + colWidths[index] / 2, y + rowHeight / 2);
       x += colWidths[index];
     });
@@ -9815,7 +9862,6 @@ function dashboardShortcutCatalog() {
   return [
     { key: "studentProfiles", label: "学生档案", view: "studentProfiles", group: "学生管理", icon: NAV_ICONS.students },
     { key: "lessons", label: "课程总表", view: "lessons", group: "教务管理", icon: NAV_ICONS.schedule },
-    { key: "week", label: "周课表", view: "week", group: "教务管理", icon: NAV_ICONS.schedule },
     { key: "weekMatrix", label: "矩阵课表", view: "weekMatrix", group: "教务管理", icon: NAV_ICONS.schedule },
     { key: "newLesson", label: "新增课程", view: "lessons", group: "常用功能", icon: NAV_ICONS.schedule, action: "newLesson" },
     { key: "teacherProfiles", label: "教师管理", view: "teacherProfiles", group: "教师管理", icon: NAV_ICONS.teachers },
@@ -9829,7 +9875,7 @@ function dashboardShortcutCatalog() {
 
 function dashboardDefaultShortcutKeys() {
   const available = new Set(dashboardShortcutCatalog().map((item) => item.key));
-  return ["studentProfiles", "lessons", "week", "teacherProfiles", "recharges", "summary", "newLesson", "weekMatrix"]
+  return ["studentProfiles", "lessons", "teacherProfiles", "recharges", "summary", "newLesson", "weekMatrix"]
     .filter((key) => available.has(key))
     .slice(0, 8);
 }
@@ -10189,7 +10235,8 @@ function applyReadonlyUi() {
     ".base-data-add", ".base-data-delete", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
     ".pricing-field", ".recharge-field", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
-    ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field",
+    ".class-group-field",
+    ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field", ".teacher-salary-notes-field",
     ".batch-delete-teacher-profiles",
     ".course-notice-tail", ".notice-greeting", ".course-notice-clear-completions",
     ".teacher-course-notice-tail", ".teacher-notice-greeting", ".teacher-course-notice-clear-completions",
@@ -10283,7 +10330,6 @@ function render() {
   const renderers = {
     dashboard: renderDashboard,
     lessons: renderLessons,
-    week: renderWeek,
     weekMatrix: renderWeekMatrix,
     courseNotice: renderCourseNotice,
     teacherCourseNotice: renderTeacherCourseNotice,
@@ -10305,6 +10351,7 @@ function render() {
     userAdmin: renderUserAdmin,
     operationLogs: renderOperationLogs,
     studentPricing: renderStudentPricing,
+    classGroups: renderClassGroups,
     teacherSalary: renderTeacherSalary,
     teacherTravelFees: renderTeacherTravelFees,
     teacherDetail: renderTeacherDetail,
@@ -11039,7 +11086,7 @@ function wireEvents() {
     input.addEventListener("change", async () => {
       ignoreRoomOneConflict = input.checked;
       localStorage.setItem(IGNORE_ROOM_ONE_CONFLICT_KEY, ignoreRoomOneConflict ? "1" : "0");
-      if (view === "lessons" || view === "week" || view === "weekMatrix") render();
+      if (view === "lessons" || view === "weekMatrix") render();
       else await load();
     });
   });
@@ -12505,6 +12552,42 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".class-group-filter-input").forEach((input) => {
+    const applyClassGroupFilter = (value) => {
+      classGroupFilter = { ...classGroupFilter, [input.dataset.filterField]: value };
+    };
+    bindSafeTextInput(input, applyClassGroupFilter, () => render());
+  });
+
+  document.querySelectorAll(".reset-class-group-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
+      render();
+    });
+  });
+
+  document.querySelectorAll(".class-group-field").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const id = Number(input.dataset.id);
+      if (!id) return;
+      input.disabled = true;
+      try {
+        const result = await request(`/api/class-groups/${id}`, {
+          method: "PATCH",
+          body: { class_name: input.value },
+        });
+        state.class_groups = (state.class_groups || []).map((row) => Number(row.id) === id ? { ...row, ...(result.row || {}) } : row);
+        showToast("班级名已保存");
+      } catch (error) {
+        showToast(error.message || "班级名保存失败", "error");
+        const row = (state.class_groups || []).find((item) => Number(item.id) === id);
+        input.value = row?.class_name || "";
+      } finally {
+        input.disabled = isReadonlyUser();
+      }
+    });
+  });
+
   document.querySelectorAll(".reset-lesson-filter").forEach((button) => {
     button.addEventListener("click", () => {
       focusedLessonIds = [];
@@ -12897,7 +12980,7 @@ function wireEvents() {
       if (button.disabled) return;
       const ids = [...selectedTeacherSalaryLessonIds];
       if (!ids.length) return;
-      if (!confirm("将把所选课程的教师薪资更新为当前课时明细规则计算值，已有手动薪资也会被覆盖。是否继续？")) return;
+      if (!confirm("将把所选课程的教师薪资更新为当前薪资规则计算值，已有手动薪资也会被覆盖。是否继续？")) return;
       button.disabled = true;
       try {
         const result = await request("/api/teacher-salary-rules/apply-selected", {
@@ -13176,7 +13259,7 @@ function wireEvents() {
         await load();
       } catch (error) {
         button.disabled = false;
-        alert(`新增课时明细失败：${error.message}`);
+        alert(`新增薪资规则失败：${error.message}`);
       }
     });
   });
@@ -13401,6 +13484,21 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".teacher-salary-notes-field").forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = input.closest(".teacher-salary-summary-row");
+      if (!row) return;
+      refreshAfter(() => request("/api/teacher-salary-notes", {
+        method: "PATCH",
+        body: {
+          teacher_name: row.dataset.teacherName,
+          month_key: state.settings.month_key,
+          notes: input.value,
+        },
+      }));
+    });
+  });
+
   document.querySelectorAll(".teacher-travel-fee-field").forEach((input) => {
     input.addEventListener("change", () => {
       const row = input.closest(".teacher-travel-fee-row");
@@ -13440,6 +13538,17 @@ function wireEvents() {
   document.querySelectorAll(".course-notice-only").forEach((input) => {
     input.addEventListener("change", () => {
       courseNoticeFilter = { ...courseNoticeFilter, onlyTeaching: input.checked };
+      saveCourseNoticeFilter();
+      loadCourseNoticeData(true);
+    });
+  });
+
+  document.querySelectorAll(".course-notice-mode-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      courseNoticeFilter = {
+        ...courseNoticeFilter,
+        mode: courseNoticeFilter.mode === "summer" ? "daily" : "summer",
+      };
       saveCourseNoticeFilter();
       loadCourseNoticeData(true);
     });

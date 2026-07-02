@@ -5893,6 +5893,21 @@ table th,
   min-width: 96px;
 }
 
+.class-group-table :is(th, td):nth-child(1),
+.class-group-table :is(th, td):nth-child(2),
+.class-group-table :is(th, td):nth-child(3) {
+  text-align: center;
+}
+
+.class-group-table :is(th, td):nth-child(4),
+.class-group-table :is(th, td):nth-child(5) {
+  text-align: left;
+}
+
+.class-group-table .cell-input {
+  min-width: 180px;
+}
+
 .lesson-table-scroll {
   overflow-x: auto;
   overflow-y: visible;
@@ -7536,6 +7551,15 @@ table th,
   white-space: nowrap;
 }
 
+.filter-bar > .filter-summary,
+.filter-bar.compact > .filter-summary {
+  margin-left: auto;
+}
+
+.filter-bar.compact > .btn:last-child {
+  margin-left: auto;
+}
+
 .filter-summary b {
   color: var(--ink);
   font-family: var(--font-number);
@@ -7548,6 +7572,21 @@ table th,
   grid-template-columns: minmax(240px, 0.9fr) repeat(4, minmax(150px, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+}
+
+.travel-week-head {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.travel-week-head small {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .query-head.student-statement-metrics {
