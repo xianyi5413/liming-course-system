@@ -1865,6 +1865,11 @@ button:disabled,
   font-weight: 700;
 }
 
+.compact-toggle {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
 .content {
   flex: 1;
   min-height: 0;
@@ -2375,7 +2380,8 @@ td.grade-cell {
   background: var(--input-bg);
 }
 
-.segmented-option {
+.segmented-option,
+.segmented-btn {
   min-height: 34px;
   padding: 0 12px;
   border: 0;
@@ -2387,7 +2393,8 @@ td.grade-cell {
   cursor: pointer;
 }
 
-.segmented-option.active {
+.segmented-option.active,
+.segmented-btn.active {
   color: var(--ink-strong);
   background: var(--brand-soft);
   box-shadow: inset 0 0 0 1px var(--brand-border);
@@ -3626,6 +3633,73 @@ select.control,
 
 .profile-form-wide {
   grid-column: 1 / -1;
+}
+
+.current-grade-cell {
+  font-weight: 850;
+  color: var(--brand);
+}
+
+.student-stage-detail-row td {
+  padding: 0;
+  background: color-mix(in srgb, var(--brand-soft) 26%, var(--panel));
+}
+
+.student-stage-panel {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.student-stage-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.student-stage-lines {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.student-stage-line {
+  display: grid;
+  grid-template-columns: minmax(72px, 96px) minmax(150px, 1fr) minmax(150px, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.student-stage-name {
+  align-self: center;
+  font-weight: 900;
+  color: var(--ink-strong);
+}
+
+.student-stage-line label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 800;
+}
+
+.student-stage-line .hidden,
+.profile-form .hidden {
+  display: none;
+}
+
+.student-profile-main-row {
+  cursor: pointer;
+}
+
+.student-profile-main-row :is(input, select, button) {
+  cursor: auto;
 }
 
 .operations-summary .metric-value {
@@ -6384,6 +6458,22 @@ table th,
   grid-column: span 2;
 }
 
+.date-shortcuts {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  min-height: 38px;
+}
+
+.lesson-date-shortcuts {
+  width: max-content;
+  max-width: 100%;
+}
+
+.lesson-date-shortcut {
+  min-width: 56px;
+}
+
 .lesson-quick-row {
   flex: none;
   padding-top: var(--space-2);
@@ -7964,6 +8054,94 @@ table th,
 .notice-list {
   display: grid;
   gap: var(--space-4);
+}
+
+.notice-layout-toggle {
+  align-self: flex-end;
+}
+
+.notice-simple-mode {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.notice-simple-panel {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.notice-simple-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+  margin-bottom: var(--space-3);
+}
+
+.notice-simple-grade {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px dashed var(--line);
+}
+
+.notice-simple-grade:first-of-type {
+  border-top: 0;
+}
+
+.notice-simple-grade-title {
+  color: var(--ink-strong);
+  font-weight: 900;
+}
+
+.notice-simple-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-3);
+}
+
+.notice-simple-tile {
+  display: grid;
+  gap: 5px;
+  min-height: 92px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+}
+
+.notice-simple-tile:hover {
+  border-color: var(--brand-border);
+  background: color-mix(in srgb, var(--brand-soft) 40%, var(--input-bg));
+}
+
+.notice-simple-tile.done {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--line));
+  background: color-mix(in srgb, var(--success-bg) 72%, var(--panel));
+}
+
+.notice-simple-title {
+  color: var(--ink-strong);
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.notice-simple-meta,
+.notice-simple-state {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 750;
+}
+
+.notice-simple-tile.done .notice-simple-state {
+  color: var(--success);
 }
 
 .notice-item {
