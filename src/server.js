@@ -86,7 +86,6 @@ const PERMISSION_TREE = [
     label: "排课",
     children: [
       { key: "lessons", label: "课程总表" },
-      { key: "week", label: "周课表" },
       { key: "weekMatrix", label: "矩阵课表" },
       { key: "courseNotice", label: "家长群课程截图" },
       { key: "teacherCourseNotice", label: "老师课程截图" },
@@ -96,12 +95,13 @@ const PERMISSION_TREE = [
     key: "students",
     label: "学生",
     children: [
-      { key: "feeDetails", label: "费用明细" },
       { key: "summary", label: "费用汇总" },
+      { key: "feeDetails", label: "费用明细" },
       { key: "recharges", label: "充值记录" },
       { key: "openingBalances", label: "期初余额" },
       { key: "studentQuery", label: "学生查询" },
       { key: "studentPricing", label: "学生单价" },
+      { key: "classGroups", label: "班级管理" },
       { key: "studentProfiles", label: "学生档案" },
     ],
   },
@@ -109,11 +109,11 @@ const PERMISSION_TREE = [
     key: "teachers",
     label: "教师",
     children: [
-      { key: "teacherProfiles", label: "教师档案" },
       { key: "teacherSalary", label: "薪资汇总" },
       { key: "teacherTravelFees", label: "车费明细" },
-      { key: "teacherDetail", label: "薪资明细" },
-      { key: "teacherSalaryRules", label: "课时明细" },
+      { key: "teacherDetail", label: "课时明细" },
+      { key: "teacherSalaryRules", label: "薪资规则" },
+      { key: "teacherProfiles", label: "教师档案" },
     ],
   },
   {
@@ -151,7 +151,6 @@ const PAGE_PERMISSION_KEYS = (() => {
 const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "dashboard",
   "lessons",
-  "week",
   "weekMatrix",
   "courseNotice",
   "teacherCourseNotice",
@@ -161,6 +160,7 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "openingBalances",
   "studentQuery",
   "studentPricing",
+  "classGroups",
   "studentProfiles",
   "teacherSalary",
   "teacherTravelFees",
@@ -180,7 +180,6 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
 ];
 const FILTER_PRESET_VIEW_KEYS = [
   "lessons",
-  "week",
   "weekMatrix",
   "summary",
   "recharges",
@@ -213,26 +212,26 @@ const DATE_PRESET_RULES = new Set([
 const DEFAULT_ROLE_PERMISSIONS = {
   owner: PAGE_PERMISSION_KEYS,
   academic: [
-    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
-    "feeDetails", "summary", "recharges", "openingBalances", "studentQuery", "studentPricing", "studentProfiles",
+    "dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "summary", "feeDetails", "recharges", "openingBalances", "studentQuery", "studentPricing", "classGroups", "studentProfiles",
     "teacherProfiles", "teacherSalary", "teacherTravelFees", "teacherDetail", "teacherSalaryRules",
     "finance", "appearance", "baseData", "pricing", "operationLogs",
   ],
   helper: [
-    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice",
     "feeDetails", "recharges", "studentQuery", "studentProfiles", "teacherProfiles", "appearance",
   ],
   assistant: [
-    "dashboard", "lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice",
+    "dashboard", "lessons", "weekMatrix", "courseNotice", "teacherCourseNotice",
     "studentQuery", "studentProfiles", "teacherProfiles", "appearance",
   ],
   teacher: ["lessons", "teacherDetail", "teacherProfiles", "appearance"],
 };
 const AREA_PERMISSION_KEYS = {
   dashboard: ["dashboard"],
-  schedule: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
-  scheduleRead: ["lessons", "week", "weekMatrix", "courseNotice", "teacherCourseNotice"],
-  students: ["feeDetails", "summary", "studentQuery", "studentProfiles", "studentPricing", "recharges", "openingBalances"],
+  schedule: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  scheduleRead: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
+  students: ["summary", "feeDetails", "studentQuery", "studentProfiles", "studentPricing", "classGroups", "recharges", "openingBalances"],
   profiles: ["studentProfiles", "teacherProfiles"],
   pricing: ["pricing", "studentPricing"],
   teacherTransport: ["teacherTravelFees"],
@@ -375,6 +374,19 @@ function initDb() {
       notes TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS class_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacher TEXT NOT NULL,
+      grade TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      students_key TEXT NOT NULL,
+      students_display TEXT DEFAULT '',
+      class_name TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (teacher, grade, subject, students_key)
     );
 
     CREATE TABLE IF NOT EXISTS fee_overrides (
@@ -673,6 +685,7 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_teacher_travel_fees_month_teacher ON teacher_travel_fees(month_key, teacher_name)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_class_groups_lookup ON class_groups(teacher, grade, subject, students_key)").run();
   db.prepare(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_salary_rules_active_key
     ON teacher_salary_rules(teacher_name, grade, subject, student_names)
@@ -1257,11 +1270,11 @@ function firstAccessibleViewFor(role, permissions) {
   const canonical = canonicalRole(role);
   const preferred =
     canonical === "teacher"
-      ? ["lessons", "teacherDetail", "teacherSalary", "week", "weekMatrix"]
+      ? ["lessons", "teacherDetail", "teacherSalary", "weekMatrix"]
       : canonical === "owner" || canonical === "academic"
         ? ["dashboard"]
         : canonical === "helper" || canonical === "assistant"
-          ? ["lessons", "studentQuery", "dashboard", "week", "weekMatrix", "appearance"]
+          ? ["lessons", "studentQuery", "dashboard", "weekMatrix", "appearance"]
           : [];
   return [...preferred, ...FIRST_ACCESSIBLE_VIEW_ORDER].find((key) => allowed.has(key)) || "";
 }
@@ -1348,6 +1361,29 @@ function seedDefaultRolesAndPermissions() {
       INSERT INTO settings(key, value) VALUES (?, '1')
       ON CONFLICT(key) DO UPDATE SET value = '1'
     `).run(travelFeesPermissionKey);
+  }
+  const classGroupsPermissionKey = "role_class_groups_permission_v1";
+  const classGroupsPermissionMigrated = text(get("SELECT value FROM settings WHERE key = ?", [classGroupsPermissionKey])?.value) === "1";
+  if (!classGroupsPermissionMigrated) {
+    for (const roleCode of ["academic"]) {
+      permissionStmt.run(roleCode, "classGroups");
+    }
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(classGroupsPermissionKey);
+  }
+  const removeWeekPermissionKey = "role_remove_week_permission_v1";
+  const removeWeekPermissionMigrated = text(get("SELECT value FROM settings WHERE key = ?", [removeWeekPermissionKey])?.value) === "1";
+  if (!removeWeekPermissionMigrated) {
+    db.prepare("DELETE FROM role_permissions WHERE permission_key = 'week'").run();
+    db.prepare("DELETE FROM user_page_permissions WHERE permission_key = 'week'").run();
+    db.prepare("DELETE FROM role_filter_presets WHERE view_key = 'week'").run();
+    db.prepare("DELETE FROM user_filter_presets WHERE view_key = 'week'").run();
+    db.prepare(`
+      INSERT INTO settings(key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = '1'
+    `).run(removeWeekPermissionKey);
   }
 }
 
@@ -3842,6 +3878,51 @@ function upsertTeacherTravelFees(body = {}) {
       const amount = feeByIndex.has(week.week_index) ? feeByIndex.get(week.week_index) : 0;
       upsertFee.run(monthKey, teacherName, week.week_index, week.start, week.end, amount, notes);
     }
+    return {
+      ok: true,
+      before,
+      after: {
+        monthly: get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [teacherName, monthKey]),
+        fees: all("SELECT * FROM teacher_travel_fees WHERE teacher_name = ? AND month_key = ? ORDER BY week_index", [teacherName, monthKey]),
+      },
+    };
+  });
+}
+
+function updateTeacherSalaryNotes(body = {}) {
+  const monthKey = text(body.month_key || getSetting("month_key"));
+  if (!validMonthKey(monthKey)) return { error: "month_key must be YYYY-MM-01", status: 400 };
+  const teacherName = text(body.teacher_name);
+  if (!teacherName) return { error: "老师姓名不能为空", status: 400 };
+  const notes = text(body.notes);
+  return withTransaction(() => {
+    upsertTeacher(teacherName);
+    const before = {
+      monthly: get("SELECT * FROM teacher_adjustments_monthly WHERE teacher_name = ? AND month_key = ?", [teacherName, monthKey]),
+      fees: all("SELECT * FROM teacher_travel_fees WHERE teacher_name = ? AND month_key = ? ORDER BY week_index", [teacherName, monthKey]),
+    };
+    const current = before.monthly || {};
+    db.prepare(`
+      INSERT INTO teacher_adjustments_monthly(
+        teacher_name, month_key, week1_transport, week2_transport, week3_transport, week4_transport, notes
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(teacher_name, month_key) DO UPDATE SET
+        notes = excluded.notes
+    `).run(
+      teacherName,
+      monthKey,
+      num(current.week1_transport),
+      num(current.week2_transport),
+      num(current.week3_transport),
+      num(current.week4_transport),
+      notes,
+    );
+    db.prepare(`
+      UPDATE teacher_travel_fees
+      SET notes = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE teacher_name = ? AND month_key = ?
+    `).run(notes, teacherName, monthKey);
     return {
       ok: true,
       before,
@@ -6565,6 +6646,132 @@ function uniqueNames(values) {
   return [...new Set((values || []).map((value) => text(value).replace(/\s+/g, "")).filter(Boolean))];
 }
 
+function classGroupIdentity(row = {}) {
+  const teacher = text(row.teacher || row.teacher_name);
+  const grade = text(row.grade);
+  const subject = text(row.subject);
+  const studentsKey = normalizedStudents(row.students_key || row.student_names || row.students_display);
+  return {
+    teacher,
+    grade,
+    subject,
+    students_key: studentsKey,
+    students_display: studentsKey,
+  };
+}
+
+function classGroupLookupKey(row = {}) {
+  const identity = classGroupIdentity(row);
+  return [identity.teacher, identity.grade, identity.subject, identity.students_key].join("\u0001");
+}
+
+function syncClassGroupsFromSources() {
+  const upsert = db.prepare(`
+    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(teacher, grade, subject, students_key) DO UPDATE SET
+      students_display = CASE
+        WHEN TRIM(COALESCE(class_groups.students_display, '')) = '' THEN excluded.students_display
+        ELSE class_groups.students_display
+      END
+  `);
+  const seen = new Set();
+  const feed = (row) => {
+    const identity = classGroupIdentity(row);
+    if (!identity.teacher || !identity.grade || !identity.subject || !identity.students_key) return;
+    const key = classGroupLookupKey(identity);
+    if (seen.has(key)) return;
+    seen.add(key);
+    upsert.run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display);
+  };
+  withTransaction(() => {
+    all(`
+      SELECT teacher_name, grade, subject, student_names
+      FROM lessons
+      WHERE TRIM(COALESCE(teacher_name, '')) <> ''
+        AND TRIM(COALESCE(grade, '')) <> ''
+        AND TRIM(COALESCE(subject, '')) <> ''
+        AND TRIM(COALESCE(student_names, '')) <> ''
+      ORDER BY teacher_name, grade, subject, student_names, id
+    `).forEach(feed);
+    all(`
+      SELECT teacher_name, grade, subject, student_names
+      FROM teacher_salary_rules
+      WHERE TRIM(COALESCE(teacher_name, '')) <> ''
+        AND TRIM(COALESCE(grade, '')) <> ''
+        AND TRIM(COALESCE(subject, '')) <> ''
+        AND TRIM(COALESCE(student_names, '')) <> ''
+      ORDER BY teacher_name, grade, subject, student_names, id
+    `).forEach(feed);
+  });
+}
+
+function classGroupRows() {
+  syncClassGroupsFromSources();
+  return all(`
+    SELECT *
+    FROM class_groups
+    ORDER BY teacher,
+      CASE grade
+        WHEN '初一' THEN 1
+        WHEN '初二' THEN 2
+        WHEN '初三' THEN 3
+        WHEN '高一' THEN 4
+        WHEN '高二' THEN 5
+        WHEN '高三' THEN 6
+        ELSE 99
+      END,
+      grade, subject, students_display, id
+  `);
+}
+
+function classGroupLookupMap() {
+  syncClassGroupsFromSources();
+  const map = new Map();
+  for (const row of all("SELECT * FROM class_groups WHERE TRIM(COALESCE(class_name, '')) <> ''")) {
+    map.set(classGroupLookupKey(row), text(row.class_name));
+  }
+  return map;
+}
+
+function updateClassGroupName(body = {}) {
+  const id = Number(body.id);
+  const className = text(body.class_name);
+  if (id) {
+    const before = get("SELECT * FROM class_groups WHERE id = ?", [id]);
+    if (!before) return { error: "班级不存在", status: 404 };
+    db.prepare("UPDATE class_groups SET class_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(className, id);
+    return { before, after: get("SELECT * FROM class_groups WHERE id = ?", [id]) };
+  }
+  const identity = classGroupIdentity(body);
+  if (!identity.teacher || !identity.grade || !identity.subject || !identity.students_key) {
+    return { error: "老师、年级、科目和学生集合不能为空", status: 400 };
+  }
+  const before = get(`
+    SELECT * FROM class_groups
+    WHERE teacher = ? AND grade = ? AND subject = ? AND students_key = ?
+  `, [identity.teacher, identity.grade, identity.subject, identity.students_key]);
+  db.prepare(`
+    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display, class_name, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(teacher, grade, subject, students_key) DO UPDATE SET
+      students_display = excluded.students_display,
+      class_name = excluded.class_name,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display, className);
+  const after = get(`
+    SELECT * FROM class_groups
+    WHERE teacher = ? AND grade = ? AND subject = ? AND students_key = ?
+  `, [identity.teacher, identity.grade, identity.subject, identity.students_key]);
+  return { before, after };
+}
+
+function decorateLessonClassName(lesson = {}, classMap = classGroupLookupMap()) {
+  const className = classMap.get(classGroupLookupKey(lesson)) || "";
+  const students = text(lesson.student_names);
+  return className ? `${className}：${students}` : students;
+}
+
 function courseClassKey(row) {
   return [
     text(row.grade),
@@ -6677,7 +6884,7 @@ function createTeacherSalaryRule(body) {
   const rule = normalizeTeacherSalaryRuleInput(body);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule)) {
-    return { error: "相同老师、年级、科目和学生集合的课时明细规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
   }
   const result = db.prepare(`
     INSERT INTO teacher_salary_rules(
@@ -6699,11 +6906,11 @@ function createTeacherSalaryRule(body) {
 
 function updateTeacherSalaryRule(id, body) {
   const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
-  if (!current) return { error: "课时明细规则不存在", status: 404 };
+  if (!current) return { error: "薪资规则不存在", status: 404 };
   const rule = normalizeTeacherSalaryRuleInput(body, current);
   if (rule.error) return rule;
   if (activeTeacherSalaryRuleConflict(rule, id)) {
-    return { error: "相同老师、年级、科目和学生集合的课时明细规则已存在", status: 409 };
+    return { error: "相同老师、年级、科目和学生集合的薪资规则已存在", status: 409 };
   }
   db.prepare(`
     UPDATE teacher_salary_rules
@@ -6727,7 +6934,7 @@ function updateTeacherSalaryRule(id, body) {
 
 function deactivateTeacherSalaryRule(id) {
   const current = get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
-  if (!current) return { error: "课时明细规则不存在", status: 404 };
+  if (!current) return { error: "薪资规则不存在", status: 404 };
   db.prepare(`
     UPDATE teacher_salary_rules
     SET is_active = 0, updated_at = CURRENT_TIMESTAMP
@@ -6899,13 +7106,13 @@ function applyTeacherSalaryRulesToLessons(lessonIds) {
         continue;
       }
       if (!isCompletedLesson(lesson)) {
-        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与课时明细规则" });
+        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与薪资规则" });
         continue;
       }
       const rule = activeTeacherSalaryRuleForLesson(lesson);
       const calculated = calculateTeacherSalaryFromRule(rule, lesson);
       if (!calculated) {
-        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的课时明细规则" });
+        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的薪资规则" });
         continue;
       }
       db.prepare(`
@@ -6951,9 +7158,9 @@ function teacherNoticeDefaultGreeting(item) {
   return `${teacher}老师你好！`;
 }
 
-function courseNoticeLesson(row) {
+function courseNoticeLesson(row, classMap = classGroupLookupMap()) {
   const students = normalizedStudents(row.student_names);
-  return {
+  const lesson = {
     id: row.id,
     teacher_name: text(row.teacher_name),
     date: text(row.date),
@@ -6969,23 +7176,91 @@ function courseNoticeLesson(row) {
     class_key: courseClassKey(row),
     completion_key: courseCompletionKey(row),
   };
+  lesson.display_student_names = decorateLessonClassName(lesson, classMap);
+  return lesson;
 }
 
-function courseNoticeData(start, end, onlyTeaching = false) {
+function summerCourseNoticeObjects(lessons) {
+  const groupMap = new Map();
+  for (const lesson of lessons) {
+    const key = [
+      "SUMMER",
+      text(lesson.teacher_name),
+      text(lesson.subject),
+      text(lesson.grade),
+    ].join("|");
+    if (!text(lesson.teacher_name) || !text(lesson.subject) || !text(lesson.grade)) continue;
+    if (!groupMap.has(key)) {
+      groupMap.set(key, {
+        send_object_key: key,
+        send_object_name: `${lesson.teacher_name}${lesson.grade}${lesson.subject}暑期班`,
+        send_object_type: "暑期班截图",
+        students: "",
+        teachers: [lesson.teacher_name],
+        grades: [lesson.grade],
+        subjects: [lesson.subject],
+        lessons: [],
+      });
+    }
+    const item = groupMap.get(key);
+    item.lessons.push(lesson);
+  }
+  return [...groupMap.values()].map((item) => ({
+    ...item,
+    students: uniqueNames(item.lessons.flatMap((lesson) => splitStudents(lesson.student_names))).join("、"),
+    lessons: item.lessons.sort((a, b) => `${a.date} ${a.time_slot} ${String(a.id).padStart(8, "0")}`.localeCompare(`${b.date} ${b.time_slot} ${String(b.id).padStart(8, "0")}`, "zh-Hans-CN")),
+  }));
+}
+
+function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
   const rows = lessonsInDateRange(start, end);
   if (!rows) return null;
+  const classMap = classGroupLookupMap();
   const lessons = rows
     .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
-    .map(courseNoticeLesson);
-  const classMap = new Map();
+    .map((row) => courseNoticeLesson(row, classMap));
+  if (mode === "summer") {
+    const objects = summerCourseNoticeObjects(lessons);
+    const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records").map((row) => row.unique_key));
+    const greetingRows = new Map(all("SELECT * FROM parent_message_greetings").map((row) => [row.send_object_key, row]));
+    const globalTail = getSetting("course_notice_global_tail") || "这是我们本周的上课安排哦[玫瑰]";
+    return {
+      range: { start, end },
+      only_teaching: Boolean(onlyTeaching),
+      mode: "summer",
+      global_tail: globalTail,
+      send_objects: objects.map((item) => {
+        const saved = greetingRows.get(item.send_object_key);
+        const greeting = text(saved?.greeting) || sendObjectDefaultGreeting(item);
+        const lessonKeys = item.lessons.map((lesson) => lesson.completion_key);
+        const completedCount = lessonKeys.filter((key) => completionKeys.has(key)).length;
+        const completed = lessonKeys.length > 0 && completedCount === lessonKeys.length;
+        const partial_completed = completedCount > 0 && !completed;
+        return {
+          ...item,
+          teachers: uniqueNames(item.teachers),
+          grades: uniqueNames(item.grades),
+          subjects: uniqueNames(item.subjects),
+          greeting,
+          global_tail: globalTail,
+          full_message: `${greeting}\n${globalTail}`,
+          completed,
+          partial_completed,
+          completed_count: completedCount,
+          lesson_count: item.lessons.length,
+        };
+      }).sort((a, b) => a.send_object_name.localeCompare(b.send_object_name, "zh-Hans-CN")),
+    };
+  }
+  const dailyClassMap = new Map();
   const personalStudents = new Set();
   for (const lesson of lessons) {
     const students = splitStudents(lesson.student_names);
     if (students.length === 1) personalStudents.add(students[0]);
     if (students.length >= 2) {
       const key = `CLASS|${lesson.class_key}`;
-      if (!classMap.has(key)) {
-        classMap.set(key, {
+      if (!dailyClassMap.has(key)) {
+        dailyClassMap.set(key, {
           send_object_key: key,
           send_object_name: `${lesson.grade}${lesson.subject}-${lesson.student_names}`,
           send_object_type: "班级群",
@@ -6996,7 +7271,7 @@ function courseNoticeData(start, end, onlyTeaching = false) {
           lessons: [],
         });
       }
-      classMap.get(key).lessons.push(lesson);
+      dailyClassMap.get(key).lessons.push(lesson);
     }
   }
 
@@ -7017,7 +7292,7 @@ function courseNoticeData(start, end, onlyTeaching = false) {
       lessons: studentLessons,
     });
   }
-  objects.push(...classMap.values());
+  objects.push(...dailyClassMap.values());
 
   const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records").map((row) => row.unique_key));
   const greetingRows = new Map(all("SELECT * FROM parent_message_greetings").map((row) => [row.send_object_key, row]));
@@ -7026,6 +7301,7 @@ function courseNoticeData(start, end, onlyTeaching = false) {
   return {
     range: { start, end },
     only_teaching: Boolean(onlyTeaching),
+    mode: "daily",
     global_tail: globalTail,
     send_objects: objects
       .map((item) => {
@@ -7062,10 +7338,11 @@ function courseNoticeData(start, end, onlyTeaching = false) {
 function teacherCourseNoticeData(start, end, onlyTeaching = false) {
   const rows = lessonsInDateRange(start, end);
   if (!rows) return null;
+  const classMap = classGroupLookupMap();
   const lessons = rows
     .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
     .map((row) => {
-      const lesson = courseNoticeLesson(row);
+      const lesson = courseNoticeLesson(row, classMap);
       lesson.completion_key = `TEACHER|${lesson.teacher_name}|${lesson.completion_key}`;
       return lesson;
     })
@@ -8582,6 +8859,7 @@ function roleCan(user, area, action = "read") {
 function apiArea(req, url) {
   const p = url.pathname;
   if (p.startsWith("/api/roles")) return "roles";
+  if (p.startsWith("/api/class-groups")) return "students";
   if (p === "/api/dashboard") return "dashboard";
   if (p.startsWith("/api/users")) return "users";
   if (p === "/api/export/core-workbook.xlsx") return "coreExport";
@@ -8608,12 +8886,13 @@ function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
   if (p === "/api/dashboard") return ["dashboard"];
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
+  if (p.startsWith("/api/class-groups")) return ["classGroups"];
   if (p.startsWith("/api/course-notice")) return ["courseNotice"];
   if (p.startsWith("/api/teacher-course-notice")) return ["teacherCourseNotice"];
   if (p === "/api/lessons-range") {
-    return ["lessons", "week", "weekMatrix", "feeDetails", "summary", "studentQuery", "teacherSalary", "teacherDetail"];
+    return ["lessons", "weekMatrix", "feeDetails", "summary", "studentQuery", "teacherSalary", "teacherDetail"];
   }
-  if (p === "/api/schedule-conflicts") return ["lessons", "week", "weekMatrix"];
+  if (p === "/api/schedule-conflicts") return ["lessons", "weekMatrix"];
   if (p.startsWith("/api/lessons")) return ["lessons"];
   if (p.startsWith("/api/recharges")) return ["recharges"];
   if (p.startsWith("/api/opening-balances")) return ["openingBalances"];
@@ -8621,7 +8900,6 @@ function apiPagePermissionKeys(req, url) {
     return [
       "teacherProfiles",
       "lessons",
-      "week",
       "weekMatrix",
       "courseNotice",
       "teacherCourseNotice",
@@ -8632,6 +8910,7 @@ function apiPagePermissionKeys(req, url) {
     ];
   }
   if (p === "/api/teacher-adjustments" || p === "/api/teacher-travel-fees") return ["teacherTravelFees"];
+  if (p === "/api/teacher-salary-notes") return ["teacherSalary"];
   if (p.startsWith("/api/teacher-salary-rules")) return ["teacherSalaryRules"];
   if (p.startsWith("/api/finance-summary")) return ["finance"];
   if (p.startsWith("/api/operation-logs")) return ["operationLogs"];
@@ -10626,7 +10905,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "teacher_salary_rules", entity_id: String(rule.id), before: null, after: rule });
     writeOperationLog(user, {
-      operation_type: "新增课时明细规则",
+      operation_type: "新增薪资规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
       target_type: "teacher_salary_rules",
       target_id: String(rule.id),
@@ -10643,7 +10922,7 @@ async function handleApi(req, res, url) {
       after: result,
     });
     writeOperationLog(user, {
-      operation_type: "同步课时明细候选",
+      operation_type: "同步薪资规则候选",
       operation_content: `扫描 ${result.scannedLessonCount} 节历史课，新增 ${result.createdCount} 条，已有 ${result.existingCount} 条，跳过 ${result.skippedCount} 条`,
       target_type: "teacher_salary_rules",
       target_id: result.createdRules.map((row) => row.id).join(","),
@@ -10681,7 +10960,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
     writeOperationLog(user, {
-      operation_type: "修改课时明细规则",
+      operation_type: "修改薪资规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names} ${rule.salary_per_unit}/${rule.unit_hours}小时`,
       target_type: "teacher_salary_rules",
       target_id: String(id),
@@ -10695,7 +10974,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "deactivate", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
     writeOperationLog(user, {
-      operation_type: "停用课时明细规则",
+      operation_type: "停用薪资规则",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names}`,
       target_type: "teacher_salary_rules",
       target_id: String(id),
@@ -10948,9 +11227,51 @@ async function handleApi(req, res, url) {
       text(url.searchParams.get("start")),
       text(url.searchParams.get("end")),
       url.searchParams.get("only_teaching") === "1",
+      url.searchParams.get("mode") === "summer" ? "summer" : "daily",
     );
     if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, data);
+  }
+  if (req.method === "GET" && url.pathname === "/api/class-groups") {
+    return sendJson(res, { class_groups: classGroupRows() });
+  }
+  const classGroupMatch = url.pathname.match(/^\/api\/class-groups\/(\d+)$/);
+  if (classGroupMatch && (req.method === "PATCH" || req.method === "PUT")) {
+    const body = await readBody(req);
+    const result = updateClassGroupName({ ...body, id: Number(classGroupMatch[1]) });
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: "update",
+      entity_type: "class_groups",
+      entity_id: String(classGroupMatch[1]),
+      before: result.before,
+      after: result.after,
+    });
+    writeOperationLog(user, {
+      operation_type: "修改班级名称",
+      operation_content: `${result.after.teacher} ${result.after.grade} ${result.after.subject} ${result.after.students_display}：${result.after.class_name || "未命名"}`,
+      target_type: "class_groups",
+      target_id: String(classGroupMatch[1]),
+    });
+    return sendJson(res, { ok: true, row: result.after });
+  }
+  if (req.method === "PUT" && url.pathname === "/api/class-groups") {
+    const result = updateClassGroupName(await readBody(req));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    recordAuditEvent(req, user, {
+      action: result.before ? "update" : "create",
+      entity_type: "class_groups",
+      entity_id: String(result.after.id),
+      before: result.before,
+      after: result.after,
+    });
+    writeOperationLog(user, {
+      operation_type: result.before ? "修改班级名称" : "新增班级名称",
+      operation_content: `${result.after.teacher} ${result.after.grade} ${result.after.subject} ${result.after.students_display}：${result.after.class_name || "未命名"}`,
+      target_type: "class_groups",
+      target_id: String(result.after.id),
+    });
+    return sendJson(res, { ok: true, row: result.after });
   }
   if (req.method === "POST" && url.pathname === "/api/course-notice/greeting") {
     const result = saveCourseNoticeGreeting(await readBody(req));
@@ -11792,6 +12113,28 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
     writeOperationLog(user, { operation_type: after ? "修改学生课次费用" : "删除学生课次费用", operation_content: `课程ID ${lessonId} ${studentName} ${after ? `¥${after.unit_price}` : ""}`, target_type: "fee_overrides", target_id: `${lessonId}|${studentName}` });
     return sendJson(res, { ok: true });
+  }
+
+  if (req.method === "PATCH" && url.pathname === "/api/teacher-salary-notes") {
+    const body = await readBody(req);
+    const result = updateTeacherSalaryNotes(body);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    const monthKey = text(body.month_key || getSetting("month_key"));
+    const teacherName = text(body.teacher_name);
+    recordAuditEvent(req, user, {
+      action: "update_notes",
+      entity_type: "teacher_salary_notes",
+      entity_id: `${teacherName}|${monthKey}`,
+      before: result.before,
+      after: result.after,
+    });
+    writeOperationLog(user, {
+      operation_type: "修改薪资汇总备注",
+      operation_content: `${teacherName} ${monthKey}：${text(body.notes) || "清空备注"}`,
+      target_type: "teacher_salary_notes",
+      target_id: `${teacherName}|${monthKey}`,
+    });
+    return sendJson(res, { ok: true, row: result.after });
   }
 
   if (req.method === "GET" && url.pathname === "/api/teacher-travel-fees") {
