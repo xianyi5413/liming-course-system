@@ -364,6 +364,7 @@ let expenseFilter = (() => {
 })();
 let auditState = { xlsxReport: null, internalReport: null, logs: [], events: [], busy: false, notice: "" };
 let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") || "";
+let backupState = { settings: null, records: [], busy: false, error: "", settingsOpen: false, recordsOpen: false };
 let dashboardRange = readDashboardRange();
 let dashboardMetricModalOpen = false;
 let dashboardMetricDraft = null;
@@ -1295,8 +1296,11 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
     if (canArea("audit")) {
       await refreshAuditEvents();
       if (!stillCurrent()) return false;
+      await refreshBackupData();
+      if (!stillCurrent()) return false;
     } else {
       auditState.events = [];
+      backupState = { ...backupState, settings: null, records: [], error: "" };
     }
     if (!auditSourceWorkbook && state.source_workbooks.length) {
       auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
@@ -1529,14 +1533,13 @@ function ensureActiveWeekDefault() {
 }
 
 function readNoticeFilter(storageKey) {
-  const fallback = { ...currentWeekRange(), onlyTeaching: true, mode: "daily" };
+  const fallback = { ...currentWeekRange(), onlyTeaching: true };
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
     const filter = {
       start: isDateValue(saved.start) ? saved.start : fallback.start,
       end: isDateValue(saved.end) ? saved.end : fallback.end,
       onlyTeaching: typeof saved.onlyTeaching === "boolean" ? saved.onlyTeaching : fallback.onlyTeaching,
-      mode: saved.mode === "summer" ? "summer" : "daily",
     };
     if (filter.start > filter.end) filter.end = filter.start;
     return filter;
@@ -1560,6 +1563,7 @@ function offsetDateMonths(value, offset) {
 function dateRangePreset(preset) {
   const today = todayDate();
   const currentMonth = `${today.slice(0, 7)}-01`;
+  if (preset === "today") return { start: today, end: today };
   if (preset === "current-month") return monthBounds(currentMonth);
   if (preset === "current-week") {
     const start = startOfWeek(today);
@@ -1813,6 +1817,7 @@ function renderDateRangePickerPanel() {
     ? (state.pending === "end" ? "请选择结束日期" : "请选择开始日期")
     : (state.pending === "start" ? "先选择结束日期" : "先选择开始日期");
   const presets = [
+    ["today", "今日"],
     ["current-month", "本月"],
     ["current-week", "本周"],
     ["prev-month", "上月"],
@@ -1883,8 +1888,7 @@ async function applyDateRangeToScope(scope, start, end) {
     focusedLessonIds = [];
     lessonFilter = { ...lessonFilter, start_date: start, end_date: end, date_preset_initialized: true };
     saveLessonFilter();
-    if (!lessonRangeLoaded()) await loadLessonRangeOnly();
-    render();
+    await refreshLessonsView({ reloadRange: !lessonRangeLoaded() });
     return;
   }
   if (scope === "fee-details") {
@@ -1973,7 +1977,6 @@ function courseNoticeQuery() {
   params.set("start", courseNoticeFilter.start);
   params.set("end", courseNoticeFilter.end);
   if (courseNoticeFilter.onlyTeaching) params.set("only_teaching", "1");
-  if (courseNoticeFilter.mode === "summer") params.set("mode", "summer");
   return params.toString();
 }
 
@@ -3062,6 +3065,7 @@ async function loadLessonRangeOnly() {
   if (!range) return;
   const result = await request(lessonsRangeUrl(range));
   state.lessons = result.lessons || [];
+  state.week_lessons = result.lessons || [];
   state.lesson_loaded_range = range;
 }
 
@@ -3405,9 +3409,10 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       ${dateRangePickerControl({ scope: "lesson", startField: "start_date", endField: "end_date", start: lessonFilter.start_date, end: lessonFilter.end_date, placeholder: "选择课程日期范围" })}
     </label>
     <div class="date-shortcuts lesson-date-shortcuts" aria-label="课程总表快捷日期">
-      <button class="btn lesson-date-shortcut" type="button" data-preset="this-week">本周</button>
-      <button class="btn lesson-date-shortcut" type="button" data-preset="next-week">下周</button>
-      <button class="btn lesson-date-shortcut" type="button" data-preset="this-month">本月</button>
+      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("today") ? "active" : ""}" type="button" data-preset="today">今日</button>
+      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-week") ? "active" : ""}" type="button" data-preset="this-week">本周</button>
+      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("next-week") ? "active" : ""}" type="button" data-preset="next-week">下周</button>
+      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-month") ? "active" : ""}" type="button" data-preset="this-month">本月</button>
     </div>
     <label class="filter-field">
       <span>教室</span>
@@ -3445,6 +3450,10 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
 }
 
 function lessonDateShortcutRange(preset) {
+  if (preset === "today") {
+    const today = todayDate();
+    return { start: today, end: today };
+  }
   if (preset === "this-week") return currentWeekRange();
   if (preset === "next-week") {
     const current = currentWeekRange();
@@ -3452,6 +3461,11 @@ function lessonDateShortcutRange(preset) {
   }
   if (preset === "this-month") return monthBounds(state?.settings?.month_key || activeMonth);
   return null;
+}
+
+function lessonDateShortcutActive(preset) {
+  const range = lessonDateShortcutRange(preset);
+  return Boolean(range && lessonFilter.start_date === range.start && lessonFilter.end_date === range.end);
 }
 
 function ensureFeeDetailsFilterMonth() {
@@ -3935,6 +3949,16 @@ async function refreshAuditLogs() {
 async function refreshAuditEvents() {
   const data = await request("/api/audit/events?limit=200");
   auditState.events = data.events || [];
+}
+
+async function refreshBackupData({ logView = false } = {}) {
+  const data = await request(`/api/backups${logView ? "?log=1" : ""}`);
+  backupState = {
+    ...backupState,
+    settings: data.settings || backupState.settings || { enabled: true, weekday: 3, last_date: "" },
+    records: data.records || [],
+    error: "",
+  };
 }
 
 async function applyAuditIssue(issue) {
@@ -4504,7 +4528,7 @@ function updateLessonSummaryMetrics() {                  /* [B档] 更新概要�
   const rows = visibleLessonRows();
   pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
-  const metricValues = document.querySelectorAll(".summary-grid .metric-value");
+  const metricValues = document.querySelectorAll(".lesson-summary-grid .metric-value");
   if (metricValues.length >= 4) {
     metricValues[0].textContent = stats.records;
     metricValues[1].textContent = stats.effective;
@@ -4529,6 +4553,98 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
     enhanceCustomSelects();
     enhanceCustomDateInputs();
   }
+}
+
+function lessonFilterRegionHtml(allRows = lessonDateRangeRows(), rows = visibleLessonRows()) {
+  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
+  if (focusSet.size) {
+    return `
+    <div class="band focus-lesson-panel">
+      <div class="focus-lesson-body">
+        <div>
+          <strong>正在查看冲突相关课程</strong>
+          <span>已定位 ${rows.length} 节课程，可直接在下方修改老师、时间、教室或学生。</span>
+        </div>
+        <button class="btn clear-focused-lessons" type="button">返回全部课程</button>
+      </div>
+    </div>
+  `;
+  }
+  return renderLessonFilterBar({ rows: allRows, filteredRows: rows });
+}
+
+function lessonModalsHtml(rows = visibleLessonRows()) {
+  return `
+    ${lessonCreateModal()}
+    ${lessonBatchCopyModal()}
+    ${weekCopyModal()}
+    ${lessonConflictModal(rows)}
+  `;
+}
+
+function updateLessonFilterRegion(rows = visibleLessonRows(), allRows = lessonDateRangeRows()) {
+  const region = document.querySelector(".lesson-filter-region");
+  if (region) region.innerHTML = lessonFilterRegionHtml(allRows, rows);
+}
+
+function updateLessonToolbarRegion(rows = visibleLessonRows()) {
+  const region = document.querySelector(".lesson-toolbar-region");
+  if (region) region.innerHTML = lessonToolbarHtml(rows);
+}
+
+function updateLessonModalRegion(rows = visibleLessonRows()) {
+  const region = document.querySelector(".lesson-modal-region");
+  if (region) region.innerHTML = lessonModalsHtml(rows);
+}
+
+function updateLessonsViewDom({
+  refreshSummary = true,
+  refreshFilter = true,
+  refreshToolbar = true,
+  refreshTable = true,
+  refreshModals = true,
+} = {}) {
+  if (view !== "lessons" || !document.querySelector("#lessons-tbody")) {
+    render();
+    return;
+  }
+  ensureLessonFilterDates();
+  const scroll = captureLessonScroll();
+  const allRows = lessonDateRangeRows();
+  const rows = visibleLessonRows();
+  pruneSelectedLessons(rows);
+  renderTopbar(`课程总表：${formatLessonDateRange()}`, "");
+  if (refreshSummary) updateLessonSummaryMetrics();
+  if (refreshFilter) updateLessonFilterRegion(rows, allRows);
+  if (refreshToolbar) updateLessonToolbarRegion(rows);
+  if (refreshTable) reRenderLessonsTbody();
+  else updateLessonSelectionControls(rows);
+  if (refreshModals) updateLessonModalRegion(rows);
+  updateLessonConflictButton(rows);
+  applyReadonlyUi();
+  wireEvents();
+  restoreLessonScroll(scroll);
+}
+
+async function refreshLessonsView({
+  reloadRange = false,
+  full = false,
+  refreshSummary = true,
+  refreshFilter = true,
+  refreshToolbar = true,
+  refreshTable = true,
+  refreshModals = true,
+} = {}) {
+  ensureLessonFilterDates();
+  if (reloadRange || !lessonRangeLoaded()) {
+    await loadLessonRangeOnly();
+    await refreshLessonConflicts();
+  }
+  if (full || view !== "lessons" || !document.querySelector("#lessons-tbody")) {
+    render();
+    return;
+  }
+  updateLessonsViewDom({ refreshSummary, refreshFilter, refreshToolbar, refreshTable, refreshModals });
 }
 
 /* ── 冲突重刷 ─────────────────────────────────────────────────────── */
@@ -5274,12 +5390,42 @@ function weekCopyPairs(sourceStart, targetStart) {
   }));
 }
 
+function weekCopyPreviewRows(sourceStart, targetStart) {
+  const offset = dayDiff(sourceStart, targetStart);
+  return weekCopySourceRows(sourceStart).map((source) => ({
+    source,
+    target: {
+      ...source,
+      id: -Math.abs(Number(source.id) || Date.now()),
+      source_id: Number(source.id),
+      date: addDays(source.date, offset),
+      month_key: monthKeyFromDateValue(addDays(source.date, offset)) || source.month_key,
+      status: "待上",
+      lesson_status: "",
+      course_status: "",
+    },
+  }));
+}
+
+function weekCopyTargetConflictInfo(previewRows) {
+  const targetRows = previewRows.map((item) => item.target);
+  const targetDates = new Set(targetRows.map((row) => row.date).filter(Boolean));
+  const sourceIds = new Set(previewRows.map((item) => Number(item.source.id)).filter(Boolean));
+  const existingRows = sortLessons(state.week_lessons || state.lessons || [])
+    .filter((row) => targetDates.has(row.date) && !sourceIds.has(Number(row.id)));
+  const issues = localScheduleConflicts([...existingRows, ...targetRows]);
+  const visible = visibleConflictIssues(issues);
+  const conflictMap = conflictMapByLesson(issues);
+  return { issues: visible.issues, conflictMap, targetRows };
+}
+
 function weekCopyModal() {
   if (!weekCopyDraft) return "";
   const sourceStart = weekCopyDraft.sourceStart || startOfWeek(todayDate());
   const targetStart = weekCopyDraft.targetStart || addDays(sourceStart, 7);
-  const rows = weekCopySourceRows(sourceStart);
-  const offset = dayDiff(sourceStart, targetStart);
+  const previewRows = weekCopyPreviewRows(sourceStart, targetStart);
+  const { issues, conflictMap } = weekCopyTargetConflictInfo(previewRows);
+  const conflictTotal = issues.length;
   return `
     <div class="modal-backdrop week-copy-modal">
       <div class="modal-panel week-copy-panel">
@@ -5300,18 +5446,37 @@ function weekCopyModal() {
             <input class="control week-copy-target" type="date" value="${escapeHtml(targetStart)}">
           </label>
         </div>
+        <div class="week-copy-conflict-summary ${conflictTotal ? "has-conflict" : "is-clear"}">
+          <strong>${conflictTotal ? `发现 ${conflictTotal} 条冲突提示` : "冲突数量 0"}</strong>
+          <span>${conflictTotal ? "请重点核对目标课程的老师、学生、时间和教室。" : "当前已加载课程中未发现目标周时间冲突。"}</span>
+        </div>
         <div class="table-wrap copy-preview-wrap">
           <table class="copy-preview-table">
-            <thead><tr><th>源日期</th><th>目标日期</th><th>时间</th><th>老师</th><th>学生</th></tr></thead>
+            <thead><tr><th>原课程</th><th>目标课程</th><th>老师</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th><th>备注/冲突</th></tr></thead>
             <tbody>
-              ${rows.map((row) => `<tr><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(addDays(row.date, offset))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.student_names)}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">源周暂无课程</td></tr>`}
+              ${previewRows.map(({ source, target }) => {
+                const conflictLabels = [...(conflictMap.get(Number(target.id)) || [])];
+                return `
+                  <tr class="${conflictLabels.length ? "has-conflict" : ""}">
+                    <td class="text-cell">${escapeHtml(source.date)} ${escapeHtml(weekdayCn(source.date))}</td>
+                    <td class="text-cell">${escapeHtml(target.date)} ${escapeHtml(weekdayCn(target.date))}</td>
+                    <td class="text-cell">${escapeHtml(target.teacher_name)}</td>
+                    <td class="text-cell">${escapeHtml(target.time_slot)}</td>
+                    <td class="text-cell">${escapeHtml(target.classroom)}</td>
+                    <td class="text-cell">${escapeHtml(target.grade)}</td>
+                    <td class="text-cell">${escapeHtml(target.subject)}</td>
+                    <td class="text-cell">${escapeHtml(target.student_names)}</td>
+                    <td class="text-cell">${escapeHtml([target.notes, ...conflictLabels].filter(Boolean).join(" / "))}</td>
+                  </tr>
+                `;
+              }).join("") || `<tr><td colspan="9" class="empty">源周暂无课程</td></tr>`}
             </tbody>
           </table>
         </div>
         <div class="modal-actions">
-          <span class="muted-tip">将复制 ${rows.length} 节课</span>
+          <span class="muted-tip">将复制 ${previewRows.length} 节课</span>
           <button class="btn week-copy-cancel" type="button">取消</button>
-          <button class="btn primary week-copy-confirm" type="button" ${rows.length ? "" : "disabled"}>确认复制</button>
+          <button class="btn primary week-copy-confirm" type="button" ${previewRows.length ? "" : "disabled"}>确认复制</button>
         </div>
       </div>
     </div>
@@ -5321,35 +5486,23 @@ function weekCopyModal() {
 function renderLessons() {
   ensureLessonFilterDates();
   const allRows = lessonDateRangeRows();
-  const focusSet = new Set(focusedLessonIds.map(Number).filter(Boolean));
   const rows = visibleLessonRows();
   pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
   const rangeText = formatLessonDateRange();
-  const focusNotice = focusSet.size ? `
-    <div class="band focus-lesson-panel">
-      <div class="focus-lesson-body">
-        <div>
-          <strong>正在查看冲突相关课程</strong>
-          <span>已定位 ${rows.length} 节课程，可直接在下方修改老师、时间、教室或学生。</span>
-        </div>
-        <button class="btn clear-focused-lessons" type="button">返回全部课程</button>
-      </div>
-    </div>
-  ` : renderLessonFilterBar({ rows: allRows, filteredRows: rows });
   renderTopbar(
     `课程总表：${rangeText}`,
     "",
   );
   contentEl.innerHTML = `
-    <div class="summary-grid">
+    <div class="summary-grid lesson-summary-grid">
       <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${stats.records}</div></div>
       <div class="metric"><div class="metric-label">有效课程</div><div class="metric-value">${stats.effective}</div></div>
       <div class="metric"><div class="metric-label">学生人次</div><div class="metric-value">${stats.studentTotal}</div></div>
       <div class="metric"><div class="metric-label">教师人数</div><div class="metric-value">${stats.teacherCount}</div></div>
     </div>
-    ${focusNotice}
-    ${lessonToolbarHtml(rows)}
+    <div class="lesson-filter-region">${lessonFilterRegionHtml(allRows, rows)}</div>
+    <div class="lesson-toolbar-region">${lessonToolbarHtml(rows)}</div>
     <div class="band">
       <div class="table-wrap smooth-table-wrap lesson-table-scroll">
         <table class="course-table lesson-table uniform-table nowrap-table ${scheduleMode ? "is-editing" : "is-browsing"}">
@@ -5364,10 +5517,7 @@ function renderLessons() {
         </table>
       </div>
     </div>
-    ${lessonCreateModal()}
-    ${lessonBatchCopyModal()}
-    ${weekCopyModal()}
-    ${lessonConflictModal(rows)}
+    <div class="lesson-modal-region">${lessonModalsHtml(rows)}</div>
   `;
   updateLessonSelectionControls(rows);
 }
@@ -6014,7 +6164,6 @@ function renderMatrixDateFilter() {
       <label>日期范围</label>
       ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}
       <button class="btn matrix-range-reset" type="button">重置</button>
-      <button class="btn matrix-current-week" type="button">当前周</button>
     </div>
   `;
 }
@@ -6720,6 +6869,100 @@ function dynamicRechargeFilterOptions(rows, filter = currentRechargeFilter()) {
   };
 }
 
+function rechargeSourceLabel(source) {
+  if (source === "carry_over") return "自动结转";
+  return "手动/无来源";
+}
+
+function rechargeAnalysis(rows = []) {
+  const actual = rows.reduce((sum, row) => sum + numberValue(row.cur_recharge), 0);
+  const gift = rows.reduce((sum, row) => sum + numberValue(row.cur_gift), 0);
+  const negative = rows.reduce((sum, row) => {
+    const actualValue = numberValue(row.cur_recharge);
+    const giftValue = numberValue(row.cur_gift);
+    return sum + (actualValue < 0 ? actualValue : 0) + (giftValue < 0 ? giftValue : 0);
+  }, 0);
+  const byGrade = new Map();
+  const bySource = new Map();
+  for (const row of rows) {
+    const grade = row.grade || "未设置";
+    const source = rechargeSourceLabel(rechargeSource(row));
+    for (const [map, key] of [[byGrade, grade], [bySource, source]]) {
+      const item = map.get(key) || { name: key, records: 0, actual: 0, gift: 0, students: new Set() };
+      item.records += 1;
+      item.actual += numberValue(row.cur_recharge);
+      item.gift += numberValue(row.cur_gift);
+      item.students.add(row.student_name);
+      map.set(key, item);
+    }
+  }
+  const normalizeSplit = (items) => [...items.values()]
+    .map((item) => ({ ...item, students: item.students.size, net: item.actual + item.gift }))
+    .sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || a.name.localeCompare(b.name, "zh-Hans-CN"));
+  return {
+    actual,
+    gift,
+    net: actual + gift,
+    records: rows.length,
+    students: uniqueSorted(rows.map((row) => row.student_name)).length,
+    negative,
+    byGrade: normalizeSplit(byGrade),
+    bySource: normalizeSplit(bySource),
+  };
+}
+
+function rechargeAnalysisSplitMarkup(title, rows = []) {
+  if (!rows.length) return "";
+  return `
+    <div class="recharge-analysis-split">
+      <div class="recharge-analysis-split-title">${escapeHtml(title)}</div>
+      <div class="recharge-analysis-chip-list">
+        ${rows.slice(0, 6).map((row) => `
+          <span class="recharge-analysis-chip">
+            <b>${escapeHtml(row.name)}</b>
+            <span class="${row.net < 0 ? "negative-text" : ""}">${escapeHtml(formatMoney(row.net))}</span>
+            <em>${row.records} 笔 / ${row.students} 人</em>
+          </span>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function rechargeAnalysisMarkup(rows = []) {
+  const summary = rechargeAnalysis(rows);
+  const cards = [
+    ["本月实际充值合计", summary.actual, "money"],
+    ["本月赠送充值合计", summary.gift, "money"],
+    ["本月净充值合计", summary.net, "money"],
+    ["充值记录数", summary.records, "number"],
+    ["充值学生数", summary.students, "number"],
+    ["退款/负充值合计", summary.negative, "money"],
+  ];
+  return `
+    <section class="recharge-analysis-panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">充值数据分析汇总</div>
+          <div class="section-subtitle">随当前来源、学生姓名和年级筛选同步更新。</div>
+        </div>
+      </div>
+      <div class="recharge-analysis-grid">
+        ${cards.map(([label, value, type]) => `
+          <div class="recharge-analysis-card ${numberValue(value) < 0 ? "is-negative" : ""}">
+            <span>${escapeHtml(label)}</span>
+            <strong>${type === "money" ? escapeHtml(formatMoney(value)) : Number(value || 0).toLocaleString("zh-CN")}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="recharge-analysis-breakdowns">
+        ${rechargeAnalysisSplitMarkup("按年级", summary.byGrade)}
+        ${rechargeAnalysisSplitMarkup("按来源", summary.bySource)}
+      </div>
+    </section>
+  `;
+}
+
 function renderRecharges() {
   const rows = rechargeRows();
   const opts = dynamicRechargeFilterOptions(rows);
@@ -6750,6 +6993,7 @@ function renderRecharges() {
         ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades, placeholder: "输入或选择年级" })}
         <button class="btn reset-recharge-filter" type="button">清空筛选</button>
       </div>
+      ${rechargeAnalysisMarkup(visibleRows)}
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
           <thead>
@@ -7434,6 +7678,119 @@ function renderStudentQuery() {
   `;
 }
 
+const BACKUP_WEEKDAYS = [
+  ["0", "周日"],
+  ["1", "周一"],
+  ["2", "周二"],
+  ["3", "周三"],
+  ["4", "周四"],
+  ["5", "周五"],
+  ["6", "周六"],
+];
+
+function backupWeekdayLabel(value) {
+  return BACKUP_WEEKDAYS.find(([key]) => String(key) === String(value))?.[1] || "周三";
+}
+
+function backupTypeLabel(value) {
+  return value === "auto" ? "自动" : "手动";
+}
+
+function backupStatusLabel(value) {
+  if (value === "success") return "成功";
+  if (value === "failed") return "失败";
+  return value || "-";
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (!Number.isFinite(size) || size <= 0) return "0 KB";
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function backupSummaryText() {
+  const settings = backupState.settings || { enabled: true, weekday: 3 };
+  const prefix = settings.enabled ? `自动备份：每${backupWeekdayLabel(settings.weekday)}` : "自动备份：已关闭";
+  return `${prefix}；已保存 ${(backupState.records || []).length} 条记录，最多保留最近 5 次成功备份`;
+}
+
+function backupSettingsModalMarkup() {
+  if (!backupState.settingsOpen) return "";
+  const settings = backupState.settings || { enabled: true, weekday: 3, last_date: "" };
+  return `
+    <div class="modal-backdrop backup-settings-modal">
+      <div class="modal-panel backup-modal-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">自动备份</div>
+            <div class="modal-subtitle">备份内容为所有月份核心 Excel zip，默认每周三检查一次。</div>
+          </div>
+          <button class="btn backup-settings-close" type="button">关闭</button>
+        </div>
+        <div class="backup-settings-grid">
+          <label class="history-toggle backup-enable-toggle">
+            <input class="backup-enabled-field" type="checkbox" ${settings.enabled ? "checked" : ""}>
+            <span>启用自动备份</span>
+          </label>
+          <label class="filter-field">
+            <span>每周几</span>
+            <select class="control backup-weekday-field">
+              ${BACKUP_WEEKDAYS.map(([key, label]) => `<option value="${key}" ${String(settings.weekday) === key ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div class="backup-last-run">上次计划检查：${escapeHtml(settings.last_date || "暂无")}</div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn backup-settings-close" type="button">取消</button>
+          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
+          <button class="btn primary backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function backupRecordsModalMarkup() {
+  if (!backupState.recordsOpen) return "";
+  const rows = backupState.records || [];
+  return `
+    <div class="modal-backdrop backup-records-modal">
+      <div class="modal-panel backup-records-panel">
+        <div class="modal-head">
+          <div>
+            <div class="modal-title">备份记录</div>
+            <div class="modal-subtitle">仅保留最近 5 次成功备份；失败记录用于排查。</div>
+          </div>
+          <button class="btn backup-records-close" type="button">关闭</button>
+        </div>
+        <div class="table-wrap smooth-table-wrap">
+          <table class="audit-table backup-record-table uniform-table nowrap-table">
+            <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>月份数</th><th>大小</th><th class="wide">文件名</th><th>下载</th></tr></thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>
+                  <td class="text-cell">${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "")}</td>
+                  <td class="text-cell">${escapeHtml(backupTypeLabel(row.backup_type))}</td>
+                  <td class="text-cell"><span class="status-badge ${row.status === "success" ? "done" : "leave"}">${escapeHtml(backupStatusLabel(row.status))}</span></td>
+                  <td class="text-cell right">${Number(row.included_months || 0)}</td>
+                  <td class="text-cell right">${escapeHtml(formatFileSize(row.file_size))}</td>
+                  <td class="text-cell" title="${escapeHtml(row.message || row.filename || "")}">${escapeHtml(row.filename || row.message || "-")}</td>
+                  <td><button class="btn backup-download" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>下载</button></td>
+                </tr>
+              `).join("") || `<tr><td colspan="7" class="empty">暂无备份记录</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
+          <button class="btn primary backup-records-close" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderAudit() {
   const workbookOptions = (state.source_workbooks || []).map((item) => (
     `<option value="${escapeHtml(item.filename)}" ${item.filename === auditSourceWorkbook ? "selected" : ""}>${escapeHtml(item.filename)}${item.month_key ? `（${escapeHtml(item.month_key.slice(0, 7))}）` : ""}</option>`
@@ -7449,11 +7806,18 @@ function renderAudit() {
 
     <div class="band audit-panel">
       <div class="section-head">
-        <div class="section-title">数据导出</div>
+        <div>
+          <div class="section-title">数据导出</div>
+          <div class="section-subtitle">${escapeHtml(backupSummaryText())}</div>
+        </div>
       </div>
       <div class="audit-toolbar">
         <button class="btn primary export-core-workbook" type="button" ${auditState.busy ? "disabled" : ""}>导出核心 Excel</button>
+        <button class="btn export-all-core-workbooks" type="button" ${auditState.busy ? "disabled" : ""}>批量导出全部月份</button>
+        <button class="btn backup-settings-open" type="button">自动备份</button>
+        <button class="btn backup-records-open" type="button">查看备份记录</button>
       </div>
+      ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
     </div>
 
     <div class="band audit-panel">
@@ -7535,6 +7899,8 @@ function renderAudit() {
         </table>
       </div>
     </details>
+    ${backupSettingsModalMarkup()}
+    ${backupRecordsModalMarkup()}
   `;
 }
 
@@ -9234,7 +9600,6 @@ function renderTeacherTravelFees() {
               <th>教师姓名</th>
               ${weeks.map((week) => `<th>${teacherTravelHeaderMarkup(week)}</th>`).join("")}
               <th>合计</th>
-              <th class="wide">备注</th>
             </tr>
           </thead>
           <tbody>
@@ -9250,15 +9615,13 @@ function renderTeacherTravelFees() {
                   </td>
                 `).join("")}
                 <td class="text-cell right">${formatMoney(teacherTravelTotal(row))}</td>
-                <td><input class="cell-input wide teacher-travel-fee-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${disabled}></td>
               </tr>
-            `).join("") || `<tr><td colspan="${weeks.length + 3}" class="empty">暂无老师档案</td></tr>`}
+            `).join("") || `<tr><td colspan="${weeks.length + 2}" class="empty">暂无老师档案</td></tr>`}
             ${rows.length ? `
               <tr>
                 <td class="text-cell"><b>合计</b></td>
                 ${weeks.map((week) => `<td class="text-cell right"><b>${formatMoney(rows.reduce((sum, row) => sum + teacherTravelAmount(row, week), 0))}</b></td>`).join("")}
                 <td class="text-cell right"><b>${formatMoney(total)}</b></td>
-                <td></td>
               </tr>
             ` : ""}
           </tbody>
@@ -9464,7 +9827,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table uniform-table nowrap-table">
-          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide">学生</th><th class="wide">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
+          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row) => {
               const calculated = showSalary ? teacherSalaryRuleCalculation(row) : null;
@@ -9478,7 +9841,7 @@ function renderTeacherDetail() {
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${calculated ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : disabledReason)}"></td>` : ""}
-                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.student_names)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>
+                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell teacher-detail-students">${escapeHtml(row.student_names)}</td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
@@ -9558,6 +9921,10 @@ function courseNoticeCellValue(row = {}, key = "") {
 
 function isPersonalCourseNoticeObject(item = {}) {
   return String(item.send_object_key || "").startsWith("PERSONAL_ALL|");
+}
+
+function isMergedClassCourseNoticeObject(item = {}) {
+  return item.send_object_type === "班级合并发送" || String(item.send_object_key || "").startsWith("CLASS_MERGED|");
 }
 
 function studentCurrentGrade(row = {}) {
@@ -9649,11 +10016,83 @@ function renderCourseNoticeSimpleGroup(title, items = []) {
 
 function renderCourseNoticeSimpleMode(objects = []) {
   const personal = objects.filter((item) => isPersonalCourseNoticeObject(item));
-  const classes = objects.filter((item) => !isPersonalCourseNoticeObject(item));
+  const mergedClasses = objects.filter((item) => isMergedClassCourseNoticeObject(item));
+  const classes = objects.filter((item) => !isPersonalCourseNoticeObject(item) && !isMergedClassCourseNoticeObject(item));
   return `
     <div class="notice-simple-mode">
       ${renderCourseNoticeSimpleGroup("个人发送", personal)}
       ${renderCourseNoticeSimpleGroup("班级发送", classes)}
+      ${renderCourseNoticeSimpleGroup("班级合并发送", mergedClasses)}
+    </div>
+  `;
+}
+
+function courseNoticePreviewItemMarkup(item) {
+  return `
+    <div class="notice-item ${item.completed ? "completed" : ""} ${item.partial_completed ? "partial" : ""}" data-send-key="${escapeHtml(item.send_object_key)}">
+      <div class="notice-left">
+        ${item.completed ? `<div class="notice-checkmark">✓</div>` : ""}
+        <div class="notice-object-head">
+          <div>
+            <div class="notice-object-name">${escapeHtml(item.send_object_name)}</div>
+            <div class="notice-object-meta">
+              <span>${escapeHtml(item.send_object_type)}</span>
+              <span>老师：${escapeHtml((item.teachers || []).join("、") || "-")}</span>
+              <span>年级：${escapeHtml((item.grades || []).join("、") || "-")}</span>
+              <span>科目：${escapeHtml((item.subjects || []).join("、") || "-")}</span>
+              ${item.student_count ? `<span>人数：${Number(item.student_count)}</span>` : ""}
+              <span>${item.lesson_count} 节课</span>
+            </div>
+          </div>
+          <span class="status-badge ${item.completed ? "done" : item.partial_completed ? "exam" : "pending"}">${escapeHtml(courseNoticeStatusText(item))}</span>
+        </div>
+        ${renderCourseNoticePreview(item)}
+      </div>
+      <div class="notice-right">
+        <label class="filter-field">
+          <span>称呼</span>
+          <input class="control notice-greeting" data-send-key="${escapeHtml(item.send_object_key)}" value="${escapeHtml(item.greeting || "")}">
+        </label>
+        <label class="filter-field">
+          <span>自动生成文案</span>
+          <textarea class="control notice-message" data-send-key="${escapeHtml(item.send_object_key)}" rows="4" readonly>${escapeHtml(courseNoticeFullMessage(item))}</textarea>
+        </label>
+        <div class="notice-actions">
+          <button class="btn notice-copy-message" type="button" data-send-key="${escapeHtml(item.send_object_key)}">复制文案</button>
+          <button class="btn primary notice-copy-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">${item.completed ? "已复制截图" : "复制课程截图"}</button>
+          <button class="btn notice-download-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">下载课程截图</button>
+        </div>
+        <div class="notice-state">${item.completed ? "✓ 该发送对象已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCourseNoticePreviewGroup(title, items = []) {
+  if (!items.length) return "";
+  return `
+    <section class="notice-preview-panel">
+      <div class="notice-simple-panel-head">
+        <div class="section-title">${escapeHtml(title)}</div>
+        <div class="section-subtitle">${items.length} 个发送对象</div>
+      </div>
+      <div class="notice-list">
+        ${items.map(courseNoticePreviewItemMarkup).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCourseNoticePreviewMode(objects = []) {
+  const personal = objects.filter((item) => isPersonalCourseNoticeObject(item));
+  const mergedClasses = objects.filter((item) => isMergedClassCourseNoticeObject(item));
+  const classes = objects.filter((item) => !isPersonalCourseNoticeObject(item) && !isMergedClassCourseNoticeObject(item));
+  if (!objects.length) return `<div class="empty">当前日期范围暂无可发送课程</div>`;
+  return `
+    <div class="notice-preview-mode">
+      ${renderCourseNoticePreviewGroup("个人发送", personal)}
+      ${renderCourseNoticePreviewGroup("班级发送", classes)}
+      ${renderCourseNoticePreviewGroup("班级合并发送", mergedClasses)}
     </div>
   `;
 }
@@ -9689,7 +10128,6 @@ function renderCourseNotice() {
           <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview">预览模式</button>
           <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "simple" ? "active" : ""}" type="button" data-layout="simple">简洁模式</button>
         </div>
-        <button class="btn course-notice-mode-toggle" type="button">${courseNoticeFilter.mode === "summer" ? "暑期班截图" : "日常班截图"}</button>
         <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
         <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
       </div>
@@ -9700,47 +10138,7 @@ function renderCourseNotice() {
     ${courseNoticeState.error ? `<div class="empty">${escapeHtml(courseNoticeState.error)}</div>` : ""}
     ${courseNoticeState.busy ? `<div class="empty">正在生成课程通知...</div>` : ""}
     ${!courseNoticeState.busy && data && courseNoticeLayoutMode === "simple" ? renderCourseNoticeSimpleMode(objects) : ""}
-    ${!courseNoticeState.busy && data && courseNoticeLayoutMode !== "simple" ? `
-      <div class="notice-list">
-        ${objects.map((item) => `
-          <div class="notice-item ${item.completed ? "completed" : ""} ${item.partial_completed ? "partial" : ""}" data-send-key="${escapeHtml(item.send_object_key)}">
-            <div class="notice-left">
-              ${item.completed ? `<div class="notice-checkmark">✓</div>` : ""}
-              <div class="notice-object-head">
-                <div>
-                  <div class="notice-object-name">${escapeHtml(item.send_object_name)}</div>
-                  <div class="notice-object-meta">
-                    <span>${escapeHtml(item.send_object_type)}</span>
-                    <span>老师：${escapeHtml((item.teachers || []).join("、") || "-")}</span>
-                    <span>年级：${escapeHtml((item.grades || []).join("、") || "-")}</span>
-                    <span>科目：${escapeHtml((item.subjects || []).join("、") || "-")}</span>
-                    <span>${item.lesson_count} 节课</span>
-                  </div>
-                </div>
-                <span class="status-badge ${item.completed ? "done" : item.partial_completed ? "exam" : "pending"}">${escapeHtml(courseNoticeStatusText(item))}</span>
-              </div>
-              ${renderCourseNoticePreview(item)}
-            </div>
-            <div class="notice-right">
-              <label class="filter-field">
-                <span>称呼</span>
-                <input class="control notice-greeting" data-send-key="${escapeHtml(item.send_object_key)}" value="${escapeHtml(item.greeting || "")}">
-              </label>
-              <label class="filter-field">
-                <span>自动生成文案</span>
-                <textarea class="control notice-message" data-send-key="${escapeHtml(item.send_object_key)}" rows="4" readonly>${escapeHtml(courseNoticeFullMessage(item))}</textarea>
-              </label>
-              <div class="notice-actions">
-                <button class="btn notice-copy-message" type="button" data-send-key="${escapeHtml(item.send_object_key)}">复制文案</button>
-                <button class="btn primary notice-copy-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">${item.completed ? "已复制截图" : "复制课程截图"}</button>
-                <button class="btn notice-download-image" type="button" data-send-key="${escapeHtml(item.send_object_key)}">下载课程截图</button>
-              </div>
-              <div class="notice-state">${item.completed ? "✓ 该发送对象已完成" : item.partial_completed ? "部分课程已有完成记录" : "等待复制截图"}</div>
-            </div>
-          </div>
-        `).join("") || `<div class="empty">当前日期范围暂无可发送课程</div>`}
-      </div>
-    ` : ""}
+    ${!courseNoticeState.busy && data && courseNoticeLayoutMode !== "simple" ? renderCourseNoticePreviewMode(objects) : ""}
   `;
 }
 
@@ -10678,10 +11076,11 @@ function collectRowPayload(row, selector) {
 function collectTeacherTravelFeePayload(row) {
   const weeks = teacherTravelWeeks();
   const amountInputs = [...row.querySelectorAll(".teacher-travel-fee-field[data-week-index]")];
+  const summary = teacherSummaryRowFor(row.dataset.teacherName || "");
   return {
     teacher_name: row.dataset.teacherName || "",
     month_key: state.settings.month_key,
-    notes: row.querySelector(".teacher-travel-fee-field[data-field='notes']")?.value || "",
+    notes: summary.notes || "",
     fees: weeks.map((week) => ({
       week_index: Number(week.week_index),
       week_start: week.start || week.week_start,
@@ -11214,6 +11613,14 @@ function wireEvents() {
       activeMonth = select.value;
       localStorage.setItem("liming:month", activeMonth);
       resetFinanceRangeToActiveMonth();
+      if (view === "lessons") {
+        state.settings = { ...(state.settings || {}), month_key: activeMonth };
+        state.active_month_key = activeMonth;
+        ensureLessonFilterDates();
+        await refreshLessonsView({ reloadRange: true });
+        renderNav();
+        return;
+      }
       await load({ refreshGlobal: false });
     });
   });
@@ -12298,6 +12705,116 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".export-all-core-workbooks").forEach((button) => {
+    button.addEventListener("click", async () => {
+      auditState.busy = true;
+      render();
+      try {
+        await downloadBlob(
+          "/api/export/core-workbooks-all.zip",
+          `黎明教育_全部月份_核心数据_${Date.now()}.zip`,
+        );
+      } catch (error) {
+        alert(error.message || "批量导出全部月份失败");
+      } finally {
+        auditState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".backup-settings-open").forEach((button) => {
+    button.addEventListener("click", () => {
+      backupState.settingsOpen = true;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".backup-records-open").forEach((button) => {
+    button.addEventListener("click", async () => {
+      backupState.recordsOpen = true;
+      backupState.busy = true;
+      render();
+      try {
+        await refreshBackupData({ logView: true });
+      } catch (error) {
+        backupState.error = error.message || "读取备份记录失败";
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".backup-settings-close").forEach((button) => {
+    button.addEventListener("click", () => {
+      backupState.settingsOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".backup-records-close").forEach((button) => {
+    button.addEventListener("click", () => {
+      backupState.recordsOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".backup-settings-save").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const enabled = document.querySelector(".backup-enabled-field")?.checked !== false;
+      const weekday = Number(document.querySelector(".backup-weekday-field")?.value || 3);
+      backupState.busy = true;
+      render();
+      try {
+        const result = await request("/api/backups/settings", {
+          method: "PUT",
+          body: { enabled, weekday },
+        });
+        backupState.settings = result.settings || backupState.settings;
+        backupState.settingsOpen = false;
+        await refreshBackupData();
+        showToast("自动备份设置已保存");
+      } catch (error) {
+        backupState.error = error.message || "保存自动备份设置失败";
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".backup-run-now").forEach((button) => {
+    button.addEventListener("click", async () => {
+      backupState.busy = true;
+      render();
+      try {
+        const result = await request("/api/backups/run", { method: "POST", body: { type: "manual" } });
+        backupState.records = result.records || backupState.records;
+        backupState.error = "";
+        showToast(`已生成备份：${result.record?.filename || ""}`);
+      } catch (error) {
+        backupState.error = error.message || "手动备份失败";
+        showToast(backupState.error, "error");
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".backup-download").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      if (!id) return;
+      try {
+        await downloadBlob(`/api/backups/${encodeURIComponent(id)}/download`, "黎明教育_核心数据备份.zip");
+      } catch (error) {
+        showToast(error.message || "下载备份失败", "error");
+      }
+    });
+  });
+
   document.querySelectorAll(".audit-run-internal").forEach((button) => {
     button.addEventListener("click", async () => {
       auditState.busy = true;
@@ -12634,7 +13151,7 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".lesson-filter-multi").forEach((input) => {
-    input.addEventListener("change", () => {
+    input.addEventListener("change", async () => {
       const field = input.dataset.filterField;
       if (field !== "teacher_names") return;
       focusedLessonIds = [];
@@ -12647,7 +13164,7 @@ function wireEvents() {
         date_preset_initialized: true,
       };
       saveLessonFilter();
-      render();
+      await refreshLessonsView();
     });
   });
 
@@ -12664,11 +13181,7 @@ function wireEvents() {
       };
       saveLessonFilter();
       if (rerender) {
-        if ((field === "start_date" || field === "end_date") && !lessonRangeLoaded()) {
-          await load();
-        } else {
-          render();
-        }
+        await refreshLessonsView({ reloadRange: (field === "start_date" || field === "end_date") && !lessonRangeLoaded() });
       }
     };
 
@@ -12680,12 +13193,7 @@ function wireEvents() {
     bindSafeTextInput(input, (value) => {
       applyLessonFilter(value, false);
     }, async () => {
-      if ((input.dataset.filterField === "start_date" || input.dataset.filterField === "end_date") && !lessonRangeLoaded()) {
-        await loadLessonRangeOnly();
-        render();
-      } else {
-        render();
-      }
+      await refreshLessonsView({ reloadRange: (input.dataset.filterField === "start_date" || input.dataset.filterField === "end_date") && !lessonRangeLoaded() });
     }, 650);
   });
 
@@ -12890,10 +13398,10 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".reset-lesson-filter").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       focusedLessonIds = [];
       resetLessonFilter();
-      render();
+      await refreshLessonsView({ reloadRange: !lessonRangeLoaded() });
     });
   });
 
@@ -12904,8 +13412,7 @@ function wireEvents() {
       focusedLessonIds = [];
       lessonFilter = { ...lessonFilter, start_date: range.start, end_date: range.end, date_preset_initialized: true };
       saveLessonFilter();
-      if (!lessonRangeLoaded()) await loadLessonRangeOnly();
-      render();
+      await refreshLessonsView({ reloadRange: !lessonRangeLoaded() });
     });
   });
 
@@ -12913,14 +13420,14 @@ function wireEvents() {
     button.addEventListener("click", () => {
       if (button.disabled) return;
       lessonConflictModalOpen = true;
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
   document.querySelectorAll(".lesson-conflict-modal-close").forEach((button) => {
     button.addEventListener("click", () => {
       lessonConflictModalOpen = false;
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -12928,14 +13435,14 @@ function wireEvents() {
     modal.addEventListener("click", (event) => {
       if (event.target !== modal) return;
       lessonConflictModalOpen = false;
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
   document.querySelectorAll(".clear-focused-lessons").forEach((button) => {
     button.addEventListener("click", () => {
       focusedLessonIds = [];
-      render();
+      updateLessonsViewDom();
     });
   });
 
@@ -12951,7 +13458,7 @@ function wireEvents() {
       activeNavGroup = "schedule";
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
-      render();
+      updateLessonsViewDom();
     });
   });
 
@@ -12979,13 +13486,16 @@ function wireEvents() {
         activeMonth = nextMonth;
         localStorage.setItem("liming:month", activeMonth);
         resetFinanceRangeToActiveMonth();
+        state.settings = { ...(state.settings || {}), month_key: activeMonth };
+        state.active_month_key = activeMonth;
       } else {
         alert(`已复制 ${result.created} 节课。`);
       }
     } else {
       alert(`已复制 ${result.created} 节课。`);
     }
-    await load();
+    markLessonDerivedDataDirty();
+    await refreshLessonsView({ reloadRange: true });
   }
 
   document.querySelectorAll(".batch-complete-lessons").forEach((button) => {
@@ -13007,7 +13517,8 @@ function wireEvents() {
           body: { ids },
         });
         selectedLessonIds = new Set();
-        await load();
+        markLessonDerivedDataDirty();
+        await refreshLessonsView({ reloadRange: true });
         showToast(`已将 ${result.updated || ids.length} 节课程标记为已上`);
       } catch (error) {
         button.disabled = false;
@@ -13022,14 +13533,14 @@ function wireEvents() {
       const ids = [...selectedLessonIds].map(Number).filter(Boolean);
       if (!ids.length) return alert("请先选择要复制的课程");
       lessonBatchCopyDraft = openLessonBatchCopyDraft();
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
   document.querySelectorAll(".batch-copy-cancel").forEach((button) => {
     button.addEventListener("click", () => {
       lessonBatchCopyDraft = null;
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -13075,7 +13586,7 @@ function wireEvents() {
     input.addEventListener("change", () => {
       const offsetDays = Number.parseInt(input.value, 10);
       resetLessonBatchCopyDates(Number.isFinite(offsetDays) ? offsetDays : 7);
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -13088,7 +13599,7 @@ function wireEvents() {
       if (!resolveManualSelectValue(input, rows[index]?.[field] ?? "")) return;
       rows[index] = { ...(rows[index] || {}), [field]: input.value };
       lessonBatchCopyDraft = { ...lessonBatchCopyDraft, targetRows: rows };
-      if (field === "date") render();
+      if (field === "date") updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -13139,14 +13650,14 @@ function wireEvents() {
     button.addEventListener("click", () => {
       const sourceStart = startOfWeek(todayDate()) || monthBounds(activeMonth).start;
       weekCopyDraft = { sourceStart, targetStart: addDays(sourceStart, 7) };
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
   document.querySelectorAll(".week-copy-cancel").forEach((button) => {
     button.addEventListener("click", () => {
       weekCopyDraft = null;
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -13154,14 +13665,14 @@ function wireEvents() {
     input.addEventListener("change", () => {
       const sourceStart = startOfWeek(input.value);
       weekCopyDraft = { ...weekCopyDraft, sourceStart, targetStart: addDays(sourceStart, 7) };
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
   document.querySelectorAll(".week-copy-target").forEach((input) => {
     input.addEventListener("change", () => {
       weekCopyDraft = { ...weekCopyDraft, targetStart: startOfWeek(input.value) };
-      render();
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -13206,7 +13717,8 @@ function wireEvents() {
         const result = await request("/api/lessons/batch-delete", { method: "POST", body: { ids } });
         lessonBatchDeleting = false;
         selectedLessonIds = new Set();
-        await load();
+        markLessonDerivedDataDirty();
+        await refreshLessonsView({ reloadRange: true });
         if (result.missing?.length) alert(`已删除 ${result.deleted || 0} 节课程，另有 ${result.missing.length} 节未找到。`);
       } catch (error) {
         lessonBatchDeleting = false;
@@ -13397,7 +13909,8 @@ function wireEvents() {
         };
         const lesson = await request("/api/lessons", { method: "POST", body: payload });
         lessonCreateDraft = null;
-        await load();
+        markLessonDerivedDataDirty();
+        await refreshLessonsView({ reloadRange: true });
         const visible = visibleLessonRows().some((row) => Number(row.id) === Number(lesson.id));
         if (!visible) alert("新增成功，如未显示请调整日期筛选。");
       } catch (error) {
@@ -13411,7 +13924,10 @@ function wireEvents() {
     button.addEventListener("click", () => {
       if (!confirm("删除这条课程记录？")) return;
       selectedLessonIds.delete(Number(button.dataset.id));
-      refreshAfter(() => request(`/api/lessons/${button.dataset.id}`, { method: "DELETE" }));
+      refreshAfter(() => request(`/api/lessons/${button.dataset.id}`, { method: "DELETE" }), async () => {
+        markLessonDerivedDataDirty();
+        await refreshLessonsView({ reloadRange: true });
+      });
     });
   });
 
@@ -13432,15 +13948,6 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".matrix-range-reset").forEach((button) => {
-    button.addEventListener("click", async () => {
-      matrixRange = currentMatrixRange(state.settings.month_key || activeMonth);
-      localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
-      saveMatrixRange();
-      await load();
-    });
-  });
-
-  document.querySelectorAll(".matrix-current-week").forEach((button) => {
     button.addEventListener("click", async () => {
       matrixRange = currentMatrixRange(state.settings.month_key || activeMonth);
       localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
@@ -13870,17 +14377,6 @@ function wireEvents() {
   document.querySelectorAll(".course-notice-only").forEach((input) => {
     input.addEventListener("change", () => {
       courseNoticeFilter = { ...courseNoticeFilter, onlyTeaching: input.checked };
-      saveCourseNoticeFilter();
-      loadCourseNoticeData(true);
-    });
-  });
-
-  document.querySelectorAll(".course-notice-mode-toggle").forEach((button) => {
-    button.addEventListener("click", () => {
-      courseNoticeFilter = {
-        ...courseNoticeFilter,
-        mode: courseNoticeFilter.mode === "summer" ? "daily" : "summer",
-      };
       saveCourseNoticeFilter();
       loadCourseNoticeData(true);
     });

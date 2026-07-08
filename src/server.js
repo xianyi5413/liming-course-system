@@ -677,6 +677,20 @@ function initDb() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       extra_json TEXT DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS backup_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      backup_time TEXT DEFAULT CURRENT_TIMESTAMP,
+      backup_type TEXT NOT NULL DEFAULT 'manual',
+      included_months INTEGER DEFAULT 0,
+      filename TEXT DEFAULT '',
+      file_path TEXT DEFAULT '',
+      file_size INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'success',
+      message TEXT DEFAULT '',
+      scheduled_date TEXT DEFAULT '',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
@@ -695,6 +709,8 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_backup_records_time ON backup_records(backup_time DESC, id DESC)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_backup_records_type ON backup_records(backup_type, scheduled_date)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_teacher_travel_fees_month_teacher ON teacher_travel_fees(month_key, teacher_name)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_class_groups_lookup ON class_groups(teacher, grade, subject, students_key)").run();
   db.prepare(`
@@ -905,6 +921,9 @@ function initDb() {
 
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('month_key', '2026-04-01')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('course_notice_global_tail', '这是我们本周的上课安排哦[玫瑰]')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_enabled', '1')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_weekday', '3')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_last_date', '')").run();
   const currentMonth = db.prepare("SELECT value FROM settings WHERE key = 'month_key'").get().value;
   db.prepare(`
     INSERT OR IGNORE INTO teacher_adjustments_monthly(
@@ -5350,6 +5369,16 @@ function currentTimeMinutes() {
   return now.getHours() * 60 + now.getMinutes();
 }
 
+// 首页“正在上的课程”：课程日期必须是今天，且当前本地时间落在 time_slot 起止时间内。
+function isDashboardCurrentLessonCandidate(row) {
+  const status = deriveStatus(row);
+  const fields = [status, row.status, row.lesson_status, row.course_status].map(text).filter(Boolean);
+  const normalized = fields.join("|");
+  if (/(请假|取消|停课|暂停|休息|异常|作废|删除|待定|考试|监考)/.test(normalized)) return false;
+  const activeStatuses = new Set(["上课中", "未下课", "已上", "待上", "未缴费", "上课", "未上", "试课"]);
+  return fields.some((value) => activeStatuses.has(value));
+}
+
 function dashboardCurrentLessons(user) {
   const today = todayKey();
   const nowMinutes = currentTimeMinutes();
@@ -5358,7 +5387,7 @@ function dashboardCurrentLessons(user) {
     [today],
   )
     .filter((row) => {
-      if (!isScheduleActive(row)) return false;
+      if (!isDashboardCurrentLessonCandidate(row)) return false;
       const range = parseTimeRange(row.time_slot);
       return Boolean(range && range.start <= nowMinutes && nowMinutes <= range.end);
     })
@@ -6066,8 +6095,8 @@ function exportTimestamp(date = new Date()) {
   ].join("");
 }
 
-function coreWorkbookFilename(monthKey) {
-  return `黎明教育_${monthLabelCn(monthKey)}_核心数据_${exportTimestamp()}.xlsx`;
+function coreWorkbookFilename(monthKey, stamp = exportTimestamp()) {
+  return `黎明教育_${monthLabelCn(monthKey)}_核心数据_${stamp}.xlsx`;
 }
 
 function coreLessonRows(monthKey) {
@@ -6286,6 +6315,198 @@ function coreWorkbookSheets(monthKey) {
     { name: "充值记录", rows: coreRechargeRows(monthKey, details) },
     { name: "薪资汇总", rows: coreTeacherSalaryRows(monthKey) },
   ];
+}
+
+function coreWorkbookBuffer(monthKey) {
+  return multiSheetXlsxBuffer(coreWorkbookSheets(monthKey));
+}
+
+function allCoreExportMonths() {
+  const months = allPartitionedMonths()
+    .filter(validMonthKey)
+    .sort((a, b) => a.localeCompare(b));
+  if (months.length) return months;
+  const fallback = text(getSetting("month_key"));
+  return validMonthKey(fallback) ? [fallback] : [];
+}
+
+function allCoreWorkbookZipFilename(stamp = exportTimestamp()) {
+  return `黎明教育_全部月份_核心数据_${stamp}.zip`;
+}
+
+function allCoreWorkbookZipBuffer(months = allCoreExportMonths(), stamp = exportTimestamp()) {
+  if (!months.length) throw new Error("暂无可导出的月份");
+  const files = months.map((monthKey) => ({
+    name: `${monthKey.slice(0, 7)}/${coreWorkbookFilename(monthKey, stamp)}`,
+    data: coreWorkbookBuffer(monthKey),
+  }));
+  return zipStore(files);
+}
+
+function backupDirPath() {
+  const backupDir = path.join(dataDir, "backups");
+  fs.mkdirSync(backupDir, { recursive: true });
+  return backupDir;
+}
+
+function uniqueFilePath(dir, filename) {
+  const parsed = path.parse(filename);
+  let target = path.join(dir, filename);
+  let suffix = 1;
+  while (fs.existsSync(target)) {
+    target = path.join(dir, `${parsed.name}_${suffix}${parsed.ext}`);
+    suffix += 1;
+  }
+  return target;
+}
+
+function insertBackupRecord(record) {
+  const result = db.prepare(`
+    INSERT INTO backup_records(
+      backup_time, backup_type, included_months, filename, file_path, file_size, status, message, scheduled_date
+    )
+    VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    text(record.backup_type) || "manual",
+    num(record.included_months),
+    text(record.filename),
+    text(record.file_path),
+    num(record.file_size),
+    text(record.status) || "success",
+    text(record.message),
+    text(record.scheduled_date),
+  );
+  return get("SELECT * FROM backup_records WHERE id = ?", [Number(result.lastInsertRowid)]);
+}
+
+function backupRecordDto(row = {}) {
+  return {
+    id: row.id,
+    backup_time: row.backup_time || "",
+    backup_type: row.backup_type || "",
+    included_months: num(row.included_months),
+    filename: row.filename || "",
+    file_size: num(row.file_size),
+    status: row.status || "",
+    message: row.message || "",
+    scheduled_date: row.scheduled_date || "",
+  };
+}
+
+function enforceBackupRetention(limit = 5) {
+  const rows = all(`
+    SELECT id, file_path
+    FROM backup_records
+    WHERE status = 'success' AND TRIM(COALESCE(file_path, '')) <> ''
+    ORDER BY backup_time DESC, id DESC
+  `);
+  for (const row of rows.slice(limit)) {
+    const filePath = text(row.file_path);
+    if (filePath) {
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch (error) {
+        console.warn("failed to remove old backup", filePath, error.message || error);
+      }
+    }
+    db.prepare("DELETE FROM backup_records WHERE id = ?").run(Number(row.id));
+  }
+}
+
+function createCoreBackup(type = "manual", options = {}) {
+  const backupType = type === "auto" ? "auto" : "manual";
+  const stamp = exportTimestamp();
+  const months = allCoreExportMonths();
+  const filename = `${backupType === "auto" ? "黎明教育_自动备份" : "黎明教育_手动备份"}_全部月份_核心数据_${stamp}.zip`;
+  const backupDir = backupDirPath();
+  let record = null;
+  try {
+    const buffer = allCoreWorkbookZipBuffer(months, stamp);
+    const filePath = uniqueFilePath(backupDir, filename);
+    fs.writeFileSync(filePath, buffer);
+    record = insertBackupRecord({
+      backup_type: backupType,
+      included_months: months.length,
+      filename: path.basename(filePath),
+      file_path: filePath,
+      file_size: buffer.length,
+      status: "success",
+      message: "",
+      scheduled_date: options.scheduledDate || "",
+    });
+    enforceBackupRetention();
+    return { ok: true, record: backupRecordDto(record), months };
+  } catch (error) {
+    record = insertBackupRecord({
+      backup_type: backupType,
+      included_months: months.length,
+      filename,
+      file_path: "",
+      file_size: 0,
+      status: "failed",
+      message: error.message || "备份失败",
+      scheduled_date: options.scheduledDate || "",
+    });
+    if (options.throwOnError === false) return { ok: false, record: backupRecordDto(record), error: error.message || "备份失败" };
+    throw error;
+  }
+}
+
+function backupRecords(limit = 50) {
+  return all(`
+    SELECT *
+    FROM backup_records
+    ORDER BY backup_time DESC, id DESC
+    LIMIT ?
+  `, [Math.max(1, Math.min(200, Number(limit) || 50))]).map(backupRecordDto);
+}
+
+function backupSettings() {
+  const weekday = Number(getSetting("auto_backup_weekday"));
+  return {
+    enabled: text(getSetting("auto_backup_enabled")) !== "0",
+    weekday: Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : 3,
+    last_date: text(getSetting("auto_backup_last_date")),
+  };
+}
+
+function saveBackupSettings(body = {}) {
+  const weekday = Number(body.weekday);
+  const normalizedWeekday = Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : 3;
+  setSetting("auto_backup_enabled", body.enabled === false || body.enabled === 0 || body.enabled === "0" ? "0" : "1");
+  setSetting("auto_backup_weekday", String(normalizedWeekday));
+  return backupSettings();
+}
+
+let autoBackupRunning = false;
+
+function maybeRunAutomaticBackup(reason = "check") {
+  if (readOnlyBalanceCli || autoBackupRunning) return { ok: true, checked: false, reason };
+  const settings = backupSettings();
+  if (!settings.enabled) return { ok: true, checked: true, due: false, reason: "disabled" };
+  const today = todayKey();
+  const now = parseDateKey(today) || new Date();
+  if (now.getDay() !== settings.weekday) return { ok: true, checked: true, due: false, reason: "weekday" };
+  if (settings.last_date === today) return { ok: true, checked: true, due: false, reason: "already_run" };
+  autoBackupRunning = true;
+  try {
+    const result = createCoreBackup("auto", { scheduledDate: today, throwOnError: false });
+    setSetting("auto_backup_last_date", today);
+    return { ...result, checked: true, due: true, reason };
+  } finally {
+    autoBackupRunning = false;
+  }
+}
+
+function backupRecordForDownload(id) {
+  const row = get("SELECT * FROM backup_records WHERE id = ?", [Number(id)]);
+  if (!row) return { error: "备份记录不存在", status: 404 };
+  if (row.status !== "success") return { error: "该备份未成功生成，无法下载", status: 400 };
+  const filePath = path.resolve(text(row.file_path));
+  const backupRoot = path.resolve(backupDirPath());
+  if (!filePath.startsWith(`${backupRoot}${path.sep}`)) return { error: "备份路径无效", status: 400 };
+  if (!fs.existsSync(filePath)) return { error: "备份文件已不存在", status: 404 };
+  return { row, filePath };
 }
 
 function teacherSalaryRows(monthKey) {
@@ -7327,79 +7548,46 @@ function courseNoticeLesson(row, classMap = classGroupLookupMap()) {
   return lesson;
 }
 
-function summerCourseNoticeObjects(lessons) {
-  const groupMap = new Map();
-  for (const lesson of lessons) {
-    const key = [
-      "SUMMER",
-      text(lesson.teacher_name),
-      text(lesson.subject),
-      text(lesson.grade),
-    ].join("|");
-    if (!text(lesson.teacher_name) || !text(lesson.subject) || !text(lesson.grade)) continue;
-    if (!groupMap.has(key)) {
-      groupMap.set(key, {
-        send_object_key: key,
-        send_object_name: `${lesson.teacher_name}${lesson.grade}${lesson.subject}暑期班`,
-        send_object_type: "暑期班截图",
-        students: "",
-        teachers: [lesson.teacher_name],
-        grades: [lesson.grade],
-        subjects: [lesson.subject],
-        lessons: [],
-      });
-    }
-    const item = groupMap.get(key);
-    item.lessons.push(lesson);
-  }
-  return [...groupMap.values()].map((item) => ({
-    ...item,
-    students: uniqueNames(item.lessons.flatMap((lesson) => splitStudents(lesson.student_names))).join("、"),
-    lessons: item.lessons.sort((a, b) => `${a.date} ${a.time_slot} ${String(a.id).padStart(8, "0")}`.localeCompare(`${b.date} ${b.time_slot} ${String(b.id).padStart(8, "0")}`, "zh-Hans-CN")),
-  }));
+function lessonClassNameOnly(lesson = {}) {
+  const display = text(lesson.display_student_names);
+  const match = display.match(/^(.+?)[：:]/);
+  return text(match?.[1]);
 }
 
-function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
+function mergedClassCourseNoticeObjects(groupMap) {
+  return [...groupMap.values()]
+    .map((item) => {
+      const subjects = uniqueNames(item.subjects);
+      if (subjects.length <= 1) return null;
+      const classNames = uniqueNames(item.class_names);
+      const classTitle = classNames.length === 1
+        ? classNames[0]
+        : `${item.grades[0] || "未设置"}-${item.students}`;
+      item.lessons.sort((a, b) => `${a.date} ${a.time_slot} ${String(a.id).padStart(8, "0")}`.localeCompare(`${b.date} ${b.time_slot} ${String(b.id).padStart(8, "0")}`, "zh-Hans-CN"));
+      return {
+        send_object_key: item.send_object_key,
+        send_object_name: `${classTitle}合并课程`,
+        send_object_type: "班级合并发送",
+        students: item.students,
+        student_count: splitStudents(item.students).length,
+        teachers: uniqueNames(item.teachers),
+        grades: uniqueNames(item.grades),
+        subjects,
+        lessons: item.lessons,
+      };
+    })
+    .filter(Boolean);
+}
+
+function courseNoticeData(start, end, onlyTeaching = false) {
   const rows = lessonsInDateRange(start, end);
   if (!rows) return null;
   const classMap = classGroupLookupMap();
   const lessons = rows
     .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
     .map((row) => courseNoticeLesson(row, classMap));
-  if (mode === "summer") {
-    const objects = summerCourseNoticeObjects(lessons);
-    const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records").map((row) => row.unique_key));
-    const greetingRows = new Map(all("SELECT * FROM parent_message_greetings").map((row) => [row.send_object_key, row]));
-    const globalTail = getSetting("course_notice_global_tail") || "这是我们本周的上课安排哦[玫瑰]";
-    return {
-      range: { start, end },
-      only_teaching: Boolean(onlyTeaching),
-      mode: "summer",
-      global_tail: globalTail,
-      send_objects: objects.map((item) => {
-        const saved = greetingRows.get(item.send_object_key);
-        const greeting = text(saved?.greeting) || sendObjectDefaultGreeting(item);
-        const lessonKeys = item.lessons.map((lesson) => lesson.completion_key);
-        const completedCount = lessonKeys.filter((key) => completionKeys.has(key)).length;
-        const completed = lessonKeys.length > 0 && completedCount === lessonKeys.length;
-        const partial_completed = completedCount > 0 && !completed;
-        return {
-          ...item,
-          teachers: uniqueNames(item.teachers),
-          grades: uniqueNames(item.grades),
-          subjects: uniqueNames(item.subjects),
-          greeting,
-          global_tail: globalTail,
-          full_message: `${greeting}\n${globalTail}`,
-          completed,
-          partial_completed,
-          completed_count: completedCount,
-          lesson_count: item.lessons.length,
-        };
-      }).sort((a, b) => a.send_object_name.localeCompare(b.send_object_name, "zh-Hans-CN")),
-    };
-  }
   const dailyClassMap = new Map();
+  const mergedClassMap = new Map();
   const personalStudents = new Set();
   for (const lesson of lessons) {
     const students = splitStudents(lesson.student_names);
@@ -7419,6 +7607,28 @@ function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
         });
       }
       dailyClassMap.get(key).lessons.push(lesson);
+      const mergedKey = [
+        "CLASS_MERGED",
+        text(lesson.grade),
+        normalizedStudents(lesson.student_names),
+      ].join("|");
+      if (!mergedClassMap.has(mergedKey)) {
+        mergedClassMap.set(mergedKey, {
+          send_object_key: mergedKey,
+          students: lesson.student_names,
+          teachers: [],
+          grades: [lesson.grade],
+          subjects: [],
+          class_names: [],
+          lessons: [],
+        });
+      }
+      const mergedItem = mergedClassMap.get(mergedKey);
+      mergedItem.teachers.push(lesson.teacher_name);
+      mergedItem.grades.push(lesson.grade);
+      mergedItem.subjects.push(lesson.subject);
+      mergedItem.class_names.push(lessonClassNameOnly(lesson));
+      mergedItem.lessons.push(lesson);
     }
   }
 
@@ -7439,7 +7649,7 @@ function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
       lessons: studentLessons,
     });
   }
-  objects.push(...dailyClassMap.values());
+  objects.push(...dailyClassMap.values(), ...mergedClassCourseNoticeObjects(mergedClassMap));
 
   const completionKeys = new Set(all("SELECT unique_key FROM course_notice_completion_records").map((row) => row.unique_key));
   const greetingRows = new Map(all("SELECT * FROM parent_message_greetings").map((row) => [row.send_object_key, row]));
@@ -7473,10 +7683,10 @@ function courseNoticeData(start, end, onlyTeaching = false, mode = "daily") {
         };
       })
       .sort((a, b) => [
-        a.send_object_type === "1V1个人群" ? "0" : "1",
+        a.send_object_type === "1V1个人群" ? "0" : a.send_object_type === "班级群" ? "1" : "2",
         a.send_object_name,
       ].join("|").localeCompare([
-        b.send_object_type === "1V1个人群" ? "0" : "1",
+        b.send_object_type === "1V1个人群" ? "0" : b.send_object_type === "班级群" ? "1" : "2",
         b.send_object_name,
       ].join("|"), "zh-Hans-CN")),
   };
@@ -7724,6 +7934,28 @@ function writeOperationLog(operator, { operation_type, operation_content = "", t
     text(target_type),
     text(target_id),
   );
+}
+
+function weekdayOperationLabel(value) {
+  const names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const index = Number(value);
+  return Number.isInteger(index) && names[index] ? names[index] : `周${text(value)}`;
+}
+
+function backupOperationText(row = {}) {
+  return `${row.filename || "未命名备份"}，${num(row.included_months)} 个月份，${num(row.file_size)} 字节，状态 ${row.status || "未知"}`;
+}
+
+function settingOperationLabel(key) {
+  return ({
+    custom_classrooms: "教室字典",
+    custom_subjects: "科目字典",
+    custom_time_slots: "时间段字典",
+    custom_course_statuses: "课程状态字典",
+    course_notice_global_tail: "家长群课程通知尾句",
+    teacher_course_notice_global_tail: "教师课程通知尾句",
+    month_key: "当前月份",
+  })[key] || text(key);
 }
 
 function lessonOperationText(row = {}) {
@@ -9010,7 +9242,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/class-groups")) return "students";
   if (p === "/api/dashboard") return "dashboard";
   if (p.startsWith("/api/users")) return "users";
-  if (p === "/api/export/core-workbook.xlsx") return "coreExport";
+  if (p === "/api/export/core-workbook.xlsx" || p === "/api/export/core-workbooks-all.zip" || p.startsWith("/api/backups")) return "coreExport";
   if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
   if (p === "/api/teacher-adjustments" || p === "/api/teacher-travel-fees") return "teacherTransport";
   if (p.includes("teacher-salary")) return "teacherSalary";
@@ -9063,6 +9295,7 @@ function apiPagePermissionKeys(req, url) {
   if (p.startsWith("/api/teacher-salary-rules")) return ["teacherSalaryRules"];
   if (p.startsWith("/api/finance-summary")) return ["finance"];
   if (p.startsWith("/api/operation-logs")) return ["operationLogs"];
+  if (p === "/api/export/core-workbook.xlsx" || p === "/api/export/core-workbooks-all.zip" || p.startsWith("/api/backups")) return ["audit"];
   if (p.startsWith("/api/staff-salary")) return ["staffPayroll"];
   if (p.startsWith("/api/staff-attendance")) return ["staffAttendance"];
   if (p.startsWith("/api/operating-expenses")) return ["expenses"];
@@ -11376,7 +11609,6 @@ async function handleApi(req, res, url) {
       text(url.searchParams.get("start")),
       text(url.searchParams.get("end")),
       url.searchParams.get("only_teaching") === "1",
-      url.searchParams.get("mode") === "summer" ? "summer" : "daily",
     );
     if (!data) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, data);
@@ -11712,16 +11944,102 @@ async function handleApi(req, res, url) {
     const monthKey = normalizeExportMonthKey(url.searchParams.get("month"));
     if (!monthKey) return sendError(res, 400, "month must be YYYY-MM or YYYY-MM-01");
     try {
+      const filename = coreWorkbookFilename(monthKey);
+      const buffer = coreWorkbookBuffer(monthKey);
+      writeOperationLog(user, {
+        operation_type: "导出单月核心Excel",
+        operation_content: `导出月份 ${monthKey.slice(0, 7)}，文件 ${filename}`,
+        target_type: "core_export",
+        target_id: monthKey,
+      });
       return sendBuffer(
         res,
-        multiSheetXlsxBuffer(coreWorkbookSheets(monthKey)),
+        buffer,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        coreWorkbookFilename(monthKey),
+        filename,
       );
     } catch (error) {
       console.error("core workbook export failed", error);
       return sendError(res, 500, `导出核心 Excel 失败：${error.message || "未知错误"}`);
     }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export/core-workbooks-all.zip") {
+    try {
+      const stamp = exportTimestamp();
+      const months = allCoreExportMonths();
+      const filename = allCoreWorkbookZipFilename(stamp);
+      const buffer = allCoreWorkbookZipBuffer(months, stamp);
+      writeOperationLog(user, {
+        operation_type: "批量导出全部月份核心Excel",
+        operation_content: `导出 ${months.length} 个月份，文件 ${filename}`,
+        target_type: "core_export",
+        target_id: "all_months",
+      });
+      return sendBuffer(
+        res,
+        buffer,
+        "application/zip",
+        filename,
+      );
+    } catch (error) {
+      console.error("all core workbooks export failed", error);
+      return sendError(res, 500, `批量导出核心 Excel 失败：${error.message || "未知错误"}`);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/backups") {
+    const auto = maybeRunAutomaticBackup("api");
+    const records = backupRecords();
+    if (url.searchParams.get("log") === "1") {
+      writeOperationLog(user, {
+        operation_type: "查看备份记录",
+        operation_content: `查看历史备份 ${records.length} 条`,
+        target_type: "backup_records",
+        target_id: "list",
+      });
+    }
+    return sendJson(res, { settings: backupSettings(), records, auto_check: auto });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/backups/settings") {
+    const settings = saveBackupSettings(await readBody(req));
+    writeOperationLog(user, {
+      operation_type: "修改自动备份设置",
+      operation_content: `${settings.enabled ? "启用" : "停用"}自动备份，频率 ${weekdayOperationLabel(settings.weekday)}`,
+      target_type: "backup_settings",
+      target_id: "auto_backup",
+    });
+    return sendJson(res, { ok: true, settings });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/backups/run") {
+    try {
+      const result = createCoreBackup("manual");
+      writeOperationLog(user, {
+        operation_type: "手动备份核心数据",
+        operation_content: backupOperationText(result.record),
+        target_type: "backup_records",
+        target_id: String(result.record.id || ""),
+      });
+      return sendJson(res, { ...result, records: backupRecords() });
+    } catch (error) {
+      console.error("manual core backup failed", error);
+      return sendError(res, 500, `手动备份失败：${error.message || "未知错误"}`);
+    }
+  }
+
+  const backupDownloadMatch = url.pathname.match(/^\/api\/backups\/(\d+)\/download$/);
+  if (req.method === "GET" && backupDownloadMatch) {
+    const result = backupRecordForDownload(Number(backupDownloadMatch[1]));
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    writeOperationLog(user, {
+      operation_type: "下载备份文件",
+      operation_content: backupOperationText(result.row),
+      target_type: "backup_records",
+      target_id: String(result.row.id || backupDownloadMatch[1]),
+    });
+    return sendBuffer(res, fs.readFileSync(result.filePath), "application/zip", result.row.filename || path.basename(result.filePath));
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/teacher-salary.xlsx") {
@@ -11862,6 +12180,15 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
     for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
+    const changedKeys = Object.keys(body).filter((key) => key !== "month_key");
+    if (changedKeys.length) {
+      writeOperationLog(user, {
+        operation_type: "修改基础数据",
+        operation_content: `修改 ${changedKeys.map(settingOperationLabel).join("、")}`,
+        target_type: "settings",
+        target_id: changedKeys.join(","),
+      });
+    }
     return sendJson(res, sanitizeBootstrap(bootstrap(text(body.month_key) || getSetting("month_key"), url.searchParams.get("include_inactive") === "1"), user));
   }
 
@@ -11870,7 +12197,12 @@ async function handleApi(req, res, url) {
     const result = copyLessons(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "copy", entity_type: "lessons", entity_id: "batch", before: body, after: result });
-    writeOperationLog(user, { operation_type: body.pairs ? "整周复制课程" : "批量复制课程", operation_content: `复制新增 ${result.created || 0} 节课程`, target_type: "lessons", target_id: (result.lessons || []).map((row) => row.id).join(",") });
+    writeOperationLog(user, {
+      operation_type: body.pairs ? "整周复制课程" : "批量复制课程",
+      operation_content: `提交 ${body.pairs ? (body.pairs || []).length : (body.lessons || []).length} 条，复制新增 ${result.created || 0} 节课程`,
+      target_type: "lessons",
+      target_id: (result.lessons || []).map((row) => row.id).join(","),
+    });
     return sendJson(res, result, 201);
   }
 
@@ -12801,4 +13133,9 @@ server.listen(port, () => {
   console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
+  const autoBackup = maybeRunAutomaticBackup("startup");
+  if (autoBackup?.due) {
+    const record = autoBackup.record || {};
+    console.log(`Auto backup ${autoBackup.ok ? "completed" : "failed"}: ${record.filename || autoBackup.error || ""}`);
+  }
 });
