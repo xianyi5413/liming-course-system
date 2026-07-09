@@ -230,6 +230,7 @@ const ROLE_VIEWS = {
 };
 const PALETTES = [
   { key: "liming-blue", label: "黎明蓝", colors: ["#002147", "#00172F", "#EAF0F7", "#C8D6E5"] },
+  { key: "black-white", label: "黑白", colors: ["#111111", "#3f3f46", "#ffffff", "#e5e7eb"] },
   { key: "jade-original", label: "青绿原版", colors: ["#2D9E8F", "#1E7A6E", "#EDF8F6", "#C8E7E2"] },
   { key: "warm-sun", label: "暖日", colors: ["#EAD6B2", "#8F5B18", "#6A471B", "#55340F"] },
   { key: "lavender", label: "薰衣草", colors: ["#D9D0EF", "#7B61B3", "#4C3B77", "#44355F"] },
@@ -1899,13 +1900,13 @@ async function applyDateRangeToScope(scope, start, end) {
   if (scope === "matrix") {
     const fallback = currentMatrixRange(state?.settings?.month_key || activeMonth);
     matrixRange = {
-      month_key: state?.settings?.month_key || activeMonth,
+      month_key: matrixRange.month_key || state?.settings?.month_key || activeMonth,
       start: start || fallback.start,
       end: end || fallback.end,
     };
     localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
     saveMatrixRange();
-    await load();
+    await refreshWeekMatrixView({ reloadRange: true });
     return;
   }
   if (scope === "course-notice") {
@@ -1934,14 +1935,13 @@ async function applyDateRangeToScope(scope, start, end) {
     if (start && end) financeRange = { ...financeRange, start, end, preset: "custom" };
     else financeRange = monthScopedFinanceRange("month");
     saveFinanceRange();
-    state.finance = await request(`/api/finance-summary?${financeRangeQuery()}`);
-    render();
+    await refreshFinanceForActiveMonth({ resetToActiveMonth: false });
     return;
   }
   if (scope === "expenses") {
     expenseFilter = { ...expenseFilter, start, end };
     localStorage.setItem("liming:expense-filter", JSON.stringify(expenseFilter));
-    await load();
+    await refreshExpensesForActiveMonth({ keepRange: true });
     return;
   }
   if (scope === "operation-logs") {
@@ -1956,7 +1956,7 @@ async function applyDateRangeToScope(scope, start, end) {
     if (!isDateValue(next.start) || !isDateValue(next.end) || next.start > next.end) return;
     dashboardRange = next;
     localStorage.setItem(DASHBOARD_RANGE_KEY, JSON.stringify(dashboardRange));
-    await load({ refreshGlobal: false });
+    await refreshDashboardForActiveMonth();
   }
 }
 
@@ -2563,7 +2563,8 @@ async function refreshStudentQueryOnly() {
     ? ((await request(`/api/student/${encodeURIComponent(selectedStudent)}/history`)).history || [])
     : [];
   await loadStudentStatement();
-  render();
+  if (view === "studentQuery") rerenderCurrentView(renderStudentQuery);
+  else render();
 }
 
 async function applyStudentQuerySelection(value) {
@@ -2611,14 +2612,8 @@ function currentMatrixRange(monthKey = activeMonth) {
 }
 
 function ensureMatrixRange() {
-  const monthKey = state?.settings?.month_key || activeMonth;
   if (!isDateValue(matrixRange.start) || !isDateValue(matrixRange.end) || matrixRange.start > matrixRange.end) {
-    matrixRange = currentMatrixRange(monthKey);
-    saveMatrixRange();
-    return;
-  }
-  if (matrixRange.month_key !== monthKey) {
-    matrixRange = { ...matrixRange, month_key: monthKey };
+    matrixRange = currentMatrixRange(matrixRange.month_key || state?.settings?.month_key || activeMonth);
     saveMatrixRange();
   }
 }
@@ -3011,10 +3006,14 @@ function monthDeleteModal() {
   `;
 }
 
-function ensureLessonFilterDates() {
-  const monthKey = state?.settings?.month_key || activeMonth;
-  const nextFilter = { ...lessonFilter, month_key: monthKey };
-  let changed = nextFilter.month_key !== lessonFilter.month_key;
+function ensureLessonFilterDates({ defaultToThisWeek = view === "lessons" } = {}) {
+  const nextFilter = { ...lessonFilter };
+  let changed = false;
+  const monthKey = nextFilter.month_key || state?.settings?.month_key || activeMonth;
+  if (monthKey && !nextFilter.month_key) {
+    nextFilter.month_key = monthKey;
+    changed = true;
+  }
   const teacherNames = normalizeNameList(nextFilter.teacher_names || (nextFilter.teacher ? [nextFilter.teacher] : []));
   if (teacherNames.join("\n") !== normalizeNameList(nextFilter.teacher_names || []).join("\n")) {
     nextFilter.teacher_names = teacherNames;
@@ -3027,6 +3026,13 @@ function ensureLessonFilterDates() {
   }
   if (!isDateValue(nextFilter.end_date)) {
     nextFilter.end_date = "";
+    changed = true;
+  }
+  if (defaultToThisWeek && !nextFilter.date_preset_initialized && (!nextFilter.start_date || !nextFilter.end_date)) {
+    const range = currentWeekRange();
+    nextFilter.start_date = range.start;
+    nextFilter.end_date = range.end;
+    nextFilter.date_preset_initialized = true;
     changed = true;
   }
   if (changed) {
@@ -3070,8 +3076,9 @@ async function loadLessonRangeOnly() {
 }
 
 function resetLessonFilter() {
-  const monthKey = state?.settings?.month_key || activeMonth;
-  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
+  const range = currentWeekRange();
+  const monthKey = lessonFilter.month_key || state?.settings?.month_key || activeMonth;
+  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: range.start, end_date: range.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
@@ -4030,6 +4037,7 @@ async function handleInternalOnlyCleanup() {
 }
 
 function gradeColor(grade) {
+  if (paletteMode === "black-white") return isDarkThemeActive() ? "#111827" : "#f3f4f6";
   const darkGradeColors = {
     "\u521d\u4e00": "#24281f",
     "\u521d\u4e8c": "#202631",
@@ -6181,11 +6189,70 @@ function renderWeekMatrix() {
     `${range.label} · 已筛选 ${rows.length} / 共 ${weekRows.length} 节`,
   );
   contentEl.innerHTML = `
-    ${renderMatrixDateFilter()}
-    ${renderMatrixViewTabs()}
-    ${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}
-    ${renderMatrixScheduleView(rows, range, conflicts)}
+    <div class="matrix-date-region">${renderMatrixDateFilter()}</div>
+    <div class="matrix-tabs-region">${renderMatrixViewTabs()}</div>
+    <div class="matrix-filter-region">${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}</div>
+    <div class="matrix-view-region">${renderMatrixScheduleView(rows, range, conflicts)}</div>
   `;
+}
+
+async function loadWeekMatrixRangeOnly() {
+  ensureMatrixRange();
+  const matrixStart = matrixRange.start;
+  const matrixEnd = matrixRange.end;
+  if (!matrixStart || !matrixEnd) return;
+  const result = await request(lessonsRangeUrl({ start: matrixStart, end: matrixEnd }, "weekMatrix"));
+  state.week_lessons = result.lessons || [];
+}
+
+function bindMatrixViewTabEvents() {
+  document.querySelectorAll(".matrix-view-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      switchMatrixViewOnly(button.dataset.matrixView || "time");
+    });
+  });
+}
+
+function updateMatrixViewOnly() {
+  if (view !== "weekMatrix" || !document.querySelector(".matrix-view-region")) {
+    render();
+    return;
+  }
+  const { range, rows, conflicts } = weekViewData({ customRange: true });
+  const tabsRegion = document.querySelector(".matrix-tabs-region");
+  const viewRegion = document.querySelector(".matrix-view-region");
+  if (tabsRegion) tabsRegion.innerHTML = renderMatrixViewTabs();
+  if (viewRegion) viewRegion.innerHTML = renderMatrixScheduleView(rows, range, conflicts);
+  applyReadonlyUi();
+  bindMatrixViewTabEvents();
+}
+
+function switchMatrixViewOnly(nextView) {
+  matrixView = ["time", "teacher", "classroom"].includes(nextView) ? nextView : "time";
+  localStorage.setItem(MATRIX_VIEW_KEY, matrixView);
+  updateMatrixViewOnly();
+}
+
+async function refreshWeekMatrixView({ reloadRange = false } = {}) {
+  ensureMatrixRange();
+  if (reloadRange) await loadWeekMatrixRangeOnly();
+  if (view !== "weekMatrix" || !document.querySelector(".matrix-view-region")) {
+    render();
+    return;
+  }
+  const { range, weekRows, rows, conflicts } = weekViewData({ customRange: true });
+  renderTopbar("矩阵课表", `${range.label} · 已筛选 ${rows.length} / 共 ${weekRows.length} 节`);
+  document.querySelector(".matrix-date-region")?.replaceChildren();
+  const dateRegion = document.querySelector(".matrix-date-region");
+  const tabsRegion = document.querySelector(".matrix-tabs-region");
+  const filterRegion = document.querySelector(".matrix-filter-region");
+  const viewRegion = document.querySelector(".matrix-view-region");
+  if (dateRegion) dateRegion.innerHTML = renderMatrixDateFilter();
+  if (tabsRegion) tabsRegion.innerHTML = renderMatrixViewTabs();
+  if (filterRegion) filterRegion.innerHTML = renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true });
+  if (viewRegion) viewRegion.innerHTML = renderMatrixScheduleView(rows, range, conflicts);
+  applyReadonlyUi();
+  wireEvents();
 }
 
 function renderFeeDetails() {
@@ -8746,7 +8813,7 @@ function studentGradeStageDetailRows(row = {}) {
 function studentProfileStageDetail(row = {}) {
   return `
     <tr class="student-stage-detail-row" data-student-id="${escapeHtml(row.id)}">
-      <td colspan="10">
+      <td colspan="9">
         <div class="student-stage-panel">
           <div class="student-stage-panel-head">
             <div class="section-title">${escapeHtml(row.name)}的年级阶段界定时间</div>
@@ -8768,7 +8835,7 @@ function studentProfileTableRows(rows) {
     return `
       <tr class="profile-row student-profile-main-row" data-kind="students" data-id="${row.id}"${gradeRowStyle(currentGrade)}>
         <td class="select-col"><input class="student-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择学生档案"></td>
-        <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
+        <td class="student-name-cell"><span class="student-name-text">${escapeHtml(row.name)}</span></td>
         <td class="text-cell center current-grade-cell">${escapeHtml(currentGrade)}</td>
         <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
         <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
@@ -8776,7 +8843,6 @@ function studentProfileTableRows(rows) {
         <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
         <td><input class="cell-input profile-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
         <td class="profile-notes-col"><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
-        <td class="readonly"><button class="btn danger delete-profile" data-kind="students" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
       </tr>
       ${expanded ? studentProfileStageDetail(row) : ""}
     `;
@@ -8882,9 +8948,20 @@ function renderProfileDirectory(kind = profileTab) {
   `;
   const studentTable = `
     <table class="profile-table student-profile-table uniform-table nowrap-table">
-      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th>姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th><th>操作</th></tr></thead>
+      <colgroup>
+        <col class="student-profile-col-select">
+        <col class="student-profile-col-name">
+        <col class="student-profile-col-grade">
+        <col class="student-profile-col-guardian">
+        <col class="student-profile-col-phone">
+        <col class="student-profile-col-status">
+        <col class="student-profile-col-date">
+        <col class="student-profile-col-date">
+        <col class="student-profile-col-notes">
+      </colgroup>
+      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th>姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
-        ${studentProfileTableRows(rows) || `<tr><td colspan="10" class="empty">暂无学生档案</td></tr>`}
+        ${studentProfileTableRows(rows) || `<tr><td colspan="9" class="empty">暂无学生档案</td></tr>`}
       </tbody>
     </table>
   `;
@@ -8899,6 +8976,7 @@ function renderProfileDirectory(kind = profileTab) {
           ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
           ${textFilterControl({ className: "profile-search", field: "q", value: profileSearch, placeholder: isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选" })}
           ${isTeacher ? "" : `<button class="btn primary open-student-stage-batch" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量修改界定时间", selectedStudentProfileIds.size)}</button>`}
+          ${isTeacher ? "" : `<button class="btn danger batch-delete-student-profiles" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量删除", selectedStudentProfileIds.size)}</button>`}
           ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
           <button class="btn backfill-profile-joined-at" type="button" data-kind="${kind}">${isTeacher ? "补齐入职日期" : "补齐入学日期"}</button>
           <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
@@ -10110,30 +10188,32 @@ function renderCourseNotice() {
   const objects = data?.send_objects || [];
   const completedObjects = objects.filter((item) => item.completed).length;
   contentEl.innerHTML = `
-    <div class="filter-bar notice-filter-bar">
-      <div class="filter-controls">
-        <label class="filter-field">
-          <span>日期范围</span>
-          ${dateRangePickerControl({ scope: "course-notice", start: courseNoticeFilter.start, end: courseNoticeFilter.end, placeholder: "选择课程通知日期范围" })}
-        </label>
-        <label class="history-toggle">
-          <input class="course-notice-only" type="checkbox" ${courseNoticeFilter.onlyTeaching ? "checked" : ""}>
-          <span>只选择“上课”</span>
-        </label>
-        <label class="filter-field notice-tail-field">
-          <span>全局后半句</span>
-          <input class="control course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
-        </label>
-        <div class="segmented notice-layout-toggle" role="group" aria-label="家长群截图模式">
-          <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview">预览模式</button>
-          <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "simple" ? "active" : ""}" type="button" data-layout="simple">简洁模式</button>
+    <div class="filter-bar notice-filter-bar notice-filter-two-row">
+      <div class="notice-filter-row notice-filter-primary-row">
+        <div class="filter-controls notice-primary-controls">
+          <label class="filter-field">
+            <span>日期范围</span>
+            ${dateRangePickerControl({ scope: "course-notice", start: courseNoticeFilter.start, end: courseNoticeFilter.end, placeholder: "选择课程通知日期范围" })}
+          </label>
+          <label class="history-toggle">
+            <input class="course-notice-only" type="checkbox" ${courseNoticeFilter.onlyTeaching ? "checked" : ""}>
+            <span>只选择“上课”</span>
+          </label>
+          <div class="segmented notice-layout-toggle" role="group" aria-label="家长群截图模式">
+            <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview">预览模式</button>
+            <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "simple" ? "active" : ""}" type="button" data-layout="simple">简洁模式</button>
+          </div>
+          <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
+          <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
         </div>
-        <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
-        <button class="btn danger course-notice-clear-completions" type="button">清除所有打勾记录</button>
+        <div class="filter-summary">
+          <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
+        </div>
       </div>
-      <div class="filter-summary">
-        <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
-      </div>
+      <label class="filter-field notice-tail-field notice-tail-row">
+        <span>全局后半句</span>
+        <input class="control course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
+      </label>
     </div>
     ${courseNoticeState.error ? `<div class="empty">${escapeHtml(courseNoticeState.error)}</div>` : ""}
     ${courseNoticeState.busy ? `<div class="empty">正在生成课程通知...</div>` : ""}
@@ -10155,26 +10235,28 @@ function renderTeacherCourseNotice() {
   const objects = data?.send_objects || [];
   const completedObjects = objects.filter((item) => item.completed).length;
   contentEl.innerHTML = `
-    <div class="filter-bar notice-filter-bar">
-      <div class="filter-controls">
-        <label class="filter-field">
-          <span>日期范围</span>
-          ${dateRangePickerControl({ scope: "teacher-course-notice", start: teacherCourseNoticeFilter.start, end: teacherCourseNoticeFilter.end, placeholder: "选择老师课程日期范围" })}
-        </label>
-        <label class="history-toggle">
-          <input class="teacher-course-notice-only" type="checkbox" ${teacherCourseNoticeFilter.onlyTeaching ? "checked" : ""}>
-          <span>只选择“上课”</span>
-        </label>
-        <label class="filter-field notice-tail-field">
-          <span>全局后半句</span>
-          <input class="control teacher-course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
-        </label>
-        <button class="btn primary teacher-course-notice-generate" type="button">生成课程通知</button>
-        <button class="btn danger teacher-course-notice-clear-completions" type="button">清除所有打勾记录</button>
+    <div class="filter-bar notice-filter-bar notice-filter-two-row">
+      <div class="notice-filter-row notice-filter-primary-row">
+        <div class="filter-controls notice-primary-controls">
+          <label class="filter-field">
+            <span>日期范围</span>
+            ${dateRangePickerControl({ scope: "teacher-course-notice", start: teacherCourseNoticeFilter.start, end: teacherCourseNoticeFilter.end, placeholder: "选择老师课程日期范围" })}
+          </label>
+          <label class="history-toggle">
+            <input class="teacher-course-notice-only" type="checkbox" ${teacherCourseNoticeFilter.onlyTeaching ? "checked" : ""}>
+            <span>只选择“上课”</span>
+          </label>
+          <button class="btn primary teacher-course-notice-generate" type="button">生成课程通知</button>
+          <button class="btn danger teacher-course-notice-clear-completions" type="button">清除所有打勾记录</button>
+        </div>
+        <div class="filter-summary">
+          <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
+        </div>
       </div>
-      <div class="filter-summary">
-        <span>已完成对象 <b>${completedObjects}/${objects.length}</b></span>
-      </div>
+      <label class="filter-field notice-tail-field notice-tail-row">
+        <span>全局后半句</span>
+        <input class="control teacher-course-notice-tail" value="${escapeHtml(data?.global_tail || "这是我们本周的上课安排哦[玫瑰]")}">
+      </label>
     </div>
     ${teacherCourseNoticeState.error ? `<div class="empty">${escapeHtml(teacherCourseNoticeState.error)}</div>` : ""}
     ${teacherCourseNoticeState.busy ? `<div class="empty">正在生成老师课程通知...</div>` : ""}
@@ -10855,7 +10937,7 @@ function applyReadonlyUi() {
     ".base-data-add", ".base-data-delete", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
     ".pricing-field", ".recharge-field", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
-    ".class-group-field",
+    ".class-group-field", ".batch-delete-student-profiles",
     ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field", ".teacher-salary-notes-field",
     ".batch-delete-teacher-profiles",
     ".course-notice-tail", ".notice-greeting", ".course-notice-clear-completions",
@@ -11043,6 +11125,152 @@ async function refreshAfter(action, after = () => load()) {
   } catch (error) {
     alert(error.message);
   }
+}
+
+const TOPBAR_MONTH_INDEPENDENT_VIEWS = new Set([
+  "lessons",
+  "weekMatrix",
+  "courseNotice",
+  "teacherCourseNotice",
+  "openingBalances",
+  "studentQuery",
+  "studentPricing",
+  "classGroups",
+  "studentProfiles",
+  "teacherSalaryRules",
+  "teacherProfiles",
+  "appearance",
+  "baseData",
+  "pricing",
+  "userAdmin",
+  "operationLogs",
+]);
+
+function syncActiveMonthState(monthKey) {
+  if (!monthKey) return;
+  activeMonth = monthKey;
+  localStorage.setItem("liming:month", activeMonth);
+  if (state) {
+    state.settings = { ...(state.settings || {}), month_key: activeMonth };
+    state.active_month_key = activeMonth;
+  }
+  document.querySelectorAll(".month-select").forEach((select) => {
+    select.value = activeMonth;
+  });
+}
+
+function captureCurrentScroll() {
+  const mainEl = document.querySelector(".main");
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    mainTop: mainEl?.scrollTop || 0,
+    mainLeft: mainEl?.scrollLeft || 0,
+    contentTop: contentEl?.scrollTop || 0,
+    contentLeft: contentEl?.scrollLeft || 0,
+  };
+}
+
+function restoreCurrentScroll(position = {}) {
+  requestAnimationFrame(() => {
+    window.scrollTo(position.windowX || 0, position.windowY || 0);
+    document.querySelector(".main")?.scrollTo?.({ top: position.mainTop || 0, left: position.mainLeft || 0 });
+    contentEl?.scrollTo?.({ top: position.contentTop || 0, left: position.contentLeft || 0 });
+  });
+}
+
+function rerenderCurrentView(renderAction) {
+  const position = captureCurrentScroll();
+  rerenderContent(renderAction);
+  restoreCurrentScroll(position);
+}
+
+async function refreshDerivedForActiveMonth(renderAction) {
+  const data = await request(`/api/bootstrap${bootstrapQuery(false)}`);
+  state = normalizeBootstrapState(data, state, true);
+  syncActiveMonthState(state.active_month_key || state.settings?.month_key || activeMonth);
+  rerenderCurrentView(renderAction);
+}
+
+async function refreshDashboardForActiveMonth() {
+  const dashboardParams = new URLSearchParams();
+  dashboardParams.set("month", activeMonth || state.settings.month_key);
+  dashboardParams.set("start", dashboardRange.start);
+  dashboardParams.set("end", dashboardRange.end);
+  state.dashboard = canView("dashboard") ? await request(`/api/dashboard?${dashboardParams.toString()}`) : null;
+  rerenderCurrentView(renderDashboard);
+}
+
+async function refreshFinanceForActiveMonth({ resetToActiveMonth = true } = {}) {
+  if (resetToActiveMonth) resetFinanceRangeToActiveMonth();
+  state.finance = canArea("finance") ? await request(`/api/finance-summary?${financeRangeQuery()}`) : null;
+  rerenderCurrentView(renderFinance);
+}
+
+async function refreshRechargesForActiveMonth() {
+  state.recharges = canView("recharges") ? ((await request(`/api/recharges?month=${encodeURIComponent(activeMonth)}`)).recharges || []) : [];
+  rerenderCurrentView(renderRecharges);
+}
+
+async function refreshStaffMonthForActiveView() {
+  state.staff = canArea("staff") ? ((await request("/api/staff")).staff || []) : [];
+  state.staff_salary = canArea("staff") ? ((await request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
+  state.staff_attendance = canArea("staff") ? ((await request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
+  rerenderCurrentView(view === "staffAttendance" ? renderStaffAttendance : renderStaffPayroll);
+}
+
+async function refreshExpensesForActiveMonth({ keepRange = false } = {}) {
+  if (!keepRange) ensureExpenseFilterDates();
+  const expenseParams = new URLSearchParams();
+  if (expenseFilter.start) expenseParams.set("start", expenseFilter.start);
+  if (expenseFilter.end) expenseParams.set("end", expenseFilter.end);
+  if (expenseFilter.category) expenseParams.set("category", expenseFilter.category);
+  if (expenseFilter.q) expenseParams.set("q", expenseFilter.q);
+  state.expenses = canArea("expenses") ? ((await request(`/api/operating-expenses?${expenseParams.toString()}`)).expenses || []) : [];
+  rerenderCurrentView(renderExpenses);
+}
+
+async function refreshAuditForActiveMonth() {
+  state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
+  if (canArea("audit")) {
+    await refreshAuditEvents();
+    await refreshBackupData();
+  }
+  auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
+    || auditSourceWorkbook
+    || state.source_workbooks[0]?.filename
+    || "";
+  rerenderCurrentView(renderAudit);
+}
+
+async function refreshTeacherDetailForActiveMonth() {
+  await loadActiveViewData({ refreshGlobal: false, fullBootstrap: false, generation: loadGeneration });
+  rerenderCurrentView(renderTeacherDetail);
+}
+
+async function refreshMonthRelatedActiveView() {
+  if (view === "dashboard") return refreshDashboardForActiveMonth();
+  if (view === "finance") return refreshFinanceForActiveMonth({ resetToActiveMonth: true });
+  if (view === "recharges") return refreshRechargesForActiveMonth();
+  if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
+  if (view === "feeDetails") return refreshDerivedForActiveMonth(renderFeeDetails);
+  if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
+  if (view === "teacherTravelFees") return refreshDerivedForActiveMonth(renderTeacherTravelFees);
+  if (view === "teacherDetail") return refreshTeacherDetailForActiveMonth();
+  if (view === "staffPayroll" || view === "staffAttendance") return refreshStaffMonthForActiveView();
+  if (view === "expenses") return refreshExpensesForActiveMonth();
+  if (view === "audit") return refreshAuditForActiveMonth();
+  syncActiveMonthState(activeMonth);
+}
+
+async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
+  if (!newMonth) return;
+  syncActiveMonthState(newMonth);
+  closeOpenMultiSelectMenus();
+  closeDateRangePicker();
+  if (newMonth === oldMonth) return;
+  if (TOPBAR_MONTH_INDEPENDENT_VIEWS.has(view)) return;
+  await refreshMonthRelatedActiveView();
 }
 
 function captureAttendanceScroll() {
@@ -11610,18 +11838,8 @@ function wireEvents() {
 
   document.querySelectorAll(".month-select").forEach((select) => {
     select.addEventListener("change", async () => {
-      activeMonth = select.value;
-      localStorage.setItem("liming:month", activeMonth);
-      resetFinanceRangeToActiveMonth();
-      if (view === "lessons") {
-        state.settings = { ...(state.settings || {}), month_key: activeMonth };
-        state.active_month_key = activeMonth;
-        ensureLessonFilterDates();
-        await refreshLessonsView({ reloadRange: true });
-        renderNav();
-        return;
-      }
-      await load({ refreshGlobal: false });
+      const oldMonth = activeMonth;
+      await onActiveMonthChanged(select.value, oldMonth);
     });
   });
 
@@ -12314,6 +12532,33 @@ function wireEvents() {
       } catch (error) {
         button.disabled = false;
         alert(`批量修改失败：${error.message}`);
+      }
+    });
+  });
+
+  document.querySelectorAll(".batch-delete-student-profiles").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.disabled) return;
+      const ids = [...selectedStudentProfileIds].map(Number).filter(Boolean);
+      if (!ids.length) return;
+      const names = profileRows("students")
+        .filter((row) => ids.includes(Number(row.id)))
+        .map((row) => row.name)
+        .filter(Boolean);
+      const sample = names.slice(0, 8).join("、");
+      const suffix = names.length > 8 ? ` 等 ${names.length} 名学生` : "";
+      if (!confirm(`确认批量删除已选中的 ${ids.length} 名学生吗？\n\n${sample}${suffix}\n\n已有历史课程、充值或单价规则的学生会改为离校并保留档案。`)) return;
+      button.disabled = true;
+      try {
+        const result = await request("/api/students/batch-delete", { method: "POST", body: { ids } });
+        selectedStudentProfileIds.clear();
+        await load({ refreshGlobal: false });
+        const message = `已删除 ${result.deleted || 0} 条学生档案，改为离校 ${result.soft_deleted || 0} 条。`;
+        showToast(message);
+        if (result.missing?.length) alert(`${message}\n另有 ${result.missing.length} 条未找到。`);
+      } catch (error) {
+        button.disabled = false;
+        alert(`批量删除学生档案失败：${error.message}`);
       }
     });
   });
@@ -13158,7 +13403,7 @@ function wireEvents() {
       const teacherNames = normalizeNameList(input.value || "");
       lessonFilter = {
         ...lessonFilter,
-        month_key: state.settings.month_key,
+        month_key: lessonFilter.month_key || state.settings.month_key,
         teacher: teacherNames.join("、"),
         teacher_names: teacherNames,
         date_preset_initialized: true,
@@ -13171,7 +13416,7 @@ function wireEvents() {
   document.querySelectorAll(".lesson-filter-input").forEach((input) => {
     const applyLessonFilter = async (value = input.value, rerender = true) => {
       const field = input.dataset.filterField;
-      const monthKey = state.settings.month_key;
+      const monthKey = lessonFilter.month_key || state.settings.month_key;
       focusedLessonIds = [];
       lessonFilter = {
         ...lessonFilter,
@@ -13958,9 +14203,7 @@ function wireEvents() {
 
   document.querySelectorAll(".matrix-view-tab").forEach((button) => {
     button.addEventListener("click", () => {
-      matrixView = button.dataset.matrixView || "time";
-      localStorage.setItem(MATRIX_VIEW_KEY, matrixView);
-      render();
+      switchMatrixViewOnly(button.dataset.matrixView || "time");
     });
   });
 

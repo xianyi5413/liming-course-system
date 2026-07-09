@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.06.26-ui-perf-batch-1";
+const APP_VERSION = "2026.07.09-ui-student-batch-delete";
 const readOnlyBalanceCli = process.argv.includes("--verify-student-balances")
   || process.argv.includes("--audit-student-balances")
   || process.argv.some((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
@@ -8128,6 +8128,33 @@ function deleteTeacherProfilesBatch(ids) {
   });
 }
 
+function deleteStudentProfilesBatch(ids) {
+  const idList = normalizedIdList(ids);
+  if (!idList.length) return { error: "ids is required", status: 400 };
+  return withTransaction(() => {
+    const before = all(`SELECT * FROM students WHERE id IN (${idList.map(() => "?").join(",")}) ORDER BY id`, idList);
+    const beforeById = new Map(before.map((row) => [Number(row.id), row]));
+    const results = [];
+    const missing = [];
+    for (const id of idList) {
+      if (!beforeById.has(id)) {
+        missing.push(id);
+        continue;
+      }
+      results.push({ id, before: beforeById.get(id), result: deleteStudentProfile(id) });
+    }
+    const names = results.map((item) => text(item.before?.name)).filter(Boolean);
+    return {
+      ok: true,
+      deleted: results.filter((item) => item.result?.deleted).length,
+      soft_deleted: results.filter((item) => item.result?.soft_deleted).length,
+      missing,
+      names,
+      results,
+    };
+  });
+}
+
 function normalizedOpeningBalancePayload(body) {
   const studentName = text(body.student_name);
   if (!studentName) return { error: "学生姓名不能为空", status: 400 };
@@ -9268,6 +9295,7 @@ function apiPagePermissionKeys(req, url) {
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
   if (p.startsWith("/api/class-groups")) return ["classGroups"];
   if (p.startsWith("/api/student-grade-stages")) return ["studentProfiles"];
+  if (p === "/api/students/batch-delete") return ["studentProfiles"];
   if (p.startsWith("/api/course-notice")) return ["courseNotice"];
   if (p.startsWith("/api/teacher-course-notice")) return ["teacherCourseNotice"];
   if (p === "/api/lessons-range") {
@@ -12350,6 +12378,32 @@ async function handleApi(req, res, url) {
     if (!result) return sendError(res, 404, "teacher not found");
     recordAuditEvent(req, user, { action: "delete", entity_type: "teachers", entity_id: String(teacherIdMatch[1]), before, after: result });
     writeOperationLog(user, { operation_type: "删除老师", operation_content: teacherOperationText(before), target_type: "teachers", target_id: String(teacherIdMatch[1]) });
+    return sendJson(res, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/students/batch-delete") {
+    const body = await readBody(req);
+    const result = deleteStudentProfilesBatch(body.ids);
+    if (result.error) return sendError(res, result.status || 400, result.error);
+    const sampleNames = (result.names || []).slice(0, 8).join("、");
+    const moreText = (result.names || []).length > 8 ? ` 等 ${result.names.length} 名` : "";
+    recordAuditEvent(req, user, {
+      action: "batch_delete",
+      entity_type: "students",
+      entity_id: "batch",
+      before: result.results.map((item) => item.before),
+      after: {
+        deleted: result.deleted,
+        soft_deleted: result.soft_deleted,
+        missing: result.missing,
+      },
+    });
+    writeOperationLog(user, {
+      operation_type: "批量删除学生档案",
+      operation_content: `批量删除学生档案 ${result.deleted || 0} 条，改为离校 ${result.soft_deleted || 0} 条：${sampleNames}${moreText}${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      target_type: "students",
+      target_id: result.results.map((item) => item.id).join(","),
+    });
     return sendJson(res, result);
   }
 
