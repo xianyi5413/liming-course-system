@@ -300,6 +300,7 @@ let userAdminNotice = "";
 let userAdminTab = localStorage.getItem("liming:user-admin-tab") || "accounts";
 let rolePermissionModal = null;
 let userAccessModal = null;
+let userCreateModalOpen = false;
 let roleCreateDraft = null;
 let lessonFilter = readLessonFilter();
 let appliedUserFilterPresetViews = new Set();
@@ -3394,6 +3395,97 @@ function positionOpenFloatingMultiSelectMenus() {
   document.querySelectorAll(".multi-select.open").forEach(positionFloatingMultiSelectMenu);
 }
 
+function bindMultiSelectControl(select) {
+  if (!select || select.dataset.multiSelectBound === "true") return;
+  select.dataset.multiSelectBound = "true";
+  const toggle = select.querySelector(".multi-select-toggle");
+  const hidden = select.querySelector(".multi-select-value");
+  const label = select.querySelector(".multi-select-label");
+  const menu = select.querySelector(".multi-select-menu");
+  const searchInput = select.querySelector(".multi-select-search");
+  const selectedValues = () => normalizeNameList(hidden?.value || "");
+  const syncSearch = () => {
+    const keyword = String(searchInput?.value || "").trim().toLowerCase();
+    menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+      const value = String(option.dataset.value || "").toLowerCase();
+      option.hidden = Boolean(keyword) && !value.includes(keyword);
+    });
+  };
+  const syncUi = () => {
+    const selected = selectedValues();
+    const selectedSet = new Set(selected);
+    select.classList.toggle("has-value", selected.length > 0);
+    if (label) label.textContent = selected.length ? selected.join("、") : (select.dataset.placeholder || "全部");
+    menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+      const active = selectedSet.has(option.dataset.value || "");
+      option.classList.toggle("selected", active);
+      const check = option.querySelector(".multi-select-check");
+      if (check) check.textContent = active ? "✓" : "";
+    });
+    syncSearch();
+  };
+  const commit = (values) => {
+    if (!hidden) return;
+    hidden.value = normalizeNameList(values).join("\n");
+    syncUi();
+    hidden.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  toggle?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (event.target.closest(".multi-select-clear-icon") && selectedValues().length) {
+      closeMultiSelectMenu(select);
+      if (searchInput) searchInput.value = "";
+      commit([]);
+      toggle.blur();
+      return;
+    }
+    document.querySelectorAll(".multi-select.open").forEach((item) => {
+      if (item !== select) closeMultiSelectMenu(item);
+    });
+    const isOpen = !select.classList.contains("open");
+    if (!isOpen) closeMultiSelectMenu(select);
+    else {
+      select.classList.add("open");
+      mountFloatingMultiSelectMenu(select);
+    }
+    toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    if (isOpen) {
+      searchInput?.focus({ preventScroll: true });
+      positionFloatingMultiSelectMenu(select);
+      requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
+    }
+  });
+  searchInput?.addEventListener("click", (event) => event.stopPropagation());
+  searchInput?.addEventListener("input", syncSearch);
+  searchInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      closeMultiSelectMenu(select);
+      searchInput.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeMultiSelectMenu(select);
+      toggle?.blur();
+    }
+  });
+  select.querySelector(".multi-select-clear")?.addEventListener("click", () => {
+    closeMultiSelectMenu(select);
+    if (searchInput) searchInput.value = "";
+    commit([]);
+  });
+  menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+    option.addEventListener("click", () => {
+      const value = option.dataset.value || "";
+      const next = selectedValues();
+      const index = next.indexOf(value);
+      if (index >= 0) next.splice(index, 1);
+      else next.push(value);
+      commit(next);
+    });
+  });
+  syncUi();
+}
+
 function rowsForFilterOption(rows, filter, excludeField, matcher) {
   const optionFilter = { ...filter, [excludeField]: "" };
   return rows.filter((row) => matcher(row, optionFilter));
@@ -5200,7 +5292,10 @@ function filterLessonCreateStudents(modal, value = "") {
   const query = String(value || "").trim().toLocaleLowerCase("zh-Hans-CN");
   modal.querySelectorAll(".lesson-create-student-option").forEach((option) => {
     const name = String(option.dataset.studentName || "").toLocaleLowerCase("zh-Hans-CN");
-    option.hidden = Boolean(query) && !name.includes(query);
+    const filteredOut = Boolean(query) && !name.includes(query);
+    option.hidden = filteredOut;
+    option.classList.toggle("is-search-filtered", filteredOut);
+    option.setAttribute("aria-hidden", String(filteredOut));
   });
   if (lessonCreateDraft) lessonCreateDraft = { ...lessonCreateDraft, student_search: value };
   updateLessonCreateStudentStats(modal);
@@ -5305,7 +5400,7 @@ function lessonCreateModal() {
             </div>
             <div class="lesson-create-student-list">
               ${students.map((name) => `
-                <label class="lesson-create-student-option" data-student-name="${escapeHtml(name)}" ${normalizedStudentSearch && !String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch) ? "hidden" : ""}>
+                <label class="lesson-create-student-option ${normalizedStudentSearch && !String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch) ? "is-search-filtered" : ""}" data-student-name="${escapeHtml(name)}" ${normalizedStudentSearch && !String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch) ? "hidden aria-hidden=\"true\"" : "aria-hidden=\"false\""}>
                   <input class="lesson-create-student-existing" type="checkbox" value="${escapeHtml(name)}" ${selectedStudents.has(name) ? "checked" : ""}>
                   <span>${escapeHtml(name)}</span>
                 </label>
@@ -6367,8 +6462,8 @@ function renderFeeDetails() {
     <div class="band">
       ${renderFeeDetailsFilterBar(rows, visibleRows)}
       <div class="bulk-action-row fee-detail-bulk-actions">
-        <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
         <button class="btn primary apply-selected-student-pricing-rules" type="button" ${bulkActionDisabledAttr(selectedCount)}>${bulkActionText("按规则更新所选费用", selectedCount)}</button>
+        <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
       </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
         <table class="fee-detail-table uniform-table nowrap-table">
@@ -7137,18 +7232,9 @@ function renderRecharges() {
   const allVisibleSelected = visibleRows.length > 0 && selectedVisibleCount === visibleRows.length;
   renderTopbar(`${monthLabel()} 充值记录`, `已显示 ${visibleRows.length} / 共 ${rows.length} 条充值记录`);
   contentEl.innerHTML = `
-    <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">充值记录</div>
-          <div class="section-subtitle">仅显示当前月份已有充值记录的学生。</div>
-        </div>
-        <div class="profile-actions">
-          <button class="btn danger batch-delete-recharges" type="button" ${bulkActionDisabledAttr(selectedRechargeIds.size)}>${bulkActionText("批量删除", selectedRechargeIds.size)}</button>
-          <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
-        </div>
-      </div>
-      <div class="filter-bar compact">
+    <div class="band recharge-page">
+      ${rechargeAnalysisMarkup(visibleRows)}
+      <div class="filter-bar compact recharge-filter-bar">
         <label>来源</label>
         ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
         <label>学生姓名</label>
@@ -7157,7 +7243,10 @@ function renderRecharges() {
         ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades, placeholder: "输入或选择年级" })}
         <button class="btn reset-recharge-filter" type="button">清空筛选</button>
       </div>
-      ${rechargeAnalysisMarkup(visibleRows)}
+      <div class="transaction-action-row recharge-action-row" role="toolbar" aria-label="充值记录操作">
+        <button class="btn danger batch-delete-recharges" type="button" ${bulkActionDisabledAttr(selectedRechargeIds.size)}>${bulkActionText("批量删除", selectedRechargeIds.size)}</button>
+        <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
+      </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
           <thead>
@@ -7193,26 +7282,20 @@ function renderOpeningBalances() {
   const allVisibleSelected = visibleRows.length > 0 && selectedVisibleCount === visibleRows.length;
   renderTopbar("期初余额", `已显示 ${visibleRows.length} / 共 ${rows.length} 条期初余额`);
   contentEl.innerHTML = `
-    <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">期初余额</div>
-          <div class="section-subtitle">全局账户期初余额，用于系统上线前余额承接，不属于充值流水。</div>
-        </div>
-        <div class="profile-actions opening-balance-actions">
-          <button class="btn danger batch-delete-opening-balances" type="button" ${bulkActionDisabledAttr(selectedOpeningBalanceIds.size)}>${bulkActionText("批量删除", selectedOpeningBalanceIds.size)}</button>
-          <button class="btn download-opening-balance-template" type="button">下载模板</button>
-          <button class="btn import-opening-balance-excel" type="button">导入 Excel</button>
-          <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
-          <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
-        </div>
-      </div>
-      <div class="filter-bar compact">
+    <div class="band opening-balance-page">
+      <div class="filter-bar compact opening-balance-filter-bar">
         <label>学生姓名</label>
         ${filterComboControl({ className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
         <label>年级</label>
         ${filterComboControl({ className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
         <button class="btn reset-opening-balance-filter" type="button">清空筛选</button>
+      </div>
+      <div class="transaction-action-row opening-balance-actions" role="toolbar" aria-label="期初余额操作">
+        <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
+        <button class="btn danger batch-delete-opening-balances" type="button" ${bulkActionDisabledAttr(selectedOpeningBalanceIds.size)}>${bulkActionText("批量删除", selectedOpeningBalanceIds.size)}</button>
+        <button class="btn download-opening-balance-template" type="button">下载模板</button>
+        <button class="btn import-opening-balance-excel" type="button">导入 Excel</button>
+        <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table">
@@ -7295,23 +7378,19 @@ function studentQueryControls(studentNames) {
 }
 
 function studentQueryComparisonPanel(report) {
-  if (!selectedStudent || !report?.summary) return "";
+  const hasReport = Boolean(selectedStudent && report?.summary);
   return `
-    <div class="band student-comparison-panel">
+    <div class="band student-comparison-panel" data-student-query-comparison-panel ${hasReport ? "" : "hidden"}>
       <div class="section-head">
         <div>
           <div class="section-title">月份汇总</div>
-          <div class="section-subtitle">${escapeHtml(studentStatementRangeLabel(report))}</div>
+          <div class="section-subtitle" data-student-query-range-label>${escapeHtml(studentStatementRangeLabel(report))}</div>
         </div>
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="student-history-table uniform-table nowrap-table">
           <thead><tr><th>月份</th><th>有效课次</th><th>当月课费</th><th>现金充值</th><th>赠送充值</th></tr></thead>
-          <tbody>
-            ${(report.month_rows || []).map((row) => `
-              <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell">${row.lesson_count}</td><td class="text-cell right">${formatMoney(row.total_fee)}</td><td class="text-cell right">${formatMoney(row.cur_recharge)}</td><td class="text-cell right">${formatMoney(row.cur_gift)}</td></tr>
-            `).join("") || `<tr><td colspan="5" class="empty">暂无期间明细</td></tr>`}
-          </tbody>
+          <tbody data-student-query-month-body>${studentQueryMonthRowsMarkup(report)}</tbody>
         </table>
       </div>
     </div>
@@ -7794,17 +7873,32 @@ function studentStatementModal(report) {
 }
 
 function studentStatementMetricCardsMarkup(summary = {}) {
-  return studentStatementMetricCards(summary).map((card) => `
-    <div class="metric">
+  return studentStatementMetricCards(summary).map((card, index) => `
+    <div class="metric" data-student-statement-metric="${index}">
       <div class="metric-label">${escapeHtml(card.label)}</div>
       <div class="metric-value ${card.negative ? "negative" : ""}">${escapeHtml(card.value)}</div>
     </div>
   `).join("");
 }
 
+function studentQueryMonthRowsMarkup(report = studentStatementReport()) {
+  if (!selectedStudent || !report?.summary) return `<tr><td colspan="5" class="empty">请先选择学生</td></tr>`;
+  return (report.month_rows || []).map((row) => `
+    <tr><td class="text-cell">${escapeHtml(formatMonthOption(row.month_key))}</td><td class="text-cell">${row.lesson_count}</td><td class="text-cell right">${formatMoney(row.total_fee)}</td><td class="text-cell right">${formatMoney(row.cur_recharge)}</td><td class="text-cell right">${formatMoney(row.cur_gift)}</td></tr>
+  `).join("") || `<tr><td colspan="5" class="empty">暂无期间明细</td></tr>`;
+}
+
+function studentQueryDetailRowsMarkup(report = studentStatementReport()) {
+  const details = selectedStudent ? (report.details || []) : [];
+  return details.map((row) => `
+    <tr class="${detailRowClass(row)}">
+      <td class="text-cell">${escapeHtml(row.student_name)}</td><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(row.weekday)}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>${readonlyPriceCell(row)}
+    </tr>
+  `).join("") || `<tr><td colspan="11" class="empty">暂无课程明细</td></tr>`;
+}
+
 function studentQueryResultsMarkup(report = studentStatementReport()) {
   const summary = selectedStudent ? report.summary : null;
-  const details = selectedStudent ? (report.details || []) : [];
   return `
     <div class="query-head student-statement-metrics">
       ${studentStatementMetricCardsMarkup(summary || {})}
@@ -7819,13 +7913,7 @@ function studentQueryResultsMarkup(report = studentStatementReport()) {
             <thead>
               <tr><th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
             </thead>
-            <tbody id="student-query-detail-tbody">
-              ${details.map((row) => `
-                <tr class="${detailRowClass(row)}">
-                  <td class="text-cell">${escapeHtml(row.student_name)}</td><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(row.weekday)}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${escapeHtml(row.grade)}</td><td class="text-cell">${escapeHtml(row.subject)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>${readonlyPriceCell(row)}
-                </tr>
-              `).join("") || `<tr><td colspan="11" class="empty">暂无课程明细</td></tr>`}
-            </tbody>
+            <tbody id="student-query-detail-tbody" data-student-query-detail-body>${studentQueryDetailRowsMarkup(report)}</tbody>
           </table>
         </div>
       </div>
@@ -7864,13 +7952,40 @@ function updateStudentQueryToolbarOnly() {
   });
 }
 
+function updateStudentQueryResultsOnly(report = studentStatementReport()) {
+  const resultRegion = document.querySelector(".student-query-results");
+  if (!resultRegion) return false;
+  const cards = studentStatementMetricCards(selectedStudent ? (report.summary || {}) : {});
+  resultRegion.querySelectorAll("[data-student-statement-metric]").forEach((card, index) => {
+    const metric = cards[index] || { label: "", value: "", negative: false };
+    const label = card.querySelector(".metric-label");
+    const value = card.querySelector(".metric-value");
+    if (label) label.textContent = metric.label;
+    if (value) {
+      value.textContent = metric.value;
+      value.classList.toggle("negative", Boolean(metric.negative));
+    }
+  });
+  const comparison = resultRegion.querySelector("[data-student-query-comparison-panel]");
+  const hasReport = Boolean(selectedStudent && report?.summary);
+  if (comparison) {
+    comparison.hidden = !hasReport;
+    const rangeLabel = comparison.querySelector("[data-student-query-range-label]");
+    if (rangeLabel) rangeLabel.textContent = studentStatementRangeLabel(report);
+    const monthBody = comparison.querySelector("[data-student-query-month-body]");
+    if (monthBody) monthBody.innerHTML = studentQueryMonthRowsMarkup(report);
+  }
+  const detailBody = resultRegion.querySelector("[data-student-query-detail-body]");
+  if (detailBody) detailBody.innerHTML = studentQueryDetailRowsMarkup(report);
+  return true;
+}
+
 function updateStudentQueryViewOnly() {
   if (view !== "studentQuery" || !document.querySelector(".student-query-results")) {
     render();
     return;
   }
-  const resultRegion = document.querySelector(".student-query-results");
-  if (resultRegion) resultRegion.innerHTML = studentQueryResultsMarkup();
+  updateStudentQueryResultsOnly();
   updateStudentQueryControlsOnly();
   updateStudentQueryToolbarOnly();
 }
@@ -8145,63 +8260,199 @@ function renderUserAdminTabs() {
 
 function renderUserAccountsPanel() {
   const users = state.users || [];
-  const canImportTeachers = canArea("users");
-  const teacherValues = uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean));
+  const canManageUsers = canArea("users");
+  const teacherValues = userTeacherValues();
   return `
     <div class="user-admin-actions">
-      <button class="btn download-user-import-template" type="button" ${canImportTeachers ? "" : "disabled"}>下载导入模板</button>
-      <button class="btn primary import-teacher-users" type="button" ${canImportTeachers ? "" : "disabled"}>从模板导入账号</button>
-      <button class="btn sync-teacher-accounts" type="button" ${canImportTeachers ? "" : "disabled"}>同步老师账号</button>
+      <button class="btn download-user-import-template" type="button" ${canManageUsers ? "" : "disabled"}>下载导入模板</button>
+      <button class="btn primary import-teacher-users" type="button" ${canManageUsers ? "" : "disabled"}>从模板导入账号</button>
+      <button class="btn sync-teacher-accounts" type="button" ${canManageUsers ? "" : "disabled"}>同步老师账号</button>
+      <button class="btn primary open-user-create-modal" type="button" ${canManageUsers ? "" : "disabled"}>+ 新增账号</button>
     </div>
-    <div class="band user-admin-panel">
-      <div class="section-head">
-        <div>
-          <div class="section-title">新增账号</div>
-          <div class="section-subtitle">老师账号建议使用手机号作为账号，老师姓名必须与课表中的授课老师一致。</div>
-        </div>
-      </div>
-      <div class="user-create-grid">
-        <input class="control new-user-field" data-field="username" name="new_account_id" autocomplete="off" placeholder="账号/手机号">
-        <input class="control new-user-field" data-field="display_name" name="new_account_display_name" autocomplete="off" placeholder="显示姓名">
-        <select class="control new-user-field" data-field="role">${roleSelectOptions(auth.user?.role === "academic" ? "teacher" : "teacher")}</select>
-        ${multiSelectControl({ className: "new-user-teachers", field: "teacher_names", selected: [], values: teacherValues, placeholder: "绑定老师", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}
-        <input class="control new-user-field" data-field="password" name="new_account_secret" type="password" autocomplete="new-password" placeholder="初始密码，至少 6 位">
-        <button class="btn primary create-user" type="button">新增账号</button>
-      </div>
-    </div>
+    ${userAccountsTableMarkup(users, teacherValues)}
+    ${userCreateModalRegionMarkup(teacherValues)}
+  `;
+}
+
+function userTeacherValues() {
+  return uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean));
+}
+
+function userAccountRowMarkup(user, teacherValues = userTeacherValues()) {
+  const teacherNames = normalizeNameList(user.bound_teacher_names || user.teacher_names || user.teacher_name);
+  const ownerAccount = isOwnerRoleValue(user.role);
+  const isSelf = Number(auth.user?.id) === Number(user.id);
+  const canDelete = auth.user?.role === "owner" && !isSelf && !ownerAccount;
+  const deleteTitle = ownerAccount ? "老板账号不可删除" : (isSelf ? "不能删除当前登录账号" : "软删除账号");
+  return `
+    <tr class="user-row" data-id="${escapeHtml(user.id)}">
+      <td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
+      <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
+      <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
+      <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
+      <td><select class="cell-select user-field" data-field="status">${options(["active", "disabled"], user.status || "active")}</select></td>
+      <td class="readonly user-actions-cell">
+        <input class="control user-reset-password-value" type="password" autocomplete="new-password" placeholder="新密码">
+        <button class="btn user-reset-password" type="button">重置</button>
+      </td>
+      <td class="readonly">
+        <button class="btn danger user-delete" type="button" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}" ${canDelete ? "" : "disabled"} title="${escapeHtml(deleteTitle)}">删除</button>
+      </td>
+    </tr>
+  `;
+}
+
+function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()) {
+  return `
     <div class="band user-admin-panel">
       <div class="table-wrap">
         <table class="user-table uniform-table nowrap-table">
           <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
-          <tbody>
-            ${users.map((user) => {
-              const teacherNames = normalizeNameList(user.bound_teacher_names || user.teacher_names || user.teacher_name);
-              const ownerAccount = isOwnerRoleValue(user.role);
-              const isSelf = Number(auth.user?.id) === Number(user.id);
-              const canDelete = auth.user?.role === "owner" && !isSelf && !ownerAccount;
-              const deleteTitle = ownerAccount ? "老板账号不可删除" : (isSelf ? "不能删除当前登录账号" : "软删除账号");
-              return `
-              <tr class="user-row" data-id="${user.id}">
-                <td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
-                <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
-                <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
-                <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
-                <td><select class="cell-select user-field" data-field="status">${options(["active", "disabled"], user.status || "active")}</select></td>
-                <td class="readonly user-actions-cell">
-                  <input class="control user-reset-password-value" type="password" autocomplete="new-password" placeholder="新密码">
-                  <button class="btn user-reset-password" type="button">重置</button>
-                </td>
-                <td class="readonly">
-                  <button class="btn danger user-delete" type="button" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}" ${canDelete ? "" : "disabled"} title="${escapeHtml(deleteTitle)}">删除</button>
-                </td>
-              </tr>
-            `;
-            }).join("") || `<tr><td colspan="7" class="empty">暂无账号</td></tr>`}
+          <tbody class="user-account-table-body">
+            ${users.map((user) => userAccountRowMarkup(user, teacherValues)).join("") || `<tr><td colspan="7" class="empty">暂无账号</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
   `;
+}
+
+function userCreateModalRegionMarkup(teacherValues = userTeacherValues()) {
+  return `<div class="user-create-modal-region">${userCreateModalMarkup(teacherValues)}</div>`;
+}
+
+function userCreateModalMarkup(teacherValues = []) {
+  if (!userCreateModalOpen) return "";
+  const canManageUsers = canArea("users");
+  const disabled = canManageUsers ? "" : "disabled";
+  return `
+    <div class="modal-backdrop user-create-modal">
+      <div class="modal-panel user-create-modal-panel" role="dialog" aria-modal="true" aria-labelledby="user-create-modal-title">
+        <div class="modal-head">
+          <div>
+            <div id="user-create-modal-title" class="modal-title">新增账号</div>
+            <div class="modal-subtitle">老师账号建议使用手机号作为账号；绑定老师必须与教师档案和课表中的授课老师一致。</div>
+          </div>
+          <button class="btn user-create-modal-cancel" type="button">关闭</button>
+        </div>
+        <form class="user-create-form" novalidate>
+          <div class="user-create-form-grid">
+            <label class="user-create-form-field">
+              <span>账号 / 手机号</span>
+              <input class="control new-user-field" data-field="username" name="new_account_id" autocomplete="off" placeholder="账号/手机号" autofocus>
+            </label>
+            <label class="user-create-form-field">
+              <span>显示姓名</span>
+              <input class="control new-user-field" data-field="display_name" name="new_account_display_name" autocomplete="off" placeholder="显示姓名">
+            </label>
+            <label class="user-create-form-field">
+              <span>角色</span>
+              <select class="control new-user-field" data-field="role">${roleSelectOptions(auth.user?.role === "academic" ? "teacher" : "teacher")}</select>
+            </label>
+            <label class="user-create-form-field">
+              <span>绑定老师</span>
+              ${multiSelectControl({ className: "new-user-teachers", field: "teacher_names", selected: [], values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}
+            </label>
+            <label class="user-create-form-field wide">
+              <span>初始密码</span>
+              <input class="control new-user-field" data-field="password" name="new_account_secret" type="password" autocomplete="new-password" placeholder="初始密码，至少 6 位">
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="btn user-create-modal-cancel" type="button">取消</button>
+            <button class="btn primary create-user" type="submit" ${disabled}>确认新增</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function updateUserCreateModalRegion() {
+  const region = document.querySelector(".user-create-modal-region");
+  if (!region) return;
+  closeOpenMultiSelectMenus();
+  region.innerHTML = userCreateModalMarkup(userTeacherValues());
+  bindUserCreateModalRegion(region);
+  region.querySelectorAll(".multi-select").forEach(bindMultiSelectControl);
+  if (isReadonlyUser()) {
+    region.querySelectorAll(".create-user, .new-user-field, .new-user-teachers").forEach((element) => {
+      element.disabled = true;
+      element.title = element.title || READONLY_WRITE_MESSAGE;
+    });
+  }
+  if (userCreateModalOpen) {
+    requestAnimationFrame(() => region.querySelector(".new-user-field[data-field=\"username\"]")?.focus({ preventScroll: true }));
+  }
+}
+
+function bindUserCreateModalRegion(region) {
+  if (!region || region.dataset.userCreateModalBound === "true") return;
+  region.dataset.userCreateModalBound = "true";
+  region.addEventListener("click", (event) => {
+    if (!event.target.closest(".user-create-modal-cancel")) return;
+    event.preventDefault();
+    userCreateModalOpen = false;
+    updateUserCreateModalRegion();
+  });
+  region.addEventListener("submit", async (event) => {
+    const form = event.target.closest(".user-create-form");
+    if (!form || !region.contains(form)) return;
+    event.preventDefault();
+    const modal = form.closest(".user-create-modal");
+    const payload = {};
+    modal?.querySelectorAll(".new-user-field").forEach((input) => {
+      if (!input.dataset.field) return;
+      payload[input.dataset.field] = input.value;
+    });
+    payload.teacher_names = normalizeNameList(modal?.querySelector(".multi-select-value.new-user-teachers")?.value || "");
+    if (!payload.username || !payload.password) return alert("请填写账号和初始密码");
+    if (payload.password.length < 6) return alert("初始密码至少 6 位");
+    if (!payload.role) return alert("请选择角色");
+    const submitButton = form.querySelector(".create-user");
+    if (submitButton?.disabled || !canWriteData()) return;
+    if (submitButton) submitButton.disabled = true;
+    try {
+      const result = await request("/api/users", { method: "POST", body: payload });
+      userCreateModalOpen = false;
+      userAdminNotice = `已新增账号 ${result.username || payload.username}`;
+      patchUserState(result);
+      insertUserAccountRow(result);
+      updateUserAdminNoticeRegion();
+      updateUserCreateModalRegion();
+    } catch (error) {
+      alert(error.message || "新增账号失败");
+      if (submitButton) submitButton.disabled = false;
+    }
+  });
+}
+
+function insertUserAccountRow(user) {
+  const tableBody = document.querySelector(".user-account-table-body");
+  if (!tableBody || !user?.id) return;
+  tableBody.querySelector(".empty")?.closest("tr")?.remove();
+  const scratch = document.createElement("tbody");
+  scratch.innerHTML = userAccountRowMarkup(user, userTeacherValues()).trim();
+  const nextRow = scratch.firstElementChild;
+  if (!nextRow) return;
+  const users = state.users || [];
+  const createdIndex = users.findIndex((item) => String(item.id) === String(user.id));
+  const laterRow = [...tableBody.querySelectorAll(".user-row")].find((row) => {
+    const rowIndex = users.findIndex((item) => String(item.id) === String(row.dataset.id));
+    return rowIndex > createdIndex;
+  });
+  tableBody.insertBefore(nextRow, laterRow || null);
+  bindMultiSelectControl(nextRow.querySelector(".multi-select"));
+  bindUserAccountRowEvents(nextRow);
+}
+
+function userAdminNoticeMarkup() {
+  return userAdminNotice ? `<div class="audit-inline-notice">${escapeHtml(userAdminNotice)}</div>` : "";
+}
+
+function updateUserAdminNoticeRegion() {
+  const region = document.querySelector(".user-admin-notice-region");
+  if (region) region.innerHTML = userAdminNoticeMarkup();
 }
 
 function renderAppearance() {
@@ -8637,7 +8888,7 @@ function renderUserAdmin() {
     userAdminTab === "roles" ? "维护角色和页面可见权限" : (auth.user?.role === "academic" ? "教务仅可维护老师账号" : "维护账号、角色和绑定老师"),
   );
   contentEl.innerHTML = `
-    ${userAdminNotice ? `<div class="audit-inline-notice">${escapeHtml(userAdminNotice)}</div>` : ""}
+    <div class="user-admin-notice-region">${userAdminNoticeMarkup()}</div>
     ${renderUserAdminTabs()}
     ${userAdminTab === "roles" ? renderRoleManagementPanel() : renderUserAccountsPanel()}
   `;
@@ -8817,12 +9068,6 @@ function renderStudentPricing() {
       </div>
     ` : ""}
     <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">学生收费规则</div>
-          <div class="section-subtitle">规则候选由历史课程自动生成；学生、年级、科目和学生集合只读，填写单价后参与费用明细判断。</div>
-        </div>
-      </div>
       ${renderStudentPricingFilterBar(rows, visibleRows)}
       <div class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table">
@@ -8854,12 +9099,6 @@ function renderClassGroups() {
   renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
   contentEl.innerHTML = `
     <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">全局班级名</div>
-          <div class="section-subtitle">唯一规则：老师 + 年级 + 科目 + 标准化学生集合。班级名为空表示未命名。</div>
-        </div>
-      </div>
       <div class="filter-bar compact class-group-filter-bar">
         <label class="filter-field">
           <span>老师</span>
@@ -9115,20 +9354,14 @@ function renderProfileDirectory(kind = profileTab) {
   `;
   contentEl.innerHTML = `
     <div class="band profile-panel">
-      <div class="section-head profile-head">
-        <div>
-          <div class="section-title">${isTeacher ? "老师档案" : "学生档案"}</div>
-          <div class="section-subtitle">${isTeacher ? "维护老师联系方式、在职状态和入离职日期。" : "档案由课程和充值导入自动补齐，也可以在这里手动维护联系方式与状态。"}</div>
-        </div>
-        <div class="profile-actions">
-          ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
-          ${textFilterControl({ className: "profile-search", field: "q", value: profileSearch, placeholder: isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选" })}
-          ${isTeacher ? "" : `<button class="btn primary open-student-stage-batch" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量修改界定时间", selectedStudentProfileIds.size)}</button>`}
-          ${isTeacher ? "" : `<button class="btn danger batch-delete-student-profiles" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量删除", selectedStudentProfileIds.size)}</button>`}
-          ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
-          <button class="btn backfill-profile-joined-at" type="button" data-kind="${kind}">${isTeacher ? "补齐入职日期" : "补齐入学日期"}</button>
-          <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
-        </div>
+      <div class="profile-actions profile-toolbar">
+        ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
+        ${textFilterControl({ className: "profile-search", field: "q", value: profileSearch, placeholder: isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选" })}
+        ${isTeacher ? "" : `<button class="btn primary open-student-stage-batch" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量修改界定时间", selectedStudentProfileIds.size)}</button>`}
+        ${isTeacher ? "" : `<button class="btn danger batch-delete-student-profiles" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量删除", selectedStudentProfileIds.size)}</button>`}
+        ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
+        <button class="btn backfill-profile-joined-at" type="button" data-kind="${kind}">${isTeacher ? "补齐入职日期" : "补齐入学日期"}</button>
+        <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
       </div>
       <div class="table-wrap">
         ${isTeacher ? teacherTable : studentTable}
@@ -9900,14 +10133,6 @@ function renderTeacherSalaryRules() {
   );
   contentEl.innerHTML = `
     <div class="band">
-      <div class="section-head">
-        <div>
-          <div class="section-title">薪资规则</div>
-          <div class="section-subtitle">课时薪资按每2小时计算。薪资大于 0 才会被启用；0 元记录仅作为待设置候选，不参与自动匹配。已有课程薪资不会自动覆盖，可在课时明细中勾选后按规则更新。</div>
-          ${syncNotice}
-        </div>
-        <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
-      </div>
       <div class="filter-bar compact">
         <label class="filter-field">
           <span>老师</span>
@@ -9937,6 +10162,10 @@ function renderTeacherSalaryRules() {
           <span>已筛选 <b>${visibleRules.length}</b> / 共 ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? `，已隐藏 ${hiddenInactiveCount} 条` : ""}</span>
         </div>
         <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
+      </div>
+      <div class="teacher-salary-rule-actions" role="toolbar" aria-label="薪资规则操作">
+        <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
+        ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="teacher-salary-rule-table uniform-table nowrap-table">
@@ -11261,7 +11490,7 @@ function applyReadonlyUi() {
     ".lesson-create-manual-field", ".lesson-create-student-existing", ".lesson-create-new-students",
     ".batch-copy-confirm", ".batch-copy-field", ".profile-field", ".delete-profile", ".profile-modal-save",
     ".student-grade-stage-field", ".save-student-grade-stage", ".open-student-stage-batch", ".student-stage-batch-field", ".student-stage-batch-save",
-    ".create-user", ".new-user-field", ".user-field", ".user-reset-password", ".user-reset-password-value",
+    ".open-user-create-modal", ".create-user", ".new-user-field", ".new-user-teachers", ".user-field", ".user-reset-password", ".user-reset-password-value",
     ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
     ".base-data-add", ".base-data-delete", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
@@ -11431,6 +11660,62 @@ function patchUserState(row) {
   if (!row || row.id == null) return;
   state.users = upsertById(state.users || [], row).sort(compareUserRow);
   if (Number(row.id) === Number(auth.user?.id)) auth.user = { ...auth.user, ...row };
+}
+
+function bindUserAccountRowEvents(row) {
+  if (!row || row.dataset.userAccountRowBound === "true") return;
+  row.dataset.userAccountRowBound = "true";
+  row.querySelectorAll(".user-field").forEach((input) => {
+    input.addEventListener("change", () => {
+      const currentRow = input.closest(".user-row");
+      if (!currentRow) return;
+      refreshAfter(() => request(`/api/users/${currentRow.dataset.id}`, {
+        method: "PATCH",
+        body: { [input.dataset.field]: input.value },
+      }), async (result) => {
+        patchUserState(result);
+        if (Number(result.id) === Number(auth.user?.id)) await load();
+        else rerenderContent(renderUserAdmin);
+      });
+    });
+  });
+  row.querySelectorAll(".multi-select-value.user-row-teachers").forEach((input) => {
+    input.addEventListener("change", () => {
+      const currentRow = input.closest(".user-row");
+      if (!currentRow) return;
+      const teacherNames = normalizeNameList(input.value || "");
+      refreshAfter(() => request(`/api/users/${currentRow.dataset.id}`, {
+        method: "PATCH",
+        body: { teacher_names: teacherNames },
+      }), async (result) => {
+        patchUserState(result);
+        if (Number(result.id) === Number(auth.user?.id)) await load();
+        else rerenderContent(renderUserAdmin);
+      });
+    });
+  });
+  row.querySelectorAll(".user-reset-password").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const password = row.querySelector(".user-reset-password-value")?.value || "";
+      if (password.length < 6) return alert("新密码至少 6 位");
+      await request(`/api/users/${row.dataset.id}/password`, { method: "POST", body: { password } });
+      userAdminNotice = "密码已重置。";
+      rerenderContent(renderUserAdmin);
+    });
+  });
+  row.querySelectorAll(".user-delete").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const username = button.dataset.username || "";
+      if (!confirm(`确定删除账号 ${username} 吗？删除后该账号将无法登录，但不会删除教师档案和课程数据。`)) return;
+      try {
+        await request(`/api/users/${button.dataset.id}`, { method: "DELETE" });
+        userAdminNotice = `已删除账号 ${username}`;
+        await load();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  });
 }
 
 async function refreshStudentPricingModule() {
@@ -11857,94 +12142,7 @@ function wireEvents() {
       dashboardGoTo(button.dataset.view || "dashboard", filter);
     });
   });
-  document.querySelectorAll(".multi-select").forEach((select) => {
-    const toggle = select.querySelector(".multi-select-toggle");
-    const hidden = select.querySelector(".multi-select-value");
-    const label = select.querySelector(".multi-select-label");
-    const menu = select.querySelector(".multi-select-menu");
-    const searchInput = select.querySelector(".multi-select-search");
-    const selectedValues = () => normalizeNameList(hidden?.value || "");
-    const syncSearch = () => {
-      const keyword = String(searchInput?.value || "").trim().toLowerCase();
-      menu?.querySelectorAll(".multi-select-option").forEach((option) => {
-        const value = String(option.dataset.value || "").toLowerCase();
-        option.hidden = Boolean(keyword) && !value.includes(keyword);
-      });
-    };
-    const syncUi = () => {
-      const selected = selectedValues();
-      const selectedSet = new Set(selected);
-      select.classList.toggle("has-value", selected.length > 0);
-      if (label) label.textContent = selected.length ? selected.join("、") : (select.dataset.placeholder || "全部");
-      menu?.querySelectorAll(".multi-select-option").forEach((option) => {
-        const active = selectedSet.has(option.dataset.value || "");
-        option.classList.toggle("selected", active);
-        const check = option.querySelector(".multi-select-check");
-        if (check) check.textContent = active ? "✓" : "";
-      });
-      syncSearch();
-    };
-    const commit = (values) => {
-      if (!hidden) return;
-      hidden.value = normalizeNameList(values).join("\n");
-      syncUi();
-      hidden.dispatchEvent(new Event("change", { bubbles: true }));
-    };
-    toggle?.addEventListener("click", (event) => {
-      event.preventDefault();
-      if (event.target.closest(".multi-select-clear-icon") && selectedValues().length) {
-        closeMultiSelectMenu(select);
-        if (searchInput) searchInput.value = "";
-        commit([]);
-        toggle.blur();
-        return;
-      }
-      document.querySelectorAll(".multi-select.open").forEach((item) => {
-        if (item !== select) closeMultiSelectMenu(item);
-      });
-      const isOpen = !select.classList.contains("open");
-      if (!isOpen) closeMultiSelectMenu(select);
-      else {
-        select.classList.add("open");
-        mountFloatingMultiSelectMenu(select);
-      }
-      toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
-      if (isOpen) {
-        searchInput?.focus({ preventScroll: true });
-        positionFloatingMultiSelectMenu(select);
-        requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
-      }
-    });
-    searchInput?.addEventListener("click", (event) => event.stopPropagation());
-    searchInput?.addEventListener("input", syncSearch);
-    searchInput?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        closeMultiSelectMenu(select);
-        searchInput.blur();
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        closeMultiSelectMenu(select);
-        toggle?.blur();
-      }
-    });
-    select.querySelector(".multi-select-clear")?.addEventListener("click", () => {
-      closeMultiSelectMenu(select);
-      if (searchInput) searchInput.value = "";
-      commit([]);
-    });
-    menu?.querySelectorAll(".multi-select-option").forEach((option) => {
-      option.addEventListener("click", () => {
-        const value = option.dataset.value || "";
-        const next = selectedValues();
-        const index = next.indexOf(value);
-        if (index >= 0) next.splice(index, 1);
-        else next.push(value);
-        commit(next);
-      });
-    });
-    syncUi();
-  });
+  document.querySelectorAll(".multi-select").forEach(bindMultiSelectControl);
 
   if (!multiSelectEventsBound) {
     multiSelectEventsBound = true;
@@ -13481,6 +13679,7 @@ function wireEvents() {
   document.querySelectorAll(".user-admin-tab").forEach((button) => {
     button.addEventListener("click", () => {
       userAdminTab = button.dataset.tab || "accounts";
+      userCreateModalOpen = false;
       localStorage.setItem("liming:user-admin-tab", userAdminTab);
       render();
     });
@@ -13628,49 +13827,15 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".create-user").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const payload = {};
-      document.querySelectorAll(".new-user-field").forEach((input) => {
-        if (!input.dataset.field) return;
-        payload[input.dataset.field] = input.value;
-      });
-      payload.teacher_names = normalizeNameList(document.querySelector(".multi-select-value.new-user-teachers")?.value || "");
-      if (!payload.username || !payload.password) return alert("请填写账号和初始密码");
-      await request("/api/users", { method: "POST", body: payload });
-      userAdminNotice = `已新增账号 ${payload.username}`;
-      await load();
+  document.querySelectorAll(".user-create-modal-region").forEach(bindUserCreateModalRegion);
+  document.querySelectorAll(".open-user-create-modal").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.disabled || !canWriteData()) return;
+      userCreateModalOpen = true;
+      updateUserCreateModalRegion();
     });
   });
-
-  document.querySelectorAll(".user-field").forEach((input) => {
-    input.addEventListener("change", () => {
-      const row = input.closest(".user-row");
-      refreshAfter(() => request(`/api/users/${row.dataset.id}`, {
-        method: "PATCH",
-        body: { [input.dataset.field]: input.value },
-      }), async (result) => {
-        patchUserState(result);
-        if (Number(result.id) === Number(auth.user?.id)) await load();
-        else rerenderContent(renderUserAdmin);
-      });
-    });
-  });
-
-  document.querySelectorAll(".multi-select-value.user-row-teachers").forEach((input) => {
-    input.addEventListener("change", () => {
-      const row = input.closest(".user-row");
-      const teacherNames = normalizeNameList(input.value || "");
-      refreshAfter(() => request(`/api/users/${row.dataset.id}`, {
-        method: "PATCH",
-        body: { teacher_names: teacherNames },
-      }), async (result) => {
-        patchUserState(result);
-        if (Number(result.id) === Number(auth.user?.id)) await load();
-        else rerenderContent(renderUserAdmin);
-      });
-    });
-  });
+  document.querySelectorAll(".user-row").forEach(bindUserAccountRowEvents);
 
   document.querySelectorAll(".user-access-open").forEach((button) => {
     button.addEventListener("click", () => {

@@ -1697,11 +1697,42 @@ button:disabled,
   font-weight: 800;
 }
 
-.user-create-grid {
+.user-create-modal-panel {
+  width: min(680px, calc(100vw - 32px));
+  max-height: 92vh;
+  overflow: auto;
+}
+
+.user-create-form {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  gap: var(--space-4);
+}
+
+.user-create-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.user-create-form-field {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-table);
+  font-weight: 800;
+}
+
+.user-create-form-field.wide {
+  grid-column: 1 / -1;
+}
+
+.user-create-form-field :is(.control, .multi-select) {
+  width: 100%;
+}
+
+.user-create-modal .modal-actions {
   gap: var(--space-3);
-  align-items: center;
 }
 
 .user-table th,
@@ -3672,6 +3703,11 @@ select.control::-ms-expand,
   white-space: nowrap;
 }
 
+.lesson-create-modal .lesson-create-student-option.is-search-filtered,
+.lesson-create-modal .lesson-create-student-option[hidden] {
+  display: none !important;
+}
+
 .lesson-create-modal .lesson-create-student-search-empty {
   grid-column: 1 / -1;
   padding: var(--space-2);
@@ -3922,6 +3958,36 @@ select.control::-ms-expand,
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   background: var(--panel-raised);
+}
+
+.recharge-page > .recharge-analysis-panel {
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+}
+
+.recharge-page .recharge-analysis-panel .section-head {
+  min-height: 0;
+  padding: 0 0 var(--space-2);
+  border-bottom: 0;
+  background: transparent;
+}
+
+.recharge-page .recharge-analysis-card {
+  gap: 3px;
+  padding: var(--space-2) var(--space-3);
+}
+
+.recharge-page .recharge-analysis-card strong {
+  font-size: 1.06rem;
+}
+
+.recharge-page .recharge-analysis-breakdowns {
+  gap: var(--space-2);
+}
+
+.recharge-page .recharge-analysis-chip {
+  padding: 4px 7px;
 }
 
 .recharge-analysis-grid {
@@ -7421,7 +7487,7 @@ table th,
 .fee-detail-bulk-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   flex-wrap: wrap;
   gap: var(--space-3);
   margin: var(--space-5) 0 var(--space-4);
@@ -7434,7 +7500,34 @@ table th,
 }
 
 .fee-detail-bulk-actions .apply-selected-student-pricing-rules {
-  margin-left: auto;
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.transaction-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-4) var(--space-4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.transaction-action-row .btn {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+  .transaction-action-row,
+  .fee-detail-bulk-actions {
+    align-items: flex-start;
+  }
+
+  .fee-detail-bulk-actions .muted-tip {
+    white-space: normal;
+  }
 }
 
 .lesson-quick-row {
@@ -8723,6 +8816,13 @@ table th,
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+/* 范围切换仅更新学生查询的内容，指标卡保持原节点且不播放进入/数值动画。 */
+.student-query-results .student-statement-metrics .metric,
+.student-query-results .student-statement-metrics .metric-value {
+  animation: none !important;
+  transition: none;
+}
+
 @media (max-width: 1180px) {
   .summary-grid,
   .appearance-settings-grid,
@@ -8797,7 +8897,7 @@ table th,
     grid-template-columns: 1fr;
   }
 
-  .user-create-grid {
+  .user-create-form-grid {
     grid-template-columns: 1fr;
   }
 
@@ -9931,6 +10031,7 @@ table th,
 
 .user-admin-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
@@ -10305,5 +10406,186 @@ table th,
 @media (max-width: 1080px) {
   .notice-item {
     grid-template-columns: 1fr;
+  }
+}
+
+/* 档案页去除重复说明后，筛选与操作保持为紧凑、可换行的独立工具栏。 */
+.profile-toolbar {
+  justify-content: flex-start;
+  min-height: 0;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--section-head);
+}
+
+.teacher-salary-rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.teacher-salary-rule-actions .section-subtitle {
+  margin: 0;
+}
+
+/* 首页内容量较小时不再保留过高卡片或趋势空白，仍保留可点击面积。 */
+.dashboard-page {
+  gap: var(--space-3);
+}
+
+.dashboard-page .section-head {
+  min-height: 46px;
+  padding: 10px var(--space-4);
+}
+
+.dashboard-metric-grid {
+  grid-template-columns: repeat(5, minmax(124px, 1fr));
+  gap: 10px;
+}
+
+.dashboard-metric-card {
+  min-height: 80px;
+  padding: 10px 12px;
+}
+
+.dashboard-shortcut-grid {
+  gap: 10px;
+}
+
+.dashboard-shortcut {
+  min-height: 68px;
+  padding: 9px 10px;
+  gap: 5px;
+}
+
+.dashboard-shortcut svg {
+  width: 20px;
+  height: 20px;
+}
+
+.dashboard-main-grid {
+  gap: var(--space-3);
+}
+
+.dashboard-todo-item {
+  min-height: 46px;
+  padding: 9px 12px;
+}
+
+.dashboard-current-item {
+  min-height: 52px;
+  padding: 10px 12px;
+}
+
+.dashboard-current-empty {
+  min-height: 96px;
+}
+
+.dashboard-trend-svg {
+  height: 196px;
+}
+
+.dashboard-empty-chart {
+  min-height: 120px;
+}
+
+.dashboard-pie-wrap {
+  min-height: 188px;
+}
+
+@media (max-width: 980px) {
+  .dashboard-metric-grid,
+  .dashboard-shortcut-grid,
+  .dashboard-main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .profile-toolbar,
+  .teacher-salary-rule-actions {
+    align-items: flex-start;
+  }
+
+  .profile-toolbar .profile-search {
+    min-width: min(240px, 100%);
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-trend-svg {
+    height: 188px;
+  }
+
+  .dashboard-empty-chart {
+    min-height: 108px;
+  }
+}
+
+/* 黑白主题保持中性黑白，同时把正文、表头、筛选和占位文字拉回可读对比度。 */
+:root[data-palette="black-white"] {
+  --ink: #111111;
+  --text: #111111;
+  --ink-strong: #0d0d0d;
+  --muted: #525252;
+  --sidebar-ink: #111111;
+  --sidebar-text: #171717;
+  --sidebar-muted: #525252;
+  --table-head-ink: #0d0d0d;
+  --neutral-chip-fg: #404040;
+  --manual-fg: #111111;
+  --group-fg: #171717;
+  --warn-fg: #404040;
+  --warn-pill-fg: #404040;
+  --shot-title: #0d0d0d;
+  --shot-muted: #525252;
+  --shot-tag-text: #111111;
+}
+
+:root[data-palette="black-white"] :is(.control, .cell-input, .cell-select)::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+:root[data-theme="dark"][data-palette="black-white"] {
+  --ink: #f7f7f7;
+  --text: #f7f7f7;
+  --ink-strong: #ffffff;
+  --muted: #b8b8b8;
+  --sidebar-ink: #f7f7f7;
+  --sidebar-text: #ededed;
+  --sidebar-muted: #b8b8b8;
+  --table-head-ink: #f7f7f7;
+  --neutral-chip-fg: #ededed;
+  --manual-fg: #ffffff;
+  --group-fg: #f7f7f7;
+  --warn-fg: #ededed;
+  --warn-pill-fg: #ededed;
+  --shot-title: #ffffff;
+  --shot-muted: #b8b8b8;
+  --shot-tag-text: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"][data-palette="black-white"] {
+    --ink: #f7f7f7;
+    --text: #f7f7f7;
+    --ink-strong: #ffffff;
+    --muted: #b8b8b8;
+    --sidebar-ink: #f7f7f7;
+    --sidebar-text: #ededed;
+    --sidebar-muted: #b8b8b8;
+    --table-head-ink: #f7f7f7;
+    --neutral-chip-fg: #ededed;
+    --manual-fg: #ffffff;
+    --group-fg: #f7f7f7;
+    --warn-fg: #ededed;
+    --warn-pill-fg: #ededed;
+    --shot-title: #ffffff;
+    --shot-muted: #b8b8b8;
+    --shot-tag-text: #ffffff;
   }
 }
