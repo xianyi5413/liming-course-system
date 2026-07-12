@@ -1903,6 +1903,8 @@ button:disabled,
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  position: relative;
 }
 
 .nav-group.open {
@@ -3718,6 +3720,127 @@ select.control::-ms-expand,
   resize: vertical;
 }
 
+.lesson-create-conflict-hint {
+  display: grid;
+  gap: 3px;
+  margin: 0 var(--space-4) var(--space-3);
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--section-head);
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.lesson-create-conflict-hint.has-conflict {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--line));
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.lesson-create-conflict-hint strong {
+  color: inherit;
+  font-weight: 800;
+}
+
+.custom-select.candidate-conflict .custom-select-button {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--line));
+  color: var(--danger);
+}
+
+.course-table.lesson-table .lesson-schedule-students {
+  padding: 4px 6px;
+  vertical-align: top;
+}
+
+.lesson-schedule-students .multi-select,
+.lesson-schedule-students .multi-select-toggle {
+  width: 100%;
+  min-width: 0;
+}
+
+.lesson-schedule-students .multi-select-selection-summary {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.25;
+}
+
+.lesson-schedule-students .multi-select-selection-summary b {
+  color: var(--text);
+  font-family: var(--font-number);
+}
+
+.lesson-schedule-students .multi-select-toggle {
+  min-height: 34px;
+  padding-right: 28px;
+}
+
+.schedule-student-menu {
+  width: min(400px, calc(100vw - 24px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 210px) auto auto;
+  gap: 8px !important;
+  overflow: hidden !important;
+}
+
+.schedule-student-menu.floating-multi-select-menu {
+  /* The outer picker never scrolls; only the candidate list owns vertical scrolling. */
+  max-height: none;
+}
+
+.lesson-student-picker-header { display: grid; gap: 6px; }
+
+.lesson-student-picker-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+
+.lesson-student-picker-search .multi-select-search { margin: 0; }
+
+.schedule-student-stats {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.schedule-student-stats b { color: var(--text); font-family: var(--font-number); }
+
+.schedule-student-options {
+  display: grid;
+  gap: 2px;
+  min-height: 0;
+  height: 210px;
+  max-height: 210px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.lesson-student-picker-list .multi-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.lesson-student-picker-list .multi-select-option > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-student-new-names {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+}
+
+.schedule-student-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 @media (max-width: 720px) {
   .lesson-create-modal .lesson-create-form,
   .teacher-salary-rule-modal .lesson-create-form,
@@ -5047,6 +5170,18 @@ select.control {
   color: var(--ink-strong);
 }
 
+/* 冲突语义来自候选数据属性，不能被通用 hover / selected 文本色覆盖。 */
+.custom-select-menu .custom-select-option.option-conflict,
+.custom-select-menu .custom-select-option.option-conflict:hover,
+.custom-select-menu .custom-select-option.option-conflict:active,
+.custom-select-menu .custom-select-option.option-conflict:focus,
+.custom-select-menu .custom-select-option.option-conflict:focus-visible,
+.custom-select-menu .custom-select-option.option-conflict.selected,
+.custom-select-menu .custom-select-option.option-conflict.is-active,
+.custom-select-menu .custom-select-option.option-conflict[aria-selected="true"] {
+  color: var(--danger);
+}
+
 .custom-select-option:disabled {
   cursor: not-allowed;
   color: var(--muted);
@@ -5292,6 +5427,40 @@ select.control {
   width: min(980px, calc(100vw - 32px));
   max-height: min(84vh, 820px);
   overflow: auto;
+}
+
+body.lesson-conflict-modal-open { overflow: hidden; }
+
+.lesson-conflict-modal { z-index: 500; }
+
+.lesson-conflict-edit-modal { z-index: 520; }
+
+.lesson-conflict-modal .modal-panel,
+.lesson-conflict-edit-modal .modal-panel { pointer-events: auto; }
+
+.lesson-conflict-edit-panel {
+  width: min(860px, calc(100vw - 32px));
+  max-height: min(88vh, 860px);
+  overflow: auto;
+}
+
+.conflict-edit-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+.conflict-edit-student-field { grid-column: 1 / -1; }
+
+.conflict-edit-student-field .multi-select { width: 100%; }
+
+.conflict-edit-new-students { width: 100%; min-height: 58px; margin-top: 8px; resize: vertical; }
+
+.conflict-lesson-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+}
+
+@media (max-width: 720px) {
+  .conflict-edit-form { grid-template-columns: 1fr; }
 }
 
 .lesson-conflict-panel .conflict-options {
@@ -7451,6 +7620,19 @@ table th,
   grid-column: span 2;
 }
 
+.lesson-date-filter-group {
+  grid-column: span 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.lesson-date-filter-group .filter-date-range {
+  flex: 1 1 216px;
+}
+
 .date-shortcuts {
   display: inline-flex;
   align-items: flex-end;
@@ -7461,6 +7643,7 @@ table th,
 .lesson-date-shortcuts {
   width: max-content;
   max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .lesson-date-shortcut {
@@ -7988,7 +8171,8 @@ table th,
 .matrix-dimension-table td {
   width: 220px;
   min-width: 220px;
-  height: 116px;
+  min-height: 116px;
+  height: auto;
   padding: 8px;
   background: var(--panel);
 }
@@ -8042,8 +8226,10 @@ table th,
 .matrix-dimension-meta span,
 .matrix-dimension-note {
   min-width: 0;
-  overflow-wrap: break-word;
-  word-break: normal;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  writing-mode: horizontal-tb;
 }
 
 .matrix-dimension-note {
@@ -8188,7 +8374,8 @@ table th,
 }
 
 .week-grid-table td {
-  height: 116px;
+  min-height: 116px;
+  height: auto;
   padding: 8px;
   background: var(--panel);
 }
@@ -8209,7 +8396,8 @@ table th,
   border-radius: var(--radius-sm);
   background: var(--panel-raised);
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-  overflow: hidden;
+  /* 学生名单较长时由内容自然撑高，不能裁切课程卡片。 */
+  overflow: visible;
 }
 
 .week-grid-card.abnormal {
@@ -8258,8 +8446,10 @@ table th,
   font-size: var(--text-caption);
   font-weight: 650;
   line-height: 1.45;
+  white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+  writing-mode: horizontal-tb;
 }
 
 .week-grid-meta {
@@ -10527,22 +10717,25 @@ table th,
 
 /* 黑白主题保持中性黑白，同时把正文、表头、筛选和占位文字拉回可读对比度。 */
 :root[data-palette="black-white"] {
-  --ink: #111111;
-  --text: #111111;
-  --ink-strong: #0d0d0d;
+  --ink: #000000;
+  --text: #000000;
+  --ink-strong: #000000;
   --muted: #525252;
-  --sidebar-ink: #111111;
-  --sidebar-text: #171717;
+  --sidebar-ink: #000000;
+  --sidebar-text: #000000;
   --sidebar-muted: #525252;
-  --table-head-ink: #0d0d0d;
-  --neutral-chip-fg: #404040;
-  --manual-fg: #111111;
-  --group-fg: #171717;
-  --warn-fg: #404040;
-  --warn-pill-fg: #404040;
-  --shot-title: #0d0d0d;
+  --table-head-ink: #000000;
+  --neutral-chip-fg: #0d0d0d;
+  --manual-fg: #0d0d0d;
+  --group-fg: #0d0d0d;
+  --warn-fg: #0d0d0d;
+  --warn-pill-fg: #0d0d0d;
+  --success: #0d0d0d;
+  --info: #0d0d0d;
+  --warning: #0d0d0d;
+  --shot-title: #000000;
   --shot-muted: #525252;
-  --shot-tag-text: #111111;
+  --shot-tag-text: #000000;
 }
 
 :root[data-palette="black-white"] :is(.control, .cell-input, .cell-select)::placeholder {
@@ -10551,41 +10744,47 @@ table th,
 }
 
 :root[data-theme="dark"][data-palette="black-white"] {
-  --ink: #f7f7f7;
-  --text: #f7f7f7;
+  --ink: #ffffff;
+  --text: #ffffff;
   --ink-strong: #ffffff;
-  --muted: #b8b8b8;
-  --sidebar-ink: #f7f7f7;
-  --sidebar-text: #ededed;
-  --sidebar-muted: #b8b8b8;
-  --table-head-ink: #f7f7f7;
-  --neutral-chip-fg: #ededed;
+  --muted: #b4b4b4;
+  --sidebar-ink: #ffffff;
+  --sidebar-text: #ffffff;
+  --sidebar-muted: #b4b4b4;
+  --table-head-ink: #ffffff;
+  --neutral-chip-fg: #ffffff;
   --manual-fg: #ffffff;
-  --group-fg: #f7f7f7;
-  --warn-fg: #ededed;
-  --warn-pill-fg: #ededed;
+  --group-fg: #ffffff;
+  --warn-fg: #ffffff;
+  --warn-pill-fg: #ffffff;
+  --success: #ffffff;
+  --info: #ffffff;
+  --warning: #ffffff;
   --shot-title: #ffffff;
-  --shot-muted: #b8b8b8;
+  --shot-muted: #b4b4b4;
   --shot-tag-text: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"][data-palette="black-white"] {
-    --ink: #f7f7f7;
-    --text: #f7f7f7;
+    --ink: #ffffff;
+    --text: #ffffff;
     --ink-strong: #ffffff;
-    --muted: #b8b8b8;
-    --sidebar-ink: #f7f7f7;
-    --sidebar-text: #ededed;
-    --sidebar-muted: #b8b8b8;
-    --table-head-ink: #f7f7f7;
-    --neutral-chip-fg: #ededed;
+    --muted: #b4b4b4;
+    --sidebar-ink: #ffffff;
+    --sidebar-text: #ffffff;
+    --sidebar-muted: #b4b4b4;
+    --table-head-ink: #ffffff;
+    --neutral-chip-fg: #ffffff;
     --manual-fg: #ffffff;
-    --group-fg: #f7f7f7;
-    --warn-fg: #ededed;
-    --warn-pill-fg: #ededed;
+    --group-fg: #ffffff;
+    --warn-fg: #ffffff;
+    --warn-pill-fg: #ffffff;
+    --success: #ffffff;
+    --info: #ffffff;
+    --warning: #ffffff;
     --shot-title: #ffffff;
-    --shot-muted: #b8b8b8;
+    --shot-muted: #b4b4b4;
     --shot-tag-text: #ffffff;
   }
 }
