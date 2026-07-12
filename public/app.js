@@ -77,6 +77,7 @@ const gradeTrendColors = {
 const LESSON_FILTER_KEY = "liming:lesson-filter";
 const LESSON_CREATE_MANUAL_VALUE = "__manual__";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
+const NAV_EXPANDED_KEY = "liming:nav-expanded-groups";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
@@ -308,8 +309,12 @@ let scheduleMode = false;
 let selectedLessonIds = new Set();
 let lessonBatchDeleting = false;
 let lessonConflictModalOpen = false;
+let lessonConflictEditDraft = null;
+let lessonConflictRefreshRequest = 0;
+let lessonConflictEventsBound = false;
 let expandedSummaryStudents = readExpandedSummaryStudents();
 let activeNavGroup = localStorage.getItem("liming:nav-group") || "";
+let expandedNavGroups = readExpandedNavGroups();
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
 let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
@@ -355,6 +360,8 @@ let staffPayrollSearch = "";
 let expenseModal = null;
 let pricingAuditModal = null;
 let lessonCreateDraft = null;
+let lessonCreateConflictRequest = 0;
+let lessonCreateConflictRows = [];
 let lessonBatchCopyDraft = null;
 let weekCopyDraft = null;
 let focusedLessonIds = [];
@@ -388,6 +395,7 @@ let activeCustomDateMonth = null;
 let dateRangePickerEl = null;
 let activeDateRangePicker = null;
 let dateRangePickerEventsBound = false;
+let navigationEventsBound = false;
 
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
@@ -643,12 +651,46 @@ function firstAllowedView() {
 function setActiveView(nextView) {
   view = nextView || "";
   activeNavGroup = view ? groupForView(view).key : "";
+  if (activeNavGroup) expandedNavGroups.add(activeNavGroup);
+  saveExpandedNavGroups();
   if (view) {
     localStorage.setItem("liming:view", view);
     localStorage.setItem("liming:nav-group", activeNavGroup);
   } else {
     clearPagePositionCache();
   }
+}
+
+function readExpandedNavGroups() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(NAV_EXPANDED_KEY) || "[]");
+    return new Set(Array.isArray(saved) ? saved.filter((key) => navGroups.some((group) => group.key === key)) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpandedNavGroups() {
+  localStorage.setItem(NAV_EXPANDED_KEY, JSON.stringify([...expandedNavGroups]));
+}
+
+function visibleNavGroups() {
+  return navGroups.map((group) => ({
+    ...group,
+    views: (group.views || []).filter(([key]) => canView(key)),
+    moreViews: (group.moreViews || []).filter(([key]) => canView(key)),
+  })).filter((group) => group.views.length || group.moreViews.length);
+}
+
+function normalizeExpandedNavGroups(groups = visibleNavGroups()) {
+  const allowed = new Set(groups.map((group) => group.key));
+  const next = new Set([...expandedNavGroups].filter((key) => allowed.has(key)));
+  const currentGroup = groupForView(view);
+  if (currentGroup?.key && allowed.has(currentGroup.key)) next.add(currentGroup.key);
+  const changed = next.size !== expandedNavGroups.size || [...next].some((key) => !expandedNavGroups.has(key));
+  expandedNavGroups = next;
+  if (changed) saveExpandedNavGroups();
+  return next;
 }
 
 function ensureAccessibleView() {
@@ -744,11 +786,16 @@ function filterCustomSelectOptions(wrapper) {
 }
 
 function selectDisplayText(select) {
-  return select.selectedOptions?.[0]?.textContent?.trim() || select.options?.[select.selectedIndex]?.textContent?.trim() || "请选择";
+  const selected = select.selectedOptions?.[0] || select.options?.[select.selectedIndex];
+  // 候选列表的标签可带“可选/冲突”，但选择完成后的控件只展示真实 value。
+  if (selected?.dataset?.candidateConflict !== undefined) return String(select.value || "").trim() || "请选择";
+  return selected?.textContent?.trim() || "请选择";
 }
 
 function syncCustomSelect(select, wrapper) {
   wrapper.querySelector(".custom-select-value").textContent = selectDisplayText(select);
+  const selectedOption = select.selectedOptions?.[0] || select.options?.[select.selectedIndex];
+  wrapper.classList.toggle("candidate-conflict", selectedOption?.dataset?.candidateConflict === "1");
   if (select.classList.contains("status-select")) {
     const cls = statusClass(rowStatus({ status: select.value }));
     ["done", "pending", "leave", "trial", "exam", "unpaid"].forEach((name) => {
@@ -885,6 +932,8 @@ function enhanceCustomSelects() {
       option.setAttribute("role", "option");
       option.disabled = nativeOption.disabled;
       option.textContent = nativeOption.textContent;
+      if (nativeOption.title) option.title = nativeOption.title;
+      if (nativeOption.dataset.candidateConflict === "1") option.classList.add("candidate-conflict", "option-conflict");
       option.addEventListener("click", () => {
         select.value = nativeOption.value;
         select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1570,6 +1619,10 @@ function offsetDateMonths(value, offset) {
 function dateRangePreset(preset) {
   const today = todayDate();
   const currentMonth = `${today.slice(0, 7)}-01`;
+  if (preset === "yesterday") {
+    const yesterday = addDays(today, -1);
+    return { start: yesterday, end: yesterday };
+  }
   if (preset === "today") return { start: today, end: today };
   if (preset === "current-month") return monthBounds(currentMonth);
   if (preset === "current-week") {
@@ -1824,6 +1877,7 @@ function renderDateRangePickerPanel() {
     ? (state.pending === "end" ? "请选择结束日期" : "请选择开始日期")
     : (state.pending === "start" ? "先选择结束日期" : "先选择开始日期");
   const presets = [
+    ["yesterday", "昨日"],
     ["today", "今日"],
     ["current-month", "本月"],
     ["current-week", "本周"],
@@ -2174,16 +2228,8 @@ function teacherSalaryTimeTokenMinutes(value) {
 }
 
 function teacherSalaryLessonHours(timeSlot) {
-  const raw = String(timeSlot || "")
-    .replaceAll("：", ":")
-    .replace(/[—–－~～至到]/g, "-")
-    .replace(/\s+/g, "");
-  const parts = raw.split("-").filter(Boolean);
-  if (parts.length < 2) return null;
-  const start = teacherSalaryTimeTokenMinutes(parts[0]);
-  const end = teacherSalaryTimeTokenMinutes(parts[1]);
-  if (start == null || end == null || end <= start) return null;
-  return (end - start) / 60;
+  const range = parseLessonTimeRange(timeSlot);
+  return range ? (range.end - range.start) / 60 : null;
 }
 
 function teacherSalaryRuleCalculation(lesson) {
@@ -2768,7 +2814,7 @@ function financePresetRange(preset) {
 }
 
 function defaultLessonFilter() {
-  return { month_key: "", teacher: "", teacher_names: [], student: "", start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
+  return { month_key: "", teacher: "", teacher_names: [], student: "", student_names: [], start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
 }
 
 function readLessonFilter() {
@@ -2776,6 +2822,8 @@ function readLessonFilter() {
   try {
     const parsed = { ...defaults, ...JSON.parse(localStorage.getItem(LESSON_FILTER_KEY) || "{}") };
     parsed.teacher_names = normalizeNameList(parsed.teacher_names || (parsed.teacher ? [parsed.teacher] : []));
+    // 兼容旧版单学生筛选；转换后仍会作为多选已选值保留在控件中，用户可单独移除。
+    parsed.student_names = normalizeNameList(parsed.student_names || (parsed.student ? [parsed.student] : []));
     return parsed;
   } catch {
     return defaults;
@@ -2809,6 +2857,11 @@ function lessonsRangeUrl(range, viewKey = lessonDataViewKey()) {
   params.set("start", range.start);
   params.set("end", range.end);
   params.set("view", viewKey);
+  // 课程总表的学生多选在本地即时筛选；当日期范围需要补拉数据时，同时把
+  // 已选学生带给轻量范围接口，后端仍按角色预筛选 ∩ 用户筛选返回任意命中项。
+  if (viewKey === "lessons") {
+    normalizeNameList(lessonFilter.student_names || []).forEach((name) => params.append("student_names", name));
+  }
   return `/api/lessons-range?${params.toString()}`;
 }
 
@@ -3065,6 +3118,13 @@ function ensureLessonFilterDates({ defaultToThisWeek = view === "lessons" } = {}
     nextFilter.teacher = teacherNames.join("、");
     changed = true;
   }
+  const studentNames = normalizeNameList(nextFilter.student_names || []);
+  const studentLabel = studentNames.join("、");
+  if (studentNames.join("\n") !== normalizeNameList(nextFilter.student_names || []).join("\n") || (studentNames.length && nextFilter.student !== studentLabel)) {
+    nextFilter.student_names = studentNames;
+    nextFilter.student = studentLabel;
+    changed = true;
+  }
   if (!isDateValue(nextFilter.start_date)) {
     nextFilter.start_date = "";
     changed = true;
@@ -3123,7 +3183,7 @@ async function loadLessonRangeOnly() {
 function resetLessonFilter() {
   const range = currentWeekRange();
   const monthKey = lessonFilter.month_key || state?.settings?.month_key || activeMonth;
-  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", start_date: range.start, end_date: range.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
+  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", student_names: [], start_date: range.start, end_date: range.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
@@ -3189,6 +3249,7 @@ function normalizeNameList(value) {
 function lessonRowsForOption(rows, filter, excludeField, options = {}) {
   const optionFilter = { ...filter, [excludeField]: "" };
   if (excludeField === "teacher") optionFilter.teacher_names = [];
+  if (excludeField === "student") optionFilter.student_names = [];
   return rows.filter((row) => lessonMatchesFilter(row, optionFilter, options));
 }
 
@@ -3208,7 +3269,9 @@ function lessonMatchesFilter(row, filter, options = {}) {
   const teacherNames = normalizeNameList(filter.teacher_names || []);
   if (teacherNames.length && !teacherNames.includes(String(row.teacher_name || "").trim())) return false;
   if (!teacherNames.length && filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
-  if (filter.student) {
+  const studentNames = normalizeNameList(filter.student_names || []);
+  if (studentNames.length && !splitStudents(row.student_names).some((name) => studentNames.includes(name))) return false;
+  if (!studentNames.length && filter.student) {
     const needle = filter.student.toLowerCase();
     if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
   }
@@ -3284,7 +3347,7 @@ function textFilterControl({ id = "", className = "", field, value = "", placeho
   `;
 }
 
-function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false }) {
+function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false, searchPlaceholder = "搜索选项", inputAttrs = "", selectionSummary = "" }) {
   const selectedList = normalizeNameList(selected);
   const selectedSet = new Set(selectedList);
   const normalized = uniqueSorted([...(values || []), ...(includeSelected ? selectedList : [])]);
@@ -3297,9 +3360,10 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
         <span class="multi-select-caret">⌄</span>
         <span class="multi-select-clear-icon" aria-hidden="true">×</span>
       </button>
-      <input class="multi-select-value ${className}" ${dataName}="${escapeHtml(field)}" type="hidden" value="${escapeHtml(selectedList.join("\n"))}">
+      <input class="multi-select-value ${className}" ${dataName}="${escapeHtml(field)}" type="hidden" value="${escapeHtml(selectedList.join("\n"))}" ${inputAttrs}>
+      ${selectionSummary ? `<span class="multi-select-selection-summary">${selectionSummary}</span>` : ""}
       <span class="multi-select-menu">
-        ${searchable ? `<input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索老师">` : ""}
+        ${searchable ? `<input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(searchPlaceholder)}">` : ""}
         <button class="multi-select-clear" type="button">${escapeHtml(clearLabel)}</button>
         ${normalized.map((item) => `
           <button class="multi-select-option ${selectedSet.has(item) ? "selected" : ""}" type="button" data-value="${escapeHtml(item)}">
@@ -3317,6 +3381,7 @@ const FLOATING_MULTI_SELECT_TOGGLE_SELECTOR = [
   ".user-row-teachers",
   ".new-user-teachers",
   ".user-access-teachers",
+  ".schedule-student-popover .multi-select-toggle",
 ].join(",");
 
 function usesFloatingMultiSelectMenu(select) {
@@ -3350,6 +3415,7 @@ function closeMultiSelectMenu(select) {
     delete menu._multiSelectOwner;
     delete select._floatingMenu;
   }
+  delete select._studentPickerLayout;
 }
 
 function closeOpenMultiSelectMenus() {
@@ -3370,13 +3436,45 @@ function positionFloatingMultiSelectMenu(select) {
   select.classList.add("floating-menu");
   const viewportGap = 8;
   const menuGap = 6;
-  const width = Math.min(Math.max(rect.width, 188), Math.max(188, window.innerWidth - viewportGap * 2));
+  const isStudentPicker = select.classList.contains("schedule-student-popover");
+  const minWidth = isStudentPicker ? 380 : 188;
+  const preferredWidth = isStudentPicker ? 400 : rect.width;
+  const maximumWidth = Math.max(160, window.innerWidth - viewportGap * 2);
+  const width = Math.min(Math.max(rect.width, preferredWidth, Math.min(minWidth, maximumWidth)), maximumWidth);
   const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportGap - menuGap);
   const spaceAbove = Math.max(0, rect.top - viewportGap - menuGap);
-  const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
-  const availableHeight = openAbove ? spaceAbove : spaceBelow;
-  const maxHeight = Math.max(80, Math.min(260, availableHeight || 260));
-  const measuredHeight = Math.min(menu.scrollHeight || maxHeight, maxHeight);
+  let openAbove;
+  let maxHeight;
+  let measuredHeight;
+  if (isStudentPicker) {
+    // The picker list is the only scrolling region.  Its geometry is captured once
+    // per open so list scroll events can never feed its current height back into layout.
+    let layout = select._studentPickerLayout;
+    if (!layout) {
+      const list = menu.querySelector(".lesson-student-picker-list");
+      const preferredListHeight = 210;
+      const fixedHeight = Math.max(0, Math.ceil(menu.getBoundingClientRect().height - (list?.getBoundingClientRect().height || 0)));
+      const preferredHeight = fixedHeight + preferredListHeight;
+      openAbove = spaceBelow < preferredHeight && spaceAbove > spaceBelow;
+      const availableHeight = openAbove ? spaceAbove : spaceBelow;
+      const listHeight = Math.max(80, Math.min(preferredListHeight, Math.floor(availableHeight - fixedHeight)));
+      layout = { openAbove, listHeight, height: fixedHeight + listHeight };
+      select._studentPickerLayout = layout;
+      if (list) {
+        list.style.height = `${layout.listHeight}px`;
+        list.style.maxHeight = `${layout.listHeight}px`;
+      }
+    }
+    openAbove = layout.openAbove;
+    maxHeight = layout.height;
+    measuredHeight = layout.height;
+  } else {
+    const preferredHeight = 180;
+    openAbove = spaceBelow < preferredHeight && spaceAbove > spaceBelow;
+    const availableHeight = openAbove ? spaceAbove : spaceBelow;
+    maxHeight = Math.max(1, Math.min(260, availableHeight || 260));
+    measuredHeight = Math.min(menu.scrollHeight || maxHeight, maxHeight);
+  }
   const left = Math.min(
     Math.max(viewportGap, rect.left),
     Math.max(viewportGap, window.innerWidth - width - viewportGap),
@@ -3388,10 +3486,14 @@ function positionFloatingMultiSelectMenu(select) {
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(Math.max(viewportGap, top))}px`;
   menu.style.width = `${Math.round(width)}px`;
-  menu.style.maxHeight = `${Math.round(maxHeight)}px`;
+  menu.style.maxHeight = isStudentPicker ? "none" : `${Math.round(maxHeight)}px`;
+  menu.style.height = isStudentPicker ? `${Math.round(measuredHeight)}px` : "";
 }
 
-function positionOpenFloatingMultiSelectMenus() {
+function positionOpenFloatingMultiSelectMenus(event) {
+  // Capturing scroll also sees the candidate list's own scroll events. Those must
+  // never reposition (or remeasure) the student picker.
+  if (event?.target instanceof Element && event.target.closest(".lesson-student-picker-list")) return;
   document.querySelectorAll(".multi-select.open").forEach(positionFloatingMultiSelectMenu);
 }
 
@@ -3421,6 +3523,9 @@ function bindMultiSelectControl(select) {
       option.classList.toggle("selected", active);
       const check = option.querySelector(".multi-select-check");
       if (check) check.textContent = active ? "✓" : "";
+    });
+    select.querySelectorAll("[data-multi-select-count]").forEach((counter) => {
+      counter.textContent = String(selected.length);
     });
     syncSearch();
   };
@@ -3455,8 +3560,18 @@ function bindMultiSelectControl(select) {
       requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
     }
   });
+  let searchComposing = false;
   searchInput?.addEventListener("click", (event) => event.stopPropagation());
-  searchInput?.addEventListener("input", syncSearch);
+  searchInput?.addEventListener("compositionstart", () => {
+    searchComposing = true;
+  });
+  searchInput?.addEventListener("compositionend", () => {
+    searchComposing = false;
+    syncSearch();
+  });
+  searchInput?.addEventListener("input", () => {
+    if (!searchComposing) syncSearch();
+  });
   searchInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -3522,11 +3637,26 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
       ${multiSelectControl({ className: "lesson-filter-multi", field: "teacher_names", selected: lessonFilter.teacher_names || [], values: opts.teachers, placeholder: "全部老师" })}
     </label>
   `;
-  const studentInput = `
+  const studentSelect = `
     <label class="filter-field">
       <span>学生</span>
-      ${filterComboControl({ className: "lesson-filter-input", field: "student", value: lessonFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
+      ${multiSelectControl({ className: "lesson-filter-multi", field: "student_names", selected: lessonFilter.student_names || [], values: opts.students, placeholder: "全部学生", clearLabel: "清空", searchable: true, searchPlaceholder: "搜索学生" })}
     </label>
+  `;
+  const lessonDateFilters = compact ? "" : `
+    <div class="lesson-date-filter-group">
+      <div class="date-shortcuts lesson-date-shortcuts" aria-label="课程总表快捷日期">
+        <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("yesterday") ? "active" : ""}" type="button" data-preset="yesterday">昨日</button>
+        <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("today") ? "active" : ""}" type="button" data-preset="today">今日</button>
+        <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-week") ? "active" : ""}" type="button" data-preset="this-week">本周</button>
+        <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("next-week") ? "active" : ""}" type="button" data-preset="next-week">下周</button>
+        <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-month") ? "active" : ""}" type="button" data-preset="this-month">本月</button>
+      </div>
+      <label class="filter-field filter-date-range">
+        <span>日期</span>
+        ${dateRangePickerControl({ scope: "lesson", startField: "start_date", endField: "end_date", start: lessonFilter.start_date, end: lessonFilter.end_date, placeholder: "选择课程日期范围" })}
+      </label>
+    </div>
   `;
   const compactExtraFilters = compact ? `
     <label class="filter-field">
@@ -3544,22 +3674,12 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
   ` : "";
   const fullFilters = compact ? "" : `
     <label class="filter-field">
-      <span>状态</span>
-      ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
-    </label>
-    <label class="filter-field filter-date-range">
-      <span>日期</span>
-      ${dateRangePickerControl({ scope: "lesson", startField: "start_date", endField: "end_date", start: lessonFilter.start_date, end: lessonFilter.end_date, placeholder: "选择课程日期范围" })}
-    </label>
-    <div class="date-shortcuts lesson-date-shortcuts" aria-label="课程总表快捷日期">
-      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("today") ? "active" : ""}" type="button" data-preset="today">今日</button>
-      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-week") ? "active" : ""}" type="button" data-preset="this-week">本周</button>
-      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("next-week") ? "active" : ""}" type="button" data-preset="next-week">下周</button>
-      <button class="btn lesson-date-shortcut ${lessonDateShortcutActive("this-month") ? "active" : ""}" type="button" data-preset="this-month">本月</button>
-    </div>
-    <label class="filter-field">
       <span>教室</span>
       ${filterComboControl({ className: "lesson-filter-input", field: "classroom", value: lessonFilter.classroom, values: opts.classrooms, placeholder: "输入或选择教室" })}
+    </label>
+    <label class="filter-field">
+      <span>状态</span>
+      ${filterComboControl({ className: "lesson-filter-input", field: "status", value: lessonFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
     </label>
     <label class="filter-field">
       <span>年级</span>
@@ -3578,10 +3698,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
     <div class="filter-bar lesson-filter-bar">
       <div class="lesson-filter-top">
         <div class="filter-controls">
-          ${teacherSelect}
-          ${studentInput}
-          ${compactExtraFilters}
-          ${fullFilters}
+          ${compact ? `${teacherSelect}${studentSelect}${compactExtraFilters}` : `${lessonDateFilters}${teacherSelect}${studentSelect}${fullFilters}`}
         </div>
         <div class="filter-summary">
           <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 节</span>
@@ -3593,6 +3710,10 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
 }
 
 function lessonDateShortcutRange(preset) {
+  if (preset === "yesterday") {
+    const yesterday = addDays(todayDate(), -1);
+    return { start: yesterday, end: yesterday };
+  }
   if (preset === "today") {
     const today = todayDate();
     return { start: today, end: today };
@@ -4302,13 +4423,15 @@ function activeGroup() {
   if (stored && groupViews(stored).some(([key]) => key === view)) return stored;
   const group = groupForView(view);
   activeNavGroup = group.key;
+  expandedNavGroups.add(group.key);
+  saveExpandedNavGroups();
   localStorage.setItem("liming:nav-group", activeNavGroup);
   return group;
 }
 
 function renderSecondaryNav(group) {
   const tabs = [...(group.views || []), ...(group.moreViews || [])].filter(([key]) => canView(key)).map(([key, label]) => `
-    <button class="nav-sub-btn ${view === key ? "active" : ""}" data-group="${group.key}" data-view="${key}">
+    <button class="nav-sub-btn ${view === key ? "active" : ""}" type="button" data-nav-group="${group.key}" data-view="${key}">
       ${escapeHtml(label)}
     </button>
   `).join("");
@@ -4496,20 +4619,17 @@ function renderUserMenu() {
 
 function renderNav() {
   const currentGroup = activeGroup();
-  const visibleGroups = navGroups.map((group) => ({
-    ...group,
-    views: (group.views || []).filter(([key]) => canView(key)),
-    moreViews: (group.moreViews || []).filter(([key]) => canView(key)),
-  })).filter((group) => group.views.length || group.moreViews.length);
+  const visibleGroups = visibleNavGroups();
+  normalizeExpandedNavGroups(visibleGroups);
   navEl.innerHTML = `
     <div class="nav-sections">
       ${visibleGroups.map((group) => `
-        <div class="nav-group ${currentGroup.key === group.key ? "open" : ""}">
-          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" data-group="${group.key}" data-tooltip="${escapeHtml(navLabelText(group))}" title="${sidebarCollapsed ? escapeHtml(navLabelText(group)) : ""}">
+        <div class="nav-group ${expandedNavGroups.has(group.key) || currentGroup.key === group.key ? "open" : ""}">
+          <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" type="button" data-nav-group="${group.key}" data-tooltip="${escapeHtml(navLabelText(group))}" title="${sidebarCollapsed ? escapeHtml(navLabelText(group)) : ""}">
             <span class="nav-icon" aria-hidden="true">${NAV_ICONS[group.key] || ""}</span>
             <span class="nav-label">${escapeHtml(navLabelText(group))}</span>
           </button>
-          ${currentGroup.key === group.key ? renderSecondaryNav(group) : ""}
+          ${expandedNavGroups.has(group.key) || currentGroup.key === group.key ? renderSecondaryNav(group) : ""}
         </div>
       `).join("")}
     </div>
@@ -4566,6 +4686,34 @@ function sortLessons(rows) {
 
 function sortedLessons() {
   return sortLessons(state.lessons);
+}
+
+function bindNavigationEvents() {
+  if (navigationEventsBound || !navEl) return;
+  navigationEventsBound = true;
+  navEl.addEventListener("click", async (event) => {
+    const primary = event.target.closest(".nav-btn[data-nav-group]");
+    if (primary && navEl.contains(primary)) {
+      const group = navGroups.find((item) => item.key === primary.dataset.navGroup);
+      if (!group || !groupViews(group).some(([key]) => canView(key))) return;
+      const currentGroup = groupForView(view);
+      if (group.key === currentGroup.key) expandedNavGroups.add(group.key);
+      else if (expandedNavGroups.has(group.key)) expandedNavGroups.delete(group.key);
+      else expandedNavGroups.add(group.key);
+      normalizeExpandedNavGroups();
+      saveExpandedNavGroups();
+      renderNav();
+      return;
+    }
+
+    const secondary = event.target.closest(".nav-sub-btn[data-view]");
+    if (!secondary || !navEl.contains(secondary) || !canView(secondary.dataset.view)) return;
+    const nextView = secondary.dataset.view;
+    if (!nextView) return;
+    event.preventDefault();
+    setActiveView(nextView);
+    await load({ refreshGlobal: false });
+  });
 }
 
 function lessonDateRangeRows(rows = sortedLessons()) {
@@ -4696,6 +4844,8 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
     /* 排课模式才渲染 select/date input，避免浏览态滚动时背着大量控件。 */
     enhanceCustomSelects();
     enhanceCustomDateInputs();
+    tbody.querySelectorAll(".multi-select:not(.schedule-student-popover)").forEach(bindMultiSelectControl);
+    tbody.querySelectorAll(".schedule-student-popover").forEach(bindScheduleStudentPopover);
   }
 }
 
@@ -4723,6 +4873,7 @@ function lessonModalsHtml(rows = visibleLessonRows()) {
     ${lessonBatchCopyModal()}
     ${weekCopyModal()}
     ${lessonConflictModal(rows)}
+    ${lessonConflictEditModal()}
   `;
 }
 
@@ -4793,10 +4944,12 @@ async function refreshLessonsView({
 
 /* ── 冲突重刷 ─────────────────────────────────────────────────────── */
 async function refreshLessonConflicts() {                /* [B档] 只调 GET /api/schedule-conflicts，不调 bootstrap / lessons-range */
+  const requestId = ++lessonConflictRefreshRequest;
   try {
-    state.schedule_conflicts = await request(
+    const report = await request(
       `/api/schedule-conflicts?month=${encodeURIComponent(activeMonth)}${ignoreRoomOneConflict ? "&ignore_room_one=1" : ""}`
     );
+    if (requestId === lessonConflictRefreshRequest) state.schedule_conflicts = report;
   } catch {
     // 冲突接口失败不影响主流程
   }
@@ -4822,7 +4975,21 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
   const { tiers, dirtyKeys } = tierConfig;
   const isB = tiers.includes("B");
   const isC = tiers.includes("C");
-  const value = input.type === "number" ? numberValue(input.value) : input.value;
+  let value = input.type === "number" ? numberValue(input.value) : input.value;
+  if (field === "time_slot" && value) {
+    const normalized = normalizeTimeSlot(value);
+    if (!normalized) {
+      input.value = previousLesson[field] ?? "";
+      alert("时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");
+      return;
+    }
+    value = normalized;
+    input.value = normalized;
+  }
+  if (field === "student_names") {
+    value = normalizeLessonStudentNames(value);
+    input.value = value;
+  }
 
   /* C 档：立即标记 dirty */
   if (isC) {
@@ -4840,10 +5007,23 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
     patchLessonInState({ ...previousLesson, [field]: value, id: previousLesson.id });
 
     try {
-      const result = await request(`/api/lessons/${lessonId}`, {
-        method: "PATCH",
-        body: { [field]: value },
-      });
+      let result;
+      try {
+        result = await request(`/api/lessons/${lessonId}`, {
+          method: "PATCH",
+          body: { [field]: value },
+        });
+      } catch (error) {
+        if (error?.status !== 409 || !error?.data?.schedule_conflicts?.issue_count) throw error;
+        const details = (error.data.schedule_conflicts.issues || []).slice(0, 3)
+          .map((issue) => `${conflictTypeLabel(issue.type)}${issue.entity ? `：${issue.entity}` : ""}`)
+          .join("；");
+        if (!confirm(`服务端发现最新冲突：${details || "请检查时间安排"}。仍要保存吗？`)) throw new Error("已取消保存");
+        result = await request(`/api/lessons/${lessonId}`, {
+          method: "PATCH",
+          body: { [field]: value, allow_conflicts: true },
+        });
+      }
 
       /* 用服务端返回值修正 state */
       patchLessonInState(result);
@@ -4935,17 +5115,18 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
 }
 
 function lessonEditCells(row, visibleIndex, cumulative, editOptions) {
+  const candidate = { ...row, student_names: normalizeLessonStudentNames(row.student_names) };
   return `
       <td class="readonly col-serial narrow"><span class="lesson-cell-text">${visibleIndex}</span></td>
       ${selectCell({ className: "lesson-field", id: row.id, field: "teacher_name", value: row.teacher_name, values: editOptions.teachers, emptyText: "未选", tdClass: "col-teacher", manualLabel: lessonManualLabel("teacher_name") })}
       ${inputCell({ className: "lesson-field", id: row.id, field: "date", value: row.date, type: "date", tdClass: "col-date" })}
       ${statusSelectCell({ id: row.id, value: rowStatus(row), tdClass: "col-status" })}
       <td class="readonly col-weekday">${escapeHtml(weekdayCn(row.date))}</td>
-      ${selectCell({ className: "lesson-field", id: row.id, field: "time_slot", value: row.time_slot, values: editOptions.times, emptyText: "未选", tdClass: "col-time", manualLabel: lessonManualLabel("time_slot") })}
-      ${selectCell({ className: "lesson-field", id: row.id, field: "classroom", value: row.classroom, values: editOptions.classrooms, emptyText: "未选", tdClass: "col-room", manualLabel: lessonManualLabel("classroom") })}
+      ${lessonCandidateSelectCell({ id: row.id, field: "time_slot", value: row.time_slot, values: editOptions.times, candidate, emptyText: "未选", tdClass: "col-time", manualLabel: lessonManualLabel("time_slot") })}
+      ${lessonCandidateSelectCell({ id: row.id, field: "classroom", value: row.classroom, values: editOptions.classrooms, candidate, emptyText: "未选", tdClass: "col-room", manualLabel: lessonManualLabel("classroom") })}
       ${selectCell({ className: "lesson-field", id: row.id, field: "grade", value: row.grade, values: editOptions.grades, emptyText: "未选", tdClass: "col-grade", manualLabel: lessonManualLabel("grade") })}
       ${selectCell({ className: "lesson-field", id: row.id, field: "subject", value: row.subject, values: editOptions.subjects, emptyText: "未选", tdClass: "col-subject", manualLabel: lessonManualLabel("subject") })}
-      ${inputCell({ className: "lesson-field wide", id: row.id, field: "student_names", value: row.student_names, tdClass: "col-students" })}
+      ${lessonScheduleStudentCell(row)}
       ${inputCell({ className: "lesson-field wide", id: row.id, field: "notes", value: row.notes, tdClass: "col-note" })}
       <td class="readonly col-index narrow">${cumulative}</td>
   `;
@@ -5170,7 +5351,14 @@ function getSubjectOptions(current = "", { includeCurrent = true } = {}) {
 }
 
 function getTimeOptions(current = "", { includeCurrent = true } = {}) {
-  return optionValuesWithCurrent(usedLessonLookupValues("times"), current, includeCurrent);
+  const valid = uniqueSorted((usedLessonLookupValues("times") || [])
+    .map((value) => normalizeTimeSlot(value))
+    .filter(Boolean));
+  const rawCurrent = String(current || "").trim();
+  const normalizedCurrent = normalizeTimeSlot(rawCurrent);
+  if (!includeCurrent || !rawCurrent) return valid;
+  // 已审计但无法解析的历史原值仍可在历史课程中显示；它不会进入普通候选池。
+  return uniqueSorted([...valid, normalizedCurrent || rawCurrent]);
 }
 
 function lessonFieldOptionValues(field, current = "", options = {}) {
@@ -5249,10 +5437,19 @@ function resolveManualSelectValue(select, previousValue = "") {
   const field = select.dataset.field || "";
   const label = lessonManualInputLabel(field);
   const entered = prompt(`请输入${label}`, "");
-  const value = String(entered || "").trim();
+  let value = String(entered || "").trim();
   if (!value) {
     setSelectValueWithOption(select, previousValue || "");
     return false;
+  }
+  if (field === "time_slot") {
+    const normalized = normalizeTimeSlot(value);
+    if (!normalized) {
+      alert("时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");
+      setSelectValueWithOption(select, previousValue || "");
+      return false;
+    }
+    value = normalized;
   }
   setSelectValueWithOption(select, value);
   return true;
@@ -5318,6 +5515,140 @@ function defaultLessonCreateDraft() {
   };
 }
 
+function lessonCreateCandidateFromDraft(draft = {}) {
+  const selected = normalizeNameList(draft.selected_students || []);
+  const manualStudents = parseLessonCreateStudents(draft.new_student_names || "");
+  return {
+    date: isDateValue(draft.date) ? draft.date : "",
+    time_slot: String(draft.time_slot || "").trim(),
+    teacher_name: String(draft.teacher_name || "").trim(),
+    classroom: String(draft.classroom || "").trim(),
+    student_names: normalizeLessonStudentNames([...selected, ...manualStudents].join("、")),
+    status: draft.status || "待上",
+  };
+}
+
+function lessonCreateFieldValue(modal, field) {
+  const select = modal?.querySelector(`.lesson-create-field[data-field="${field}"]`);
+  if (!select) return "";
+  if (select.value !== LESSON_CREATE_MANUAL_VALUE) return String(select.value || "").trim();
+  return String(modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${field}"]`)?.value || "").trim();
+}
+
+function lessonCreateCandidateFromModal(modal) {
+  const selectedStudents = lessonCreateSelectedStudentNames(modal);
+  const manualStudents = parseLessonCreateStudents(modal?.querySelector(".lesson-create-new-students")?.value || "");
+  return {
+    date: String(modal?.querySelector(".lesson-create-field[data-field=\"date\"]")?.value || "").trim(),
+    time_slot: lessonCreateFieldValue(modal, "time_slot"),
+    teacher_name: lessonCreateFieldValue(modal, "teacher_name"),
+    classroom: lessonCreateFieldValue(modal, "classroom"),
+    student_names: normalizeLessonStudentNames([...selectedStudents, ...manualStudents].join("、")),
+    status: lessonCreateFieldValue(modal, "status") || "待上",
+  };
+}
+
+function lessonCreateConflictHintHtml(info, candidate = {}) {
+  if (!candidate.date || !candidate.time_slot) {
+    return `<span>选择日期和时间后会实时检查老师、学生和教室冲突。</span>`;
+  }
+  if (!info?.conflict) return `<span>当前选择未发现冲突；候选项会随日期、老师、学生和教室即时排序。</span>`;
+  const reasons = (info.reasons || []).slice(0, 4).map((reason) => {
+    const detail = reason.lesson_label ? `（${reason.lesson_label}）` : "";
+    return `${conflictTypeLabel(reason.type)}${reason.entity ? `：${reason.entity}` : ""}${detail}`;
+  });
+  const more = (info.reasons?.length || 0) > reasons.length ? `；另有 ${info.reasons.length - reasons.length} 项` : "";
+  return `<strong>发现冲突</strong><span>${escapeHtml(`${reasons.join("；")}${more}`)}</span>`;
+}
+
+function rebuildLessonCreateSelect(select, optionsHtml) {
+  if (!select) return;
+  const wrapper = enhancedSelectWrapper(select);
+  const menu = customSelectMenu(wrapper);
+  closeCustomSelects();
+  menu?.remove();
+  wrapper?.remove();
+  delete select.dataset.customSelect;
+  select.classList.remove("native-select-hidden");
+  select.removeAttribute("tabindex");
+  select.removeAttribute("aria-hidden");
+  select.innerHTML = optionsHtml;
+  enhanceCustomSelects();
+}
+
+function lessonCreateConflictCandidateRows() {
+  const rows = new Map();
+  for (const row of [...(state?.lessons || []), ...(lessonCreateConflictRows || [])]) {
+    const key = Number(row?.id) || `${row?.date || ""}|${row?.time_slot || ""}|${row?.teacher_name || ""}|${row?.classroom || ""}|${row?.student_names || ""}`;
+    rows.set(key, row);
+  }
+  return [...rows.values()];
+}
+
+async function refreshLessonCreateConflictRows(modal) {
+  const candidate = lessonCreateCandidateFromModal(modal);
+  const requestId = ++lessonCreateConflictRequest;
+  if (!isDateValue(candidate.date)) {
+    lessonCreateConflictRows = [];
+    refreshLessonCreateConflictUi(modal);
+    return;
+  }
+  try {
+    const params = new URLSearchParams({ start: candidate.date, end: candidate.date, view: "lessons" });
+    const result = await request(`/api/lessons-range?${params.toString()}`);
+    if (requestId !== lessonCreateConflictRequest || !modal?.isConnected) return;
+    const latestDate = lessonCreateCandidateFromModal(modal).date;
+    if (latestDate !== candidate.date) return;
+    lessonCreateConflictRows = result.lessons || [];
+    refreshLessonCreateConflictUi(modal);
+  } catch {
+    // 当前已加载课程仍会参与本地检查；范围请求失败不阻断课程填写。
+  }
+}
+
+function refreshLessonCreateConflictUi(modal) {
+  if (!modal) return;
+  const candidate = lessonCreateCandidateFromModal(modal);
+  const conflictRows = lessonCreateConflictCandidateRows();
+  const definitions = [
+    { field: "time_slot", values: getTimeOptions(candidate.time_slot), manualLabel: lessonManualLabel("time_slot") },
+    { field: "classroom", values: getRoomOptions(candidate.classroom), manualLabel: lessonManualLabel("classroom") },
+  ];
+  for (const definition of definitions) {
+    const select = modal.querySelector(`.lesson-create-field[data-field="${definition.field}"]`);
+    if (!select) continue;
+    const currentSelectValue = String(select.value || "").trim();
+    const current = currentSelectValue === LESSON_CREATE_MANUAL_VALUE
+      ? LESSON_CREATE_MANUAL_VALUE
+      : lessonCreateFieldValue(modal, definition.field);
+    const markup = lessonCandidateSelectOptions({
+      field: definition.field,
+      values: definition.values,
+      current,
+      candidate,
+      emptyText: "未选",
+      manualLabel: definition.manualLabel,
+      rows: conflictRows,
+    });
+    rebuildLessonCreateSelect(select, markup);
+  }
+  const nextCandidate = lessonCreateCandidateFromModal(modal);
+  const info = buildLessonCandidateConflict(nextCandidate, { rows: conflictRows });
+  const hint = modal.querySelector(".lesson-create-conflict-hint");
+  if (hint) {
+    hint.classList.toggle("has-conflict", info.conflict);
+    hint.innerHTML = lessonCreateConflictHintHtml(info, nextCandidate);
+  }
+  if (lessonCreateDraft) {
+    lessonCreateDraft = {
+      ...lessonCreateDraft,
+      ...nextCandidate,
+      selected_students: lessonCreateSelectedStudentNames(modal),
+      new_student_names: modal.querySelector(".lesson-create-new-students")?.value || "",
+    };
+  }
+}
+
 function lessonCreateModal() {
   if (!lessonCreateDraft) return "";
   const draft = { ...defaultLessonCreateDraft(), ...lessonCreateDraft };
@@ -5328,6 +5659,8 @@ function lessonCreateModal() {
   const normalizedStudentSearch = studentSearch.trim().toLocaleLowerCase("zh-Hans-CN");
   const studentResultCount = students.filter((name) => String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch)).length;
   const status = draft.status || "待上";
+  const candidate = lessonCreateCandidateFromDraft({ ...draft, date });
+  const conflictInfo = buildLessonCandidateConflict(candidate, { rows: lessonCreateConflictCandidateRows() });
   return `
     <div class="modal-backdrop lesson-create-modal">
       <div class="modal-panel lesson-create-panel">
@@ -5350,7 +5683,7 @@ function lessonCreateModal() {
           <label class="filter-field">
             <span>时间</span>
             <select class="control lesson-create-field" data-field="time_slot">
-              ${manualSelectOptions(getTimeOptions(draft.time_slot), draft.time_slot, lessonManualLabel("time_slot"))}
+              ${lessonCandidateSelectOptions({ field: "time_slot", values: getTimeOptions(draft.time_slot), current: draft.time_slot, candidate, manualLabel: lessonManualLabel("time_slot") })}
             </select>
             <input class="control lesson-create-manual-field hidden" data-manual-field="time_slot" type="text" placeholder="请输入新时间">
           </label>
@@ -5364,7 +5697,7 @@ function lessonCreateModal() {
           <label class="filter-field">
             <span>教室</span>
             <select class="control lesson-create-field" data-field="classroom">
-              ${manualSelectOptions(getRoomOptions(draft.classroom), draft.classroom, lessonManualLabel("classroom"))}
+              ${lessonCandidateSelectOptions({ field: "classroom", values: getRoomOptions(draft.classroom), current: draft.classroom, candidate, manualLabel: lessonManualLabel("classroom") })}
             </select>
             <input class="control lesson-create-manual-field hidden" data-manual-field="classroom" type="text" placeholder="请输入新教室名称">
           </label>
@@ -5413,6 +5746,9 @@ function lessonCreateModal() {
             <span>备注</span>
             <input class="control lesson-create-field" data-field="notes" type="text" value="${escapeHtml(draft.notes)}">
           </label>
+        </div>
+        <div class="lesson-create-conflict-hint ${conflictInfo.conflict ? "has-conflict" : ""}" aria-live="polite">
+          ${lessonCreateConflictHintHtml(conflictInfo, candidate)}
         </div>
         <div class="modal-actions">
           <button class="btn lesson-create-cancel" type="button">取消</button>
@@ -5763,10 +6099,10 @@ function visibleConflictIssues(issues = []) {
 
 function parseLessonTimeRange(value) {
   const raw = String(value || "")
-    .replaceAll("：", ":")
+    .replace(/[：﹕]/g, ":")
     .replace(/[—–~～至到]/g, "-")
     .replace(/\s+/g, "");
-  if (!raw) return null;
+  if (!raw || !/^[^-]+-[^-]+$/.test(raw)) return null;
   const toMinutes = (token) => {
     const match = String(token || "").match(/^(\d{1,2})(?::?(\d{2}))?$/);
     if (!match) return null;
@@ -5775,21 +6111,303 @@ function parseLessonTimeRange(value) {
     if (hour > 23 || minute > 59) return null;
     return hour * 60 + minute;
   };
-  const parts = raw.split("-").filter(Boolean);
-  let start = null;
-  let end = null;
-  if (parts.length >= 2) {
-    start = toMinutes(parts[0]);
-    end = toMinutes(parts[1]);
-  } else {
-    const tokens = [...raw.matchAll(/\d{1,2}:?\d{0,2}/g)].map((item) => item[0]);
-    if (tokens.length >= 2) {
-      start = toMinutes(tokens[0]);
-      end = toMinutes(tokens[1]);
-    }
-  }
+  const [startToken, endToken] = raw.split("-");
+  const start = toMinutes(startToken);
+  const end = toMinutes(endToken);
   if (start == null || end == null || end <= start) return null;
   return { start, end };
+}
+
+/*
+ * 课程时间在前端的唯一规范：HH:mm-HH:mm。
+ * 解析失败时返回空字符串，让调用方可以保留历史原值作展示、或在保存新值时明确提示用户。
+ */
+function normalizeTimeSlot(value) {
+  const range = parseLessonTimeRange(value);
+  if (!range) return "";
+  const format = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  return `${format(range.start)}-${format(range.end)}`;
+}
+
+function normalizeLessonStudentNames(value) {
+  return uniqueSorted(splitStudents(value)).join("、");
+}
+
+function isLessonConflictActive(row = {}) {
+  return rowStatus(row) !== "请假"
+    && String(row.lesson_status || "").trim() !== "休息"
+    && !String(row.course_status || "").trim().startsWith("暂停");
+}
+
+function lessonCandidateValue(field, value) {
+  const raw = String(value || "").trim();
+  return field === "time_slot" ? (normalizeTimeSlot(raw) || raw) : raw;
+}
+
+function lessonCandidateContext(values = {}) {
+  return {
+    id: values.id,
+    date: String(values.date || "").trim(),
+    time_slot: lessonCandidateValue("time_slot", values.time_slot),
+    teacher_name: String(values.teacher_name || "").trim(),
+    classroom: normalizeRoom(values.classroom),
+    student_names: normalizeLessonStudentNames(values.student_names),
+    status: values.status || rowStatus(values),
+    lesson_status: values.lesson_status || "",
+    course_status: values.course_status || "",
+  };
+}
+
+function lessonCandidateConflictLessonLabel(row = {}) {
+  return [
+    row.date || "未填日期",
+    row.time_slot || "未填时间",
+    row.teacher_name || "未填老师",
+    row.classroom || "未填教室",
+    `${row.grade || ""}${row.subject || ""}`,
+  ].filter(Boolean).join(" · ");
+}
+
+/*
+ * 新增课程和排课行内编辑共用的候选冲突检查。
+ * 只依赖当前已加载课程，不发 bootstrap 请求；最终保存仍由后端再校验。
+ */
+function buildLessonCandidateConflict(candidate = {}, { excludeLessonId = null, rows = state?.lessons || [] } = {}) {
+  const target = lessonCandidateContext(candidate);
+  const reasons = [];
+  const relatedLessons = [];
+  const seen = new Set();
+  const targetRange = parseLessonTimeRange(target.time_slot);
+  const addReason = (type, entity, row) => {
+    const key = `${type}|${row.id || ""}|${entity || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    reasons.push({
+      type,
+      entity,
+      lesson_id: row.id,
+      lesson_label: lessonCandidateConflictLessonLabel(row),
+    });
+    relatedLessons.push(row);
+  };
+
+  if (!isLessonConflictActive(target)) {
+    return { conflict: false, invalid_time: false, reasons, relatedLessons, candidate: target };
+  }
+  if (target.time_slot && !targetRange) {
+    reasons.push({
+      type: "invalid_time",
+      entity: target.time_slot,
+      lesson_id: null,
+      lesson_label: "时间格式无法识别，请使用 HH:mm-HH:mm",
+    });
+    return { conflict: true, invalid_time: true, reasons, relatedLessons, candidate: target };
+  }
+  if (!target.date || !targetRange) {
+    return { conflict: false, invalid_time: false, reasons, relatedLessons, candidate: target };
+  }
+
+  const targetStudents = new Set(splitStudents(target.student_names));
+  const excludedId = excludeLessonId == null ? Number(target.id) : Number(excludeLessonId);
+  for (const row of rows || []) {
+    if (!isLessonConflictActive(row) || Number(row.id) === excludedId || row.date !== target.date) continue;
+    const rowRange = parseLessonTimeRange(normalizeTimeSlot(row.time_slot) || row.time_slot);
+    if (!rowRange || !(targetRange.start < rowRange.end && rowRange.start < targetRange.end)) continue;
+    if (target.teacher_name && String(row.teacher_name || "").trim() === target.teacher_name) {
+      addReason("teacher", target.teacher_name, row);
+    }
+    const room = normalizeRoom(row.classroom);
+    if (target.classroom && room && room === target.classroom) {
+      addReason("classroom", target.classroom, row);
+    }
+    const sharedStudents = splitStudents(row.student_names).filter((name) => targetStudents.has(name));
+    for (const name of sharedStudents) addReason("student", name, row);
+  }
+  return { conflict: reasons.length > 0, invalid_time: false, reasons, relatedLessons, candidate: target };
+}
+
+function lessonCandidateConflictText(info, { limit = 3 } = {}) {
+  if (!info?.conflict) return "当前候选未发现冲突";
+  const text = (info.reasons || []).slice(0, limit).map((reason) => {
+    if (reason.type === "invalid_time") return "时间格式无效，请使用 HH:mm-HH:mm";
+    const entity = reason.entity ? `：${reason.entity}` : "";
+    return `${conflictTypeLabel(reason.type)}${entity}`;
+  });
+  const more = (info.reasons?.length || 0) > limit ? ` 等 ${info.reasons.length} 项` : "";
+  return `${text.join("；")}${more}`;
+}
+
+function sortLessonCandidateOptions({ field, values = [], current = "", candidate = {}, excludeLessonId = null, includeCurrent = true, rows } = {}) {
+  const seen = new Set();
+  const normalizedValues = [];
+  const push = (value) => {
+    const normalized = lessonCandidateValue(field, value);
+    if (!normalized || normalized === LESSON_CREATE_MANUAL_VALUE || seen.has(normalized)) return;
+    seen.add(normalized);
+    normalizedValues.push(normalized);
+  };
+  (values || []).forEach(push);
+  if (includeCurrent) push(current);
+  return normalizedValues.map((value) => {
+    const conflict = buildLessonCandidateConflict(
+      { ...candidate, [field]: value },
+      { excludeLessonId, rows },
+    );
+    return {
+      value,
+      conflict,
+      label: `${value}（${conflict.conflict ? "冲突" : "可选"}）`,
+      title: conflict.conflict ? lessonCandidateConflictText(conflict) : "当前选课信息下可选",
+    };
+  }).sort((a, b) => {
+    const status = Number(a.conflict.conflict) - Number(b.conflict.conflict);
+    return status || a.value.localeCompare(b.value, "zh-Hans-CN");
+  });
+}
+
+function lessonCandidateSelectOptions({
+  field,
+  values = [],
+  current = "",
+  candidate = {},
+  emptyText = "未选",
+  manualLabel = "",
+  includeCurrent = true,
+  excludeLessonId = null,
+  rows,
+} = {}) {
+  const selected = lessonCandidateValue(field, current);
+  const optionsForField = sortLessonCandidateOptions({ field, values, current: selected, candidate, excludeLessonId, includeCurrent, rows });
+  return [
+    emptyText ? `<option value="">${escapeHtml(emptyText)}</option>` : "",
+    ...optionsForField.map((option) => `
+      <option value="${escapeHtml(option.value)}" title="${escapeHtml(option.title)}" data-candidate-conflict="${option.conflict.conflict ? "1" : "0"}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>
+    `),
+    manualLabel ? `<option value="${LESSON_CREATE_MANUAL_VALUE}" ${current === LESSON_CREATE_MANUAL_VALUE ? "selected" : ""}>＋ ${escapeHtml(manualLabel)}</option>` : "",
+  ].join("");
+}
+
+function lessonCandidateSelectCell({ id, field, value, values, candidate, emptyText = "未选", tdClass = "", manualLabel = "" }) {
+  return `
+    <td class="${tdClass}">
+      <select class="cell-select lesson-field lesson-candidate-field" data-id="${escapeHtml(String(id))}" data-field="${escapeHtml(field)}">
+        ${lessonCandidateSelectOptions({
+          field,
+          values,
+          current: value,
+          candidate,
+          emptyText,
+          manualLabel,
+          excludeLessonId: id,
+        })}
+      </select>
+    </td>
+  `;
+}
+
+function lessonScheduleStudentCell(row) {
+  const selected = normalizeNameList(splitStudents(row.student_names));
+  const values = getActiveStudentOptions(selected, { includeCurrent: true });
+  const label = selected.length > 3 ? `${selected.slice(0, 3).join("、")} 等 ${selected.length} 人` : (selected.join("、") || "选择学生");
+  return `
+    <td class="col-students lesson-schedule-students">
+      <span class="multi-select schedule-student-popover" data-placeholder="选择学生">
+        <button class="control multi-select-toggle lesson-schedule-student-field" type="button" aria-expanded="false">
+          <span class="multi-select-label">${escapeHtml(label)}</span><span class="multi-select-caret">⌄</span>
+        </button>
+        <input class="multi-select-value lesson-field" data-id="${escapeHtml(String(row.id))}" data-field="student_names" type="hidden" value="${escapeHtml(selected.join("\n"))}">
+        <span class="multi-select-menu schedule-student-menu" role="dialog" aria-label="学生选择">
+          <div class="lesson-student-picker-header">
+            <div class="lesson-student-picker-search"><input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索在读学生"><button class="btn schedule-student-search-clear" type="button">清空</button></div>
+            <div class="schedule-student-stats">已选择 <b data-student-selected-count>${selected.length}</b> 人 · 当前结果 <b data-student-result-count>${values.length}</b> 人</div>
+          </div>
+          <div class="schedule-student-options lesson-student-picker-list">
+            ${values.map((name) => `<button class="multi-select-option ${selected.includes(name) ? "selected" : ""}" type="button" data-value="${escapeHtml(name)}" title="${escapeHtml(name)}"><span class="multi-select-check">${selected.includes(name) ? "✓" : ""}</span><span>${escapeHtml(name)}</span></button>`).join("") || `<span class="multi-select-empty">暂无在读学生</span>`}
+          </div>
+          <div class="lesson-student-picker-add"><textarea class="control schedule-student-new-names" rows="2" placeholder="新增学生：用逗号、顿号、空格或换行分隔"></textarea></div>
+          <div class="schedule-student-actions lesson-student-picker-footer"><button class="btn schedule-student-cancel" type="button">取消</button><button class="btn primary schedule-student-confirm" type="button">确认</button></div>
+        </span>
+      </span>
+    </td>`;
+}
+
+function bindScheduleStudentPopover(select) {
+  if (!select || select.dataset.studentPopoverBound === "true") return;
+  select.dataset.studentPopoverBound = "true";
+  const toggle = select.querySelector(".multi-select-toggle");
+  const hidden = select.querySelector(".multi-select-value");
+  const menu = select.querySelector(".multi-select-menu");
+  const search = select.querySelector(".multi-select-search");
+  const newNames = select.querySelector(".schedule-student-new-names");
+  let draft = normalizeNameList(hidden?.value || "");
+  let composing = false;
+  const sync = () => {
+    const keyword = String(search?.value || "").trim().toLocaleLowerCase("zh-Hans-CN");
+    const selectedSet = new Set(draft);
+    let visible = 0;
+    menu?.querySelectorAll(".multi-select-option").forEach((option) => {
+      const name = String(option.dataset.value || "");
+      const shown = !keyword || name.toLocaleLowerCase("zh-Hans-CN").includes(keyword);
+      option.hidden = !shown;
+      if (shown) visible += 1;
+      option.classList.toggle("selected", selectedSet.has(name));
+      option.querySelector(".multi-select-check").textContent = selectedSet.has(name) ? "✓" : "";
+    });
+    menu?.querySelector("[data-student-selected-count]") && (menu.querySelector("[data-student-selected-count]").textContent = String(draft.length));
+    menu?.querySelector("[data-student-result-count]") && (menu.querySelector("[data-student-result-count]").textContent = String(visible));
+  };
+  const close = () => {
+    if (search) search.value = "";
+    closeMultiSelectMenu(select);
+  };
+  toggle?.addEventListener("click", (event) => {
+    event.preventDefault();
+    document.querySelectorAll(".schedule-student-popover.open").forEach((item) => { if (item !== select) closeMultiSelectMenu(item); });
+    if (select.classList.contains("open")) return close();
+    draft = normalizeNameList(hidden?.value || "");
+    if (search) search.value = "";
+    select.classList.add("open");
+    toggle.setAttribute("aria-expanded", "true");
+    mountFloatingMultiSelectMenu(select);
+    sync();
+    positionFloatingMultiSelectMenu(select);
+    requestAnimationFrame(() => search?.focus({ preventScroll: true }));
+  });
+  search?.addEventListener("compositionstart", () => { composing = true; });
+  search?.addEventListener("compositionend", () => { composing = false; sync(); });
+  search?.addEventListener("input", () => { if (!composing) sync(); });
+  search?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.preventDefault();
+    if (event.key === "Escape") { event.preventDefault(); close(); }
+  });
+  menu?.addEventListener("click", (event) => event.stopPropagation());
+  menu?.querySelector(".schedule-student-search-clear")?.addEventListener("click", () => {
+    if (search) search.value = "";
+    sync();
+    search?.focus({ preventScroll: true });
+  });
+  menu?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    close();
+    toggle?.focus({ preventScroll: true });
+  });
+  menu?.querySelectorAll(".multi-select-option").forEach((option) => option.addEventListener("click", () => {
+    const value = option.dataset.value || "";
+    draft = draft.includes(value) ? draft.filter((name) => name !== value) : normalizeNameList([...draft, value]);
+    sync();
+  }));
+  menu?.querySelector(".schedule-student-cancel")?.addEventListener("click", close);
+  menu?.querySelector(".schedule-student-confirm")?.addEventListener("click", () => {
+    const added = parseLessonCreateStudents(newNames?.value || "");
+    const next = normalizeNameList([...draft, ...added]);
+    if (hidden) {
+      hidden.value = normalizeLessonStudentNames(next.join("、"));
+      hidden.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    close();
+  });
+  sync();
 }
 
 function scheduleConflictLessonDetail(row) {
@@ -5982,6 +6600,16 @@ function scheduleConflictPanel(issues) {
 }
 
 function lessonConflictState(rows = visibleLessonRows()) {
+  return calculateVisibleLessonConflicts(rows);
+}
+
+// 课程总表的冲突提示必须与表格使用同一份可见课程集合；服务端全月冲突报告
+// 仍用于最终保存校验，不能直接拿来作为当前筛选视图的统计或弹窗数据。
+function getVisibleLessonsForConflictCheck() {
+  return visibleLessonRows();
+}
+
+function calculateVisibleLessonConflicts(rows = getVisibleLessonsForConflictCheck()) {
   return visibleConflictIssues(localScheduleConflicts(rows));
 }
 
@@ -6038,8 +6666,7 @@ function conflictIssueMarkup(issue) {
         </div>
         <div class="conflict-message">${escapeHtml(issue.message || "")}</div>
       </div>
-      ${ids.length ? `<button class="btn conflict-focus" type="button" data-lesson-ids="${escapeHtml(ids.join(","))}">定位课程</button>` : ""}
-      ${details.length ? `<div class="conflict-lessons">${details.map(conflictLessonDetailMarkup).join("")}</div>` : ""}
+      ${details.length ? `<div class="conflict-lessons">${details.map((lesson) => `<div class="conflict-lesson-entry">${conflictLessonDetailMarkup(lesson)}${Number(lesson.id) ? `<button class="btn conflict-edit-lesson" type="button" data-lesson-id="${Number(lesson.id)}" ${isReadonlyUser() ? "disabled title=\"只读账号不能修改\"" : ""}>${isReadonlyUser() ? "只读查看" : "处理"}</button>` : ""}</div>`).join("")}</div>` : (ids.length ? `<button class="btn conflict-edit-lesson" type="button" data-lesson-id="${ids[0]}" ${isReadonlyUser() ? "disabled" : ""}>${isReadonlyUser() ? "只读查看" : "处理"}</button>` : "")}
     </div>
   `;
 }
@@ -6082,6 +6709,117 @@ function lessonConflictModal(rows) {
       </div>
     </div>
   `;
+}
+
+function syncLessonConflictModalBodyState() {
+  document.body.classList.toggle("lesson-conflict-modal-open", Boolean(lessonConflictModalOpen || lessonConflictEditDraft));
+}
+
+function openVisibleLessonConflictsModal() {
+  if (lessonConflictModalOpen) return;
+  lessonConflictEditDraft = null;
+  lessonConflictModalOpen = true;
+  updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+  syncLessonConflictModalBodyState();
+}
+
+function closeVisibleLessonConflictsModal() {
+  const changed = lessonConflictModalOpen || lessonConflictEditDraft;
+  lessonConflictModalOpen = false;
+  lessonConflictEditDraft = null;
+  if (changed) updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+  syncLessonConflictModalBodyState();
+}
+
+function openConflictLessonEditor(lessonId) {
+  if (isReadonlyUser() || !lessonConflictModalOpen) return;
+  const id = Number(lessonId);
+  const lesson = getVisibleLessonsForConflictCheck().find((row) => Number(row.id) === id)
+    || state.lessons.find((row) => Number(row.id) === id)
+    || (state.schedule_conflicts?.issues || []).flatMap((issue) => issue.lesson_details || []).find((row) => Number(row.id) === id);
+  if (!lesson) return alert("未找到该课程，请刷新后重试");
+  lessonConflictEditDraft = { ...lesson, status: lesson.status || rowStatus(lesson) };
+  updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+  syncLessonConflictModalBodyState();
+}
+
+function closeConflictLessonEditor() {
+  if (!lessonConflictEditDraft) return;
+  lessonConflictEditDraft = null;
+  updateLessonModalRegion();
+  syncLessonConflictModalBodyState();
+}
+
+async function saveConflictLessonEditor(button) {
+  if (!lessonConflictEditDraft || isReadonlyUser() || button.disabled) return;
+  const modal = button.closest(".lesson-conflict-edit-modal");
+  const payload = { ...lessonConflictEditDraft };
+  modal?.querySelectorAll(".conflict-edit-field").forEach((input) => {
+    payload[input.dataset.field] = input.value;
+  });
+  const selected = normalizeNameList(modal?.querySelector(".conflict-edit-students .multi-select-value")?.value || "");
+  const added = parseLessonCreateStudents(modal?.querySelector(".conflict-edit-new-students")?.value || "");
+  payload.student_names = normalizeLessonStudentNames([...selected, ...added].join("、"));
+  payload.time_slot = normalizeTimeSlot(payload.time_slot);
+  if (!payload.date || !payload.time_slot) return alert("请填写日期和规范的时间（HH:mm-HH:mm）");
+  const localConflict = buildLessonCandidateConflict(payload, { excludeLessonId: payload.id });
+  if (localConflict.conflict && !confirm(`修改后仍有冲突：${lessonCandidateConflictText(localConflict)}。是否继续保存？`)) return;
+  button.disabled = true;
+  try {
+    let updated;
+    try {
+      updated = await request(`/api/lessons/${payload.id}`, { method: "PATCH", body: payload });
+    } catch (error) {
+      if (error?.status !== 409 || !error?.data?.schedule_conflicts?.issue_count) throw error;
+      if (!confirm("服务端发现最新冲突，仍要保存吗？")) { button.disabled = false; return; }
+      updated = await request(`/api/lessons/${payload.id}`, { method: "PATCH", body: { ...payload, allow_conflicts: true } });
+    }
+    patchLessonInState(updated);
+    markLessonDerivedDataDirty();
+    lessonConflictEditDraft = null;
+    await refreshLessonConflicts();
+    updateLessonsViewDom({ refreshFilter: false, refreshSummary: true, refreshToolbar: true, refreshTable: true, refreshModals: true });
+    syncLessonConflictModalBodyState();
+  } catch (error) {
+    button.disabled = false;
+    alert(error.message || "保存失败");
+  }
+}
+
+function lessonConflictEditModal() {
+  const draft = lessonConflictEditDraft;
+  if (!draft) return "";
+  const candidate = lessonCandidateContext(draft);
+  const students = normalizeNameList(splitStudents(draft.student_names));
+  const studentSelector = multiSelectControl({
+    className: "conflict-edit-students",
+    field: "student_names",
+    selected: students,
+    values: getActiveStudentOptions(students, { includeCurrent: true }),
+    placeholder: "选择学生",
+    clearLabel: "清空选择",
+    dataAttr: "field",
+    searchable: true,
+    searchPlaceholder: "搜索在读学生",
+  });
+  return `
+    <div class="modal-backdrop lesson-conflict-edit-modal">
+      <div class="modal-panel lesson-conflict-edit-panel">
+        <div class="modal-head"><div><div class="modal-title">处理冲突课程</div><div class="modal-subtitle">修改只保存在此弹窗草稿；确认后由服务端进行最终冲突校验。</div></div><button class="btn conflict-edit-cancel" type="button">取消</button></div>
+        <div class="copy-form conflict-edit-form">
+          <label class="filter-field"><span>日期</span><input class="control conflict-edit-field" data-field="date" type="date" value="${escapeHtml(draft.date || "")}"></label>
+          <label class="filter-field"><span>授课老师</span><select class="control conflict-edit-field" data-field="teacher_name">${manualSelectOptions(getActiveTeacherOptions(draft.teacher_name), draft.teacher_name, lessonManualLabel("teacher_name"))}</select></label>
+          <label class="filter-field"><span>时间</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="time_slot">${lessonCandidateSelectOptions({ field: "time_slot", values: getTimeOptions(draft.time_slot), current: draft.time_slot, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("time_slot") })}</select></label>
+          <label class="filter-field"><span>教室</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="classroom">${lessonCandidateSelectOptions({ field: "classroom", values: getRoomOptions(draft.classroom), current: draft.classroom, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("classroom") })}</select></label>
+          <label class="filter-field"><span>年级</span><select class="control conflict-edit-field" data-field="grade">${manualSelectOptions(getGradeOptions(draft.grade), draft.grade, lessonManualLabel("grade"))}</select></label>
+          <label class="filter-field"><span>科目</span><select class="control conflict-edit-field" data-field="subject">${manualSelectOptions(getSubjectOptions(draft.subject), draft.subject, lessonManualLabel("subject"))}</select></label>
+          <label class="filter-field"><span>状态</span><select class="control conflict-edit-field" data-field="status">${manualSelectOptions(getStatusOptions(draft.status || rowStatus(draft)), draft.status || rowStatus(draft), lessonManualLabel("status"), { emptyText: "" })}</select></label>
+          <label class="filter-field"><span>备注</span><textarea class="control conflict-edit-field" data-field="notes" rows="2">${escapeHtml(draft.notes || "")}</textarea></label>
+          <label class="filter-field conflict-edit-student-field"><span>学生</span>${studentSelector}<textarea class="control conflict-edit-new-students" rows="2" placeholder="新增学生：用逗号、顿号、空格或换行分隔"></textarea></label>
+        </div>
+        <div class="modal-actions"><button class="btn conflict-edit-cancel" type="button">取消</button><button class="btn primary conflict-edit-save" type="button">保存修改</button></div>
+      </div>
+    </div>`;
 }
 
 function timeSlotSortValue(value) {
@@ -8502,7 +9240,11 @@ function renderAppearance() {
 function settingsArray(key) {
   try {
     const parsed = JSON.parse(state?.settings?.[key] || "[]");
-    return Array.isArray(parsed) ? uniqueSorted(parsed) : [];
+    if (!Array.isArray(parsed)) return [];
+    if (key === "custom_time_slots") {
+      return uniqueSorted(parsed.map((value) => normalizeTimeSlot(value)).filter(Boolean));
+    }
+    return uniqueSorted(parsed);
   } catch {
     return [];
   }
@@ -8519,34 +9261,35 @@ function baseDataDefinitions() {
       title: "教室",
       settingKey: "custom_classrooms",
       placeholder: "例如 C6",
-      values: uniqueSorted([...(state.lookups?.classrooms || []), ...(state.used_lesson_lookups?.classrooms || [])]),
+      historicalValues: uniqueSorted(state.used_lesson_lookups?.classrooms || []),
     },
     {
       key: "subjects",
       title: "科目",
       settingKey: "custom_subjects",
       placeholder: "例如 政治",
-      values: uniqueSorted([...(state.lookups?.subjects || []), ...(state.used_lesson_lookups?.subjects || [])]),
+      historicalValues: uniqueSorted(state.used_lesson_lookups?.subjects || []),
     },
     {
       key: "times",
       title: "常用时间",
       settingKey: "custom_time_slots",
       placeholder: "例如 19:00-21:00",
-      values: uniqueSorted([...(state.lookups?.times || []), ...(state.used_lesson_lookups?.times || [])]),
+      historicalValues: uniqueSorted((state.used_lesson_lookups?.times || []).map((value) => normalizeTimeSlot(value)).filter(Boolean)),
     },
     {
       key: "statuses",
       title: "课程状态",
       settingKey: "custom_course_statuses",
       placeholder: "例如 调课",
-      values: uniqueSorted([...(state.lookups?.status || defaultCourseStatuses)]),
+      historicalValues: uniqueSorted(state.used_lesson_lookups?.statuses || []),
     },
   ];
 }
 
 function baseDataCard(def) {
   const customValues = settingsArray(def.settingKey);
+  const historicalValues = def.historicalValues || [];
   return `
     <div class="base-data-card" data-setting-key="${escapeHtml(def.settingKey)}">
       <div class="section-head base-data-card-head">
@@ -8568,9 +9311,9 @@ function baseDataCard(def) {
           </span>
         `).join("") || `<span class="muted-tip">暂无自定义值</span>`}
       </div>
-      <div class="base-data-list-title">当前候选（默认 + 自定义 + 历史使用）</div>
+      <div class="base-data-list-title">历史使用 / 当前候选</div>
       <div class="base-data-chip-list">
-        ${def.values.map((value) => `<span class="neutral-chip">${escapeHtml(value)}</span>`).join("") || `<span class="muted-tip">暂无候选</span>`}
+        ${historicalValues.map((value) => `<span class="neutral-chip">${escapeHtml(value)}</span>`).join("") || `<span class="muted-tip">暂无历史使用值</span>`}
       </div>
     </div>
   `;
@@ -12142,7 +12885,8 @@ function wireEvents() {
       dashboardGoTo(button.dataset.view || "dashboard", filter);
     });
   });
-  document.querySelectorAll(".multi-select").forEach(bindMultiSelectControl);
+  document.querySelectorAll(".multi-select:not(.schedule-student-popover)").forEach(bindMultiSelectControl);
+  document.querySelectorAll(".schedule-student-popover").forEach(bindScheduleStudentPopover);
 
   if (!multiSelectEventsBound) {
     multiSelectEventsBound = true;
@@ -12335,34 +13079,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".nav-btn").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const group = navGroups.find((item) => item.key === button.dataset.group);
-      if (!group) return;
-      const previousView = view;
-      activeNavGroup = group.key;
-      const allowedViews = groupViews(group).filter(([key]) => canView(key));
-      if (!allowedViews.some(([key]) => key === view)) {
-        view = allowedViews[0]?.[0] || firstAllowedView();
-      }
-      localStorage.setItem("liming:view", view);
-      localStorage.setItem("liming:nav-group", activeNavGroup);
-      if (view !== previousView) await load({ refreshGlobal: false });
-      else render();
-    });
-  });
-
-  document.querySelectorAll(".nav-sub-btn").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const nextView = button.dataset.view;
-      view = nextView;
-      activeNavGroup = button.dataset.group || groupForView(view).key;
-      localStorage.setItem("liming:view", view);
-      localStorage.setItem("liming:nav-group", activeNavGroup);
-      await load({ refreshGlobal: false });  // 进入页面时只加载当前页面需要的数据
-    });
-  });
-
   document.querySelectorAll(".month-select").forEach((select) => {
     select.addEventListener("change", async () => {
       const oldMonth = activeMonth;
@@ -12419,10 +13135,17 @@ function wireEvents() {
       const settingKey = button.dataset.settingKey;
       const def = baseDataDefinitions().find((item) => item.settingKey === settingKey);
       const input = document.querySelector(`.base-data-new-value[data-setting-key="${selectorEscape(settingKey)}"]`);
-      const value = String(input?.value || "").trim();
+      let value = String(input?.value || "").trim();
       if (!def || !value) return alert("请先填写有效内容");
-      if (def.values.some((item) => item === value)) return alert("该值已存在，不能重复新增");
-      const nextValues = uniqueSorted([...settingsArray(settingKey), value]);
+      if (settingKey === "custom_time_slots") {
+        const normalized = normalizeTimeSlot(value);
+        if (!normalized) return alert("常用时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");
+        value = normalized;
+      }
+      if ([...settingsArray(settingKey), ...(def.historicalValues || [])].some((item) => item === value)) return alert("该值已存在，不能重复新增");
+      const nextValues = settingKey === "custom_time_slots"
+        ? uniqueSorted([...settingsArray(settingKey), value].map((item) => normalizeTimeSlot(item)).filter(Boolean))
+        : uniqueSorted([...settingsArray(settingKey), value]);
       try {
         await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
         await load();
@@ -13865,7 +14588,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".user-reset-password").forEach((button) => {
+  document.querySelectorAll(".user-reset-password-legacy-handler").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest(".user-row");
       const password = row.querySelector(".user-reset-password-value")?.value || "";
@@ -13875,7 +14598,7 @@ function wireEvents() {
       rerenderContent(renderUserAdmin);
     });
   });
-  document.querySelectorAll(".user-delete").forEach((button) => {
+  document.querySelectorAll(".user-delete-legacy-handler").forEach((button) => {
     button.addEventListener("click", async () => {
       const username = button.dataset.username || "";
       if (!confirm(`确定删除账号 ${username} 吗？删除后该账号将无法登录，但不会删除教师档案和课程数据。`)) return;
@@ -13892,18 +14615,25 @@ function wireEvents() {
   document.querySelectorAll(".lesson-filter-multi").forEach((input) => {
     input.addEventListener("change", async () => {
       const field = input.dataset.filterField;
-      if (field !== "teacher_names") return;
       focusedLessonIds = [];
-      const teacherNames = normalizeNameList(input.value || "");
-      lessonFilter = {
+      const selectedNames = normalizeNameList(input.value || "");
+      const nextFilter = {
         ...lessonFilter,
         month_key: lessonFilter.month_key || state.settings.month_key,
-        teacher: teacherNames.join("、"),
-        teacher_names: teacherNames,
         date_preset_initialized: true,
       };
+      if (field === "teacher_names") {
+        nextFilter.teacher = selectedNames.join("、");
+        nextFilter.teacher_names = selectedNames;
+      } else if (field === "student_names") {
+        nextFilter.student = selectedNames.join("、");
+        nextFilter.student_names = selectedNames;
+      } else {
+        return;
+      }
+      lessonFilter = nextFilter;
       saveLessonFilter();
-      await refreshLessonsView();
+      await refreshLessonsView({ reloadRange: field === "student_names" });
     });
   });
 
@@ -14138,9 +14868,10 @@ function wireEvents() {
 
   document.querySelectorAll(".reset-lesson-filter").forEach((button) => {
     button.addEventListener("click", async () => {
+      const hadStudentSelection = normalizeNameList(lessonFilter.student_names || []).length > 0;
       focusedLessonIds = [];
       resetLessonFilter();
-      await refreshLessonsView({ reloadRange: !lessonRangeLoaded() });
+      await refreshLessonsView({ reloadRange: hadStudentSelection || !lessonRangeLoaded() });
     });
   });
 
@@ -14155,28 +14886,57 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".lesson-conflict-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (button.disabled) return;
-      lessonConflictModalOpen = true;
-      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+  if (!lessonConflictEventsBound) {
+    lessonConflictEventsBound = true;
+    contentEl.addEventListener("click", (event) => {
+      const target = event.target;
+      const conflictButton = target.closest(".lesson-conflict-btn");
+      if (conflictButton) {
+        event.preventDefault();
+        if (!conflictButton.disabled) openVisibleLessonConflictsModal();
+        return;
+      }
+      const closeButton = target.closest(".lesson-conflict-modal-close");
+      if (closeButton) {
+        event.preventDefault();
+        closeVisibleLessonConflictsModal();
+        return;
+      }
+      const editButton = target.closest(".conflict-edit-lesson");
+      if (editButton) {
+        event.preventDefault();
+        if (!editButton.disabled) openConflictLessonEditor(editButton.dataset.lessonId);
+        return;
+      }
+      const editCancelButton = target.closest(".conflict-edit-cancel");
+      if (editCancelButton) {
+        event.preventDefault();
+        closeConflictLessonEditor();
+        return;
+      }
+      const editSaveButton = target.closest(".conflict-edit-save");
+      if (editSaveButton) {
+        event.preventDefault();
+        saveConflictLessonEditor(editSaveButton);
+        return;
+      }
+      if (target.classList?.contains("lesson-conflict-edit-modal")) {
+        closeConflictLessonEditor();
+      } else if (target.classList?.contains("lesson-conflict-modal")) {
+        closeVisibleLessonConflictsModal();
+      }
     });
-  });
-
-  document.querySelectorAll(".lesson-conflict-modal-close").forEach((button) => {
-    button.addEventListener("click", () => {
-      lessonConflictModalOpen = false;
-      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (lessonConflictEditDraft) {
+        event.preventDefault();
+        closeConflictLessonEditor();
+      } else if (lessonConflictModalOpen) {
+        event.preventDefault();
+        closeVisibleLessonConflictsModal();
+      }
     });
-  });
-
-  document.querySelectorAll(".lesson-conflict-modal").forEach((modal) => {
-    modal.addEventListener("click", (event) => {
-      if (event.target !== modal) return;
-      lessonConflictModalOpen = false;
-      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
-    });
-  });
+  }
 
   document.querySelectorAll(".clear-focused-lessons").forEach((button) => {
     button.addEventListener("click", () => {
@@ -14185,19 +14945,16 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".conflict-focus").forEach((button) => {
+  // 矩阵课表中的旧冲突摘要仍保留“定位课程”能力；课程总表弹窗本身已改为独立编辑弹窗。
+  document.querySelectorAll(".schedule-conflict-panel .conflict-focus").forEach((button) => {
     button.addEventListener("click", () => {
-      focusedLessonIds = String(button.dataset.lessonIds || "")
-        .split(",")
-        .map((id) => Number(id))
-        .filter(Boolean);
+      focusedLessonIds = String(button.dataset.lessonIds || "").split(",").map(Number).filter(Boolean);
       if (!focusedLessonIds.length) return;
-      lessonConflictModalOpen = false;
       view = "lessons";
       activeNavGroup = "schedule";
       localStorage.setItem("liming:view", view);
       localStorage.setItem("liming:nav-group", activeNavGroup);
-      updateLessonsViewDom();
+      render();
     });
   });
 
@@ -14359,16 +15116,19 @@ function wireEvents() {
       try {
         const lessons = rows.map((row) => {
           if (!isDateValue(row.date)) throw new Error(`目标日期无效：${row.date || "空"}`);
+          const rawTimeSlot = String(row.time_slot || "").trim();
+          const timeSlot = rawTimeSlot ? normalizeTimeSlot(rawTimeSlot) : "";
+          if (rawTimeSlot && !timeSlot) throw new Error(`时间格式无效：${rawTimeSlot}。请使用 HH:mm-HH:mm，例如 08:30-10:30`);
           const payload = {
             teacher_name: row.teacher_name || "",
             date: row.date,
             month_key: monthKeyFromDateValue(row.date) || state.settings.month_key,
             status: row.status || "待上",
-            time_slot: row.time_slot || "",
+            time_slot: timeSlot,
             classroom: row.classroom || "",
             grade: row.grade || "",
             subject: row.subject || "",
-            student_names: row.student_names || "",
+            student_names: normalizeLessonStudentNames(row.student_names || ""),
             notes: row.notes || "",
           };
           if (String(row.teacher_salary ?? "").trim() !== "") payload.teacher_salary = numberValue(row.teacher_salary);
@@ -14435,13 +15195,17 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".schedule-mode-toggle").forEach((button) => {
+    if (button.dataset.scheduleModeBound === "true") return;
+    button.dataset.scheduleModeBound = "true";
     button.addEventListener("click", () => {
+      const startedAt = performance.now();
       const scroll = captureLessonScroll();
       scheduleMode = !scheduleMode;
       button.classList.toggle("primary", scheduleMode);
       button.textContent = scheduleMode ? "结束排课" : "开始排课";
       reRenderLessonsTbody();
       restoreLessonScroll(scroll);
+      requestAnimationFrame(() => console.info(`[performance] ${scheduleMode ? "enter" : "exit"} schedule mode: ${(performance.now() - startedAt).toFixed(1)}ms`));
     });
   });
 
@@ -14581,16 +15345,25 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".add-lesson").forEach((button) => {
+    if (button.dataset.lessonCreateOpenBound === "true") return;
+    button.dataset.lessonCreateOpenBound = "true";
     button.addEventListener("click", () => {
+      const startedAt = performance.now();
       lessonCreateDraft = defaultLessonCreateDraft();
-      render();
+      lessonCreateConflictRows = [];
+      lessonCreateConflictRequest += 1;
+      // Keep the table, filters and summary in place; only mount the modal region.
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
+      requestAnimationFrame(() => console.info(`[performance] open add-lesson modal: ${(performance.now() - startedAt).toFixed(1)}ms`));
     });
   });
 
   document.querySelectorAll(".lesson-create-cancel").forEach((button) => {
     button.addEventListener("click", () => {
       lessonCreateDraft = null;
-      render();
+      lessonCreateConflictRows = [];
+      lessonCreateConflictRequest += 1;
+      updateLessonsViewDom({ refreshSummary: false, refreshFilter: false, refreshToolbar: false, refreshTable: false, refreshModals: true });
     });
   });
 
@@ -14604,15 +15377,46 @@ function wireEvents() {
 
   document.querySelectorAll(".lesson-create-field").forEach((input) => {
     input.addEventListener("change", () => {
-      if (!Object.prototype.hasOwnProperty.call(LESSON_MANUAL_FIELD_LABELS, input.dataset.field)) return;
       const modal = input.closest(".lesson-create-modal");
-      const manualInput = modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${input.dataset.field}"]`);
-      if (!manualInput) return;
-      const isManual = input.value === LESSON_CREATE_MANUAL_VALUE;
-      manualInput.classList.toggle("hidden", !isManual);
-      if (isManual) manualInput.focus();
-      else manualInput.value = "";
+      const field = input.dataset.field;
+      if (Object.prototype.hasOwnProperty.call(LESSON_MANUAL_FIELD_LABELS, field)) {
+        const manualInput = modal?.querySelector(`.lesson-create-manual-field[data-manual-field="${field}"]`);
+        if (manualInput) {
+          const isManual = input.value === LESSON_CREATE_MANUAL_VALUE;
+          manualInput.classList.toggle("hidden", !isManual);
+          if (isManual) manualInput.focus();
+          else manualInput.value = "";
+        }
+      }
+      if (field === "date") {
+        lessonCreateConflictRows = [];
+        refreshLessonCreateConflictRows(modal);
+      } else {
+        refreshLessonCreateConflictUi(modal);
+      }
     });
+  });
+
+  document.querySelectorAll(".lesson-create-modal").forEach((modal) => {
+    if (modal.dataset.conflictRangeLoaded === "true") return;
+    modal.dataset.conflictRangeLoaded = "true";
+    refreshLessonCreateConflictRows(modal);
+  });
+
+  document.querySelectorAll(".lesson-create-manual-field").forEach((input) => {
+    let composing = false;
+    const update = () => refreshLessonCreateConflictUi(input.closest(".lesson-create-modal"));
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      update();
+    });
+    input.addEventListener("input", () => {
+      if (!composing) update();
+    });
+    input.addEventListener("change", update);
   });
 
   document.querySelectorAll(".lesson-create-student-search").forEach((input) => {
@@ -14635,8 +15439,26 @@ function wireEvents() {
 
   document.querySelectorAll(".lesson-create-student-existing").forEach((input) => {
     input.addEventListener("change", () => {
-      updateLessonCreateStudentStats(input.closest(".lesson-create-modal"));
+      const modal = input.closest(".lesson-create-modal");
+      updateLessonCreateStudentStats(modal);
+      refreshLessonCreateConflictUi(modal);
     });
+  });
+
+  document.querySelectorAll(".lesson-create-new-students").forEach((input) => {
+    let composing = false;
+    const update = () => refreshLessonCreateConflictUi(input.closest(".lesson-create-modal"));
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      update();
+    });
+    input.addEventListener("input", () => {
+      if (!composing) update();
+    });
+    input.addEventListener("change", update);
   });
 
   document.querySelectorAll(".lesson-create-confirm").forEach((button) => {
@@ -14647,7 +15469,9 @@ function wireEvents() {
       if (!isDateValue(date)) return alert("请选择有效的课程日期");
       button.disabled = true;
       try {
-        const timeSlot = lessonCreateSelectValue(modal, "time_slot", "请填写新时间");
+        const rawTimeSlot = lessonCreateSelectValue(modal, "time_slot", "请填写新时间");
+        const timeSlot = normalizeTimeSlot(rawTimeSlot);
+        if (!timeSlot) throw new Error("时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");
         const teacherName = lessonCreateSelectValue(modal, "teacher_name", "请填写新老师名称");
         const classroom = lessonCreateSelectValue(modal, "classroom", "请填写新教室名称");
         const grade = lessonCreateSelectValue(modal, "grade", "请填写新年级名称");
@@ -14655,7 +15479,7 @@ function wireEvents() {
         const status = lessonCreateSelectValue(modal, "status", "请填写新状态") || "待上";
         const selectedStudents = lessonCreateSelectedStudentNames(modal);
         const newStudents = parseLessonCreateStudents(modal.querySelector(".lesson-create-new-students")?.value);
-        const studentNames = uniqueSorted([...selectedStudents, ...newStudents]);
+        const studentNames = normalizeNameList([...selectedStudents, ...newStudents]);
         const payload = {
           date,
           month_key: monthKeyFromDateValue(date) || state.settings.month_key,
@@ -14664,12 +15488,39 @@ function wireEvents() {
           classroom,
           grade,
           subject,
-          student_names: studentNames.join("、"),
+          student_names: normalizeLessonStudentNames(studentNames.join("、")),
           notes: fieldValue("notes"),
           status,
         };
-        const lesson = await request("/api/lessons", { method: "POST", body: payload });
+        const localConflict = buildLessonCandidateConflict(payload);
+        if (localConflict.conflict) {
+          const related = (localConflict.reasons || []).slice(0, 5)
+            .map((reason) => `${conflictTypeLabel(reason.type)}${reason.entity ? `：${reason.entity}` : ""}${reason.lesson_label ? `\n  ${reason.lesson_label}` : ""}`)
+            .join("\n");
+          if (!confirm(`当前课程与已有课程存在冲突：\n${related}\n\n仍要确认新增吗？`)) {
+            button.disabled = false;
+            return;
+          }
+          payload.allow_conflicts = true;
+        }
+        let lesson;
+        try {
+          lesson = await request("/api/lessons", { method: "POST", body: payload });
+        } catch (error) {
+          const serverConflicts = error?.data?.schedule_conflicts;
+          if (error?.status !== 409 || !serverConflicts?.issue_count) throw error;
+          const details = (serverConflicts.issues || []).slice(0, 5)
+            .map((issue) => `${conflictTypeLabel(issue.type)}${issue.entity ? `：${issue.entity}` : ""}${issue.lessons?.[0] ? `\n  ${issue.lessons[0]}` : ""}`)
+            .join("\n");
+          if (!confirm(`服务端发现最新冲突：\n${details}\n\n仍要确认新增吗？`)) {
+            button.disabled = false;
+            return;
+          }
+          lesson = await request("/api/lessons", { method: "POST", body: { ...payload, allow_conflicts: true } });
+        }
         lessonCreateDraft = null;
+        lessonCreateConflictRows = [];
+        lessonCreateConflictRequest += 1;
         markLessonDerivedDataDirty();
         await refreshLessonsView({ reloadRange: true });
         const visible = visibleLessonRows().some((row) => Number(row.id) === Number(lesson.id));
@@ -15343,6 +16194,8 @@ function wireEvents() {
   enhanceCustomSelects();
   enhanceCustomDateInputs();
 }
+
+bindNavigationEvents();
 
 load().catch((error) => {
   renderLoadFailure(error);

@@ -10,7 +10,10 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.11-ui-layout-account";
+const APP_VERSION = "2026.07.13-navigation-delegation-maintenance";
+const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
+const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
+let lastTimeSlotMigrationReport = null;
 const readOnlyBalanceCli = process.argv.includes("--verify-student-balances")
   || process.argv.includes("--audit-student-balances")
   || process.argv.some((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
@@ -952,6 +955,7 @@ function initDb() {
   seedDefaultUsers();
   seedDefaultRolesAndPermissions();
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
+  lastTimeSlotMigrationReport = migrateHistoricalTimeSlots();
 }
 
 if (!readOnlyBalanceCli) initDb();
@@ -1899,7 +1903,7 @@ function xlsxLessonHasCandidateData(row) {
 function validXlsxLessonTime(value) {
   const slot = text(value);
   if (!slot || slot === "0" || slot === "0:00") return false;
-  return /\d/.test(slot);
+  return !!normalizeTimeSlot(slot);
 }
 
 function xlsxLessonSkipReasons(row) {
@@ -1908,13 +1912,16 @@ function xlsxLessonSkipReasons(row) {
   if (!text(row.student_names)) reasons.push("missing-student");
   if (!text(row.teacher_name)) reasons.push("missing-teacher");
   else if (!isValidTeacherName(row.teacher_name)) reasons.push("invalid-teacher");
-  if (!validXlsxLessonTime(row.time_slot)) reasons.push("missing-time");
+  if (!text(row.time_slot)) reasons.push("missing-time");
+  else if (!validXlsxLessonTime(row.time_slot)) reasons.push("invalid-time-format");
   return reasons;
 }
 
 function finalizeXlsxLessonRow(row, monthKey) {
   row.lesson_status ||= "上课";
   row.course_status ||= "未上";
+  row.time_slot = normalizeTimeSlot(row.time_slot) || text(row.time_slot);
+  row.student_names = normalizedStudents(row.student_names);
   row.student_count = splitStudents(row.student_names).length;
   row.month_key = monthKeyFromDate(row.date) || monthKey;
   row.status = deriveStatus(row);
@@ -4126,12 +4133,20 @@ function jsonArraySetting(key) {
 
 function mergeLookupValues(defaults, customKey) {
   const seen = new Set();
-  return [...(defaults || []), ...jsonArraySetting(customKey)].filter((value) => {
+  const values = [...(defaults || []), ...jsonArraySetting(customKey)].filter((value) => {
     const normalized = text(value);
     if (!normalized || seen.has(normalized)) return false;
     seen.add(normalized);
     return true;
   }).map(text);
+  return customKey === "custom_time_slots" ? normalizeTimeSlotList(values) : values;
+}
+
+function normalizedUsedLessonLookup(key, value) {
+  const raw = text(value).replace(/\u3000/g, " ").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+  if (key === "times") return normalizeTimeSlot(raw);
+  return raw;
 }
 
 function usedLessonLookups() {
@@ -4141,14 +4156,21 @@ function usedLessonLookups() {
     grades: "grade",
     subjects: "subject",
     times: "time_slot",
+    statuses: "status",
   };
-  const distinct = (field) => all(`
+  const distinct = (key, field) => {
+    const seen = new Set();
+    return all(`
     SELECT DISTINCT ${field} AS value
     FROM lessons
     WHERE ${field} IS NOT NULL AND TRIM(${field}) <> ''
-    ORDER BY value
-  `).map((row) => text(row.value)).filter(Boolean);
-  const lookups = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, distinct(field)]));
+  `).map((row) => normalizedUsedLessonLookup(key, row.value)).filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    }).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  };
+  const lookups = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, distinct(key, field)]));
   lookups.students = uniqueNames(all(`
     SELECT student_names
     FROM lessons
@@ -9376,6 +9398,36 @@ function filterLessonsByTeacherNames(rows, teacherNames = []) {
   return (rows || []).filter((row) => allowed.has(text(row.teacher_name)));
 }
 
+// 学生参数使用重复 query 参数或逗号/顿号分隔均可；空格只做首尾清理，
+// 不把姓名中的空格当作分隔符，保证 URL 解码后仍按原姓名匹配。
+function studentNamesFromUrl(url) {
+  const rawValues = [
+    ...url.searchParams.getAll("student_names"),
+    ...url.searchParams.getAll("student_names[]"),
+    ...url.searchParams.getAll("student"),
+  ];
+  const seen = new Set();
+  const names = [];
+  for (const rawValue of rawValues) {
+    for (const item of text(rawValue).split(/[、,，;；\n\r]+/)) {
+      const name = text(item);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  return names.sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+}
+
+// 多名学生采用“任意命中”而非“全部命中”。角色预筛选会在调用方先完成，
+// 因而此处只收窄已授权的数据池。
+function filterLessonsByStudentNames(rows, studentNames = []) {
+  const names = studentNames || [];
+  if (!names.length) return rows || [];
+  const allowed = new Set(names);
+  return (rows || []).filter((row) => splitStudents(row.student_names).some((name) => allowed.has(name)));
+}
+
 function rolePrefilterForView(user, viewKey) {
   const presets = user?.filter_presets || {};
   const preset = presets[text(viewKey)];
@@ -9559,6 +9611,135 @@ function backupDb(prefix = "pre_audit") {
   db.exec("PRAGMA wal_checkpoint(FULL)");
   fs.copyFileSync(dbPath, target);
   return target;
+}
+
+function writeTimeSlotMigrationAudit({ entity, before = "", after = "", status = "resolved", notes = "" }) {
+  db.prepare(`
+    INSERT INTO audit_logs(run_id, issue_key, source, severity, entity, field, before_value, after_value, status, notes)
+    VALUES (?, ?, 'time_slot_normalization', ?, ?, 'time_slot', ?, ?, ?, ?)
+  `).run(
+    TIME_SLOT_MIGRATION_KEY,
+    `${TIME_SLOT_MIGRATION_KEY}|${text(entity)}|${text(before)}`,
+    status === "skipped" ? "WARN" : "INFO",
+    text(entity),
+    text(before),
+    text(after),
+    status,
+    text(notes),
+  );
+}
+
+// One-time, additive migration. It deliberately changes only safely parsed slots;
+// raw values that cannot be understood stay untouched and are auditable.
+function migrateHistoricalTimeSlots() {
+  if (text(getSetting(TIME_SLOT_MIGRATION_KEY)) === "1") {
+    return { ok: true, executed: false, reason: "already_migrated", backup: "", lessons_updated: 0, custom_time_slots_updated: false, legacy_invalid_time_slots_preserved: false, skipped: [] };
+  }
+
+  const lessonUpdates = [];
+  const skipped = [];
+  for (const row of all("SELECT id, time_slot FROM lessons ORDER BY id")) {
+    const raw = text(row.time_slot);
+    if (!raw) continue;
+    const normalized = normalizeTimeSlot(raw);
+    if (!normalized) {
+      skipped.push({ entity: `lesson:${row.id}`, value: raw, reason: "unparseable_lesson_time" });
+      continue;
+    }
+    if (normalized !== raw) lessonUpdates.push({ id: Number(row.id), before: raw, after: normalized });
+  }
+
+  let customTimeSlotsUpdate = null;
+  let legacyInvalidTimeSlotsUpdate = null;
+  const customTimeSlotsRaw = getSetting("custom_time_slots");
+  if (text(customTimeSlotsRaw)) {
+    try {
+      const parsed = JSON.parse(customTimeSlotsRaw);
+      if (!Array.isArray(parsed)) {
+        skipped.push({ entity: "settings:custom_time_slots", value: customTimeSlotsRaw, reason: "custom_time_slots_not_array" });
+      } else {
+        const validSlots = [];
+        const invalidSlots = [];
+        const seenValid = new Set();
+        const seenInvalid = new Set();
+        for (const item of parsed) {
+          const raw = text(item);
+          if (!raw) continue;
+          const normalized = normalizeTimeSlot(raw);
+          if (normalized) {
+            if (!seenValid.has(normalized)) {
+              seenValid.add(normalized);
+              validSlots.push(normalized);
+            }
+          } else if (!seenInvalid.has(raw)) {
+            // 异常原值进入独立的保留设置和审计，不混入正常候选，也不会被后续
+            // 基础数据保存操作悄然删除。
+            seenInvalid.add(raw);
+            invalidSlots.push(raw);
+            skipped.push({ entity: "settings:custom_time_slots", value: raw, reason: "unparseable_custom_time" });
+          }
+        }
+        const serialized = JSON.stringify(normalizeTimeSlotList(validSlots));
+        if (serialized !== customTimeSlotsRaw) customTimeSlotsUpdate = { before: customTimeSlotsRaw, after: serialized };
+        const legacyRaw = getSetting(TIME_SLOT_LEGACY_INVALID_SETTING_KEY);
+        const legacySerialized = JSON.stringify(invalidSlots);
+        if ((invalidSlots.length || legacyRaw) && legacySerialized !== legacyRaw) {
+          legacyInvalidTimeSlotsUpdate = { before: legacyRaw, after: legacySerialized };
+        }
+      }
+    } catch {
+      skipped.push({ entity: "settings:custom_time_slots", value: customTimeSlotsRaw, reason: "custom_time_slots_invalid_json" });
+    }
+  }
+
+  const hasDataChanges = lessonUpdates.length > 0 || !!customTimeSlotsUpdate || !!legacyInvalidTimeSlotsUpdate;
+  const backup = hasDataChanges ? backupDb("pre_time_slot_normalization_v1") : "";
+  withTransaction(() => {
+    const updateLesson = db.prepare("UPDATE lessons SET time_slot = ? WHERE id = ?");
+    for (const row of lessonUpdates) {
+      updateLesson.run(row.after, row.id);
+      writeTimeSlotMigrationAudit({ entity: `lesson:${row.id}`, before: row.before, after: row.after });
+    }
+    if (customTimeSlotsUpdate) {
+      setSetting("custom_time_slots", customTimeSlotsUpdate.after);
+      writeTimeSlotMigrationAudit({
+        entity: "settings:custom_time_slots",
+        before: customTimeSlotsUpdate.before,
+        after: customTimeSlotsUpdate.after,
+      });
+    }
+    if (legacyInvalidTimeSlotsUpdate) {
+      setSetting(TIME_SLOT_LEGACY_INVALID_SETTING_KEY, legacyInvalidTimeSlotsUpdate.after);
+      writeTimeSlotMigrationAudit({
+        entity: `settings:${TIME_SLOT_LEGACY_INVALID_SETTING_KEY}`,
+        before: legacyInvalidTimeSlotsUpdate.before,
+        after: legacyInvalidTimeSlotsUpdate.after,
+        notes: "unparseable_custom_time_preserved",
+      });
+    }
+    for (const item of skipped) {
+      writeTimeSlotMigrationAudit({ entity: item.entity, before: item.value, status: "skipped", notes: item.reason });
+    }
+    setSetting(TIME_SLOT_MIGRATION_KEY, "1");
+  });
+
+  const report = {
+    ok: true,
+    executed: true,
+    backup,
+    lessons_updated: lessonUpdates.length,
+    custom_time_slots_updated: !!customTimeSlotsUpdate,
+    legacy_invalid_time_slots_preserved: !!legacyInvalidTimeSlotsUpdate,
+    skipped,
+  };
+  console.info(`[time normalization][migration] ${JSON.stringify({
+    lessons_updated: report.lessons_updated,
+    custom_time_slots_updated: report.custom_time_slots_updated,
+    legacy_invalid_time_slots_preserved: report.legacy_invalid_time_slots_preserved,
+    skipped: skipped.length,
+    backup,
+  })}`);
+  return report;
 }
 
 function recentAuditLogs(limit = 200) {
@@ -10642,7 +10823,7 @@ function spawnSafeReadRaw(req) {
 }
 
 function timeTokenToMinutes(value) {
-  const raw = text(value).replaceAll("：", ":");
+  const raw = text(value).replace(/[：﹕]/g, ":");
   const match = raw.match(/^(\d{1,2})(?::?(\d{2}))?$/);
   if (!match) return null;
   const hour = Number(match[1]);
@@ -10651,27 +10832,98 @@ function timeTokenToMinutes(value) {
   return hour * 60 + minute;
 }
 
-function parseTimeRange(value) {
+function formatTimeMinutes(minutes) {
+  const value = Number(minutes);
+  if (!Number.isInteger(value) || value < 0 || value >= 24 * 60) return "";
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+}
+
+// Course time is persisted only in this format. Keep parsing and overlap checks
+// on this same canonical representation so equivalent user input cannot diverge.
+function normalizeTimeSlot(value) {
   const raw = text(value)
-    .replaceAll("：", ":")
+    .replace(/[：﹕]/g, ":")
     .replace(/[—–－~～至到]/g, "-")
     .replace(/\s+/g, "");
   if (!raw) return null;
-  const parts = raw.split("-").filter(Boolean);
-  let start = null;
-  let end = null;
-  if (parts.length >= 2) {
-    start = timeTokenToMinutes(parts[0]);
-    end = timeTokenToMinutes(parts[1]);
-  } else {
-    const tokens = [...raw.matchAll(/\d{1,2}:?\d{0,2}/g)].map((item) => item[0]);
-    if (tokens.length >= 2) {
-      start = timeTokenToMinutes(tokens[0]);
-      end = timeTokenToMinutes(tokens[1]);
-    }
-  }
+  if (!/^[^-]+-[^-]+$/.test(raw)) return null;
+  const parts = raw.split("-");
+  const start = timeTokenToMinutes(parts[0]);
+  const end = timeTokenToMinutes(parts[1]);
+  if (start == null || end == null || end <= start) return null;
+  return `${formatTimeMinutes(start)}-${formatTimeMinutes(end)}`;
+}
+
+function parseTimeRange(value) {
+  const normalized = normalizeTimeSlot(value);
+  if (!normalized) return null;
+  const [startToken, endToken] = normalized.split("-");
+  const start = timeTokenToMinutes(startToken);
+  const end = timeTokenToMinutes(endToken);
   if (start == null || end == null || end <= start) return null;
   return { start, end };
+}
+
+function timeSlotSortValue(value) {
+  return parseTimeRange(value)?.start ?? Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeTimeSlotList(values) {
+  const seen = new Set();
+  const normalized = [];
+  for (const value of values || []) {
+    const slot = normalizeTimeSlot(value);
+    if (!slot || seen.has(slot)) continue;
+    seen.add(slot);
+    normalized.push(slot);
+  }
+  return normalized.sort((a, b) => timeSlotSortValue(a) - timeSlotSortValue(b) || a.localeCompare(b));
+}
+
+function normalizeCustomTimeSlotSetting(value) {
+  let values = value;
+  if (typeof values === "string") {
+    try {
+      values = JSON.parse(values);
+    } catch {
+      return { error: "常用时间必须是 JSON 数组，时间格式示例：08:30-10:30" };
+    }
+  }
+  if (!Array.isArray(values)) return { error: "常用时间必须是数组，时间格式示例：08:30-10:30" };
+  const invalid = values.map(text).filter((item) => item && !normalizeTimeSlot(item));
+  if (invalid.length) {
+    return {
+      error: `常用时间格式无效：${invalid.slice(0, 3).join("、")}。请使用 HH:mm-HH:mm，例如 08:30-10:30`,
+      invalid,
+    };
+  }
+  const slots = normalizeTimeSlotList(values);
+  return { slots, serialized: JSON.stringify(slots) };
+}
+
+function timeSlotValidationError(value) {
+  return `课程时间格式无效：${text(value) || "空"}。请使用 HH:mm-HH:mm，例如 08:30-10:30`;
+}
+
+// 所有课程写入口在落库前经过这一处：时间写为标准格式，学生名单按系统
+// 既有的去空、去重、排序、顿号分隔口径保存。空时间仍允许快速建行补录，
+// 但只要填写了时间，就不能把无法识别的原始值静默写入数据库。
+function normalizeLessonPersistenceInput(data = {}) {
+  const next = { ...data };
+  if (Object.prototype.hasOwnProperty.call(data, "time_slot")) {
+    const rawTime = text(data.time_slot);
+    if (rawTime) {
+      const normalizedTime = normalizeTimeSlot(rawTime);
+      if (!normalizedTime) return { error: timeSlotValidationError(rawTime) };
+      next.time_slot = normalizedTime;
+    } else {
+      next.time_slot = "";
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "student_names")) {
+    next.student_names = normalizedStudents(data.student_names);
+  }
+  return { data: next };
 }
 
 function isScheduleActive(row) {
@@ -10813,6 +11065,78 @@ function scheduleConflicts(monthKey, options = {}) {
   return { month_key: monthKey, issue_count: issues.length, ignored_room_one_count, counts, issues };
 }
 
+// 单条课程保存时使用与月度冲突报告相同的时间段重叠口径。该检查不依赖前端
+// 候选状态，避免旧请求、旧页面数据或直接调用接口绕过最终确认。
+function lessonSaveConflicts(candidate = {}, { excludeLessonId = 0 } = {}) {
+  const target = {
+    ...candidate,
+    date: text(candidate.date),
+    time_slot: text(candidate.time_slot),
+    teacher_name: text(candidate.teacher_name),
+    classroom: normalizeRoom(candidate.classroom),
+    student_names: normalizedStudents(candidate.student_names),
+  };
+  const issues = [];
+  const rawTime = text(candidate.time_slot);
+  const normalizedTime = rawTime ? normalizeTimeSlot(rawTime) : "";
+  if (rawTime && !normalizedTime) {
+    return {
+      issue_count: 1,
+      issues: [{
+        severity: "MEDIUM",
+        type: "invalid_time",
+        date: target.date,
+        time_slot: rawTime,
+        entity: "candidate",
+        lesson_ids: [],
+        message: timeSlotValidationError(rawTime),
+        lessons: [],
+        lesson_details: [],
+      }],
+    };
+  }
+  target.time_slot = normalizedTime;
+  if (!isScheduleActive(target) || !target.date || !normalizedTime) {
+    return { issue_count: 0, issues };
+  }
+  const targetRange = parseTimeRange(normalizedTime);
+  if (!targetRange) return { issue_count: 0, issues };
+  const targetStudents = new Set(splitStudents(target.student_names));
+  const existing = all(
+    "SELECT * FROM lessons WHERE date = ? AND id <> ? ORDER BY time_slot, teacher_name, classroom, sort_order, id",
+    [target.date, Number(excludeLessonId) || 0],
+  ).filter(isScheduleActive);
+  const push = (type, entity, row, message) => {
+    issues.push({
+      severity: "HIGH",
+      type,
+      date: target.date,
+      time_slot: `${normalizedTime} / ${row.time_slot || ""}`.replace(/\s*\/\s*$/, ""),
+      entity,
+      lesson_ids: Number(row.id) ? [Number(row.id)] : [],
+      message,
+      lessons: [lessonScheduleLabel(row)],
+      lesson_details: [conflictLessonDetail(row)],
+    });
+  };
+  for (const row of existing) {
+    const rowRange = parseTimeRange(row.time_slot);
+    if (!rowRange || !(targetRange.start < rowRange.end && rowRange.start < targetRange.end)) continue;
+    if (target.teacher_name && target.teacher_name === text(row.teacher_name)) {
+      push("teacher", target.teacher_name, row, `${target.teacher_name} 在重叠时间段已有课程`);
+    }
+    const room = normalizeRoom(row.classroom);
+    if (target.classroom && room && target.classroom === room) {
+      push("classroom", target.classroom, row, `${target.classroom} 在重叠时间段已被占用`);
+    }
+    const sharedStudents = splitStudents(row.student_names).filter((name) => targetStudents.has(name));
+    for (const student of sharedStudents) {
+      push("student", student, row, `学生 ${student} 在重叠时间段已有课程`);
+    }
+  }
+  return { issue_count: issues.length, issues };
+}
+
 function applyAuditPatch(issue) {
   const patch = issue.patch || {};
   if (patch.type === "insert_lesson" && patch.lesson) {
@@ -10836,6 +11160,9 @@ function applyAuditPatch(issue) {
       if (Object.prototype.hasOwnProperty.call(patch, field)) payload[field] = patch[field];
     }
     if (Object.keys(payload).length) {
+      const normalized = normalizeLessonPersistenceInput(payload);
+      if (normalized.error) return false;
+      Object.assign(payload, normalized.data);
       if (Object.prototype.hasOwnProperty.call(payload, "status")) Object.assign(payload, legacyStatusFields(payload.status));
       if (Object.prototype.hasOwnProperty.call(payload, "teacher_salary")) {
         payload.teacher_salary_source = "import";
@@ -10984,6 +11311,9 @@ function patchTable(table, idField, idValue, allowedFields, data) {
 }
 
 function insertLesson(data, options = {}) {
+  const normalizedInput = normalizeLessonPersistenceInput(data);
+  if (normalizedInput.error) throw new Error(normalizedInput.error);
+  data = normalizedInput.data;
   const monthKey = data.month_key || getSetting("month_key");
   const status = deriveStatus(data);
   const legacy = legacyStatusFields(status);
@@ -11106,11 +11436,27 @@ function copyLessons(body) {
   if (!copyPairs.length) return { error: "source_lesson_ids and target_dates required", status: 400 };
   if (copyPairs.length > 200) return { error: "single copy capped at 200 rows", status: 400 };
 
+  // 先在事务外校验所有源课程时间，避免某个历史异常时间导致复制到一半才失败。
+  const normalizedSources = new Map();
+  for (const pair of copyPairs) {
+    if (normalizedSources.has(pair.source_id)) continue;
+    const source = get("SELECT * FROM lessons WHERE id = ?", [pair.source_id]);
+    if (!source) continue;
+    const normalized = normalizeLessonPersistenceInput({
+      time_slot: source.time_slot,
+      student_names: source.student_names,
+    });
+    if (normalized.error) {
+      return { error: `源课程 ${pair.source_id}：${normalized.error}`, status: 400 };
+    }
+    normalizedSources.set(pair.source_id, { ...source, ...normalized.data });
+  }
+
   return withTransaction(() => {
     const created = [];
     const nextOrderByDate = new Map();
     for (const pair of copyPairs) {
-      const src = get("SELECT * FROM lessons WHERE id = ?", [pair.source_id]);
+      const src = normalizedSources.get(pair.source_id);
       if (!src || pair.target_date === src.date) continue;
       if (!nextOrderByDate.has(pair.target_date)) {
         const maxOrder = num(get(
@@ -11160,9 +11506,15 @@ function createLessonsBatch(rows) {
   const items = Array.isArray(rows) ? rows : [];
   if (!items.length) return { error: "lessons required", status: 400 };
   if (items.length > 200) return { error: "single batch capped at 200 rows", status: 400 };
+  const normalizedItems = [];
+  for (const item of items) {
+    const normalized = normalizeLessonPersistenceInput(item);
+    if (normalized.error) return { error: normalized.error, status: 400 };
+    normalizedItems.push(normalized.data);
+  }
   return withTransaction(() => {
     const created = [];
-    for (const item of items) {
+    for (const item of normalizedItems) {
       const nameError = teacherNameError(item.teacher_name);
       if (nameError) return { error: nameError, status: 400 };
       if (!validDateKey(text(item.date))) {
@@ -11627,7 +11979,10 @@ async function handleApi(req, res, url) {
     const viewKey = prefilterViewFromUrl(url, "lessons");
     const rangeLessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
     const lessons = rangeLessons
-      ? filterLessonsByTeacherNames(filterLessonsByRolePrefilter(rangeLessons, user, viewKey), teacherNamesFromUrl(url))
+      ? filterLessonsByStudentNames(
+        filterLessonsByTeacherNames(filterLessonsByRolePrefilter(rangeLessons, user, viewKey), teacherNamesFromUrl(url)),
+        studentNamesFromUrl(url),
+      )
       : null;
     if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
@@ -12207,6 +12562,11 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
+    if (Object.prototype.hasOwnProperty.call(body, "custom_time_slots")) {
+      const normalized = normalizeCustomTimeSlotSetting(body.custom_time_slots);
+      if (normalized.error) return sendError(res, 400, normalized.error);
+      body.custom_time_slots = normalized.serialized;
+    }
     for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
     const changedKeys = Object.keys(body).filter((key) => key !== "month_key");
     if (changedKeys.length) {
@@ -12275,39 +12635,53 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const nameError = teacherNameError(body.teacher_name);
     if (nameError) return sendError(res, 400, nameError);
-    const lessonData = { ...body };
+    const normalized = normalizeLessonPersistenceInput(body);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+    const lessonData = { ...normalized.data };
     delete lessonData.teacher_salary_source;
     delete lessonData.teacher_salary_rule_id;
+    delete lessonData.allow_conflicts;
+    const conflictReport = lessonSaveConflicts(lessonData);
+    if (conflictReport.issue_count && !body.allow_conflicts) {
+      return sendJson(res, {
+        error: "检测到课程冲突，请确认后再保存",
+        schedule_conflicts: conflictReport,
+      }, 409);
+    }
     const lesson = insertLesson(lessonData);
     recordAuditEvent(req, user, { action: "create", entity_type: "lessons", entity_id: String(lesson.id), before: null, after: lesson });
-    writeOperationLog(user, { operation_type: "创建课程", operation_content: `${text(body.teacher_name)} ${text(body.date)} ${text(body.time_slot)} ${text(body.subject)} ${text(body.student_names)}`, target_type: "lessons", target_id: String(lesson.id) });
-    return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson) }, 201);
+    writeOperationLog(user, { operation_type: "创建课程", operation_content: `${text(lesson.teacher_name)} ${text(lesson.date)} ${text(lesson.time_slot)} ${text(lesson.subject)} ${text(lesson.student_names)}`, target_type: "lessons", target_id: String(lesson.id) });
+    return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson), schedule_conflicts: conflictReport }, 201);
   }
 
   const lessonMatch = url.pathname.match(/^\/api\/lessons\/(\d+)$/);
   if (lessonMatch && req.method === "PATCH") {
     const body = await readBody(req);
-    if (Object.prototype.hasOwnProperty.call(body, "teacher_name")) {
-      const nameError = teacherNameError(body.teacher_name);
+    const normalized = normalizeLessonPersistenceInput(body);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+    const incoming = normalized.data;
+    if (Object.prototype.hasOwnProperty.call(incoming, "teacher_name")) {
+      const nameError = teacherNameError(incoming.teacher_name);
       if (nameError) return sendError(res, 400, nameError);
     }
     const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
-    const payload = { ...body, updated_at: new Date().toISOString() };
+    const payload = { ...incoming, updated_at: new Date().toISOString() };
     delete payload.teacher_salary_source;
     delete payload.teacher_salary_rule_id;
-    if (Object.prototype.hasOwnProperty.call(body, "teacher_salary")) {
-      const manualSalary = optionalNumber(body.teacher_salary);
+    delete payload.allow_conflicts;
+    if (Object.prototype.hasOwnProperty.call(incoming, "teacher_salary")) {
+      const manualSalary = optionalNumber(incoming.teacher_salary);
       payload.teacher_salary = manualSalary;
       payload.teacher_salary_source = manualSalary === null ? "empty" : "manual";
       payload.teacher_salary_rule_id = null;
     } else {
       const salaryMatchFields = ["teacher_name", "grade", "subject", "student_names", "time_slot"];
-      const matchFieldsChanged = salaryMatchFields.some((field) => Object.prototype.hasOwnProperty.call(body, field));
+      const matchFieldsChanged = salaryMatchFields.some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
       const currentSource = text(current.teacher_salary_source);
       if (matchFieldsChanged && (!currentSource || currentSource === "empty" || currentSource === "auto")) {
         const resolvedSalary = resolvedTeacherSalaryForLesson({
           ...current,
-          ...body,
+          ...incoming,
           teacher_salary_present: false,
         });
         payload.teacher_salary = resolvedSalary.teacher_salary;
@@ -12315,7 +12689,14 @@ async function handleApi(req, res, url) {
         payload.teacher_salary_rule_id = resolvedSalary.teacher_salary_rule_id;
       }
     }
-    Object.assign(payload, lessonStatusPatchPayload(current, body));
+    Object.assign(payload, lessonStatusPatchPayload(current, incoming));
+    const conflictReport = lessonSaveConflicts({ ...current, ...payload }, { excludeLessonId: Number(lessonMatch[1]) });
+    if (conflictReport.issue_count && !body.allow_conflicts) {
+      return sendJson(res, {
+        error: "检测到课程冲突，请确认后再保存",
+        schedule_conflicts: conflictReport,
+      }, 409);
+    }
     auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
       "student_names", "notes", "course_status", "status", "teacher_salary", "teacher_salary_source",
@@ -12323,7 +12704,7 @@ async function handleApi(req, res, url) {
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     writeOperationLog(user, { operation_type: "修改课程", operation_content: `${text(updated.teacher_name)} ${text(updated.date)} ${text(updated.time_slot)} ${text(updated.subject)} ${text(updated.student_names)}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
-    return sendJson(res, { ...updated, warnings: lessonWarnings(updated) });
+    return sendJson(res, { ...updated, warnings: lessonWarnings(updated), schedule_conflicts: conflictReport });
   }
   if (lessonMatch && req.method === "DELETE") {
     auditedDelete(req, user, "lessons", "id", Number(lessonMatch[1]), "lessons");
