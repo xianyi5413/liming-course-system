@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.11-ui-course-workflow";
+const APP_VERSION = "2026.07.11-ui-layout-account";
 const readOnlyBalanceCli = process.argv.includes("--verify-student-balances")
   || process.argv.includes("--audit-student-balances")
   || process.argv.some((arg) => arg === "--trace-student-balance" || arg.startsWith("--trace-student-balance="));
