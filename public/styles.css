@@ -1551,6 +1551,75 @@ button:disabled,
   border-bottom: 1px solid var(--sidebar-line);
 }
 
+.nav-expand-toggle {
+  width: 34px;
+  height: 34px;
+  margin-left: auto;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--sidebar-text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.nav-expand-toggle:hover,
+.nav-expand-toggle:focus-visible {
+  border-color: var(--sidebar-border);
+  color: var(--sidebar-active-text);
+  background: var(--sidebar-hover);
+}
+
+.nav-expand-toggle svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.view-loading-skeleton {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.view-loading-bar,
+.view-loading-grid span,
+.view-loading-table {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-soft) 20%, var(--brand-soft) 45%, var(--surface-soft) 70%);
+  background-size: 220% 100%;
+  animation: view-loading-shimmer 1.2s ease-in-out infinite;
+}
+
+.view-loading-bar {
+  width: min(280px, 48%);
+  height: 30px;
+}
+
+.view-loading-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.view-loading-grid span {
+  min-height: 92px;
+}
+
+.view-loading-table {
+  min-height: 260px;
+}
+
+@keyframes view-loading-shimmer {
+  to { background-position: -220% 0; }
+}
+
 #nav {
   display: flex;
   flex-direction: column;
@@ -7936,6 +8005,21 @@ table th,
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 课程总表学生列由当前可见课程的 Canvas 实测文本宽度驱动。 */
+.course-table.lesson-table :is(th, td).col-students,
+.course-table.lesson-table col.col-students {
+  width: var(--lesson-student-column-width, 300px) !important;
+  min-width: var(--lesson-student-column-width, 300px) !important;
+  max-width: none !important;
+}
+
+.course-table.lesson-table .col-students .lesson-cell-text,
+.lesson-schedule-students .multi-select-label {
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
 }
 

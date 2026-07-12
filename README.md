@@ -15,6 +15,17 @@
 
 ## 近期功能迭代记录
 
+### 2026-07-13（导航总开关、学生列完整显示与切页性能）
+
+1. **导航总开关**
+   左侧品牌区新增“展开全部菜单 / 折叠全部菜单”按钮。它只处理当前账号有权限且具有可见二级页面的菜单组；单个菜单仍可独立展开或收起。展开集合沿用 `liming:nav-expanded-groups` 保存，读取时校验 JSON、去除无权限组，并在总开关与单组操作后立即同步图标和语义标签。
+2. **课程总表学生列**
+   学生列按当前筛选结果中最长的完整学生名单，使用 Canvas `measureText()` 结合单元格内边距和排课态下拉箭头空间计算统一宽度。表头、浏览行与排课编辑行共用 CSS 变量和 `colgroup`；筛选、局部 `tbody` 刷新及学生确认修改后都会重新计算。学生姓名不再以省略号或“等 X 人”截断，超宽内容仅在课程表容器内横向滚动。
+3. **导航切页与数据加载性能**
+   点击二级导航会立即更新选中态、页面标题和轻量骨架，数据随后局部填充。稳定 GET 请求按当前账号角色和完整 URL 使用 15 秒会话内缓存并复用进行中的 Promise；任意成功写操作会保守清空读取缓存，避免显示旧数据。教师/学生候选、账号与角色、员工与薪资考勤等相互独立请求已改为 `Promise.all()` 并行，旧切页响应继续由加载序号忽略。
+4. **维护与版本**
+   保留现有课程局部 `tbody` 刷新、冲突检查、学生选择浮层、权限、导入导出、备份和操作日志逻辑，未删除存在兼容风险的历史分支。后端诊断版本为 `2026.07.13-nav-toggle-student-width-performance`，前端资源版本同步为 `20260713-nav-toggle-student-width-performance`。
+
 ### 2026-07-13（导航事件委托与保守维护）
 
 1. **导航失效修复**
@@ -830,7 +841,7 @@ npm.cmd run audit:student-balances
 ### 启动方式与版本
 
 - 本地仍使用 `npm start` 启动，默认访问 `http://localhost:5177`；端口被占用时通过 `PORT=5178 npm start` 或 PowerShell `$env:PORT="5178"; npm start` 指定。
-- 当前后端诊断版本为 `2026.07.13-navigation-delegation-maintenance`，前端入口脚本为 `/app.js?v=20260713-navigation-delegation-maintenance`，样式入口为 `/styles.css?v=20260713-navigation-delegation-maintenance`。
+- 当前后端诊断版本为 `2026.07.13-nav-toggle-student-width-performance`，前端入口脚本为 `/app.js?v=20260713-nav-toggle-student-width-performance`，样式入口为 `/styles.css?v=20260713-nav-toggle-student-width-performance`。
 - 静态前端没有构建步骤，修改后重启服务并强刷页面即可验证。
 
 ### 登录后首页加载
