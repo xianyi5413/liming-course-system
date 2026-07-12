@@ -78,6 +78,7 @@ const LESSON_FILTER_KEY = "liming:lesson-filter";
 const LESSON_CREATE_MANUAL_VALUE = "__manual__";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const NAV_EXPANDED_KEY = "liming:nav-expanded-groups";
+const REQUEST_CACHE_TTL = 15000;
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
@@ -248,6 +249,10 @@ const PALETTES = [
 let state = null;
 let auth = { user: null, roles: ROLE_LABELS };
 let loadGeneration = 0;
+const requestCache = new Map();
+const requestInflight = new Map();
+let requestCacheRevision = 0;
+let navigationTransitionStartedAt = 0;
 const storedInitialView = localStorage.getItem("liming:view");
 const shouldMigrateDashboardDefault = localStorage.getItem(DASHBOARD_DEFAULT_MIGRATED_KEY) !== "1" && (!storedInitialView || storedInitialView === "lessons");
 let view = shouldMigrateDashboardDefault ? "dashboard" : (storedInitialView || "dashboard");
@@ -464,6 +469,21 @@ function showToast(message, type = 'success') {
   }, 3000);
 }
 
+function isCacheableGetRequest(path, options = {}) {
+  if (options.cache === false || !String(path).startsWith("/api/")) return false;
+  return !String(path).startsWith("/api/auth/");
+}
+
+function invalidateRequestCache() {
+  requestCacheRevision += 1;
+  requestCache.clear();
+}
+
+function requestCacheKey(path) {
+  const user = auth.user || {};
+  return `${user.id || "guest"}|${user.role || "anonymous"}|${String(path)}`;
+}
+
 async function request(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const readonlySafeMutation = method === "POST" && READONLY_SAFE_MUTATION_PATHS.has(String(path).split("?")[0]);
@@ -474,27 +494,48 @@ async function request(path, options = {}) {
     error.path = path;
     throw error;
   }
+  const cacheable = method === "GET" && isCacheableGetRequest(path, options);
+  const cacheRevision = requestCacheRevision;
+  const cacheKey = cacheable ? requestCacheKey(path) : "";
+  const now = Date.now();
+  const cached = cacheable ? requestCache.get(cacheKey) : null;
+  if (cached && cached.expiresAt > now) return cached.data;
+  if (cacheable && requestInflight.has(cacheKey)) return requestInflight.get(cacheKey);
   const config = {
     method,
     headers: { "content-type": "application/json" },
     cache: "no-store",
   };
   if (options.body !== undefined) config.body = JSON.stringify(options.body);
-  const res = await fetch(path, config);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (res.status === 401) {
-      auth.user = null;
-      renderLogin(data.error || "请先登录");
+  const run = (async () => {
+    const res = await fetch(path, config);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401) {
+        auth.user = null;
+        renderLogin(data.error || "请先登录");
+      }
+      const error = new Error(data.error || `HTTP ${res.status}`);
+      error.status = res.status;
+      error.path = path;
+      error.data = data;
+      throw error;
     }
-    const error = new Error(data.error || `HTTP ${res.status}`);
-    error.status = res.status;
-    error.path = path;
-    error.data = data;
-    throw error;
+    if (cacheable && cacheRevision === requestCacheRevision) {
+      requestCache.set(cacheKey, { data, expiresAt: Date.now() + REQUEST_CACHE_TTL });
+    }
+    if (method !== "GET") {
+      clearStudentQueryCache();
+      invalidateRequestCache();
+    }
+    return data;
+  })();
+  if (cacheable) requestInflight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    if (cacheable) requestInflight.delete(cacheKey);
   }
-  if (method !== "GET") clearStudentQueryCache();
-  return data;
 }
 
 async function requestWithStatus(path, options = {}) {
@@ -515,7 +556,10 @@ async function requestWithStatus(path, options = {}) {
     auth.user = null;
     renderLogin(data.error || "请先登录");
   }
-  if (res.ok && method !== "GET") clearStudentQueryCache();
+  if (res.ok && method !== "GET") {
+    clearStudentQueryCache();
+    invalidateRequestCache();
+  }
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -1280,14 +1324,13 @@ function bootstrapQuery(lite = true) {
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
   const stillCurrent = () => loadGeneration === generation;
 
-  if (viewNeedsProfileTeachers()) {
-    state.profile_teachers = ((await request("/api/teachers")).teachers || []);
-    if (!stillCurrent()) return false;
-  }
-  if (viewNeedsProfileStudents() && canArea("students")) {
-    state.profile_students = ((await request("/api/students")).students || []);
-    if (!stillCurrent()) return false;
-  }
+  const [teachersResult, studentsResult] = await Promise.all([
+    viewNeedsProfileTeachers() ? request("/api/teachers") : null,
+    viewNeedsProfileStudents() && canArea("students") ? request("/api/students") : null,
+  ]);
+  if (!stillCurrent()) return false;
+  if (teachersResult) state.profile_teachers = teachersResult.teachers || [];
+  if (studentsResult) state.profile_students = studentsResult.students || [];
 
   if (viewNeedsLessonRange()) {
     const lessonRange = lessonLoadRange();
@@ -1367,14 +1410,15 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   }
 
   if (view === "userAdmin") {
-    const usersResult = canArea("users") ? await request("/api/users") : { users: [], roles: {} };
+    const [usersResult, rolesResult] = await Promise.all([
+      canArea("users") ? request("/api/users") : Promise.resolve({ users: [], roles: {} }),
+      auth.user?.role === "owner"
+        ? request("/api/roles")
+        : Promise.resolve({ roles: [], permission_tree: auth.permission_tree || state.permission_tree || [] }),
+    ]);
     if (!stillCurrent()) return false;
     state.users = usersResult.users || [];
     auth.roles = usersResult.roles || auth.roles || ROLE_LABELS;
-    const rolesResult = auth.user?.role === "owner"
-      ? await request("/api/roles")
-      : { roles: [], permission_tree: auth.permission_tree || state.permission_tree || [] };
-    if (!stillCurrent()) return false;
     state.roles = rolesResult.roles || [];
     state.permission_tree = rolesResult.permission_tree || state.permission_tree || [];
   } else if (refreshGlobal && !state.permission_tree?.length) {
@@ -1382,12 +1426,15 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   }
 
   if (view === "staffPayroll" || view === "staffAttendance") {
-    state.staff = canArea("staff") ? ((await request("/api/staff")).staff || []) : [];
+    const [staffResult, salaryResult, attendanceResult] = await Promise.all([
+      canArea("staff") ? request("/api/staff") : Promise.resolve({ staff: [] }),
+      canArea("staff") ? request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`) : Promise.resolve({ rows: [] }),
+      canArea("staff") ? request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`) : Promise.resolve({ rows: [] }),
+    ]);
     if (!stillCurrent()) return false;
-    state.staff_salary = canArea("staff") ? ((await request(`/api/staff-salary?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
-    if (!stillCurrent()) return false;
-    state.staff_attendance = canArea("staff") ? ((await request(`/api/staff-attendance?month=${encodeURIComponent(activeMonth)}`)).rows || []) : [];
-    if (!stillCurrent()) return false;
+    state.staff = staffResult.staff || [];
+    state.staff_salary = salaryResult.rows || [];
+    state.staff_attendance = attendanceResult.rows || [];
   }
 
   if (view === "expenses") {
@@ -4423,8 +4470,6 @@ function activeGroup() {
   if (stored && groupViews(stored).some(([key]) => key === view)) return stored;
   const group = groupForView(view);
   activeNavGroup = group.key;
-  expandedNavGroups.add(group.key);
-  saveExpandedNavGroups();
   localStorage.setItem("liming:nav-group", activeNavGroup);
   return group;
 }
@@ -4441,6 +4486,41 @@ function renderSecondaryNav(group) {
 
 function navLabelText(group) {
   return String(group.label || "").replace(/^\S+\s+/, "").trim() || group.label || "";
+}
+
+function expandableNavGroups(groups = visibleNavGroups()) {
+  return groups.filter((group) => groupViews(group).length > 1);
+}
+
+function navExpandToggleIcon(expanded) {
+  return expanded
+    ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 14 5-5 5 5"></path><path d="M5 19h14"></path></svg>`
+    : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path><path d="M5 5h14"></path></svg>`;
+}
+
+function syncNavExpandToggle(groups = visibleNavGroups()) {
+  const button = document.querySelector("#nav-expand-toggle");
+  if (!button) return;
+  const expandable = expandableNavGroups(groups);
+  const allExpanded = expandable.length > 0 && expandable.every((group) => expandedNavGroups.has(group.key));
+  const label = allExpanded ? "折叠全部菜单" : "展开全部菜单";
+  button.hidden = expandable.length === 0 || sidebarCollapsed;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.setAttribute("aria-pressed", allExpanded ? "true" : "false");
+  button.innerHTML = navExpandToggleIcon(allExpanded);
+}
+
+function toggleAllVisibleNavGroups() {
+  const groups = visibleNavGroups();
+  const expandable = expandableNavGroups(groups);
+  if (!expandable.length) return;
+  const allExpanded = expandable.every((group) => expandedNavGroups.has(group.key));
+  if (allExpanded) expandable.forEach((group) => expandedNavGroups.delete(group.key));
+  else expandable.forEach((group) => expandedNavGroups.add(group.key));
+  normalizeExpandedNavGroups(groups);
+  saveExpandedNavGroups();
+  renderNav();
 }
 
 function passwordEyeIcon(visible) {
@@ -4624,16 +4704,17 @@ function renderNav() {
   navEl.innerHTML = `
     <div class="nav-sections">
       ${visibleGroups.map((group) => `
-        <div class="nav-group ${expandedNavGroups.has(group.key) || currentGroup.key === group.key ? "open" : ""}">
+        <div class="nav-group ${expandedNavGroups.has(group.key) ? "open" : ""}">
           <button class="nav-btn ${currentGroup.key === group.key ? "active" : ""}" type="button" data-nav-group="${group.key}" data-tooltip="${escapeHtml(navLabelText(group))}" title="${sidebarCollapsed ? escapeHtml(navLabelText(group)) : ""}">
             <span class="nav-icon" aria-hidden="true">${NAV_ICONS[group.key] || ""}</span>
             <span class="nav-label">${escapeHtml(navLabelText(group))}</span>
           </button>
-          ${expandedNavGroups.has(group.key) || currentGroup.key === group.key ? renderSecondaryNav(group) : ""}
+          ${expandedNavGroups.has(group.key) ? renderSecondaryNav(group) : ""}
         </div>
       `).join("")}
     </div>
   `;
+  syncNavExpandToggle(visibleGroups);
 }
 
 function renderTopbar(title, meta = "", actions = "") {
@@ -4688,17 +4769,43 @@ function sortedLessons() {
   return sortLessons(state.lessons);
 }
 
+function viewLabel(viewKey = view) {
+  for (const group of navGroups) {
+    const item = groupViews(group).find(([key]) => key === viewKey);
+    if (item) return item[1];
+  }
+  return "课程管理";
+}
+
+function renderViewTransitionSkeleton() {
+  navigationTransitionStartedAt = performance.now();
+  renderNav();
+  renderTopbar(viewLabel());
+  contentEl.innerHTML = `
+    <div class="view-loading-skeleton" role="status" aria-live="polite">
+      <div class="view-loading-bar wide"></div>
+      <div class="view-loading-grid"><span></span><span></span><span></span></div>
+      <div class="view-loading-table"></div>
+    </div>
+  `;
+}
+
 function bindNavigationEvents() {
   if (navigationEventsBound || !navEl) return;
   navigationEventsBound = true;
-  navEl.addEventListener("click", async (event) => {
+  const sidebar = navEl.closest(".sidebar") || navEl;
+  sidebar.addEventListener("click", async (event) => {
+    const allToggle = event.target.closest("#nav-expand-toggle");
+    if (allToggle && sidebar.contains(allToggle)) {
+      event.preventDefault();
+      toggleAllVisibleNavGroups();
+      return;
+    }
     const primary = event.target.closest(".nav-btn[data-nav-group]");
     if (primary && navEl.contains(primary)) {
       const group = navGroups.find((item) => item.key === primary.dataset.navGroup);
       if (!group || !groupViews(group).some(([key]) => canView(key))) return;
-      const currentGroup = groupForView(view);
-      if (group.key === currentGroup.key) expandedNavGroups.add(group.key);
-      else if (expandedNavGroups.has(group.key)) expandedNavGroups.delete(group.key);
+      if (expandedNavGroups.has(group.key)) expandedNavGroups.delete(group.key);
       else expandedNavGroups.add(group.key);
       normalizeExpandedNavGroups();
       saveExpandedNavGroups();
@@ -4712,6 +4819,7 @@ function bindNavigationEvents() {
     if (!nextView) return;
     event.preventDefault();
     setActiveView(nextView);
+    renderViewTransitionSkeleton();
     await load({ refreshGlobal: false });
   });
 }
@@ -4838,6 +4946,7 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
   table?.classList.toggle("is-editing", scheduleMode);
   table?.classList.toggle("is-browsing", !scheduleMode);
   tbody.innerHTML = lessonRowsHtml(rows);
+  applyLessonTableStudentColumnWidth(measureVisibleStudentColumnWidth(rows));
   updateLessonSelectionControls(rows);
   cleanupCustomSelectPortals();
   if (scheduleMode) {
@@ -5097,6 +5206,22 @@ function lessonTextCell(colClass, value, { html = "", title = value } = {}) {
   return `<td class="readonly ${colClass}"${titleAttr}><span class="lesson-cell-text">${shown}</span></td>`;
 }
 
+function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
+  const probe = document.createElement("canvas").getContext("2d");
+  const sample = document.querySelector(".lesson-table .col-students") || document.body;
+  const style = getComputedStyle(sample);
+  probe.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const names = (lessons || []).map((row) => normalizeLessonStudentNames(row.student_names || ""));
+  names.push("学生");
+  const contentWidth = Math.max(...names.map((value) => probe.measureText(value).width), 0);
+  // 文字宽度加上单元格内边距；排课态另为按钮预留下拉箭头空间。
+  return Math.max(156, Math.ceil(contentWidth + (scheduleMode ? 54 : 24)));
+}
+
+function applyLessonTableStudentColumnWidth(width = measureVisibleStudentColumnWidth()) {
+  document.querySelector(".lesson-table")?.style.setProperty("--lesson-student-column-width", `${width}px`);
+}
+
 function lessonReadonlyCells(row, visibleIndex, cumulative) {
   return [
     lessonTextCell("col-serial narrow", String(visibleIndex), { title: `当前可见序号 ${visibleIndex}` }),
@@ -5108,7 +5233,7 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
     lessonTextCell("col-room", row.classroom),
     lessonTextCell("col-grade", row.grade),
     lessonTextCell("col-subject", row.subject),
-    lessonTextCell("col-students", row.student_names),
+    lessonTextCell("col-students", normalizeLessonStudentNames(row.student_names)),
     lessonTextCell("col-note", row.notes),
     lessonTextCell("col-index narrow", String(cumulative), { title: String(cumulative) }),
   ].join("");
@@ -5195,6 +5320,7 @@ function lessonToolbarHtml(rows) {
       </div>
     </div>
   `;
+  syncNavExpandToggle(visibleGroups);
 }
 
 function updateLessonSelectionControls(rows = visibleLessonRows()) {
@@ -6016,6 +6142,7 @@ function renderLessons() {
   const rows = visibleLessonRows();
   pruneSelectedLessons(rows);
   const stats = lessonStats(rows);
+  const studentColumnWidth = measureVisibleStudentColumnWidth(rows);
   const rangeText = formatLessonDateRange();
   renderTopbar(
     `课程总表：${rangeText}`,
@@ -6032,7 +6159,8 @@ function renderLessons() {
     <div class="lesson-toolbar-region">${lessonToolbarHtml(rows)}</div>
     <div class="band">
       <div class="table-wrap smooth-table-wrap lesson-table-scroll">
-        <table class="course-table lesson-table uniform-table nowrap-table ${scheduleMode ? "is-editing" : "is-browsing"}">
+        <table class="course-table lesson-table uniform-table nowrap-table ${scheduleMode ? "is-editing" : "is-browsing"}" style="--lesson-student-column-width:${studentColumnWidth}px">
+          <colgroup><col span="10"><col class="col-students"><col span="2"></colgroup>
           <thead>
             <tr>
               <th class="lesson-select-head col-select"><input class="lesson-select-all" type="checkbox" aria-label="全选当前可见课程" ${rows.length ? "" : "disabled"}></th><th class="col-serial">序号</th><th class="col-teacher">授课老师</th><th class="col-date">日期</th><th class="col-status">状态</th><th class="col-weekday">星期</th><th class="col-time">时间</th><th class="col-room">教室</th><th class="col-grade">年级</th><th class="col-subject">科目</th><th class="col-students">学生</th><th class="col-note">备注</th><th class="col-index">累计序号</th>
@@ -6308,7 +6436,7 @@ function lessonCandidateSelectCell({ id, field, value, values, candidate, emptyT
 function lessonScheduleStudentCell(row) {
   const selected = normalizeNameList(splitStudents(row.student_names));
   const values = getActiveStudentOptions(selected, { includeCurrent: true });
-  const label = selected.length > 3 ? `${selected.slice(0, 3).join("、")} 等 ${selected.length} 人` : (selected.join("、") || "选择学生");
+  const label = selected.join("、") || "选择学生";
   return `
     <td class="col-students lesson-schedule-students">
       <span class="multi-select schedule-student-popover" data-placeholder="选择学生">
@@ -12363,6 +12491,13 @@ function render() {
   (renderers[view] || renderLessons)();
   applyReadonlyUi();
   wireEvents();
+  if (navigationTransitionStartedAt) {
+    console.debug("[navigation-performance]", {
+      view,
+      skeleton_to_data_ms: Math.round(performance.now() - navigationTransitionStartedAt),
+    });
+    navigationTransitionStartedAt = 0;
+  }
   if (viewChanged) {
     requestAnimationFrame(() => {
       window.scrollTo({ top: 0, left: 0 });
