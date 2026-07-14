@@ -1389,6 +1389,54 @@
   }
 }
 
+/* Persisted base-data palette values take precedence over the legacy semantic
+   defaults above, including inside compact course-table cells. */
+.status-badge,
+.status-badge.done,
+.status-badge.pending,
+.status-badge.leave,
+.status-badge.trial,
+.status-badge.exam,
+.status-badge.unpaid {
+  background: var(--badge-bg, var(--neutral-chip-bg));
+  color: var(--badge-fg, var(--neutral-chip-fg));
+}
+
+/* The course-table student column intentionally grows to the widest visible
+   complete badge line. Horizontal overflow belongs to its table wrapper only. */
+.course-table.lesson-table :is(th, td).col-students,
+.course-table.lesson-table col.col-students {
+  width: var(--lesson-student-column-width, 300px) !important;
+  min-width: var(--lesson-student-column-width, 300px) !important;
+  max-width: none !important;
+}
+.course-table.lesson-table .lesson-student-badges,
+.course-table.lesson-table .schedule-student-badges {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.course-table.lesson-table .lesson-schedule-student-field {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.course-table.lesson-table .lesson-schedule-student-field:hover,
+.course-table.lesson-table .lesson-schedule-student-field:focus-visible { background: transparent; }
+.schedule-student-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 2px 0 6px;
+  border-bottom: 1px solid var(--line);
+}
+
 /* 未开启“跟随当前配色”时，课程截图始终维持固定黎明蓝方案。 */
 :root[data-palette]:not([data-shot-follow-palette="true"]) {
   --shot-bg: #f7f9fc;
@@ -2986,6 +3034,8 @@ td.grade-cell {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background: var(--badge-bg, var(--neutral-chip-bg));
+  color: var(--badge-fg, var(--neutral-chip-fg));
 }
 
 .backup-record-table {
@@ -3898,6 +3948,40 @@ select.control::-ms-expand,
   white-space: nowrap;
 }
 
+.lesson-student-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.student-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--badge-bg, var(--neutral-chip-bg));
+  color: var(--badge-fg, var(--neutral-chip-fg));
+  font: inherit;
+  font-size: var(--text-caption);
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.student-badge-removable { cursor: pointer; }
+.student-badge-removable:hover,
+.student-badge-removable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; filter: brightness(.96); }
+.student-badge-remove { font-size: 15px; line-height: .8; font-weight: 500; }
+
+.lesson-student-picker-list .student-badge { pointer-events: none; }
+
 .schedule-student-new-names {
   width: 100%;
   min-height: 56px;
@@ -4284,6 +4368,104 @@ select.control::-ms-expand,
 @media (max-width: 640px) {
   .recharge-analysis-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Compact schedule-mode entity selectors keep color on the badge, not the cell. */
+.course-table.lesson-table :is(.col-status, .col-grade, .col-subject) .custom-select-cell {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.course-table.lesson-table :is(.col-status, .col-grade, .col-subject) .custom-select-button {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  min-height: 24px;
+  height: 24px;
+  padding: 0 18px 0 0;
+  border: 0 !important;
+  border-radius: 999px;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-align: left;
+}
+
+.course-table.lesson-table :is(.col-status, .col-grade, .col-subject) .custom-select-value {
+  display: inline-flex;
+  flex: 0 1 auto;
+  overflow: visible;
+  text-align: left;
+}
+
+.course-table.lesson-table :is(.col-status, .col-grade, .col-subject) .custom-select-arrow {
+  right: 0;
+}
+
+.course-table.lesson-table .col-room .custom-select.candidate-conflict .custom-select-button {
+  box-shadow: inset 0 0 0 1px var(--danger) !important;
+}
+
+.course-table.lesson-table .col-room .custom-select.candidate-conflict .custom-select-value {
+  color: var(--danger) !important;
+}
+
+.custom-select-option .entity-badge {
+  pointer-events: none;
+}
+
+.custom-select-candidate-state {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.custom-select-option.option-conflict .custom-select-candidate-state {
+  color: var(--danger);
+}
+
+.lesson-date-shortcuts {
+  width: auto;
+  min-width: 0;
+}
+
+@media (max-width: 1320px) {
+  .lesson-filter-top .filter-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lesson-filter-top .filter-summary {
+    grid-column: 2;
+  }
+
+  .lesson-filter-top .filter-search {
+    grid-column: 1;
+  }
+
+  .lesson-date-filter-group {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .lesson-filter-top .filter-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-date-filter-group,
+  .lesson-filter-top .filter-search,
+  .lesson-filter-top .filter-summary {
+    grid-column: auto;
+  }
+
+  .lesson-date-filter-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-filter-top .filter-summary {
+    justify-self: end;
   }
 }
 
@@ -7645,27 +7827,25 @@ table th,
 }
 
 .lesson-filter-top {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-4);
+  display: block;
   width: 100%;
   min-width: 0;
 }
 
 .lesson-filter-top .filter-summary {
-  flex: 0 0 auto;
-  margin-left: auto;
-  align-self: flex-end;
-  justify-self: end;
+  grid-column: 4;
+  align-self: end;
+  min-width: max-content;
+  margin-left: 0;
   justify-content: flex-end;
 }
 
 .lesson-filter-top .filter-controls {
-  flex: 1 1 auto;
   display: grid;
-  grid-template-columns: minmax(168px, 1fr) minmax(168px, 1fr) minmax(136px, 160px) minmax(246px, 1.15fr);
+  grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(200px, 1.2fr);
   align-items: end;
+  column-gap: 12px;
+  row-gap: 11px;
   min-width: 0;
 }
 
@@ -7686,20 +7866,20 @@ table th,
 }
 
 .lesson-filter-top .filter-search {
-  grid-column: span 2;
+  grid-column: span 3;
 }
 
 .lesson-date-filter-group {
   grid-column: span 2;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: max-content minmax(282px, 1fr);
   align-items: flex-end;
-  gap: var(--space-3);
+  gap: 12px;
   min-width: 0;
 }
 
 .lesson-date-filter-group .filter-date-range {
-  flex: 1 1 216px;
+  min-width: 282px;
 }
 
 .date-shortcuts {
@@ -8015,6 +8195,45 @@ table th,
   min-width: var(--lesson-student-column-width, 300px) !important;
   max-width: none !important;
 }
+
+/* Student names are individual labels: they may wrap inside a bounded table column
+   instead of widening the entire page or being compressed into an ellipsis. */
+.course-table.lesson-table :is(th, td).col-students,
+.course-table.lesson-table col.col-students {
+  width: var(--lesson-student-column-width, 300px) !important;
+  min-width: min(220px, var(--lesson-student-column-width, 300px)) !important;
+  max-width: 420px !important;
+}
+
+.course-table.lesson-table .col-students .lesson-cell-text { white-space: normal; overflow: visible; text-overflow: clip; }
+.course-table.lesson-table .lesson-schedule-students { vertical-align: middle; }
+.lesson-schedule-students .schedule-student-badges { margin-bottom: 5px; }
+.lesson-schedule-students .lesson-schedule-student-field { min-height: 28px; padding: 3px 24px 3px 7px; font-size: var(--text-caption); }
+
+.course-table.lesson-table .col-status .status-badge,
+.course-table.lesson-table .col-status .custom-select-status .custom-select-button {
+  background: var(--badge-bg, var(--neutral-chip-bg)) !important;
+  color: var(--badge-fg, var(--neutral-chip-fg)) !important;
+  border: 0 !important;
+  border-radius: 6px;
+  font-weight: 700;
+}
+.custom-select-status .custom-select-value .status-badge { min-width: 0; }
+.custom-select-option .status-option-badge { pointer-events: none; }
+
+/* Only the fee-detail table is condensed; recharge, opening balance and profile
+   tables intentionally keep their established spacing. */
+.fee-detail-table.uniform-table th { padding-top: 6px; padding-bottom: 6px; line-height: 1.25; }
+.fee-detail-table.uniform-table td { padding-top: 5px; padding-bottom: 5px; line-height: 1.3; vertical-align: middle; }
+.fee-detail-table.uniform-table .status-badge { min-height: 21px; padding: 2px 7px; }
+.fee-detail-table.uniform-table input[type="checkbox"] { inline-size: 16px; block-size: 16px; }
+
+.color-config-card { grid-column: span 1; }
+.color-config-list { display: grid; gap: 7px; }
+.color-config-row { display: grid; grid-template-columns: minmax(92px, 1fr) auto auto; gap: 8px; align-items: center; }
+.color-config-row label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--text-caption); }
+.color-config-row input[type="color"] { inline-size: 30px; block-size: 26px; padding: 1px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.base-data-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 
 .course-table.lesson-table .col-students .lesson-cell-text,
 .lesson-schedule-students .multi-select-label {
@@ -9849,37 +10068,6 @@ table th,
   gap: var(--space-4);
 }
 
-.dashboard-metric-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(140px, 1fr));
-  gap: var(--space-3);
-}
-
-.dashboard-metric-card {
-  min-height: 104px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  background: var(--panel-raised);
-  padding: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  box-shadow: var(--shadow-panel);
-}
-
-.dashboard-metric-card span {
-  color: var(--muted);
-  font-size: var(--text-caption);
-}
-
-.dashboard-metric-card strong {
-  color: var(--brand);
-  font-family: var(--font-number);
-  font-size: var(--text-number);
-  line-height: var(--leading-tight);
-  word-break: break-word;
-}
-
 .dashboard-shortcut-grid {
   display: grid;
   grid-template-columns: repeat(8, minmax(88px, 1fr));
@@ -10538,7 +10726,6 @@ table th,
 }
 
 @media (max-width: 980px) {
-  .dashboard-metric-grid,
   .dashboard-shortcut-grid,
   .dashboard-main-grid,
   .dashboard-pie-grid,
@@ -10715,16 +10902,6 @@ table th,
   padding: 10px var(--space-4);
 }
 
-.dashboard-metric-grid {
-  grid-template-columns: repeat(5, minmax(124px, 1fr));
-  gap: 10px;
-}
-
-.dashboard-metric-card {
-  min-height: 80px;
-  padding: 10px 12px;
-}
-
 .dashboard-shortcut-grid {
   gap: 10px;
 }
@@ -10771,7 +10948,6 @@ table th,
 }
 
 @media (max-width: 980px) {
-  .dashboard-metric-grid,
   .dashboard-shortcut-grid,
   .dashboard-main-grid {
     grid-template-columns: 1fr;
@@ -10871,4 +11047,707 @@ table th,
     --shot-muted: #b4b4b4;
     --shot-tag-text: #ffffff;
   }
+}
+.money-input::-webkit-outer-spin-button,
+.money-input::-webkit-inner-spin-button,
+.currency-input::-webkit-outer-spin-button,
+.currency-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.money-input,
+.currency-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.grade-badge,
+.subject-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--badge-fg) 18%, transparent);
+  border-radius: 999px;
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  font-size: var(--text-caption);
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.color-config-card-inline {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.filter-combo-count {
+  display: block;
+  padding: 5px 10px 3px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  pointer-events: none;
+}
+
+.filter-combo-option .student-badge,
+.filter-combo-option .grade-badge,
+.filter-combo-option .subject-badge,
+.filter-combo-option .status-badge {
+  pointer-events: none;
+}
+
+/* The management console intentionally uses immediate state changes rather than motion. */
+*,
+*::before,
+*::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
+html {
+  scroll-behavior: auto;
+}
+
+/* Keep the complete student badge row visible; only the table wrapper scrolls. */
+.course-table.lesson-table col.col-students,
+.course-table.lesson-table :is(th, td).col-students {
+  min-width: var(--lesson-student-column-width, 300px) !important;
+  max-width: none !important;
+}
+
+.course-table.lesson-table .lesson-schedule-student-field {
+  padding: 0;
+}
+
+/* Conflict warnings are a narrow red cue, never a status-driven row fill. */
+.course-table tr.has-warnings {
+  background: transparent;
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.course-table tr.has-warnings > td {
+  background: transparent;
+}
+
+/* Shared entity badge contract: every colored entity stays compact and inline. */
+.entity-badge,
+.student-badge,
+.grade-badge,
+.subject-badge,
+.status-badge {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  justify-self: start;
+  min-height: 24px;
+  height: 24px;
+  max-height: 24px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--badge-bg, var(--neutral-chip-bg)) !important;
+  color: var(--badge-fg, var(--neutral-chip-fg)) !important;
+  font-family: inherit;
+  font-size: var(--text-caption);
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  vertical-align: middle;
+}
+
+.student-badge > span:first-child {
+  min-width: 0;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.student-badge-removable {
+  gap: 5px;
+}
+
+.student-badge-remove {
+  flex: 0 0 auto;
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* The student editor reserves five compact candidate rows and keeps its shell static. */
+.schedule-student-menu {
+  width: min(400px, calc(100vw - 24px));
+  grid-template-rows: auto auto 210px auto auto;
+  gap: 7px !important;
+  overflow: hidden !important;
+}
+
+.schedule-student-selected {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 5px;
+  max-height: 72px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+}
+
+.schedule-student-options {
+  height: 210px;
+  min-height: 210px;
+  max-height: 210px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.lesson-student-picker-list .multi-select-option {
+  min-height: 38px;
+  height: 38px;
+  padding: 5px 8px;
+}
+
+.schedule-student-new-names {
+  min-height: 46px;
+  height: 46px;
+  resize: none;
+}
+
+.multi-select-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.multi-select-search-row .multi-select-search {
+  margin: 0;
+}
+
+.multi-select-search-clear {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.multi-select-result-count {
+  display: block;
+  padding: 1px 4px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+/* The app shell owns viewport height; sidebar and main content scroll independently. */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  height: 100dvh;
+  min-height: 0;
+}
+
+.main {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.content {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+@media (min-width: 641px) {
+  .sidebar {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  #nav {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+  }
+}
+
+/* Date ranges have fixed intrinsic room for both ISO dates and the calendar icon. */
+.date-range-picker,
+.date-range-trigger {
+  min-width: 282px;
+}
+
+.date-range-picker {
+  flex: 0 0 282px;
+  max-width: 100%;
+}
+
+.date-range-text {
+  grid-template-columns: 86px 18px 86px;
+  gap: 5px;
+  min-width: 190px;
+}
+
+.date-range-part {
+  min-width: 86px;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.lesson-filter-top .date-range-picker,
+.lesson-filter-top .date-range-trigger {
+  width: 282px;
+  min-width: 282px;
+}
+
+.lesson-date-filter-group .filter-date-range {
+  flex: 0 0 282px;
+}
+
+@media (max-width: 640px) {
+  .date-range-picker,
+  .date-range-trigger,
+  .lesson-filter-top .date-range-picker,
+  .lesson-filter-top .date-range-trigger {
+    width: 100%;
+    min-width: 282px;
+  }
+
+  .lesson-date-filter-group .filter-date-range {
+    flex-basis: 282px;
+  }
+}
+
+/* Search results must disappear even when option components define display. */
+.multi-select-option[hidden],
+.filter-combo-option[hidden],
+.custom-select-option[hidden],
+.multi-select-empty[hidden],
+.filter-combo-empty[hidden],
+.custom-select-empty[hidden] {
+  display: none !important;
+}
+
+.entity-badge-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+
+.operation-result-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.operation-result-badge.success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.operation-result-badge.failure {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.operation-log-details {
+  min-width: 92px;
+  white-space: normal;
+}
+
+.operation-log-table :is(th, td):nth-child(4) {
+  min-width: 280px;
+  max-width: 520px;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.operation-log-table :is(th, td):nth-child(7) {
+  min-width: 120px;
+  white-space: normal !important;
+}
+
+.operation-log-details summary {
+  color: var(--brand-dark);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.operation-log-details div,
+.operation-log-details pre {
+  margin-top: 6px;
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
+.operation-log-details pre {
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--ink);
+  font: 12px/1.5 var(--font-mono, monospace);
+}
+
+/* Notes are body copy; only the column heading stays centered. */
+.course-table.lesson-table th.col-note {
+  text-align: center !important;
+}
+
+.course-table.lesson-table td.col-note,
+.course-table.lesson-table td.col-note .lesson-cell-text {
+  text-align: left !important;
+  white-space: normal !important;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+
+.course-table.lesson-table td.col-note .cell-input {
+  text-align: left !important;
+}
+
+.course-table.lesson-table td.col-note .lesson-note-input {
+  height: auto;
+  min-height: 34px;
+  max-height: 108px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  resize: vertical;
+}
+
+.course-table.lesson-table :is(td.col-status, td.col-status .custom-select-value) .status-badge {
+  min-width: 0;
+  min-height: 24px;
+  height: 24px;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--badge-fg) 18%, transparent);
+  border-radius: 999px;
+  background: var(--badge-bg, var(--neutral-chip-bg)) !important;
+  color: var(--badge-fg, var(--neutral-chip-fg)) !important;
+  box-shadow: none;
+}
+
+/* Time and classroom are plain compact selectors; semantic badges stay on the
+   status, grade, subject and student fields. */
+.course-table.lesson-table.is-editing :is(td.col-time, td.col-room) .custom-select-cell {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.course-table.lesson-table.is-editing :is(td.col-time, td.col-room) .custom-select-button {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  min-height: 24px;
+  height: 24px;
+  padding: 0 18px 0 0;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--ink);
+  font-size: var(--text-table);
+  font-weight: 400;
+  text-align: left;
+}
+
+.course-table.lesson-table.is-editing :is(td.col-time, td.col-room) .custom-select-value {
+  display: inline-block;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.course-table.lesson-table.is-editing :is(td.col-time, td.col-room) .custom-select-arrow {
+  right: 0;
+}
+
+/* The first course-filter row has explicit intrinsic room for shortcuts, two
+   complete ISO dates, teacher and student controls. */
+.lesson-filter-top .filter-controls {
+  grid-template-columns: minmax(300px, 1.6fr) 282px minmax(150px, .75fr) minmax(220px, 1fr);
+}
+
+.lesson-date-filter-group {
+  grid-template-columns: minmax(300px, 1fr) 282px;
+}
+
+@media (max-width: 1320px) {
+  .lesson-filter-top .filter-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lesson-date-filter-group {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .lesson-filter-top .filter-controls,
+  .lesson-date-filter-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-date-filter-group {
+    grid-column: auto;
+  }
+}
+
+/* 2026-07-14: keep the two population charts in the useful upper-right area.
+   Grid areas only reposition existing DOM; no chart or request is duplicated. */
+.dashboard-main-grid {
+  grid-template-columns: minmax(220px, .65fr) minmax(360px, 1.1fr) minmax(480px, 1.35fr);
+  grid-template-areas:
+    "todo trend pies"
+    "current current current";
+  align-items: stretch;
+}
+
+.dashboard-todo-section { grid-area: todo; }
+.dashboard-trend-section { grid-area: trend; }
+.dashboard-current-section { grid-area: current; }
+.dashboard-pie-section {
+  grid-area: pies;
+  grid-column: auto;
+}
+
+.dashboard-pie-section .section-head {
+  min-height: 42px;
+}
+
+.dashboard-pie-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dashboard-pie-card {
+  gap: 6px;
+  padding: 8px;
+}
+
+.dashboard-pie-card-head {
+  gap: 6px;
+  font-size: var(--text-caption);
+}
+
+.dashboard-pie-wrap {
+  grid-template-columns: 112px minmax(74px, 1fr);
+  gap: 7px;
+  justify-content: stretch;
+  width: 100%;
+  min-height: 132px;
+  margin: 0;
+  padding: 0;
+}
+
+.dashboard-pie-svg {
+  width: 112px;
+  height: 112px;
+}
+
+.dashboard-pie-legend {
+  gap: 4px;
+  align-items: stretch;
+}
+
+.dashboard-legend-item {
+  width: 100%;
+  padding: 4px 6px;
+  gap: 5px;
+}
+
+.dashboard-legend-item span {
+  width: 9px;
+  height: 9px;
+}
+
+.dashboard-legend-copy {
+  justify-content: space-between;
+  width: 100%;
+  gap: 5px;
+  font-size: 11px;
+}
+
+@media (max-width: 1280px) {
+  .dashboard-main-grid {
+    grid-template-columns: minmax(230px, .7fr) minmax(500px, 1.3fr);
+    grid-template-areas:
+      "todo pies"
+      "trend trend"
+      "current current";
+  }
+}
+
+@media (max-width: 980px) {
+  .dashboard-main-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "todo"
+      "pies"
+      "trend"
+      "current";
+  }
+
+  .dashboard-pie-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-pie-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboard-pie-wrap {
+    grid-template-columns: 124px minmax(110px, 1fr);
+  }
+
+  .dashboard-pie-svg {
+    width: 124px;
+    height: 124px;
+  }
+}
+
+/* Course filters share one stable toggle + floating searchable menu. */
+.lesson-filter-top .multi-select,
+.lesson-filter-top .multi-select-toggle {
+  width: 100%;
+  min-width: 0;
+}
+
+.multi-select-menu.floating-multi-select-menu {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.multi-select-menu.floating-multi-select-menu .multi-select-search-row {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 5px;
+  background: var(--panel-raised);
+}
+
+.multi-select-menu.floating-multi-select-menu .multi-select-result-count {
+  position: sticky;
+  top: 38px;
+  z-index: 1;
+  background: var(--panel-raised);
+}
+
+.multi-select-option .classroom-badge,
+.classroom-badge {
+  --badge-bg: var(--neutral-chip-bg);
+  --badge-fg: var(--neutral-chip-fg);
+  pointer-events: none;
+}
+
+/* Candidate rows use one main value and exactly one right-side state chip. */
+.custom-select-option.candidate-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.custom-select-candidate-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-select-candidate-state {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.custom-select-option.option-conflict .custom-select-candidate-state {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* Schedule state is the same badge as browsing state; the wrapper stays clear. */
+.course-table.lesson-table.is-editing td.col-status .custom-select-cell,
+.course-table.lesson-table.is-editing td.col-status .custom-select-button,
+.course-table.lesson-table.is-editing td.col-status .custom-select-value {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  height: 24px;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.course-table.lesson-table.is-editing td.col-status .custom-select-button {
+  width: auto;
+  padding: 0 15px 0 0;
+  border-radius: 999px;
+}
+
+.course-table.lesson-table.is-editing td.col-status .custom-select-arrow {
+  right: 0;
+}
+
+/* Classroom conflicts use a horizontal underline, never the stray left bar. */
+.course-table.lesson-table.is-editing td.col-room .custom-select.candidate-conflict .custom-select-button {
+  box-shadow: inset 0 -1px 0 var(--danger) !important;
+  color: var(--danger);
+}
+
+/* Student badges occupy the cell's vertical center and remain one complete line. */
+.course-table.lesson-table td.lesson-schedule-students {
+  vertical-align: middle !important;
+}
+
+.course-table.lesson-table .lesson-schedule-student-field {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+}
+
+.course-table.lesson-table .schedule-student-badges {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-height: 24px;
+  margin: 0;
+  white-space: nowrap;
 }

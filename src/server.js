@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.13-nav-toggle-student-width-performance";
+const APP_VERSION = "2026.07.14-dashboard-filter-option-polish";
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -677,6 +677,9 @@ function initDb() {
       operation_content TEXT DEFAULT '',
       target_type TEXT DEFAULT '',
       target_id TEXT DEFAULT '',
+      result_status TEXT DEFAULT 'success',
+      client_ip TEXT DEFAULT '',
+      user_agent TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       extra_json TEXT DEFAULT ''
     );
@@ -703,6 +706,16 @@ function initDb() {
   if (!auditColumns.includes("issue_key")) {
     db.prepare("ALTER TABLE audit_logs ADD COLUMN issue_key TEXT DEFAULT ''").run();
   }
+  const operationLogColumns = db.prepare("PRAGMA table_info(operation_logs)").all().map((column) => column.name);
+  if (!operationLogColumns.includes("result_status")) {
+    db.prepare("ALTER TABLE operation_logs ADD COLUMN result_status TEXT DEFAULT 'success'").run();
+  }
+  if (!operationLogColumns.includes("client_ip")) {
+    db.prepare("ALTER TABLE operation_logs ADD COLUMN client_ip TEXT DEFAULT ''").run();
+  }
+  if (!operationLogColumns.includes("user_agent")) {
+    db.prepare("ALTER TABLE operation_logs ADD COLUMN user_agent TEXT DEFAULT ''").run();
+  }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_logs_issue_key ON audit_logs(issue_key)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_entity ON audit_events(entity_type, entity_id)").run();
@@ -712,6 +725,7 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_operator ON operation_logs(operator_name, operator_account)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_type ON operation_logs(operation_type)").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_operation_logs_status ON operation_logs(result_status)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_backup_records_time ON backup_records(backup_time DESC, id DESC)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_backup_records_type ON backup_records(backup_type, scheduled_date)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_teacher_travel_fees_month_teacher ON teacher_travel_fees(month_key, teacher_name)").run();
@@ -5190,21 +5204,11 @@ function financeSummary(range) {
   };
 }
 
-function lessonDurationHours(row = {}) {
-  const range = parseTimeRange(row.time_slot);
-  if (!range) return 1;
-  return Math.max(0, (range.end - range.start) / 60);
-}
-
 function dashboardCanSeeMoney(user) {
   const role = canonicalRole(user.role);
   if (role === "teacher") return false;
   if (isSuperRole(role)) return true;
   return roleHasAnyPermission(role, ["finance", "feeDetails", "summary", "recharges", "openingBalances"]);
-}
-
-function dashboardMetric(key, label, value, format = "number", visible = true) {
-  return { key, label, value: format === "money" ? moneyRound(value) : value, format, visible };
 }
 
 function dashboardMonthData(monthKey, user) {
@@ -5213,48 +5217,6 @@ function dashboardMonthData(monthKey, user) {
   const range = monthRange(monthKey);
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, time_slot, id", [monthKey]);
   return { details, summaries, range, lessons };
-}
-
-function dashboardMetricItems(monthKey, user, monthData = dashboardMonthData(monthKey, user)) {
-  const today = todayKey();
-  const role = canonicalRole(user.role);
-  const canMoney = dashboardCanSeeMoney(user);
-  const { details, summaries, range, lessons } = monthData;
-  const todayLessons = lessons.filter((row) => row.date === today);
-  const completedToday = todayLessons.filter(isCompletedLesson).length;
-  const leaveToday = todayLessons.filter((row) => deriveStatus(row) === "请假").length;
-  const pendingToday = todayLessons.filter((row) => deriveStatus(row) === "待上").length;
-  const effectiveDetails = role === "teacher"
-    ? []
-    : details.filter((row) => row.effective);
-  const finance = canMoney ? financeSummary(range) : null;
-  const monthLessonHours = role === "teacher"
-    ? lessons.filter(isCompletedLesson).reduce((sum, row) => sum + lessonDurationHours(row), 0)
-    : effectiveDetails.reduce((sum, row) => sum + lessonDurationHours(row), 0);
-  const debtAmount = canMoney
-    ? summaries.reduce((sum, row) => sum + Math.max(0, -num(row.actual_balance)), 0)
-    : 0;
-  const activeStudentCount = num(get(`
-    SELECT COUNT(*) AS count
-    FROM students
-    WHERE COALESCE(NULLIF(status, ''), '在读') = '在读'
-  `)?.count);
-
-  const items = [
-    dashboardMetric("month_course_fee", "本月课程费", summaries.reduce((sum, row) => sum + num(row.total_fee), 0), "money", canMoney),
-    dashboardMetric("month_receivable", "本月应收", finance?.balance_sheet?.accounts_receivable || 0, "money", canMoney),
-    dashboardMetric("month_consumption_amount", "本月消耗金额", summaries.reduce((sum, row) => sum + num(row.actual_consumption) + num(row.gift_consumption), 0), "money", canMoney),
-    dashboardMetric("month_consumption_hours", "本月消耗课时", Number(monthLessonHours.toFixed(1)), "hours"),
-    dashboardMetric("today_completed_lessons", role === "teacher" ? "今日已上课程数" : "今日已上课程数", completedToday, "number"),
-    dashboardMetric("today_leave_count", "今日请假次数", leaveToday, "number"),
-    dashboardMetric("today_pending_lessons", "今日待上课程数", pendingToday, "number"),
-    dashboardMetric("student_debt_amount", "学员欠费金额", debtAmount, "money", canMoney),
-    dashboardMetric("active_student_count", "在读学员数量", activeStudentCount, "number", role !== "teacher"),
-  ];
-  if (role === "teacher") {
-    items.push(dashboardMetric("month_completed_lessons", "本月已上课程数", lessons.filter(isCompletedLesson).length, "number"));
-  }
-  return items.filter((item) => item.visible);
 }
 
 function dashboardTodos(monthKey, user, monthData = dashboardMonthData(monthKey, user)) {
@@ -5439,7 +5401,6 @@ function dashboardData(url, user) {
   return {
     month_key: monthKey,
     range: { start, end },
-    metrics: dashboardMetricItems(monthKey, user, monthData),
     todos: dashboardTodos(monthKey, user, monthData),
     trend,
     student_pie: dashboardStudentPie(user),
@@ -7943,19 +7904,71 @@ function recordAuditEvent(req, actor, { action, entity_type, entity_id = "", bef
   );
 }
 
-function writeOperationLog(operator, { operation_type, operation_content = "", target_type = "", target_id = "" }) {
-  if (!operator || !operation_type) return;
-  db.prepare(`
-    INSERT INTO operation_logs(campus_name, operator_name, operator_account, operation_type, operation_content, target_type, target_id)
-    VALUES ('黎明教育', ?, ?, ?, ?, ?, ?)
-  `).run(
-    text(operator.display_name),
-    text(operator.username),
-    text(operation_type),
-    text(operation_content),
-    text(target_type),
-    text(target_id),
-  );
+function safeOperationJson(value) {
+  if (value == null) return "";
+  const sensitiveKey = /(password|passcode|token|secret|cookie|authorization|session|sid)/i;
+  try {
+    return JSON.stringify(value, (key, item) => {
+      if (sensitiveKey.test(key)) return "[已脱敏]";
+      if (typeof item === "string") return item.slice(0, 500);
+      return item;
+    }).slice(0, 4000);
+  } catch {
+    return JSON.stringify({ error: "日志详情无法序列化" });
+  }
+}
+
+const CLIENT_OPERATION_TYPES = {
+  month_switch: "切换月份",
+  schedule_mode_start: "开始排课",
+  schedule_mode_end: "结束排课",
+  parent_notice_generate: "生成家长课程通知",
+  parent_notice_copy_message: "复制家长课程文案",
+  parent_notice_copy_image: "复制家长课程截图",
+  parent_notice_download_image: "下载家长课程截图",
+  teacher_notice_generate: "生成老师课程通知",
+  teacher_notice_copy_message: "复制老师课程文案",
+  teacher_notice_copy_image: "复制老师课程截图",
+  teacher_notice_download_image: "下载老师课程截图",
+  appearance_theme_change: "修改外观主题",
+  appearance_palette_change: "修改外观配色",
+};
+
+function writeOperationLog(operator, {
+  operation_type,
+  operation_content = "",
+  target_type = "",
+  target_id = "",
+  result_status = "success",
+  details = null,
+  operator_account = "",
+} = {}, req = null) {
+  if (!operation_type) return false;
+  try {
+    db.prepare(`
+      INSERT INTO operation_logs(
+        campus_name, operator_name, operator_account, operation_type, operation_content,
+        target_type, target_id, result_status, client_ip, user_agent, extra_json
+      )
+      VALUES ('黎明教育', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      text(operator?.display_name || operator?.username || "未登录访客").slice(0, 120),
+      text(operator?.username || operator_account).slice(0, 120),
+      text(operation_type).slice(0, 120),
+      text(operation_content).slice(0, 2000),
+      text(target_type).slice(0, 120),
+      text(target_id).slice(0, 240),
+      result_status === "failure" ? "failure" : "success",
+      req ? requestIp(req).slice(0, 120) : "",
+      req ? text(req.headers["user-agent"]).slice(0, 500) : "",
+      safeOperationJson(details),
+    );
+    return true;
+  } catch (error) {
+    // Audit persistence must never turn a successful business operation into a failure.
+    console.warn(`操作日志写入失败: ${error.message}`);
+    return false;
+  }
 }
 
 function weekdayOperationLabel(value) {
@@ -7973,6 +7986,9 @@ function settingOperationLabel(key) {
     custom_classrooms: "教室字典",
     custom_subjects: "科目字典",
     custom_time_slots: "时间段字典",
+    course_status_colors: "课程状态配色",
+    student_grade_colors: "学生年级配色",
+    course_subject_colors: "课程科目配色",
     custom_course_statuses: "课程状态字典",
     course_notice_global_tail: "家长群课程通知尾句",
     teacher_course_notice_global_tail: "教师课程通知尾句",
@@ -7980,11 +7996,35 @@ function settingOperationLabel(key) {
   })[key] || text(key);
 }
 
+function settingsOperationType(keys = []) {
+  if (keys.length !== 1) return "修改基础数据";
+  return ({
+    course_status_colors: "修改状态配色",
+    student_grade_colors: "修改年级配色",
+    course_subject_colors: "修改科目配色",
+  })[keys[0]] || "修改基础数据";
+}
+
 function lessonOperationText(row = {}) {
   return [row.date, row.teacher_name, row.time_slot, row.subject, row.student_names]
     .map(text)
     .filter(Boolean)
     .join(" ");
+}
+
+const LESSON_OPERATION_FIELDS = ["date", "teacher_name", "time_slot", "classroom", "status", "grade", "subject", "student_names", "notes"];
+
+function lessonOperationDetails(before = {}, after = {}, extra = {}) {
+  const changed_fields = LESSON_OPERATION_FIELDS.filter((field) => text(before?.[field]) !== text(after?.[field]));
+  const pick = (row) => Object.fromEntries(LESSON_OPERATION_FIELDS.map((field) => [field, text(row?.[field])]).filter(([, value]) => value));
+  return { before: pick(before), after: pick(after), changed_fields, ...extra };
+}
+
+function lessonOperationChangeText(before = {}, after = {}) {
+  const changes = LESSON_OPERATION_FIELDS
+    .filter((field) => text(before?.[field]) !== text(after?.[field]))
+    .map((field) => `${field} ${text(before?.[field]) || "空"} → ${text(after?.[field]) || "空"}`);
+  return changes.length ? changes.join("；") : lessonOperationText(after);
 }
 
 function userOperationText(row = {}) {
@@ -11549,21 +11589,73 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await readBody(req);
-    const row = loginUser(body.username, body.password);
-    if (!row) return sendError(res, 401, "用户名或密码错误");
+    const username = text(body.username).slice(0, 120);
+    const account = username ? get("SELECT * FROM users WHERE username = ?", [username]) : null;
+    const failureReason = !username || !text(body.password)
+      ? "参数缺失"
+      : !account
+        ? "账号不存在"
+        : account.status !== "active"
+          ? "账号禁用"
+          : !verifyPassword(body.password, account.password_hash)
+            ? "密码错误"
+            : "";
+    const row = failureReason ? null : account;
+    if (!row) {
+      writeOperationLog(null, {
+        operation_type: "登录系统",
+        operation_content: `账号 ${username || "（空）"} 登录失败：${failureReason}`,
+        target_type: "auth",
+        target_id: username,
+        result_status: "failure",
+        operator_account: username,
+        details: { username, result: "failure", reason: failureReason, app_version: APP_VERSION },
+      }, req);
+      return sendError(res, 401, "用户名或密码错误");
+    }
     const sid = crypto.randomBytes(32).toString("hex");
     sessions.set(sid, { user_id: row.id, expires_at: Date.now() + 7 * 86400000 });
     setSessionCookie(res, sid);
+    writeOperationLog(row, {
+      operation_type: "登录系统",
+      operation_content: `账号 ${row.username} 登录成功`,
+      target_type: "auth",
+      target_id: String(row.id),
+      details: { username: row.username, display_name: row.display_name, user_id: row.id, role: canonicalRole(row.role), result: "success", app_version: APP_VERSION },
+    }, req);
     return sendJson(res, { app_version: APP_VERSION, user: publicUser(row) });
   }
   if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+    const logoutUser = currentUser(req);
     const sid = parseCookies(req).liming_session;
     if (sid) sessions.delete(sid);
     clearSessionCookie(res);
+    writeOperationLog(logoutUser, {
+      operation_type: "退出系统",
+      operation_content: logoutUser ? `账号 ${logoutUser.username} 退出成功` : "无有效会话的退出请求",
+      target_type: "auth",
+      target_id: logoutUser ? String(logoutUser.id) : "",
+      result_status: logoutUser ? "success" : "failure",
+      details: { username: logoutUser?.username || "", user_id: logoutUser?.id || null, result: logoutUser ? "success" : "failure", reason: logoutUser ? "主动退出" : "会话无效或已过期", app_version: APP_VERSION },
+    }, req);
     return sendJson(res, { ok: true });
   }
   const user = currentUser(req);
   if (!user) return sendError(res, 401, "请先登录");
+  if (req.method === "POST" && url.pathname === "/api/operation-logs/client") {
+    const body = await readBody(req);
+    const action = text(body.action);
+    const operationType = CLIENT_OPERATION_TYPES[action];
+    if (!operationType) return sendError(res, 400, "不支持的客户端日志类型");
+    writeOperationLog(user, {
+      operation_type: operationType,
+      operation_content: text(body.content) || operationType,
+      target_type: text(body.target_type) || "client_action",
+      target_id: text(body.target_id),
+      details: { ...(body.details && typeof body.details === "object" ? body.details : {}), action, app_version: APP_VERSION },
+    }, req);
+    return sendJson(res, { ok: true });
+  }
   if (req.method === "POST" && url.pathname === "/api/auth/change-password") {
     const body = await readBody(req);
     const result = changeOwnPassword(user, body.current_password, body.new_password);
@@ -11790,24 +11882,36 @@ async function handleApi(req, res, url) {
   if (userAccessMatch && req.method === "PATCH") {
     const targetId = Number(userAccessMatch[1]);
     const before = publicUser(get("SELECT * FROM users WHERE id = ?", [targetId]));
-    const result = updateUserAccessConfig(user, targetId, await readBody(req));
+    const body = await readBody(req);
+    const result = updateUserAccessConfig(user, targetId, body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update_access", entity_type: "users", entity_id: String(targetId), before, after: result });
+    const beforeTeachers = new Set(before?.bound_teacher_names || []);
+    const afterTeachers = new Set(result.bound_teacher_names || []);
+    const addedTeachers = [...afterTeachers].filter((name) => !beforeTeachers.has(name));
+    const removedTeachers = [...beforeTeachers].filter((name) => !afterTeachers.has(name));
     writeOperationLog(user, {
-      operation_type: "修改账号权限",
-      operation_content: `${result.username} 权限 ${result.permissions.length} 项，绑定老师 ${(result.bound_teacher_names || []).join(",") || "无"}`,
+      operation_type: addedTeachers.length || removedTeachers.length ? "修改账号绑定老师" : "修改账号权限",
+      operation_content: `${result.username} 权限 ${result.permissions.length} 项，新增绑定 ${addedTeachers.join(",") || "无"}，解除绑定 ${removedTeachers.join(",") || "无"}`,
       target_type: "users",
       target_id: String(targetId),
-    });
+      details: { before: { permissions: before?.permissions || [], bound_teacher_names: [...beforeTeachers] }, after: { permissions: result.permissions || [], bound_teacher_names: [...afterTeachers] }, added_teachers: addedTeachers, removed_teachers: removedTeachers },
+    }, req);
     return sendJson(res, result);
   }
   const userMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
   if (userMatch && req.method === "PATCH") {
     const before = get("SELECT id, username, display_name, role, teacher_name, status, created_at, updated_at FROM users WHERE id = ?", [Number(userMatch[1])]);
-    const result = patchUser(user, Number(userMatch[1]), await readBody(req));
+    const body = await readBody(req);
+    const result = patchUser(user, Number(userMatch[1]), body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "update", entity_type: "users", entity_id: String(userMatch[1]), before, after: result });
-    writeOperationLog(user, { operation_type: "修改账号", operation_content: userOperationText(result), target_type: "users", target_id: String(userMatch[1]) });
+    const operationType = before?.status !== result.status
+      ? (result.status === "active" ? "启用账号" : "禁用账号")
+      : before?.role !== result.role
+        ? "修改账号角色"
+        : "修改账号";
+    writeOperationLog(user, { operation_type: operationType, operation_content: userOperationText(result), target_type: "users", target_id: String(userMatch[1]), details: { before, after: { id: result.id, username: result.username, display_name: result.display_name, role: result.role, teacher_name: result.teacher_name, status: result.status } } }, req);
     return sendJson(res, result);
   }
   if (userMatch && req.method === "DELETE") {
@@ -11869,12 +11973,14 @@ async function handleApi(req, res, url) {
     const operator = text(url.searchParams.get("operator") || "");
     const operator_account = text(url.searchParams.get("operator_account") || "");
     const operation_type = text(url.searchParams.get("operation_type") || "");
+    const result_status = text(url.searchParams.get("result_status") || "");
     const content = text(url.searchParams.get("content") || "");
     const start_date = text(url.searchParams.get("start_date") || "");
     const end_date = text(url.searchParams.get("end_date") || "");
     if (operator) { conditions.push("operator_name LIKE ?"); params.push(`%${operator}%`); }
     if (operator_account) { conditions.push("operator_account LIKE ?"); params.push(`%${operator_account}%`); }
     if (operation_type) { conditions.push("operation_type LIKE ?"); params.push(`%${operation_type}%`); }
+    if (result_status) { conditions.push("result_status = ?"); params.push(result_status); }
     if (content) { conditions.push("operation_content LIKE ?"); params.push(`%${content}%`); }
     if (start_date) { conditions.push("datetime(created_at, '+8 hours') >= ?"); params.push(`${start_date} 00:00:00`); }
     if (end_date) { conditions.push("datetime(created_at, '+8 hours') <= ?"); params.push(`${end_date} 23:59:59`); }
@@ -11887,10 +11993,14 @@ async function handleApi(req, res, url) {
       `SELECT * FROM operation_logs ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [...params, page_size, offset],
     );
-    return sendJson(res, { items, total, page, page_size });
+    const operation_types = all("SELECT DISTINCT operation_type FROM operation_logs WHERE operation_type <> '' ORDER BY operation_type")
+      .map((row) => row.operation_type);
+    return sendJson(res, { items, total, page, page_size, operation_types, result_statuses: ["success", "failure"] });
   }
   if (req.method === "GET" && url.pathname === "/api/audit/logs") {
-    return sendJson(res, { logs: recentAuditLogs(Number(url.searchParams.get("limit") || 200)) });
+    const logs = recentAuditLogs(Number(url.searchParams.get("limit") || 200));
+    writeOperationLog(user, { operation_type: "查看历史审计", operation_content: `查看历史审计 ${logs.length} 条`, target_type: "audit_logs", target_id: "list", details: { count: logs.length } }, req);
+    return sendJson(res, { logs });
   }
   if (req.method === "GET" && url.pathname === "/api/audit/events") {
     return sendJson(res, {
@@ -11940,10 +12050,15 @@ async function handleApi(req, res, url) {
     }
   }
   if (req.method === "GET" && url.pathname === "/api/audit/internal-checks") {
-    return sendJson(res, internalAudit(resolveMonthKey(url), { log: url.searchParams.get("log") !== "0" }));
+    const monthKey = resolveMonthKey(url);
+    const result = internalAudit(monthKey, { log: url.searchParams.get("log") !== "0" });
+    writeOperationLog(user, { operation_type: "运行内部校验", operation_content: `校验月份 ${monthKey}，发现 ${result.issue_count || result.issues?.length || 0} 项`, target_type: "audit", target_id: monthKey, details: { month_key: monthKey, issue_count: result.issue_count || result.issues?.length || 0 } }, req);
+    return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/audit/xlsx-diff") {
-    return sendJson(res, await runXlsxAuditFromUpload(req, url));
+    const result = await runXlsxAuditFromUpload(req, url);
+    writeOperationLog(user, { operation_type: "数据对账", operation_content: `Excel 数据对账，发现 ${result.issue_count || result.issues?.length || 0} 项`, target_type: "audit", target_id: text(result.run_id || "xlsx"), details: { run_id: result.run_id || "", issue_count: result.issue_count || result.issues?.length || 0, source_file: path.basename(text(result.source_file)) } }, req);
+    return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/audit/apply") {
     const body = await readBody(req);
@@ -11959,7 +12074,9 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/audit/ignore") {
     const body = await readBody(req);
-    return sendJson(res, ignoreAuditIssues(body.ids || [], body.issue_keys || []));
+    const result = ignoreAuditIssues(body.ids || [], body.issue_keys || []);
+    writeOperationLog(user, { operation_type: "忽略对账项", operation_content: `忽略 ${result.ignored || 0} 条对账项`, target_type: "audit_logs", target_id: "batch", details: { requested: (body.ids || []).length, ignored: result.ignored || 0 } }, req);
+    return sendJson(res, result);
   }
   if (req.method === "GET" && url.pathname === "/api/schedule-conflicts") {
     const report = scheduleConflicts(resolveMonthKey(url), {
@@ -12334,7 +12451,8 @@ async function handleApi(req, res, url) {
         operation_content: `导出月份 ${monthKey.slice(0, 7)}，文件 ${filename}`,
         target_type: "core_export",
         target_id: monthKey,
-      });
+        details: { month_key: monthKey, filename, file_size: buffer.length },
+      }, req);
       return sendBuffer(
         res,
         buffer,
@@ -12343,6 +12461,7 @@ async function handleApi(req, res, url) {
       );
     } catch (error) {
       console.error("core workbook export failed", error);
+      writeOperationLog(user, { operation_type: "导出单月核心Excel", operation_content: `导出月份 ${monthKey.slice(0, 7)} 失败：${error.message || "未知错误"}`, target_type: "core_export", target_id: monthKey, result_status: "failure", details: { month_key: monthKey, reason: error.message || "未知错误" } }, req);
       return sendError(res, 500, `导出核心 Excel 失败：${error.message || "未知错误"}`);
     }
   }
@@ -12358,7 +12477,8 @@ async function handleApi(req, res, url) {
         operation_content: `导出 ${months.length} 个月份，文件 ${filename}`,
         target_type: "core_export",
         target_id: "all_months",
-      });
+        details: { months, filename, file_size: buffer.length },
+      }, req);
       return sendBuffer(
         res,
         buffer,
@@ -12367,6 +12487,7 @@ async function handleApi(req, res, url) {
       );
     } catch (error) {
       console.error("all core workbooks export failed", error);
+      writeOperationLog(user, { operation_type: "批量导出全部月份核心Excel", operation_content: `批量导出失败：${error.message || "未知错误"}`, target_type: "core_export", target_id: "all_months", result_status: "failure", details: { reason: error.message || "未知错误" } }, req);
       return sendError(res, 500, `批量导出核心 Excel 失败：${error.message || "未知错误"}`);
     }
   }
@@ -12380,7 +12501,8 @@ async function handleApi(req, res, url) {
         operation_content: `查看历史备份 ${records.length} 条`,
         target_type: "backup_records",
         target_id: "list",
-      });
+        details: { count: records.length },
+      }, req);
     }
     return sendJson(res, { settings: backupSettings(), records, auto_check: auto });
   }
@@ -12392,7 +12514,8 @@ async function handleApi(req, res, url) {
       operation_content: `${settings.enabled ? "启用" : "停用"}自动备份，频率 ${weekdayOperationLabel(settings.weekday)}`,
       target_type: "backup_settings",
       target_id: "auto_backup",
-    });
+      details: settings,
+    }, req);
     return sendJson(res, { ok: true, settings });
   }
 
@@ -12404,10 +12527,12 @@ async function handleApi(req, res, url) {
         operation_content: backupOperationText(result.record),
         target_type: "backup_records",
         target_id: String(result.record.id || ""),
-      });
+        details: result.record,
+      }, req);
       return sendJson(res, { ...result, records: backupRecords() });
     } catch (error) {
       console.error("manual core backup failed", error);
+      writeOperationLog(user, { operation_type: "手动备份核心数据", operation_content: `手动备份失败：${error.message || "未知错误"}`, target_type: "backup_records", target_id: "manual", result_status: "failure", details: { reason: error.message || "未知错误" } }, req);
       return sendError(res, 500, `手动备份失败：${error.message || "未知错误"}`);
     }
   }
@@ -12421,17 +12546,21 @@ async function handleApi(req, res, url) {
       operation_content: backupOperationText(result.row),
       target_type: "backup_records",
       target_id: String(result.row.id || backupDownloadMatch[1]),
-    });
+      details: backupRecordDto(result.row),
+    }, req);
     return sendBuffer(res, fs.readFileSync(result.filePath), "application/zip", result.row.filename || path.basename(result.filePath));
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/teacher-salary.xlsx") {
     const monthKey = resolveMonthKey(url);
+    const filename = `teacher-salary-${monthKey}.xlsx`;
+    const buffer = xlsxBuffer("薪资汇总", teacherSalaryRows(monthKey));
+    writeOperationLog(user, { operation_type: "导出教师薪资", operation_content: `导出月份 ${monthKey}，文件 ${filename}`, target_type: "teacher_salary", target_id: monthKey, details: { month_key: monthKey, filename, file_size: buffer.length } }, req);
     return sendBuffer(
       res,
-      xlsxBuffer("薪资汇总", teacherSalaryRows(monthKey)),
+      buffer,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      `teacher-salary-${monthKey}.xlsx`,
+      filename,
     );
   }
 
@@ -12443,11 +12572,14 @@ async function handleApi(req, res, url) {
     if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
     const rows = studentStatementRows(monthKey, studentName, range);
     if (!rows) return sendError(res, 404, "student statement not found");
+    const filename = `student-statement-${studentName}-${range.start}_${range.end}.xlsx`;
+    const buffer = xlsxBuffer("学生账单", rows);
+    writeOperationLog(user, { operation_type: "导出学生账单", operation_content: `${studentName} ${range.start} 至 ${range.end}，文件 ${filename}`, target_type: "student_statement", target_id: studentName, details: { student_name: studentName, month_key: monthKey, start: range.start, end: range.end, filename, file_size: buffer.length } }, req);
     return sendBuffer(
       res,
-      xlsxBuffer("学生账单", rows),
+      buffer,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      `student-statement-${studentName}-${range.start}_${range.end}.xlsx`,
+      filename,
     );
   }
 
@@ -12461,11 +12593,15 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/opening-balances/export.xlsx") {
+    const filename = openingBalanceExportFilename();
+    const rows = openingBalanceExportRows();
+    const buffer = xlsxBuffer("期初余额", rows);
+    writeOperationLog(user, { operation_type: "导出学生期初余额", operation_content: `导出 ${Math.max(0, rows.length - 1)} 条期初余额，文件 ${filename}`, target_type: "student_opening_balances", target_id: "xlsx", details: { count: Math.max(0, rows.length - 1), filename, file_size: buffer.length } }, req);
     return sendBuffer(
       res,
-      xlsxBuffer("期初余额", openingBalanceExportRows()),
+      buffer,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      openingBalanceExportFilename(),
+      filename,
     );
   }
 
@@ -12571,11 +12707,12 @@ async function handleApi(req, res, url) {
     const changedKeys = Object.keys(body).filter((key) => key !== "month_key");
     if (changedKeys.length) {
       writeOperationLog(user, {
-        operation_type: "修改基础数据",
+        operation_type: settingsOperationType(changedKeys),
         operation_content: `修改 ${changedKeys.map(settingOperationLabel).join("、")}`,
         target_type: "settings",
         target_id: changedKeys.join(","),
-      });
+        details: { changed_keys: changedKeys, changed_labels: changedKeys.map(settingOperationLabel) },
+      }, req);
     }
     return sendJson(res, sanitizeBootstrap(bootstrap(text(body.month_key) || getSetting("month_key"), url.searchParams.get("include_inactive") === "1"), user));
   }
@@ -12650,7 +12787,13 @@ async function handleApi(req, res, url) {
     }
     const lesson = insertLesson(lessonData);
     recordAuditEvent(req, user, { action: "create", entity_type: "lessons", entity_id: String(lesson.id), before: null, after: lesson });
-    writeOperationLog(user, { operation_type: "创建课程", operation_content: `${text(lesson.teacher_name)} ${text(lesson.date)} ${text(lesson.time_slot)} ${text(lesson.subject)} ${text(lesson.student_names)}`, target_type: "lessons", target_id: String(lesson.id) });
+    writeOperationLog(user, {
+      operation_type: body.allow_conflicts ? "允许冲突创建课程" : "创建课程",
+      operation_content: `课程#${lesson.id} ${lessonOperationText(lesson)}`,
+      target_type: "lessons",
+      target_id: String(lesson.id),
+      details: lessonOperationDetails({}, lesson, { allow_conflicts: body.allow_conflicts === true, conflict_count: conflictReport.issue_count || 0 }),
+    }, req);
     return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson), schedule_conflicts: conflictReport }, 201);
   }
 
@@ -12703,12 +12846,20 @@ async function handleApi(req, res, url) {
       "teacher_salary_rule_id", "month_key", "sort_order", "updated_at",
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
-    writeOperationLog(user, { operation_type: "修改课程", operation_content: `${text(updated.teacher_name)} ${text(updated.date)} ${text(updated.time_slot)} ${text(updated.subject)} ${text(updated.student_names)}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
+    const studentNamesChanged = Object.prototype.hasOwnProperty.call(incoming, "student_names") && text(current.student_names) !== text(updated.student_names);
+    writeOperationLog(user, {
+      operation_type: body.allow_conflicts ? "允许冲突保存课程" : studentNamesChanged ? "排课模式修改学生" : "修改课程",
+      operation_content: `课程#${lessonMatch[1]}：${lessonOperationChangeText(current, updated)}`,
+      target_type: "lessons",
+      target_id: String(lessonMatch[1]),
+      details: lessonOperationDetails(current, updated, { allow_conflicts: body.allow_conflicts === true, conflict_count: conflictReport.issue_count || 0 }),
+    }, req);
     return sendJson(res, { ...updated, warnings: lessonWarnings(updated), schedule_conflicts: conflictReport });
   }
   if (lessonMatch && req.method === "DELETE") {
+    const before = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     auditedDelete(req, user, "lessons", "id", Number(lessonMatch[1]), "lessons");
-    writeOperationLog(user, { operation_type: "删除课程", operation_content: `课程ID ${lessonMatch[1]}`, target_type: "lessons", target_id: String(lessonMatch[1]) });
+    writeOperationLog(user, { operation_type: "删除课程", operation_content: `课程#${lessonMatch[1]} ${lessonOperationText(before)}`, target_type: "lessons", target_id: String(lessonMatch[1]), details: lessonOperationDetails(before, {}) }, req);
     return sendJson(res, { ok: true });
   }
 
@@ -12750,7 +12901,15 @@ async function handleApi(req, res, url) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
     const after = auditedPatchTable(req, user, "teachers", "id", Number(teacherIdMatch[1]), ["name", "phone", "notes", "status", "joined_at", "left_at"], payload, "teachers");
-    writeOperationLog(user, { operation_type: "修改老师档案", operation_content: teacherOperationText(after), target_type: "teachers", target_id: String(teacherIdMatch[1]) });
+    const changed = (field) => Object.prototype.hasOwnProperty.call(payload, field) && text(current[field]) !== text(after[field]);
+    const operationType = changed("status")
+      ? "修改教师状态"
+      : changed("left_at")
+        ? "修改教师离职日期"
+        : changed("joined_at")
+          ? (text(current.joined_at) ? "修改教师入职日期" : "补齐教师入职日期")
+          : "修改教师档案";
+    writeOperationLog(user, { operation_type: operationType, operation_content: teacherOperationText(after), target_type: "teachers", target_id: String(teacherIdMatch[1]), details: { before: current, after, changed_fields: Object.keys(payload).filter(changed) } }, req);
     return sendJson(res, after);
   }
   if (teacherIdMatch && req.method === "DELETE") {
@@ -12798,11 +12957,18 @@ async function handleApi(req, res, url) {
     for (const field of ["name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
-    auditedPatchTable(req, user, "students", "id", Number(studentIdMatch[1]), [
+    const row = auditedPatchTable(req, user, "students", "id", Number(studentIdMatch[1]), [
       "name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at",
     ], payload, "students");
-    const row = get("SELECT * FROM students WHERE id = ?", [Number(studentIdMatch[1])]);
-    writeOperationLog(user, { operation_type: "修改学生档案", operation_content: studentOperationText(row), target_type: "students", target_id: String(studentIdMatch[1]) });
+    const changed = (field) => Object.prototype.hasOwnProperty.call(payload, field) && text(current[field]) !== text(row[field]);
+    const operationType = changed("status")
+      ? "修改学生状态"
+      : changed("left_at")
+        ? "修改学生离校日期"
+        : changed("joined_at")
+          ? (text(current.joined_at) ? "修改学生入学日期" : "补齐学生入学日期")
+          : "修改学生档案";
+    writeOperationLog(user, { operation_type: operationType, operation_content: studentOperationText(row), target_type: "students", target_id: String(studentIdMatch[1]), details: { before: current, after: row, changed_fields: Object.keys(payload).filter(changed) } }, req);
     return sendJson(res, { ...row, warnings: studentWarnings(row.name, row.grade) });
   }
   if (studentIdMatch && req.method === "DELETE") {
