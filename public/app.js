@@ -382,7 +382,8 @@ let profileStatusFilter = (() => {
 let profileModal = null;
 let selectedTeacherProfileIds = new Set();
 let selectedStudentProfileIds = new Set();
-let expandedStudentProfileIds = new Set();
+let studentGradeStageModalDraft = null;
+let studentGradeStageEventsBound = false;
 let studentGradeStageBatchModalOpen = false;
 let studentGradeStageBatchDraft = { stage: "初一", start_date: "", end_date: "" };
 let staffProfileSearch = "";
@@ -418,10 +419,14 @@ let backupState = { settings: null, records: [], busy: false, error: "", setting
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
+let dashboardTrendChart = null;
+let dashboardTrendChartElement = null;
+let dashboardTrendResizeObserver = null;
 let customSelectEventsBound = false;
 let customDateEventsBound = false;
 let filterComboEventsBound = false;
 let multiSelectEventsBound = false;
+let colorConfigPreviewEventsBound = false;
 let userMenuEventsBound = false;
 let customDatePickerEl = null;
 let activeCustomDateInput = null;
@@ -430,6 +435,7 @@ let dateRangePickerEl = null;
 let activeDateRangePicker = null;
 let dateRangePickerEventsBound = false;
 let navigationEventsBound = false;
+let toastDismissTimer = 0;
 
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
@@ -473,29 +479,38 @@ function isDarkThemeActive() {
 }
 
 function ensureToastContainer() {
-  let container = document.querySelector('.toast-container');
+  const containers = [...document.querySelectorAll(".toast-container")];
+  let container = containers.shift();
+  containers.forEach((item) => item.remove());
   if (!container) {
-    container = document.createElement('div');
-    container.className = 'toast-container';
+    container = document.createElement("div");
+    container.className = "toast-container";
     document.body.appendChild(container);
   }
   return container;
 }
 
-function showToast(message, type = 'success') {
+function dismissToast({ removeContainer = true } = {}) {
+  clearTimeout(toastDismissTimer);
+  toastDismissTimer = 0;
+  document.querySelectorAll(".toast-container .toast").forEach((toast) => toast.remove());
+  if (removeContainer) document.querySelectorAll(".toast-container").forEach((container) => container.remove());
+}
+
+function showToast(message, type = "success") {
   const container = ensureToastContainer();
-  const toast = document.createElement('div');
+  let toast = container.querySelector(".toast");
+  container.querySelectorAll(".toast").forEach((item) => {
+    if (item !== toast) item.remove();
+  });
+  if (!toast) {
+    toast = document.createElement("div");
+    container.appendChild(toast);
+  }
   toast.className = `toast toast-${type}`;
-  toast.textContent = message;
-
-  container.appendChild(toast);
-
-  setTimeout(() => {
-    toast.classList.add('toast-hiding');
-    toast.addEventListener('animationend', () => {
-      toast.remove();
-    });
-  }, 3000);
+  toast.textContent = String(message || "操作完成");
+  clearTimeout(toastDismissTimer);
+  toastDismissTimer = window.setTimeout(() => dismissToast(), 2600);
 }
 
 function isCacheableGetRequest(path, options = {}) {
@@ -742,6 +757,7 @@ function firstAllowedView() {
 }
 
 function setActiveView(nextView) {
+  if ((nextView || "") !== view) dismissToast();
   view = nextView || "";
   activeNavGroup = view ? groupForView(view).key : "";
   if (activeNavGroup && navExpansionMode !== "all-collapsed") expandedNavGroups.add(activeNavGroup);
@@ -862,6 +878,16 @@ function customSelectMenu(wrapper) {
   return wrapper?._customSelectMenu || wrapper?.querySelector(".custom-select-menu") || null;
 }
 
+function customSelectOwner(node) {
+  const wrapper = node?.closest?.(".custom-select");
+  if (wrapper) return wrapper;
+  return node?.closest?.(".custom-select-menu")?._customSelectOwner || null;
+}
+
+function customSelectNative(wrapper) {
+  return wrapper?._customSelectNative || null;
+}
+
 function customSelectSearchInput(wrapper) {
   return customSelectMenu(wrapper)?.querySelector(".custom-select-search-input") || null;
 }
@@ -892,6 +918,8 @@ function filterCustomSelectOptions(wrapper) {
   });
   const empty = menu.querySelector(".custom-select-empty");
   if (empty) empty.hidden = visibleCount > 0;
+  const resultCount = menu.querySelector("[data-custom-select-result-count]");
+  if (resultCount) resultCount.textContent = String(visibleCount);
 }
 
 function renderCustomSelectBadge(select, value) {
@@ -991,6 +1019,12 @@ function openCustomSelect(wrapper) {
   requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }));
 }
 
+function closeSearchablePicker() {
+  closeCustomSelects();
+  closeOpenMultiSelectMenus();
+  closeCustomDatePicker();
+}
+
 function enhanceCustomSelects() {
   cleanupCustomSelectPortals();
   document.querySelectorAll("select").forEach((select) => {
@@ -1005,6 +1039,7 @@ function enhanceCustomSelects() {
       "custom-select",
       select.classList.contains("cell-select") ? "custom-select-cell" : "custom-select-control",
       select.classList.contains("status-select") ? "custom-select-status" : "",
+      select.classList.contains("inline-status-select") ? "custom-select-inline-status" : "",
       select.dataset.field ? `custom-select-field-${select.dataset.field}` : "",
     ].filter(Boolean).join(" ");
     if (select.style.width) wrapper.style.width = select.style.width;
@@ -1013,6 +1048,8 @@ function enhanceCustomSelects() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "custom-select-button";
+    button.disabled = select.disabled;
+    button.setAttribute("aria-disabled", select.disabled ? "true" : "false");
     button.setAttribute("aria-haspopup", "listbox");
     button.setAttribute("aria-expanded", "false");
     button.innerHTML = `<span class="custom-select-value"></span><span class="custom-select-arrow" aria-hidden="true"></span>`;
@@ -1023,6 +1060,7 @@ function enhanceCustomSelects() {
     menu.setAttribute("role", "listbox");
     menu._customSelectOwner = wrapper;
     wrapper._customSelectMenu = menu;
+    wrapper._customSelectNative = select;
 
     const searchWrap = document.createElement("div");
     searchWrap.className = "custom-select-search";
@@ -1042,8 +1080,11 @@ function enhanceCustomSelects() {
     const emptyOption = document.createElement("div");
     emptyOption.className = "custom-select-empty";
     emptyOption.hidden = true;
-    emptyOption.textContent = "无匹配选项";
-    menu.append(searchWrap, emptyOption);
+    emptyOption.textContent = "暂无匹配结果";
+    const resultCount = document.createElement("div");
+    resultCount.className = "custom-select-result-count";
+    resultCount.innerHTML = `当前结果 <b data-custom-select-result-count>0</b> 项`;
+    menu.append(searchWrap, resultCount, emptyOption);
 
     [...select.options].forEach((nativeOption) => {
       const option = document.createElement("button");
@@ -1069,76 +1110,7 @@ function enhanceCustomSelects() {
       } else option.textContent = nativeOption.textContent;
       if (nativeOption.title) option.title = nativeOption.title;
       if (nativeOption.dataset.candidateConflict === "1") option.classList.add("candidate-conflict", "option-conflict");
-      option.addEventListener("click", () => {
-        select.value = nativeOption.value;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-        syncCustomSelect(select, wrapper);
-        closeCustomSelects();
-      });
       menu.appendChild(option);
-    });
-
-    searchInput.addEventListener("input", () => {
-      filterCustomSelectOptions(wrapper);
-    });
-    searchInput.addEventListener("keydown", (event) => {
-      const optionsList = customSelectVisibleOptions(menu);
-      if (event.key === "Escape") {
-        closeCustomSelects();
-        button.focus();
-      } else if (event.key === "ArrowDown") {
-        event.preventDefault();
-        optionsList[0]?.focus();
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        optionsList[optionsList.length - 1]?.focus();
-      } else if (event.key === "Enter") {
-        event.preventDefault();
-        (menu.querySelector(".custom-select-option.selected:not([hidden])") || optionsList[0])?.click();
-      }
-    });
-    searchClear.addEventListener("click", () => {
-      searchInput.value = "";
-      filterCustomSelectOptions(wrapper);
-      searchInput.focus({ preventScroll: true });
-    });
-
-    button.addEventListener("click", () => {
-      const willOpen = !wrapper.classList.contains("open");
-      closeCustomSelects(wrapper);
-      if (willOpen) openCustomSelect(wrapper);
-      else {
-        wrapper.classList.remove("open", "open-up");
-        customSelectMenu(wrapper)?.classList.remove("open", "open-up");
-        button.setAttribute("aria-expanded", "false");
-      }
-    });
-    button.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        closeCustomSelects();
-        button.focus();
-      }
-      if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openCustomSelect(wrapper);
-        customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
-      }
-    });
-    menu.addEventListener("keydown", (event) => {
-      if (event.target?.classList?.contains("custom-select-search-input")) return;
-      const optionsList = customSelectVisibleOptions(menu);
-      const currentIndex = optionsList.indexOf(document.activeElement);
-      if (event.key === "Escape") {
-        closeCustomSelects();
-        button.focus();
-      } else if (event.key === "ArrowDown") {
-        event.preventDefault();
-        optionsList[Math.min(optionsList.length - 1, currentIndex + 1)]?.focus();
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        if (currentIndex <= 0) customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
-        else optionsList[Math.max(0, currentIndex - 1)]?.focus();
-      }
     });
 
     wrapper.append(button);
@@ -1150,7 +1122,107 @@ function enhanceCustomSelects() {
   if (!customSelectEventsBound) {
     customSelectEventsBound = true;
     document.addEventListener("click", (event) => {
+      const option = event.target.closest(".custom-select-option");
+      if (option) {
+        const wrapper = customSelectOwner(option);
+        const select = customSelectNative(wrapper);
+        if (!wrapper || !select || option.disabled) return;
+        select.value = option.dataset.value || "";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        if (wrapper.isConnected) syncCustomSelect(select, wrapper);
+        closeCustomSelects();
+        return;
+      }
+
+      const clear = event.target.closest(".custom-select-search-clear");
+      if (clear) {
+        const wrapper = customSelectOwner(clear);
+        const input = customSelectSearchInput(wrapper);
+        if (!wrapper || !input) return;
+        input.value = "";
+        filterCustomSelectOptions(wrapper);
+        input.focus({ preventScroll: true });
+        return;
+      }
+
+      const button = event.target.closest(".custom-select-button");
+      if (button) {
+        const wrapper = customSelectOwner(button);
+        if (!wrapper) return;
+        const willOpen = !wrapper.classList.contains("open");
+        closeCustomSelects(wrapper);
+        if (willOpen) openCustomSelect(wrapper);
+        else {
+          wrapper.classList.remove("open", "open-up");
+          customSelectMenu(wrapper)?.classList.remove("open", "open-up");
+          button.setAttribute("aria-expanded", "false");
+        }
+        return;
+      }
+
       if (!event.target.closest(".custom-select") && !event.target.closest(".custom-select-menu")) closeCustomSelects();
+    });
+    document.addEventListener("compositionstart", (event) => {
+      if (event.target.matches?.(".custom-select-search-input")) event.target.dataset.composing = "1";
+    });
+    document.addEventListener("compositionend", (event) => {
+      if (!event.target.matches?.(".custom-select-search-input")) return;
+      event.target.dataset.composing = "0";
+      filterCustomSelectOptions(customSelectOwner(event.target));
+    });
+    document.addEventListener("input", (event) => {
+      if (!event.target.matches?.(".custom-select-search-input") || event.target.dataset.composing === "1") return;
+      filterCustomSelectOptions(customSelectOwner(event.target));
+    });
+    document.addEventListener("keydown", (event) => {
+      const wrapper = customSelectOwner(event.target);
+      if (!wrapper) return;
+      const button = wrapper.querySelector(".custom-select-button");
+      const menu = customSelectMenu(wrapper);
+      const optionsList = customSelectVisibleOptions(menu);
+      if (event.target.matches?.(".custom-select-search-input")) {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          closeCustomSelects();
+          button?.focus();
+        } else if (event.key === "ArrowDown") {
+          event.preventDefault();
+          optionsList[0]?.focus();
+        } else if (event.key === "ArrowUp") {
+          event.preventDefault();
+          optionsList[optionsList.length - 1]?.focus();
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          (menu?.querySelector(".custom-select-option.selected:not([hidden])") || optionsList[0])?.click();
+        }
+        return;
+      }
+      if (event.target.closest?.(".custom-select-button")) {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          closeCustomSelects();
+          button?.focus();
+        } else if (["ArrowDown", "Enter", " "].includes(event.key)) {
+          event.preventDefault();
+          openCustomSelect(wrapper);
+          customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (!event.target.closest?.(".custom-select-menu")) return;
+      const currentIndex = optionsList.indexOf(document.activeElement);
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        closeCustomSelects();
+        button?.focus();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        optionsList[Math.min(optionsList.length - 1, currentIndex + 1)]?.focus();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (currentIndex <= 0) customSelectSearchInput(wrapper)?.focus({ preventScroll: true });
+        else optionsList[Math.max(0, currentIndex - 1)]?.focus();
+      }
     });
     window.addEventListener("resize", () => closeCustomSelects());
     window.addEventListener("scroll", () => {
@@ -1162,8 +1234,11 @@ function enhanceCustomSelects() {
 function parseDateValue(value) {
   const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return null;
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  if (Number.isNaN(date.getTime())) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime()) || date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
   return date;
 }
 
@@ -1199,6 +1274,7 @@ function ensureCustomDatePicker() {
     if (day && activeCustomDateInput) {
       const input = activeCustomDateInput;
       input.value = day.dataset.date;
+      input.removeAttribute("aria-invalid");
       closeCustomDatePicker();
       input.dispatchEvent(new Event("change", { bubbles: true }));
     }
@@ -1281,10 +1357,19 @@ function closeCustomDatePicker() {
 
 function enhanceCustomDateInputs() {
   document.querySelectorAll('input[type="date"]').forEach((input) => {
-    if (input.dataset.customDate === "1") return;
+    if (input.dataset.customDate === "1" || input.dataset.nativeDate === "1") return;
+    input.dataset.dateKind = input.dataset.dateKind || "single";
+    if (input.dataset.dateKind !== "single") return;
     input.dataset.customDate = "1";
     input.type = "text";
-    input.readOnly = true;
+    const editable = !input.disabled && !input.readOnly && input.dataset.dateInputMode !== "picker-only";
+    input.readOnly = !editable;
+    if (editable) {
+      input.inputMode = "numeric";
+      input.maxLength = 10;
+      input.pattern = "\\d{4}-\\d{2}-\\d{2}";
+      input.title = "请输入 YYYY-MM-DD 格式的日期";
+    }
     input.placeholder = "选择日期";
     input.classList.add("custom-date-input");
     input.setAttribute("aria-haspopup", "dialog");
@@ -1292,11 +1377,24 @@ function enhanceCustomDateInputs() {
     input.addEventListener("click", () => openCustomDatePicker(input));
     input.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
+        event.stopPropagation();
         closeCustomDatePicker();
-      } else if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+      } else if (editable && event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      } else if (event.key === "ArrowDown" || (!editable && (event.key === "Enter" || event.key === " "))) {
         event.preventDefault();
         openCustomDatePicker(input);
       }
+    });
+    input.addEventListener("input", () => {
+      const value = String(input.value || "").trim();
+      if (!value || isDateValue(value)) input.removeAttribute("aria-invalid");
+    });
+    input.addEventListener("blur", () => {
+      const value = String(input.value || "").trim();
+      if (value && !isDateValue(value)) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
     });
   });
 
@@ -1828,7 +1926,7 @@ function dateRangePickerControl({
 } = {}) {
   const hasValue = Boolean(start || end);
   return `
-    <span class="date-range-picker ${hasValue ? "has-value" : ""} ${disabled ? "disabled" : ""}" data-range-scope="${escapeHtml(scope || "")}" data-start-field="${escapeHtml(startField)}" data-end-field="${escapeHtml(endField)}" data-start="${escapeHtml(start || "")}" data-end="${escapeHtml(end || "")}">
+    <span class="date-range-picker ${hasValue ? "has-value" : ""} ${disabled ? "disabled" : ""}" data-date-kind="range" data-range-scope="${escapeHtml(scope || "")}" data-start-field="${escapeHtml(startField)}" data-end-field="${escapeHtml(endField)}" data-start="${escapeHtml(start || "")}" data-end="${escapeHtml(end || "")}">
       <button class="control date-range-trigger ${className}" type="button" ${disabled ? "disabled" : ""} aria-haspopup="dialog" aria-expanded="false">
         <span class="date-range-text" aria-label="${escapeHtml(dateRangeText(start, end))}">${dateRangeTextMarkup(start, end)}</span>
         <span class="date-range-icon" aria-hidden="true"></span>
@@ -2026,6 +2124,7 @@ function renderDateRangePickerPanel() {
     ["prev-year", "去年"],
     ["current-year", "今年"],
   ];
+  const presetScrollTop = picker.querySelector(".date-range-presets")?.scrollTop || 0;
   picker.innerHTML = `
     <div class="date-range-presets">
       ${presets.map(([key, label]) => `<button class="date-range-preset" type="button" data-range-preset="${key}">${escapeHtml(label)}</button>`).join("")}
@@ -2038,6 +2137,8 @@ function renderDateRangePickerPanel() {
       </div>
     </div>
   `;
+  const presetList = picker.querySelector(".date-range-presets");
+  if (presetList) presetList.scrollTop = presetScrollTop;
   picker.hidden = false;
   requestAnimationFrame(positionDateRangePickerPanel);
 }
@@ -2880,9 +2981,7 @@ function saveStudentQueryRange() {
 }
 
 function isDateValue(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
-  const date = new Date(`${value}T00:00:00`);
-  return !Number.isNaN(date.getTime());
+  return Boolean(parseDateValue(value));
 }
 
 function saveFinanceRange() {
@@ -3100,7 +3199,7 @@ function rechargeModalMarkup() {
         <div class="lesson-create-form recharge-form-grid">
           <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
-          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-field="recharge_date" type="date" value="${escapeHtml(defaultRechargeDate())}"></label>
+          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(defaultRechargeDate())}"></label>
           <label>现金充值<input id="new-recharge-cur" class="control money-input recharge-modal-field" data-field="cur_recharge" type="number" step="0.01" value="0"></label>
           <label>赠送充值<input id="new-recharge-gift" class="control money-input recharge-modal-field" data-field="cur_gift" type="number" step="0.01" value="0"></label>
           <label>来源 / 渠道<input id="new-recharge-source" class="control recharge-modal-field" data-field="source" placeholder="如现金、微信、支付宝"></label>
@@ -3522,12 +3621,12 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
   const selectedSet = new Set(selectedList);
   const normalized = uniqueSorted([...(values || []), ...(includeSelected ? selectedList : [])]);
   const dataName = dataAttr === "field" ? "data-field" : "data-filter-field";
-  const label = selectedList.length ? selectedList.join("、") : placeholder;
+  const label = multiSelectSelectionMarkup(field, selectedList, placeholder);
   const emptyLabel = emptyText || (/student/.test(field || "") ? "暂无匹配学生" : "暂无匹配选项");
   return `
     <span class="multi-select ${selectedList.length ? "has-value" : ""}" data-field="${escapeHtml(field)}" data-placeholder="${escapeHtml(placeholder)}" data-selection-mode="${multiple ? "multiple" : "single"}">
       <button ${id ? `id="${escapeHtml(id)}"` : ""} class="control multi-select-toggle ${className}" type="button" aria-expanded="false">
-        <span class="multi-select-label">${escapeHtml(label)}</span>
+        <span class="multi-select-label">${label}</span>
         <span class="multi-select-caret">⌄</span>
         <span class="multi-select-clear-icon" aria-hidden="true">×</span>
       </button>
@@ -3549,6 +3648,18 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
   `;
 }
 
+function multiSelectSelectionMarkup(field, values = [], placeholder = "全部") {
+  const selected = normalizeNameList(values);
+  if (!selected.length) return escapeHtml(placeholder);
+  if (["student", "student_name", "student_names", "students"].includes(field)) {
+    return `<span class="entity-badge-list">${selected.map((value) => renderEntityBadge("student", value)).join("")}</span>`;
+  }
+  if (["grade", "subject", "status"].includes(field)) {
+    return `<span class="entity-badge-list">${selected.map((value) => renderEntityBadge(field, value)).join("")}</span>`;
+  }
+  return escapeHtml(selected.join("、"));
+}
+
 function multiSelectOptionLabel(field, value) {
   if (field === "student" || field === "student_name" || field === "student_names" || field === "students") return renderEntityBadge("student", value);
   if (["grade", "subject", "status"].includes(field)) return renderEntityBadge(field, value);
@@ -3562,6 +3673,7 @@ const FLOATING_MULTI_SELECT_TOGGLE_SELECTOR = [
   ".new-user-teachers",
   ".user-access-teachers",
   ".schedule-student-popover .multi-select-toggle",
+  ".conflict-edit-students",
 ].join(",");
 
 function usesFloatingMultiSelectMenu(select) {
@@ -3570,6 +3682,12 @@ function usesFloatingMultiSelectMenu(select) {
 
 function multiSelectMenuFor(select) {
   return select?._floatingMenu || select?.querySelector(".multi-select-menu") || null;
+}
+
+function multiSelectOwner(node) {
+  const select = node?.closest?.(".multi-select");
+  if (select) return select;
+  return node?.closest?.(".multi-select-menu")?._multiSelectOwner || null;
 }
 
 function mountFloatingMultiSelectMenu(select) {
@@ -3599,7 +3717,18 @@ function closeMultiSelectMenu(select) {
 }
 
 function closeOpenMultiSelectMenus() {
-  document.querySelectorAll(".multi-select.open").forEach(closeMultiSelectMenu);
+  document.querySelectorAll(".multi-select.open").forEach((select) => {
+    if (select.classList.contains("schedule-student-popover") && typeof select._studentClose === "function") select._studentClose();
+    else closeMultiSelectMenu(select);
+  });
+}
+
+function closeOtherMultiSelectMenus(except) {
+  document.querySelectorAll(".multi-select.open").forEach((select) => {
+    if (select === except) return;
+    if (select.classList.contains("schedule-student-popover") && typeof select._studentClose === "function") select._studentClose();
+    else closeMultiSelectMenu(select);
+  });
 }
 
 function positionFloatingMultiSelectMenu(select) {
@@ -3713,20 +3842,16 @@ function refreshSearchableSelectResults(select) {
 function bindMultiSelectControl(select) {
   if (!select || select.dataset.multiSelectBound === "true") return;
   select.dataset.multiSelectBound = "true";
-  const toggle = select.querySelector(".multi-select-toggle");
   const hidden = select.querySelector(".multi-select-value");
   const label = select.querySelector(".multi-select-label");
   const menu = select.querySelector(".multi-select-menu");
-  const searchInput = select.querySelector(".multi-select-search");
-  const isMultiple = select.dataset.selectionMode !== "single";
   select._searchableOptionPool = [...(menu?.querySelectorAll(".multi-select-option") || [])];
   const selectedValues = () => normalizeNameList(hidden?.value || "");
-  const syncSearch = () => refreshSearchableSelectResults(select);
   const syncUi = () => {
     const selected = selectedValues();
     const selectedSet = new Set(selected);
     select.classList.toggle("has-value", selected.length > 0);
-    if (label) label.textContent = selected.length ? selected.join("、") : (select.dataset.placeholder || "全部");
+    if (label) label.innerHTML = multiSelectSelectionMarkup(select.dataset.field || "", selected, select.dataset.placeholder || "全部");
     (select._searchableOptionPool || []).forEach((option) => {
       const active = selectedSet.has(option.dataset.value || "");
       option.classList.toggle("selected", active);
@@ -3736,7 +3861,7 @@ function bindMultiSelectControl(select) {
     select.querySelectorAll("[data-multi-select-count]").forEach((counter) => {
       counter.textContent = String(selected.length);
     });
-    syncSearch();
+    refreshSearchableSelectResults(select);
   };
   const commit = (values) => {
     if (!hidden) return;
@@ -3744,95 +3869,9 @@ function bindMultiSelectControl(select) {
     syncUi();
     hidden.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  toggle?.addEventListener("click", (event) => {
-    event.preventDefault();
-    if (event.target.closest(".multi-select-clear-icon") && selectedValues().length) {
-      closeMultiSelectMenu(select);
-      if (searchInput) searchInput.value = "";
-      commit([]);
-      toggle.blur();
-      return;
-    }
-    document.querySelectorAll(".multi-select.open").forEach((item) => {
-      if (item !== select) closeMultiSelectMenu(item);
-    });
-    const isOpen = !select.classList.contains("open");
-    if (!isOpen) closeMultiSelectMenu(select);
-    else {
-      select.classList.add("open");
-      mountFloatingMultiSelectMenu(select);
-    }
-    toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
-    if (isOpen) {
-      searchInput?.focus({ preventScroll: true });
-      positionFloatingMultiSelectMenu(select);
-      requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
-    }
-  });
-  let searchComposing = false;
-  searchInput?.addEventListener("click", (event) => event.stopPropagation());
-  searchInput?.addEventListener("compositionstart", () => {
-    searchComposing = true;
-  });
-  searchInput?.addEventListener("compositionend", () => {
-    searchComposing = false;
-    syncSearch();
-  });
-  searchInput?.addEventListener("input", () => {
-    if (!searchComposing) syncSearch();
-  });
-  searchInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      const visible = [...(menu?.querySelectorAll(".multi-select-option") || [])].filter((option) => !option.hidden);
-      const target = visible.find((option) => option.classList.contains("selected")) || visible[0];
-      if (target) target.click();
-      else closeMultiSelectMenu(select);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      closeMultiSelectMenu(select);
-      toggle?.blur();
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      [...(menu?.querySelectorAll(".multi-select-option") || [])].find((option) => !option.hidden)?.focus();
-    }
-  });
-  select.querySelector(".multi-select-search-clear")?.addEventListener("click", () => {
-    if (!searchInput) return;
-    searchInput.value = "";
-    syncSearch();
-    searchInput.focus({ preventScroll: true });
-  });
-  select.querySelector(".multi-select-clear")?.addEventListener("click", () => {
-    closeMultiSelectMenu(select);
-    if (searchInput) searchInput.value = "";
-    commit([]);
-  });
-  menu?.querySelectorAll(".multi-select-option").forEach((option) => {
-    option.addEventListener("click", () => {
-      const value = option.dataset.value || "";
-      if (!isMultiple) {
-        commit(value ? [value] : []);
-        closeMultiSelectMenu(select);
-        toggle?.focus({ preventScroll: true });
-        return;
-      }
-      const next = selectedValues();
-      const index = next.indexOf(value);
-      if (index >= 0) next.splice(index, 1);
-      else next.push(value);
-      commit(next);
-    });
-  });
-  menu?.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const visible = [...menu.querySelectorAll(".multi-select-option")].filter((option) => !option.hidden);
-    const index = visible.indexOf(document.activeElement);
-    event.preventDefault();
-    if (event.key === "ArrowDown") visible[Math.min(visible.length - 1, index + 1)]?.focus();
-    else if (index <= 0) searchInput?.focus({ preventScroll: true });
-    else visible[index - 1]?.focus();
-  });
+  select._multiSelectSelectedValues = selectedValues;
+  select._multiSelectSync = syncUi;
+  select._multiSelectCommit = commit;
   syncUi();
 }
 
@@ -4732,9 +4771,10 @@ function bindSafeTextInput(input, applyValue, renderAction, _delay = 650) {
 function inputCell({ className, id, field, value, type = "text", extra = "", tdClass = "" }) {
   const inputValue = type === "number" ? moneyInput(value) : (value ?? "");
   const moneyField = /(?:price|amount|salary|balance|fee|recharge|gift|cost|rate)/i.test(field || "");
+  const dateKind = type === "date" ? 'data-date-kind="single"' : "";
   return `
     <td class="${tdClass}">
-      <input class="cell-input ${className} ${type === "number" ? "number" : ""} ${moneyField ? "money-input" : ""}" data-id="${id}" data-field="${field}" type="${type}" value="${escapeHtml(inputValue)}" ${extra}>
+      <input class="cell-input ${className} ${type === "number" ? "number" : ""} ${moneyField ? "money-input" : ""}" data-id="${id}" data-field="${field}" ${dateKind} type="${type}" value="${escapeHtml(inputValue)}" ${extra}>
     </td>
   `;
 }
@@ -4817,6 +4857,9 @@ function passwordEyeIcon(visible) {
 }
 
 function renderLogin(error = "") {
+  dismissToast();
+  closeSearchablePicker();
+  cleanupCustomSelectPortals();
   const remembered = loginRemember();
   appEl?.classList.add("login-mode");
   appEl?.classList.remove("readonly-mode");
@@ -5289,7 +5332,10 @@ function updateLessonToolbarRegion(rows = visibleLessonRows()) {
 
 function updateLessonModalRegion(rows = visibleLessonRows()) {
   const region = document.querySelector(".lesson-modal-region");
-  if (region) region.innerHTML = lessonModalsHtml(rows);
+  if (region) {
+    closeSearchablePicker();
+    region.innerHTML = lessonModalsHtml(rows);
+  }
 }
 
 function updateLessonsViewDom({
@@ -5499,9 +5545,11 @@ function lessonTextCell(colClass, value, { html = "", title = value } = {}) {
 
 function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
   const probe = document.createElement("canvas").getContext("2d");
-  const sample = document.querySelector(".lesson-table .col-students") || document.body;
-  const style = getComputedStyle(sample);
-  probe.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const rootStyle = getComputedStyle(document.documentElement);
+  const bodyStyle = getComputedStyle(document.body);
+  const tableFontSize = rootStyle.getPropertyValue("--text-table").trim() || "13px";
+  // 使用课程表自身的设计变量，不依赖首次渲染时旧表格 DOM 是否已经存在。
+  probe.font = `400 ${tableFontSize} ${bodyStyle.fontFamily}`;
   const badgePadding = 16;
   const badgeGap = 5;
   const cellPadding = 16;
@@ -5705,13 +5753,13 @@ function parseDateList(value) {
 }
 
 function usedLessonLookupValues(key) {
-  const base = {
-    classrooms: state.lookups?.classrooms || [],
-    subjects: state.lookups?.subjects || [],
-    times: state.lookups?.times || [],
-    grades: (state.lookups?.grades || []).map((g) => g.name),
-  }[key] || [];
-  return uniqueSorted([...base, ...(state.used_lesson_lookups?.[key] || [])]);
+  if (key === "grades") {
+    return uniqueSorted([
+      ...((state.lookups?.grades || []).map((grade) => grade.name)),
+      ...(state.used_lesson_lookups?.grades || []),
+    ]);
+  }
+  return normalizeBaseDataValues(key, state.used_lesson_lookups?.[key] || []);
 }
 
 function optionValuesWithCurrent(values = [], current = "", includeCurrent = true) {
@@ -6094,7 +6142,7 @@ function lessonCreateModal() {
         <div class="copy-form lesson-create-form">
           <label class="filter-field">
             <span>日期</span>
-            <input class="control lesson-create-field lesson-create-date" data-field="date" type="date" value="${escapeHtml(date)}">
+            <input class="control lesson-create-field lesson-create-date" data-date-kind="single" data-field="date" type="date" value="${escapeHtml(date)}">
           </label>
           <label class="filter-field">
             <span>星期</span>
@@ -6386,11 +6434,11 @@ function weekCopyModal() {
         <div class="copy-form week-copy-form">
           <label class="filter-field">
             <span>源周周一</span>
-            <input class="control week-copy-source" type="date" value="${escapeHtml(sourceStart)}">
+              <input class="control week-copy-source" data-date-kind="single" type="date" value="${escapeHtml(sourceStart)}">
           </label>
           <label class="filter-field">
             <span>目标周周一</span>
-            <input class="control week-copy-target" type="date" value="${escapeHtml(targetStart)}">
+              <input class="control week-copy-target" data-date-kind="single" type="date" value="${escapeHtml(targetStart)}">
           </label>
         </div>
         <div class="week-copy-conflict-summary ${conflictTotal ? "has-conflict" : "is-clear"}">
@@ -6727,27 +6775,50 @@ function lessonCandidateSelectCell({ id, field, value, values, candidate, emptyT
   `;
 }
 
+function lessonStudentPickerMarkup({
+  selected = [],
+  values = [],
+  fallbackGrade = "",
+  lessonId = "",
+  className = "",
+  toggleClass = "",
+  hiddenClass = "",
+  hiddenAttrs = "",
+} = {}) {
+  const selectedNames = normalizeNameList(selected);
+  const candidateNames = optionValuesWithCurrent(values, selectedNames, true);
+  return `
+    <span class="multi-select schedule-student-popover ${escapeHtml(className)}" data-placeholder="选择学生" data-student-fallback-grade="${escapeHtml(fallbackGrade)}">
+      <button class="multi-select-toggle lesson-schedule-student-field ${escapeHtml(toggleClass)}" type="button" aria-expanded="false" aria-label="编辑学生" title="编辑学生"><span class="lesson-student-badges schedule-student-badges">${selectedNames.map((name) => renderStudentBadge(name, { fallbackGrade })).join("") || '<span class="muted-tip">未填学生</span>'}</span></button>
+      <input class="multi-select-value ${escapeHtml(hiddenClass)}" ${hiddenAttrs} type="hidden" value="${escapeHtml(selectedNames.join("\n"))}">
+      <span class="multi-select-menu schedule-student-menu" role="dialog" aria-label="学生选择">
+        <div class="lesson-student-picker-header">
+          <div class="lesson-student-picker-search"><input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索在读学生"><button class="btn schedule-student-search-clear" type="button">清空</button></div>
+          <div class="schedule-student-stats">已选择 <b data-student-selected-count>${selectedNames.length}</b> 人 · 当前结果 <b data-student-result-count>${candidateNames.length}</b> 人</div>
+        </div>
+        <div class="schedule-student-selected" data-student-selected-list ${selectedNames.length ? "" : "hidden"}>${selectedNames.map((name) => renderStudentBadge(name, { fallbackGrade, removable: true, lessonId })).join("")}</div>
+        <div class="schedule-student-options lesson-student-picker-list">
+          ${candidateNames.map((name) => `<button class="multi-select-option ${selectedNames.includes(name) ? "selected" : ""}" type="button" data-value="${escapeHtml(name)}" title="${escapeHtml(name)}"><span class="multi-select-check">${selectedNames.includes(name) ? "✓" : ""}</span>${renderStudentBadge(name, { fallbackGrade })}</button>`).join("") || `<span class="multi-select-empty">暂无在读学生</span>`}
+        </div>
+        <div class="lesson-student-picker-add"><textarea class="control schedule-student-new-names" rows="2" placeholder="新增学生：用逗号、顿号、空格或换行分隔"></textarea></div>
+        <div class="schedule-student-actions lesson-student-picker-footer"><button class="btn schedule-student-cancel" type="button">取消</button><button class="btn primary schedule-student-confirm" type="button">确认</button></div>
+      </span>
+    </span>`;
+}
+
 function lessonScheduleStudentCell(row) {
   const selected = normalizeNameList(splitStudents(row.student_names));
   const values = getActiveStudentOptions(selected, { includeCurrent: true });
   return `
     <td class="col-students lesson-schedule-students">
-      <span class="multi-select schedule-student-popover" data-placeholder="选择学生" data-student-fallback-grade="${escapeHtml(row.grade || "")}">
-        <button class="multi-select-toggle lesson-schedule-student-field" type="button" aria-expanded="false" aria-label="编辑学生" title="编辑学生"><span class="lesson-student-badges schedule-student-badges">${selected.map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("") || '<span class="muted-tip">未填学生</span>'}</span></button>
-        <input class="multi-select-value lesson-field" data-id="${escapeHtml(String(row.id))}" data-field="student_names" type="hidden" value="${escapeHtml(selected.join("\n"))}">
-        <span class="multi-select-menu schedule-student-menu" role="dialog" aria-label="学生选择">
-          <div class="lesson-student-picker-header">
-            <div class="lesson-student-picker-search"><input class="multi-select-search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索在读学生"><button class="btn schedule-student-search-clear" type="button">清空</button></div>
-            <div class="schedule-student-stats">已选择 <b data-student-selected-count>${selected.length}</b> 人 · 当前结果 <b data-student-result-count>${values.length}</b> 人</div>
-          </div>
-          <div class="schedule-student-selected" data-student-selected-list ${selected.length ? "" : "hidden"}>${selected.map((name) => renderStudentBadge(name, { fallbackGrade: row.grade, removable: true, lessonId: row.id })).join("")}</div>
-          <div class="schedule-student-options lesson-student-picker-list">
-            ${values.map((name) => `<button class="multi-select-option ${selected.includes(name) ? "selected" : ""}" type="button" data-value="${escapeHtml(name)}" title="${escapeHtml(name)}"><span class="multi-select-check">${selected.includes(name) ? "✓" : ""}</span>${renderStudentBadge(name, { fallbackGrade: row.grade })}</button>`).join("") || `<span class="multi-select-empty">暂无在读学生</span>`}
-          </div>
-          <div class="lesson-student-picker-add"><textarea class="control schedule-student-new-names" rows="2" placeholder="新增学生：用逗号、顿号、空格或换行分隔"></textarea></div>
-          <div class="schedule-student-actions lesson-student-picker-footer"><button class="btn schedule-student-cancel" type="button">取消</button><button class="btn primary schedule-student-confirm" type="button">确认</button></div>
-        </span>
-      </span>
+      ${lessonStudentPickerMarkup({
+        selected,
+        values,
+        fallbackGrade: row.grade || "",
+        lessonId: row.id,
+        hiddenClass: "lesson-field",
+        hiddenAttrs: `data-id="${escapeHtml(String(row.id))}" data-field="student_names"`,
+      })}
     </td>`;
 }
 
@@ -6783,79 +6854,35 @@ function renderLessonStudentCandidateList(select, draft = []) {
 function bindScheduleStudentPopover(select) {
   if (!select || select.dataset.studentPopoverBound === "true") return;
   select.dataset.studentPopoverBound = "true";
-  const toggle = select.querySelector(".multi-select-toggle");
   const hidden = select.querySelector(".multi-select-value");
-  const menu = select.querySelector(".multi-select-menu");
-  const search = select.querySelector(".multi-select-search");
-  const newNames = select.querySelector(".schedule-student-new-names");
-  let draft = normalizeNameList(hidden?.value || "");
-  let composing = false;
-  select._studentCandidates = getActiveStudentOptions(draft, { includeCurrent: true });
-  const sync = () => {
-    renderLessonStudentCandidateList(select, draft);
-  };
-  const close = () => {
+  select._studentDraft = normalizeNameList(hidden?.value || "");
+  select._studentCandidates = getActiveStudentOptions(select._studentDraft, { includeCurrent: true });
+  select._studentSync = () => renderLessonStudentCandidateList(select, select._studentDraft || []);
+  select._studentClose = () => {
+    const menu = multiSelectMenuFor(select);
+    const search = menu?.querySelector(".multi-select-search");
+    const newNames = menu?.querySelector(".schedule-student-new-names");
     if (search) search.value = "";
+    if (newNames) newNames.value = "";
+    select._studentDraft = normalizeNameList(hidden?.value || "");
+    select._studentSync();
     closeMultiSelectMenu(select);
   };
-  toggle?.addEventListener("click", (event) => {
-    event.preventDefault();
-    document.querySelectorAll(".schedule-student-popover.open").forEach((item) => { if (item !== select) closeMultiSelectMenu(item); });
-    if (select.classList.contains("open")) return close();
-    draft = normalizeNameList(hidden?.value || "");
-    if (search) search.value = "";
-    select.classList.add("open");
-    toggle.setAttribute("aria-expanded", "true");
-    mountFloatingMultiSelectMenu(select);
-    sync();
-    positionFloatingMultiSelectMenu(select);
-    requestAnimationFrame(() => search?.focus({ preventScroll: true }));
-  });
-  search?.addEventListener("compositionstart", () => { composing = true; });
-  search?.addEventListener("compositionend", () => { composing = false; sync(); });
-  search?.addEventListener("input", () => { if (!composing) sync(); });
-  search?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") event.preventDefault();
-    if (event.key === "Escape") { event.preventDefault(); close(); }
-  });
-  menu?.addEventListener("click", (event) => event.stopPropagation());
-  menu?.querySelector(".schedule-student-search-clear")?.addEventListener("click", () => {
-    if (search) search.value = "";
-    sync();
-    search?.focus({ preventScroll: true });
-  });
-  menu?.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    close();
-    toggle?.focus({ preventScroll: true });
-  });
-  menu?.addEventListener("click", (event) => {
-    const selectedBadge = event.target.closest(".schedule-student-selected .student-badge-removable");
-    if (selectedBadge) {
-      draft = draft.filter((name) => name !== (selectedBadge.dataset.studentName || ""));
-      sync();
-      refreshScheduleStudentPopoverLayout(select);
-      return;
-    }
-    const option = event.target.closest(".multi-select-option");
-    if (!option) return;
-    const value = option.dataset.value || "";
-    draft = draft.includes(value) ? draft.filter((name) => name !== value) : normalizeNameList([...draft, value]);
-    sync();
-    refreshScheduleStudentPopoverLayout(select);
-  });
-  menu?.querySelector(".schedule-student-cancel")?.addEventListener("click", close);
-  menu?.querySelector(".schedule-student-confirm")?.addEventListener("click", () => {
+  select._studentConfirm = () => {
+    const menu = multiSelectMenuFor(select);
+    const newNames = menu?.querySelector(".schedule-student-new-names");
     const added = parseLessonCreateStudents(newNames?.value || "");
-    const next = normalizeNameList([...draft, ...added]);
+    const next = normalizeNameList([...(select._studentDraft || []), ...added]);
+    select._studentDraft = next;
+    select._studentCandidates = getActiveStudentOptions(next, { includeCurrent: true });
+    if (newNames) newNames.value = "";
     if (hidden) {
       hidden.value = normalizeLessonStudentNames(next.join("、"));
       hidden.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    close();
-  });
-  sync();
+    select._studentClose();
+  };
+  select._studentSync();
 }
 
 function scheduleConflictLessonDetail(row) {
@@ -7198,18 +7225,32 @@ function closeConflictLessonEditor() {
   syncLessonConflictModalBodyState();
 }
 
+function conflictLessonDraftFromModal(modal) {
+  const next = { ...(lessonConflictEditDraft || {}) };
+  modal?.querySelectorAll(".conflict-edit-field").forEach((input) => {
+    next[input.dataset.field] = input.value;
+  });
+  const selected = normalizeNameList(modal?.querySelector(".multi-select-value.conflict-edit-students")?.value || "");
+  next.student_names = normalizeLessonStudentNames(selected.join("、"));
+  next.weekday = weekdayCn(next.date);
+  return next;
+}
+
+function refreshConflictLessonEditorForDate(modal) {
+  if (!lessonConflictEditDraft || !modal) return;
+  lessonConflictEditDraft = conflictLessonDraftFromModal(modal);
+  updateLessonModalRegion();
+  applyReadonlyUi();
+  wireEvents();
+  syncLessonConflictModalBodyState();
+}
+
 async function saveConflictLessonEditor(button) {
   if (!lessonConflictEditDraft || isReadonlyUser() || button.disabled) return;
   const modal = button.closest(".lesson-conflict-edit-modal");
-  const payload = { ...lessonConflictEditDraft };
-  modal?.querySelectorAll(".conflict-edit-field").forEach((input) => {
-    payload[input.dataset.field] = input.value;
-  });
-  const selected = normalizeNameList(modal?.querySelector(".conflict-edit-students .multi-select-value")?.value || "");
-  const added = parseLessonCreateStudents(modal?.querySelector(".conflict-edit-new-students")?.value || "");
-  payload.student_names = normalizeLessonStudentNames([...selected, ...added].join("、"));
+  const payload = conflictLessonDraftFromModal(modal);
   payload.time_slot = normalizeTimeSlot(payload.time_slot);
-  if (!payload.date || !payload.time_slot) return alert("请填写日期和规范的时间（HH:mm-HH:mm）");
+  if (!isDateValue(payload.date) || !payload.time_slot) return alert("请填写有效日期和规范的时间（HH:mm-HH:mm）");
   const localConflict = buildLessonCandidateConflict(payload, { excludeLessonId: payload.id });
   if (localConflict.conflict && !confirm(`修改后仍有冲突：${lessonCandidateConflictText(localConflict)}。是否继续保存？`)) return;
   button.disabled = true;
@@ -7239,23 +7280,22 @@ function lessonConflictEditModal() {
   if (!draft) return "";
   const candidate = lessonCandidateContext(draft);
   const students = normalizeNameList(splitStudents(draft.student_names));
-  const studentSelector = multiSelectControl({
-    className: "conflict-edit-students",
-    field: "student_names",
+  const studentSelector = lessonStudentPickerMarkup({
     selected: students,
     values: getActiveStudentOptions(students, { includeCurrent: true }),
-    placeholder: "选择学生",
-    clearLabel: "清空选择",
-    dataAttr: "field",
-    searchable: true,
-    searchPlaceholder: "搜索在读学生",
+    fallbackGrade: draft.grade || "",
+    lessonId: draft.id,
+    className: "conflict-student-popover",
+    toggleClass: "conflict-edit-student-toggle",
+    hiddenClass: "conflict-edit-students",
+    hiddenAttrs: 'data-field="student_names"',
   });
   return `
     <div class="modal-backdrop lesson-conflict-edit-modal">
       <div class="modal-panel lesson-conflict-edit-panel">
         <div class="modal-head"><div><div class="modal-title">处理冲突课程</div><div class="modal-subtitle">修改只保存在此弹窗草稿；确认后由服务端进行最终冲突校验。</div></div><button class="btn conflict-edit-cancel" type="button">取消</button></div>
         <div class="copy-form conflict-edit-form">
-          <label class="filter-field"><span>日期</span><input class="control conflict-edit-field" data-field="date" type="date" value="${escapeHtml(draft.date || "")}"></label>
+          <label class="filter-field conflict-edit-date-field"><span>日期</span><span class="conflict-edit-date-control"><input class="control conflict-edit-field" data-date-kind="single" data-date-input-mode="editable" data-field="date" type="date" value="${escapeHtml(draft.date || "")}" aria-label="课程日期"><span class="conflict-edit-weekday">${escapeHtml(weekdayCn(draft.date) || "")}</span></span></label>
           <label class="filter-field"><span>授课老师</span><select class="control conflict-edit-field" data-field="teacher_name">${manualSelectOptions(getActiveTeacherOptions(draft.teacher_name), draft.teacher_name, lessonManualLabel("teacher_name"))}</select></label>
           <label class="filter-field"><span>时间</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="time_slot">${lessonCandidateSelectOptions({ field: "time_slot", values: getTimeOptions(draft.time_slot), current: draft.time_slot, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("time_slot") })}</select></label>
           <label class="filter-field"><span>教室</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="classroom">${lessonCandidateSelectOptions({ field: "classroom", values: getRoomOptions(draft.classroom), current: draft.classroom, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("classroom") })}</select></label>
@@ -7263,7 +7303,7 @@ function lessonConflictEditModal() {
           <label class="filter-field"><span>科目</span><select class="control conflict-edit-field" data-field="subject">${manualSelectOptions(getSubjectOptions(draft.subject), draft.subject, lessonManualLabel("subject"))}</select></label>
           <label class="filter-field"><span>状态</span><select class="control conflict-edit-field" data-field="status">${manualSelectOptions(getStatusOptions(draft.status || rowStatus(draft)), draft.status || rowStatus(draft), lessonManualLabel("status"), { emptyText: "" })}</select></label>
           <label class="filter-field"><span>备注</span><textarea class="control conflict-edit-field" data-field="notes" rows="2">${escapeHtml(draft.notes || "")}</textarea></label>
-          <label class="filter-field conflict-edit-student-field"><span>学生</span>${studentSelector}<textarea class="control conflict-edit-new-students" rows="2" placeholder="新增学生：用逗号、顿号、空格或换行分隔"></textarea></label>
+          <div class="filter-field conflict-edit-student-field"><span>学生</span>${studentSelector}</div>
         </div>
         <div class="modal-actions"><button class="btn conflict-edit-cancel" type="button">取消</button><button class="btn primary conflict-edit-save" type="button">保存修改</button></div>
       </div>
@@ -8445,7 +8485,7 @@ function renderRecharges() {
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
-                <td><input class="cell-input recharge-field" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
+            <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无充值记录</td></tr>`}
@@ -9475,10 +9515,15 @@ function userAccountRowMarkup(user, teacherValues = userTeacherValues()) {
       <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
       <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
       <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
-      <td><select class="cell-select user-field" data-field="status">${options(["active", "disabled"], user.status || "active")}</select></td>
+      <td><select class="cell-select user-field inline-status-select user-inline-status" data-field="status" data-original-value="${escapeHtml(user.status || "active")}">
+        <option value="active" ${user.status !== "disabled" ? "selected" : ""}>启用</option>
+        <option value="disabled" ${user.status === "disabled" ? "selected" : ""}>停用</option>
+      </select></td>
       <td class="readonly user-actions-cell">
-        <input class="control user-reset-password-value" type="password" autocomplete="new-password" placeholder="新密码">
-        <button class="btn user-reset-password" type="button">重置</button>
+        <div class="user-reset-password-inline">
+          <input class="control user-reset-password-value" type="password" autocomplete="new-password" placeholder="新密码">
+          <button class="btn user-reset-password" type="button">重置</button>
+        </div>
       </td>
       <td class="readonly">
         <button class="btn danger user-delete" type="button" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}" ${canDelete ? "" : "disabled"} title="${escapeHtml(deleteTitle)}">删除</button>
@@ -9492,6 +9537,15 @@ function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()
     <div class="band user-admin-panel">
       <div class="table-wrap">
         <table class="user-table uniform-table nowrap-table">
+          <colgroup>
+            <col class="user-col-username">
+            <col class="user-col-display-name">
+            <col class="user-col-role">
+            <col class="user-col-teachers">
+            <col class="user-col-status">
+            <col class="user-col-password">
+            <col class="user-col-delete">
+          </colgroup>
           <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
           <tbody class="user-account-table-body">
             ${users.map((user) => userAccountRowMarkup(user, teacherValues)).join("") || `<tr><td colspan="7" class="empty">暂无账号</td></tr>`}
@@ -9627,6 +9681,8 @@ function insertUserAccountRow(user) {
     return rowIndex > createdIndex;
   });
   tableBody.insertBefore(nextRow, laterRow || null);
+  applyReadonlyUi();
+  enhanceCustomSelects();
   bindMultiSelectControl(nextRow.querySelector(".multi-select"));
   bindUserAccountRowEvents(nextRow);
 }
@@ -9697,10 +9753,6 @@ function settingsArray(key) {
   }
 }
 
-function selectorEscape(value) {
-  return window.CSS?.escape ? CSS.escape(value) : String(value || "").replace(/["\\]/g, "\\$&");
-}
-
 function baseDataDefinitions() {
   return [
     {
@@ -9708,46 +9760,60 @@ function baseDataDefinitions() {
       title: "教室",
       settingKey: "custom_classrooms",
       placeholder: "例如 C6",
-      historicalValues: uniqueSorted(state.used_lesson_lookups?.classrooms || []),
+      currentValues: uniqueSorted(state.used_lesson_lookups?.classrooms || []),
     },
     {
       key: "subjects",
       title: "科目",
       settingKey: "custom_subjects",
       placeholder: "例如 政治",
-      historicalValues: uniqueSorted(state.used_lesson_lookups?.subjects || []),
+      currentValues: uniqueSorted(state.used_lesson_lookups?.subjects || []),
     },
     {
       key: "times",
       title: "常用时间",
       settingKey: "custom_time_slots",
       placeholder: "例如 19:00-21:00",
-      historicalValues: uniqueSorted((state.used_lesson_lookups?.times || []).map((value) => normalizeTimeSlot(value)).filter(Boolean)),
+      currentValues: uniqueSorted((state.used_lesson_lookups?.times || []).map((value) => normalizeTimeSlot(value)).filter(Boolean)),
     },
     {
       key: "statuses",
       title: "课程状态",
       settingKey: "custom_course_statuses",
       placeholder: "例如 调课",
-      historicalValues: uniqueSorted(state.used_lesson_lookups?.statuses || []),
+      currentValues: uniqueSorted(state.used_lesson_lookups?.statuses || []),
     },
   ];
 }
 
+function normalizeBaseDataValues(key, values = []) {
+  const normalized = (values || []).map((value) => {
+    const raw = typeof value === "object" ? value?.name : value;
+    const clean = String(raw || "").replace(/\u3000/g, " ").replace(/\s+/g, " ").trim();
+    return key === "times" ? normalizeTimeSlot(clean) : clean;
+  }).filter(Boolean);
+  return uniqueSorted(normalized);
+}
+
+function baseDataCandidateValues(def) {
+  if (!def) return [];
+  return normalizeBaseDataValues(def.key, def.currentValues || []);
+}
+
 function baseDataCard(def) {
   const customValues = settingsArray(def.settingKey);
-  const historicalValues = def.historicalValues || [];
+  const candidateValues = baseDataCandidateValues(def);
   const colorKind = def.settingKey === "custom_course_statuses"
     ? "status"
     : def.settingKey === "custom_subjects"
       ? "subject"
       : "";
   return `
-    <div class="base-data-card" data-setting-key="${escapeHtml(def.settingKey)}">
+    <div class="base-data-card ${colorKind ? "base-data-card-with-colors" : ""}" data-setting-key="${escapeHtml(def.settingKey)}">
       <div class="section-head base-data-card-head">
         <div>
           <div class="section-title">${escapeHtml(def.title)}</div>
-          <div class="section-subtitle">新增值会进入新增课程候选；删除只移除基础字典，不删除历史课程。</div>
+          <div class="section-subtitle">当前候选只统计数据库中仍存在的课程；自定义值不会把无课程引用的旧项补回候选。</div>
         </div>
       </div>
       <div class="base-data-add-row">
@@ -9763,9 +9829,9 @@ function baseDataCard(def) {
           </span>
         `).join("") || `<span class="muted-tip">暂无自定义值</span>`}
       </div>
-      <div class="base-data-list-title">历史使用 / 当前候选</div>
+      <div class="base-data-list-title">当前课程实际使用</div>
       <div class="base-data-chip-list">
-        ${historicalValues.map((value) => `<span class="neutral-chip">${escapeHtml(value)}</span>`).join("") || `<span class="muted-tip">暂无历史使用值</span>`}
+        ${candidateValues.map((value) => `<span class="neutral-chip">${escapeHtml(value)}</span>`).join("") || `<span class="muted-tip">暂无可用候选</span>`}
       </div>
       ${colorKind ? inlineColorConfigCard(colorKind) : ""}
     </div>
@@ -9773,17 +9839,18 @@ function baseDataCard(def) {
 }
 
 function colorConfigEntries(kind) {
-  if (kind === "status") return uniqueSorted([...statusValues(), ...Object.keys(configuredColorMap("course_status_colors", DEFAULT_COURSE_STATUS_COLORS))]);
-  if (kind === "subject") return uniqueSorted([
-    ...(state?.lookups?.subjects || []),
-    ...usedLessonLookupValues("subjects"),
-    ...Object.keys(configuredColorMap("course_subject_colors", DEFAULT_SUBJECT_COLORS)),
-  ].filter(Boolean));
-  return uniqueSorted([
+  if (kind === "status") {
+    const def = baseDataDefinitions().find((item) => item.key === "statuses");
+    return baseDataCandidateValues(def);
+  }
+  if (kind === "subject") {
+    const def = baseDataDefinitions().find((item) => item.key === "subjects");
+    return baseDataCandidateValues(def);
+  }
+  return normalizeBaseDataValues("grades", [
     ...gradeOrder,
     ...(state?.profile_students || []).map((row) => row.current_grade || row.grade),
     ...usedLessonLookupValues("grades"),
-    ...Object.keys(configuredColorMap("student_grade_colors", DEFAULT_STUDENT_GRADE_COLORS)),
   ].filter(Boolean));
 }
 
@@ -9851,12 +9918,6 @@ function renderRoleManagementPanel() {
   }
   return `
     <div class="band user-admin-panel role-admin-panel">
-      <div class="section-head">
-        <div>
-          <div class="section-title">角色管理</div>
-          <div class="section-subtitle">五类内置角色名称固定，可编辑各角色的页面权限。</div>
-        </div>
-      </div>
       <div class="table-wrap">
         <table class="user-table role-table uniform-table nowrap-table">
           <thead><tr><th>角色名称</th><th>是否只读</th><th>编辑</th><th>删除</th></tr></thead>
@@ -10002,7 +10063,7 @@ function rolePresetFieldMarkup(viewDef, fieldDef, presets, teacherValues) {
         <select class="control role-preset-date-rule">
           ${ruleOptions.map(([rule, label]) => `<option value="${escapeHtml(rule)}" ${selectedRule === rule ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
         </select>
-        <input class="control role-preset-fixed-date" type="date" value="${escapeHtml(fixedDate)}" ${selectedRule === "fixed" ? "" : "hidden"}>
+        <input class="control role-preset-fixed-date" data-date-kind="single" type="date" value="${escapeHtml(fixedDate)}" ${selectedRule === "fixed" ? "" : "hidden"}>
       </label>
     `;
   }
@@ -10151,13 +10212,13 @@ function renderUserAdmin() {
 }
 
 function renderBaseData() {
-  renderTopbar("基础数据", "维护新增课程常用选项；历史课程使用过的值仍会保留在候选项中");
+  renderTopbar("基础数据", "候选与配色仅统计数据库中当前仍存在的课程记录");
   contentEl.innerHTML = `
     <div class="band base-data-panel">
       <div class="section-head">
         <div>
           <div class="section-title">基础数据 / 数据字典</div>
-          <div class="section-subtitle">第一阶段管理教室、科目、常用时间和课程状态。老师、学生仍在档案页维护，年级继续使用固定顺序。</div>
+          <div class="section-subtitle">教室、科目、常用时间和课程状态按现存课程实时汇总；删除最后一条引用课程后，对应候选与配色同步消失。</div>
         </div>
       </div>
       <div class="base-data-grid">
@@ -10429,65 +10490,169 @@ function studentGradeStageMap(row = {}) {
   return map;
 }
 
-function studentGradeStageDetailRows(row = {}) {
+function studentGradeStageDraftFor(row = {}) {
   const map = studentGradeStageMap(row);
+  const stages = Object.fromEntries(gradeSortOrder.map((stage) => {
+    const item = map.get(stage) || {};
+    return [stage, {
+      start_date: item.start_date || "",
+      end_date: stage === "已毕业" ? "" : item.end_date || "",
+    }];
+  }));
+  return {
+    student_id: Number(row.id),
+    student_name: row.name || "",
+    fallback_grade: row.grade || "未设置",
+    current_grade: studentCurrentGrade(row),
+    stages,
+    original_stages: structuredClone(stages),
+  };
+}
+
+function collectStudentGradeStageModalDraft(modal) {
+  if (!studentGradeStageModalDraft || !modal) return studentGradeStageModalDraft;
+  modal.querySelectorAll(".student-grade-stage-field").forEach((input) => {
+    const stage = input.dataset.stage;
+    const field = input.dataset.field;
+    if (!studentGradeStageModalDraft.stages?.[stage] || !field) return;
+    studentGradeStageModalDraft.stages[stage][field] = String(input.value || "").trim();
+  });
+  return studentGradeStageModalDraft;
+}
+
+function studentGradeStageModalRows(draft) {
   return gradeSortOrder.map((stage) => {
-    const item = map.get(stage) || { stage, start_date: "", end_date: "" };
+    const item = draft.stages?.[stage] || { start_date: "", end_date: "" };
     const isGraduated = stage === "已毕业";
+    const disabled = isReadonlyUser() ? "disabled" : "";
     return `
-      <div class="student-stage-line" data-student-name="${escapeHtml(row.name)}" data-stage="${escapeHtml(stage)}">
+      <section class="student-stage-card" data-stage="${escapeHtml(stage)}">
         <div class="student-stage-name">${escapeHtml(stage)}</div>
         <label>
           <span>起始日期</span>
-          <input class="cell-input student-grade-stage-field" type="date" data-field="start_date" value="${escapeHtml(item.start_date || "")}">
+          <input class="control student-grade-stage-field" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="start_date" value="${escapeHtml(item.start_date || "")}" ${disabled}>
         </label>
-        <label class="${isGraduated ? "hidden" : ""}">
+        ${isGraduated ? "" : `<label>
           <span>截止日期</span>
-          <input class="cell-input student-grade-stage-field" type="date" data-field="end_date" value="${escapeHtml(isGraduated ? "" : item.end_date || "")}">
-        </label>
-        <button class="btn save-student-grade-stage" type="button">保存</button>
-      </div>
+          <input class="control student-grade-stage-field" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="end_date" value="${escapeHtml(item.end_date || "")}" ${disabled}>
+        </label>`}
+      </section>
     `;
   }).join("");
 }
 
-function studentProfileStageDetail(row = {}) {
+function studentGradeStageModalMarkup() {
+  const draft = studentGradeStageModalDraft;
+  if (!draft) return "";
+  const saveDisabled = isReadonlyUser() ? `disabled title="${escapeHtml(READONLY_WRITE_MESSAGE)}"` : "";
   return `
-    <tr class="student-stage-detail-row" data-student-id="${escapeHtml(row.id)}">
-      <td colspan="9">
-        <div class="student-stage-panel">
-          <div class="student-stage-panel-head">
-            <div class="section-title">${escapeHtml(row.name)}的年级阶段界定时间</div>
-            <div class="section-subtitle">当前年级按今天日期自动判断；未匹配阶段时回退到原档案年级：${escapeHtml(row.grade || "未设置")}。</div>
+    <div class="modal-backdrop student-grade-stage-modal">
+      <div class="modal-panel student-grade-stage-panel" role="dialog" aria-modal="true" aria-labelledby="student-grade-stage-modal-title">
+        <div class="modal-head student-grade-stage-modal-head">
+          <div>
+            <div class="modal-title" id="student-grade-stage-modal-title">${escapeHtml(draft.student_name)} · 年级阶段</div>
+            <div class="modal-subtitle">当前年级按今天日期自动判断；未命中阶段时回退档案年级“${escapeHtml(draft.fallback_grade)}”。</div>
           </div>
-          <div class="student-stage-lines">
-            ${studentGradeStageDetailRows(row)}
-          </div>
+          <button class="btn student-grade-stage-cancel" type="button">关闭</button>
         </div>
-      </td>
+        <div class="student-grade-stage-modal-body">
+          <div class="student-grade-stage-current">当前显示：${renderGradeBadge(draft.current_grade || draft.fallback_grade)}</div>
+          <div class="student-stage-grid">${studentGradeStageModalRows(draft)}</div>
+        </div>
+        <div class="modal-actions student-grade-stage-modal-actions">
+          <button class="btn student-grade-stage-cancel" type="button">取消</button>
+          <button class="btn primary student-grade-stage-save" type="button" ${saveDisabled}>保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function openStudentGradeStageModal(studentId) {
+  const row = (state.profile_students || []).find((item) => Number(item.id) === Number(studentId));
+  const region = document.querySelector(".student-grade-stage-modal-region");
+  if (!row || !region) return;
+  closeSearchablePicker();
+  studentGradeStageModalDraft = studentGradeStageDraftFor(row);
+  region.innerHTML = studentGradeStageModalMarkup();
+  document.body.classList.add("student-grade-stage-modal-open");
+  enhanceCustomDateInputs();
+  applyReadonlyUi();
+}
+
+function closeStudentGradeStageModal() {
+  closeSearchablePicker();
+  studentGradeStageModalDraft = null;
+  document.querySelector(".student-grade-stage-modal-region")?.replaceChildren();
+  document.body.classList.remove("student-grade-stage-modal-open");
+}
+
+async function saveStudentGradeStageModal(button) {
+  if (!studentGradeStageModalDraft || isReadonlyUser() || button.disabled) return;
+  const modal = button.closest(".student-grade-stage-modal");
+  const draft = collectStudentGradeStageModalDraft(modal);
+  const stages = gradeSortOrder.map((stage) => ({
+    stage,
+    start_date: draft.stages?.[stage]?.start_date || "",
+    end_date: stage === "已毕业" ? "" : draft.stages?.[stage]?.end_date || "",
+  })).filter((item) => {
+    const original = draft.original_stages?.[item.stage] || { start_date: "", end_date: "" };
+    return item.start_date !== original.start_date || item.end_date !== original.end_date;
+  });
+  if (!stages.length) {
+    closeStudentGradeStageModal();
+    showToast("年级阶段没有变化");
+    return;
+  }
+  for (const item of stages) {
+    if (item.start_date && !isDateValue(item.start_date)) return showToast(`${item.stage}起始日期格式不正确`, "error");
+    if (item.end_date && !isDateValue(item.end_date)) return showToast(`${item.stage}截止日期格式不正确`, "error");
+    if (item.stage !== "已毕业" && item.start_date && item.end_date && item.start_date > item.end_date) return showToast(`${item.stage}起始日期不能晚于截止日期`, "error");
+  }
+  button.disabled = true;
+  try {
+    const result = await request("/api/student-grade-stages", {
+      method: "PUT",
+      body: { student_name: draft.student_name, stages },
+    });
+    if (result.student) {
+      patchProfileState("students", result.student);
+      const row = document.querySelector(`.student-profile-main-row[data-id="${selectorEscape(result.student.id)}"]`);
+      const currentGrade = studentCurrentGrade(result.student);
+      if (row) {
+        const nameCell = row.querySelector(".student-name-cell");
+        const gradeCell = row.querySelector(".current-grade-cell");
+        if (nameCell) nameCell.innerHTML = renderStudentBadge(result.student.name, { grade: currentGrade });
+        if (gradeCell) gradeCell.innerHTML = renderGradeBadge(currentGrade);
+      }
+    }
+    closeStudentGradeStageModal();
+    showToast("年级阶段已保存");
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message || "保存失败", "error");
+  }
+}
+
+function studentProfileTableRowMarkup(row) {
+  const currentGrade = studentCurrentGrade(row);
+  return `
+    <tr class="profile-row student-profile-main-row" data-kind="students" data-id="${row.id}" title="点击查看年级阶段">
+      <td class="select-col"><input class="student-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择学生档案"></td>
+      <td class="student-name-cell">${renderStudentBadge(row.name, { grade: currentGrade })}</td>
+      <td class="text-cell center current-grade-cell">${renderGradeBadge(currentGrade)}</td>
+      <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
+      <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
+      <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在读")}">${options(studentStatusOptions, row.status || "在读")}</select></td>
+      <td><input class="cell-input profile-field" data-field="joined_at" type="date" data-date-kind="single" value="${escapeHtml(profileDateValue(row))}"></td>
+      <td><input class="cell-input profile-field" data-field="left_at" type="date" data-date-kind="single" value="${escapeHtml(row.left_at || "")}"></td>
+      <td class="profile-notes-col"><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
     </tr>
   `;
 }
 
 function studentProfileTableRows(rows) {
-  return rows.map((row) => {
-    const currentGrade = studentCurrentGrade(row);
-    const expanded = expandedStudentProfileIds.has(Number(row.id));
-    return `
-      <tr class="profile-row student-profile-main-row" data-kind="students" data-id="${row.id}">
-        <td class="select-col"><input class="student-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择学生档案"></td>
-        <td class="student-name-cell">${renderStudentBadge(row.name, { grade: currentGrade })}</td>
-        <td class="text-cell center current-grade-cell">${renderGradeBadge(currentGrade)}</td>
-        <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
-        <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
-        <td><select class="cell-select profile-field" data-field="status">${options(studentStatusOptions, row.status || "在读")}</select></td>
-        <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
-        <td><input class="cell-input profile-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
-        <td class="profile-notes-col"><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
-      </tr>
-      ${expanded ? studentProfileStageDetail(row) : ""}
-    `;
-  }).join("");
+  return rows.map(studentProfileTableRowMarkup).join("");
 }
 
 function studentGradeStageBatchModal() {
@@ -10506,8 +10671,8 @@ function studentGradeStageBatchModal() {
         </div>
         <div class="profile-form">
           <label>阶段<select class="control student-stage-batch-field" data-field="stage">${options(gradeSortOrder, stage)}</select></label>
-          <label>起始日期<input class="control student-stage-batch-field" data-field="start_date" type="date" value="${escapeHtml(studentGradeStageBatchDraft.start_date || "")}"></label>
-          <label class="${isGraduated ? "hidden" : ""}">截止日期<input class="control student-stage-batch-field" data-field="end_date" type="date" value="${escapeHtml(isGraduated ? "" : studentGradeStageBatchDraft.end_date || "")}"></label>
+          <label>起始日期<input class="control student-stage-batch-field" data-field="start_date" type="date" data-date-kind="single" value="${escapeHtml(studentGradeStageBatchDraft.start_date || "")}"></label>
+          <label class="${isGraduated ? "hidden" : ""}">截止日期<input class="control student-stage-batch-field" data-field="end_date" type="date" data-date-kind="single" value="${escapeHtml(isGraduated ? "" : studentGradeStageBatchDraft.end_date || "")}"></label>
         </div>
         <div class="modal-actions">
           <button class="btn student-stage-batch-cancel" type="button">取消</button>
@@ -10578,9 +10743,9 @@ function renderProfileDirectory(kind = profileTab) {
             <td class="select-col"><input class="teacher-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedTeacherProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择老师档案"></td>
             <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
             <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
-            <td><select class="cell-select profile-field" data-field="status">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
-            <td><input class="cell-input profile-field" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
-            <td><input class="cell-input profile-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
+            <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在职")}">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
+          <td><input class="cell-input profile-field" data-date-kind="single" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
+          <td><input class="cell-input profile-field" data-date-kind="single" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
             <td class="profile-notes-col"><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
           </tr>
         `).join("") || `<tr><td colspan="7" class="empty">暂无老师档案</td></tr>`}
@@ -10623,6 +10788,7 @@ function renderProfileDirectory(kind = profileTab) {
     </div>
     ${profileModalMarkup()}
     ${studentGradeStageBatchModal()}
+    <div class="student-grade-stage-modal-region">${isTeacher ? "" : studentGradeStageModalMarkup()}</div>
   `;
 }
 
@@ -10729,7 +10895,7 @@ function staffModalMarkup() {
           <label>标准天数<input class="control staff-modal-field" data-field="standard_work_days" type="number" value="26"></label>
           <label>手机<input class="control staff-modal-field" data-field="phone" placeholder="联系电话"></label>
           <label>状态<select class="control staff-modal-field" data-field="status">${options(["在职", "暂停", "离职"], "在职")}</select></label>
-          <label>入职日期<input class="control staff-modal-field" data-field="joined_at" type="date"></label>
+        <label>入职日期<input class="control staff-modal-field" data-date-kind="single" data-field="joined_at" type="date"></label>
           <label class="profile-form-wide">备注<input class="control staff-modal-field" data-field="notes" placeholder="备注"></label>
         </div>
         <datalist id="staff-role-list">${(state.lookups.staff_roles || []).map((role) => `<option value="${escapeHtml(role)}"></option>`).join("")}</datalist>
@@ -10770,8 +10936,8 @@ function staffProfilesPanelMarkup() {
                 <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${moneyInput(row.standard_work_days || 26)}"></td>
                 <td><input class="cell-input staff-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
                 <td><select class="cell-select staff-field" data-field="status">${options(["在职", "暂停", "离职"], row.status || "在职")}</select></td>
-                <td><input class="cell-input staff-field" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
-                <td><input class="cell-input staff-field" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
+            <td><input class="cell-input staff-field" data-date-kind="single" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
+            <td><input class="cell-input staff-field" data-date-kind="single" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
                 <td><input class="cell-input wide staff-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
                 <td class="readonly"><button class="btn danger delete-staff" data-id="${row.id}" data-name="${escapeHtml(row.name)}">删除</button></td>
               </tr>
@@ -11002,7 +11168,7 @@ function expenseModalMarkup() {
           <button class="btn expense-modal-cancel" type="button">取消</button>
         </div>
         <div class="profile-form">
-          <label>日期<input class="control expense-modal-field" data-field="expense_date" type="date" value="${todayDate()}"></label>
+        <label>日期<input class="control expense-modal-field" data-date-kind="single" data-field="expense_date" type="date" value="${todayDate()}"></label>
           <label>类别<input class="control expense-modal-field" data-field="category" list="expense-category-list" value="其他"></label>
           <label>金额<input class="control money-input expense-modal-field" data-field="amount" type="number" placeholder="0"></label>
           <label>商家<input class="control expense-modal-field" data-field="vendor" placeholder="商家/收款方"></label>
@@ -11047,7 +11213,7 @@ function renderExpenses() {
           <tbody>
             ${rows.map((row) => `
               <tr class="expense-row" data-id="${row.id}">
-                <td><input class="cell-input expense-field" data-field="expense_date" type="date" value="${escapeHtml(row.expense_date)}"></td>
+            <td><input class="cell-input expense-field" data-date-kind="single" data-field="expense_date" type="date" value="${escapeHtml(row.expense_date)}"></td>
                 <td><input class="cell-input expense-field" data-field="category" list="expense-category-options" value="${escapeHtml(row.category)}"></td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.amount, { className: "expense-field", attrs: `data-field="amount"` })}</td>
                 <td><input class="cell-input expense-field" data-field="vendor" value="${escapeHtml(row.vendor || "")}"></td>
@@ -11061,25 +11227,6 @@ function renderExpenses() {
       </div>
     </div>
     ${expenseModalMarkup()}
-  `;
-}
-
-function operationLogDetailsMarkup(log = {}) {
-  let details = {};
-  try {
-    details = log.extra_json ? JSON.parse(log.extra_json) : {};
-  } catch {
-    details = { note: "详情数据格式异常" };
-  }
-  const detailText = Object.keys(details).length ? JSON.stringify(details, null, 2) : "无附加字段";
-  return `
-    <details class="operation-log-details">
-      <summary>查看</summary>
-      <div><b>目标：</b>${escapeHtml([log.target_type, log.target_id].filter(Boolean).join(" / ") || "-")}</div>
-      <div><b>IP：</b>${escapeHtml(log.client_ip || "-")}</div>
-      <div><b>浏览器：</b>${escapeHtml(log.user_agent || "-")}</div>
-      <pre>${escapeHtml(detailText)}</pre>
-    </details>
   `;
 }
 
@@ -11153,7 +11300,7 @@ async function renderOperationLogs() {
         </div>
       </div>
       <div class="table-wrap">
-        <table class="operation-log-table uniform-table nowrap-table">
+        <table class="operation-log-table uniform-table">
           <thead>
             <tr>
               <th>操作人</th>
@@ -11162,7 +11309,6 @@ async function renderOperationLogs() {
               <th>操作内容</th>
               <th>结果</th>
               <th>操作时间</th>
-              <th>详情</th>
             </tr>
           </thead>
           <tbody>
@@ -11171,12 +11317,11 @@ async function renderOperationLogs() {
                 <td class="text-cell">${escapeHtml(log.operator_name)}</td>
                 <td class="text-cell">${escapeHtml(log.operator_account)}</td>
                 <td class="text-cell">${escapeHtml(log.operation_type)}</td>
-                <td class="text-cell" title="${escapeHtml(log.operation_content)}">${escapeHtml(log.operation_content)}</td>
+                <td class="text-cell operation-log-content">${escapeHtml(log.display_content || log.operation_content)}</td>
                 <td class="text-cell"><span class="operation-result-badge ${log.result_status === "failure" ? "failure" : "success"}">${log.result_status === "failure" ? "失败" : "成功"}</span></td>
                 <td class="text-cell">${escapeHtml(formatBeijingTime(log.created_at))}</td>
-                <td class="text-cell">${operationLogDetailsMarkup(log)}</td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无操作日志</td></tr>`}
+            `).join("") || `<tr><td colspan="6" class="empty">暂无操作日志</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -11615,7 +11760,7 @@ function courseNoticeColumns(mode = "parent") {
   const columns = [
     ["teacher_name", "授课老师"],
     ["date", "日期"],
-    ["lesson_status", "上课情况"],
+    ["status", "状态"],
     ["weekday", "星期"],
     ["time_slot", "时间"],
     ["classroom", "教室"],
@@ -11657,13 +11802,14 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
 function courseNoticeCellValue(row = {}, key = "") {
   if (key === "weekday") return row.weekday || weekdayCn(row.date);
   if (key === "student_names") return row.display_student_names || row.student_names || "";
+  if (key === "status") return String(row.status || rowStatus(row) || "").trim();
   return row[key] || "";
 }
 
 function courseNoticeCellBadges(row = {}, key = "") {
   const value = String(courseNoticeCellValue(row, key) || "").trim();
   if (!value) return [];
-  if (key === "lesson_status") return [{ type: "status", label: value }];
+  if (key === "status") return [{ type: "status", label: value }];
   if (key === "grade") return [{ type: "grade", label: value }];
   if (key === "subject") return [{ type: "subject", label: value }];
   if (key === "student_names") return splitStudents(value).map((label) => ({ type: "student", label }));
@@ -11738,18 +11884,50 @@ function noticeSimpleStatus(item = {}, actionStore = {}) {
 
 function noticeSimpleTile(item = {}, {
   actionStore = {},
-  title = "",
   meta = "",
   className = "notice-simple-tile",
+  details = "",
 } = {}) {
   const action = noticeSimpleAction(item, actionStore);
   const done = Boolean(item.completed || action.done);
   return `
     <button class="${escapeHtml(className)} ${done ? "done" : ""}" type="button" data-send-key="${escapeHtml(item.send_object_key)}">
-      <span class="notice-simple-title">${escapeHtml(title || item.send_object_name || "发送对象")}</span>
-      <span class="notice-simple-meta">${escapeHtml(meta || `${Number(item.lesson_count || item.lessons?.length || 0)} 节课`)}</span>
+      ${details}
       <span class="notice-simple-state">${escapeHtml(noticeSimpleStatus(item, actionStore))}</span>
+      <span class="notice-simple-meta">${escapeHtml(meta || `${Number(item.lesson_count || item.lessons?.length || 0)} 节课`)}</span>
     </button>
+  `;
+}
+
+function courseNoticeTagGroup(item = {}) {
+  const grades = uniqueSorted([...(item.grades || []), ...(item.lessons || []).map((lesson) => lesson.grade)].filter(Boolean));
+  const subjects = uniqueSorted([...(item.subjects || []), ...(item.lessons || []).map((lesson) => lesson.subject)].filter(Boolean));
+  const badges = [
+    ...grades.map((value) => renderEntityBadge("grade", value)),
+    ...subjects.map((value) => renderEntityBadge("subject", value)),
+  ].join("");
+  return badges ? `<span class="notice-course-tag-group entity-badge-list">${badges}</span>` : "";
+}
+
+function courseNoticeSimpleValues(item = {}) {
+  const students = uniqueSorted([
+    ...splitStudents(item.students || ""),
+    ...(item.lessons || []).flatMap((lesson) => splitStudents(lesson.display_student_names || lesson.student_names || "")),
+  ].filter(Boolean));
+  const grades = uniqueSorted([...(item.grades || []), ...(item.lessons || []).map((lesson) => lesson.grade)].filter(Boolean));
+  const subjects = uniqueSorted([...(item.subjects || []), ...(item.lessons || []).map((lesson) => lesson.subject)].filter(Boolean));
+  return { students, grades, subjects };
+}
+
+function courseNoticeSimpleDetails(item = {}) {
+  const { students, grades, subjects } = courseNoticeSimpleValues(item);
+  const studentBadges = students.map((name) => renderEntityBadge("student", name, { fallbackGrade: grades[0] || "" })).join("");
+  const gradeBadges = grades.map((value) => renderEntityBadge("grade", value)).join("");
+  const subjectBadges = subjects.map((value) => renderEntityBadge("subject", value)).join("");
+  return `
+    <span class="notice-simple-detail-line notice-simple-students entity-badge-list">${studentBadges || '<span class="muted-tip">未设置学生</span>'}</span>
+    <span class="notice-simple-detail-line notice-simple-grades entity-badge-list">${gradeBadges || '<span class="muted-tip">未设置年级</span>'}</span>
+    <span class="notice-simple-detail-line notice-simple-subjects entity-badge-list">${subjectBadges || '<span class="muted-tip">未设置科目</span>'}</span>
   `;
 }
 
@@ -11762,14 +11940,12 @@ function courseNoticeSimpleStatus(item = {}) {
 }
 
 function courseNoticeSimpleTile(item = {}) {
-  const grade = courseNoticeObjectGrade(item);
-  const title = isPersonalCourseNoticeObject(item)
-    ? (splitStudents(item.students)[0] || item.send_object_name)
-    : (item.send_object_name || item.students || "班级发送");
+  const count = Number(item.lesson_count || item.lessons?.length || 0);
+  const objectName = isPersonalCourseNoticeObject(item) ? "" : (item.send_object_name || "");
   return noticeSimpleTile(item, {
     actionStore: courseNoticeSimpleActions,
-    title,
-    meta: `${grade} · ${Number(item.lesson_count || item.lessons?.length || 0)} 节课`,
+    meta: `${objectName ? `${objectName} · ` : ""}${count} 节课`,
+    details: courseNoticeSimpleDetails(item),
   });
 }
 
@@ -11817,8 +11993,7 @@ function courseNoticePreviewItemMarkup(item) {
             <div class="notice-object-meta">
               <span>${escapeHtml(item.send_object_type)}</span>
               <span>老师：${escapeHtml((item.teachers || []).join("、") || "-")}</span>
-              <span class="entity-badge-list">${(item.grades || []).map((value) => renderEntityBadge("grade", value)).join("") || "-"}</span>
-              <span class="entity-badge-list">${(item.subjects || []).map((value) => renderEntityBadge("subject", value)).join("") || "-"}</span>
+              ${courseNoticeTagGroup(item) || "-"}
               ${item.student_count ? `<span>人数：${Number(item.student_count)}</span>` : ""}
               <span>${item.lesson_count} 节课</span>
             </div>
@@ -11898,10 +12073,10 @@ function renderCourseNotice() {
           </label>
           <label class="history-toggle">
             <input class="course-notice-only" type="checkbox" ${courseNoticeFilter.onlyTeaching ? "checked" : ""}>
-            <span>只选择“上课”</span>
+            <span>只选择“已上”</span>
           </label>
           <div class="segmented notice-layout-toggle" role="group" aria-label="家长群截图模式">
-            <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview">预览模式</button>
+            <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview">详细模式</button>
             <button class="segmented-btn course-notice-layout-toggle ${courseNoticeLayoutMode === "simple" ? "active" : ""}" type="button" data-layout="simple">简洁模式</button>
           </div>
           <button class="btn primary course-notice-generate" type="button">生成课程通知</button>
@@ -11924,11 +12099,12 @@ function renderCourseNotice() {
 }
 
 function teacherCourseNoticeSimpleTile(item = {}) {
+  const teacherName = String(item.send_object_name || "未命名老师").replace(/老师课程$/, "老师");
   return noticeSimpleTile(item, {
     actionStore: teacherCourseNoticeSimpleActions,
-    title: item.send_object_name || "未命名老师",
-    meta: `${Number(item.lesson_count || item.lessons?.length || 0)} 节课`,
+    meta: `${teacherName} · ${Number(item.lesson_count || item.lessons?.length || 0)} 节课`,
     className: "notice-simple-tile teacher-notice-simple-tile",
+    details: courseNoticeSimpleDetails(item),
   });
 }
 
@@ -11959,8 +12135,7 @@ function teacherCourseNoticePreviewItemMarkup(item = {}) {
             <div class="notice-object-name">${escapeHtml(item.send_object_name)}</div>
             <div class="notice-object-meta">
               <span>${escapeHtml(item.send_object_type)}</span>
-              <span class="entity-badge-list">${(item.grades || []).map((value) => renderEntityBadge("grade", value)).join("") || "-"}</span>
-              <span class="entity-badge-list">${(item.subjects || []).map((value) => renderEntityBadge("subject", value)).join("") || "-"}</span>
+              ${courseNoticeTagGroup(item) || "-"}
               <span>${item.lesson_count} 节课</span>
             </div>
           </div>
@@ -12043,10 +12218,10 @@ function renderTeacherCourseNotice() {
           </label>
           <label class="history-toggle">
             <input class="teacher-course-notice-only" type="checkbox" ${teacherCourseNoticeFilter.onlyTeaching ? "checked" : ""}>
-            <span>只选择“上课”</span>
+            <span>只选择“已上”</span>
           </label>
           <div class="segmented notice-layout-toggle" role="group" aria-label="老师截图模式">
-            <button class="segmented-btn teacher-course-notice-layout-toggle ${teacherCourseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview" aria-pressed="${teacherCourseNoticeLayoutMode === "preview"}">预览模式</button>
+            <button class="segmented-btn teacher-course-notice-layout-toggle ${teacherCourseNoticeLayoutMode === "preview" ? "active" : ""}" type="button" data-layout="preview" aria-pressed="${teacherCourseNoticeLayoutMode === "preview"}">详细模式</button>
             <button class="segmented-btn teacher-course-notice-layout-toggle ${teacherCourseNoticeLayoutMode === "simple" ? "active" : ""}" type="button" data-layout="simple" aria-pressed="${teacherCourseNoticeLayoutMode === "simple"}">简洁模式</button>
           </div>
           <button class="btn primary teacher-course-notice-generate" type="button">生成课程通知</button>
@@ -12166,6 +12341,9 @@ function courseNoticeCanvasBadgeWidth(ctx, badges = []) {
 function drawCourseNoticeCanvasBadges(ctx, badges, row, x, y, width, height) {
   const totalWidth = courseNoticeCanvasBadgeWidth(ctx, badges);
   let badgeX = x + Math.max(8, (width - totalWidth) / 2);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
   for (const badge of badges) {
     const badgeWidth = Math.ceil(ctx.measureText(badge.label).width) + 16;
     const badgeHeight = 26;
@@ -12175,9 +12353,10 @@ function drawCourseNoticeCanvasBadges(ctx, badges, row, x, y, width, height) {
     roundedCanvasRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 7);
     ctx.fill();
     ctx.fillStyle = color.color;
-    ctx.fillText(badge.label, badgeX + badgeWidth / 2, y + height / 2);
+    ctx.fillText(badge.label, badgeX + badgeWidth / 2, badgeY + badgeHeight / 2);
     badgeX += badgeWidth + 6;
   }
+  ctx.restore();
 }
 
 function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
@@ -12296,7 +12475,7 @@ function canvasBlob(canvas) {
   });
 }
 
-async function downloadCourseNoticeImage(item, mode = "parent", title = "课程通知") {
+async function downloadCourseNoticeImage(item, mode = "parent", title = "课程通知", notify = true) {
   const canvas = courseNoticeCanvas(item, mode, title);
   const link = document.createElement("a");
   link.href = canvas.toDataURL("image/png");
@@ -12308,6 +12487,7 @@ async function downloadCourseNoticeImage(item, mode = "parent", title = "课程�
     target_id: item.send_object_key || "",
     details: { object_name: item.send_object_name || "", lesson_count: item.lesson_count || item.lessons?.length || 0, filename: link.download },
   });
+  if (notify) showToast("课程截图已下载");
 }
 
 async function completeCourseNoticeItem(item, endpoint = "/api/course-notice/complete") {
@@ -12329,7 +12509,7 @@ async function copyCourseNoticeImage(item, mode = "parent", title = "课程通�
   const canvas = courseNoticeCanvas(item, mode, title);
   const blob = await canvasBlob(canvas);
   if (!navigator.clipboard?.write || !window.ClipboardItem) {
-    await downloadCourseNoticeImage(item, mode, title);
+    await downloadCourseNoticeImage(item, mode, title, false);
     throw new Error("当前浏览器不支持直接复制图片，已改为下载图片");
   }
   await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
@@ -12383,7 +12563,7 @@ function bindTeacherCourseNoticeContentEvents(root = document) {
         });
         showToast("文案已复制");
       } catch (error) {
-        alert(error.message || "复制失败");
+        showToast(error.message || "复制失败", "error");
       }
     });
   });
@@ -12503,50 +12683,82 @@ function dashboardGoTo(viewKey, filter = {}) {
   load({ refreshGlobal: false });
 }
 
-function dashboardTrendSvg(rows = []) {
-  const width = 760;
-  const height = 238;
-  const pad = { left: 42, right: 18, top: 20, bottom: 36 };
+function dashboardTrendChartMarkup(rows = []) {
   const values = rows.map((row) => Number(row.lesson_count || 0));
-  const max = Math.max(1, Math.ceil(Math.max(...values)));
-  const plotW = width - pad.left - pad.right;
-  const plotH = height - pad.top - pad.bottom;
   if (!rows.length || values.every((value) => value === 0)) {
     return `<div class="dashboard-empty-chart">暂无课程数据</div>`;
   }
-  const step = rows.length > 1 ? plotW / (rows.length - 1) : plotW;
-  const points = rows.map((row, index) => {
-    const x = pad.left + index * step;
-    const y = pad.top + plotH - (Number(row.lesson_count || 0) / max) * plotH;
-    return { x, y, row };
-  });
-  const linePath = points.reduce((path, point, index) => {
-    if (index === 0) return `M ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
-    const previous = points[index - 1];
-    const midX = (previous.x + point.x) / 2;
-    return `${path} C ${midX.toFixed(1)} ${previous.y.toFixed(1)}, ${midX.toFixed(1)} ${point.y.toFixed(1)}, ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
-  }, "");
-  const baseline = pad.top + plotH;
-  const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${baseline} L ${points[0].x.toFixed(1)} ${baseline} Z`;
-  const labelStep = Math.max(1, Math.ceil((rows.length - 1) / 5));
-  const labels = points.map((point, index) => {
-    if (index !== 0 && index !== rows.length - 1 && index % labelStep !== 0) return "";
-    return `<text class="dashboard-chart-label" x="${point.x.toFixed(1)}" y="${height - 12}" text-anchor="middle">${escapeHtml(point.row.date.slice(5))}</text>`;
-  }).join("");
-  const gridLines = [0, 0.5, 1].map((ratio) => {
-    const y = pad.top + plotH * ratio;
-    return `<line class="dashboard-chart-grid" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}"></line>`;
-  }).join("");
-  return `
-    <svg class="dashboard-trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="课程趋势图">
-      ${gridLines}
-      <text class="dashboard-chart-y-label" x="${pad.left - 10}" y="${pad.top + 4}" text-anchor="end">${max}</text>
-      <text class="dashboard-chart-y-label" x="${pad.left - 10}" y="${baseline + 4}" text-anchor="end">0</text>
-      <path class="dashboard-trend-area" d="${areaPath}"></path>
-      <path class="dashboard-trend-line" d="${linePath}"></path>
-      ${labels}
-    </svg>
-  `;
+  return `<div class="dashboard-trend-chart" role="img" aria-label="课程趋势图"></div>`;
+}
+
+function dashboardChartCssValue(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function disposeDashboardTrendChart() {
+  dashboardTrendResizeObserver?.disconnect();
+  dashboardTrendResizeObserver = null;
+  if (dashboardTrendChart && !dashboardTrendChart.isDisposed?.()) dashboardTrendChart.dispose();
+  dashboardTrendChart = null;
+  dashboardTrendChartElement = null;
+}
+
+function initDashboardTrendChart(rows = []) {
+  const element = document.querySelector(".dashboard-trend-chart");
+  if (!element || !window.echarts) {
+    disposeDashboardTrendChart();
+    if (element && !window.echarts) element.innerHTML = '<div class="dashboard-empty-chart">图表组件加载失败</div>';
+    return;
+  }
+  if (dashboardTrendChartElement !== element) {
+    disposeDashboardTrendChart();
+    dashboardTrendChartElement = element;
+    dashboardTrendChart = window.echarts.getInstanceByDom(element) || window.echarts.init(element);
+    if (window.ResizeObserver) {
+      dashboardTrendResizeObserver = new window.ResizeObserver(() => {
+        if (dashboardTrendChartElement?.isConnected && dashboardTrendChart && !dashboardTrendChart.isDisposed?.()) dashboardTrendChart.resize();
+      });
+      dashboardTrendResizeObserver.observe(element);
+    }
+  }
+  const brand = dashboardChartCssValue("--brand", "#2563eb");
+  const brandSoft = dashboardChartCssValue("--brand-soft", "#dbeafe");
+  const muted = dashboardChartCssValue("--muted", "#64748b");
+  const line = dashboardChartCssValue("--line-soft", "#e5e7eb");
+  dashboardTrendChart.setOption({
+    animation: false,
+    grid: { left: 8, right: 8, top: 10, bottom: 4, containLabel: true },
+    tooltip: { trigger: "axis", appendToBody: true, confine: true },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: rows.map((row) => String(row.date || "").slice(5)),
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: line } },
+      axisLabel: { color: muted, fontSize: 11, hideOverlap: true },
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      minInterval: 1,
+      axisTick: { show: false },
+      axisLine: { show: false },
+      axisLabel: { color: muted, fontSize: 11 },
+      splitLine: { lineStyle: { color: line, type: "dashed" } },
+    },
+    series: [{
+      name: "课程数量",
+      type: "line",
+      smooth: 0.24,
+      showSymbol: false,
+      data: rows.map((row) => Number(row.lesson_count || 0)),
+      lineStyle: { color: brand, width: 2 },
+      itemStyle: { color: brand },
+      areaStyle: { color: brandSoft, opacity: 0.52 },
+      emphasis: { disabled: true },
+    }],
+  }, true);
+  dashboardTrendChart.resize();
 }
 
 function dashboardPieSvg(pie = {}, options = {}) {
@@ -12667,6 +12879,7 @@ function dashboardShortcutModal() {
 }
 
 function renderDashboard() {
+  disposeDashboardTrendChart();
   const dashboard = state.dashboard || { todos: [], trend: [], student_pie: { items: [], total: 0 }, teacher_pie: { items: [], total: 0 }, current_lessons: [] };
   const shortcuts = dashboardShortcutCatalog();
   const shortcutMap = new Map(shortcuts.map((item) => [item.key, item]));
@@ -12692,6 +12905,15 @@ function renderDashboard() {
       </section>
 
       <div class="dashboard-main-grid">
+        <section class="band dashboard-current-section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">正在上的课程</div>
+            </div>
+          </div>
+          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [])}
+        </section>
+
         <section class="band dashboard-todo-section">
           <div class="section-head">
             <div>
@@ -12717,16 +12939,7 @@ function renderDashboard() {
               ${dateRangePickerControl({ scope: "dashboard", start: dashboardRange.start, end: dashboardRange.end, placeholder: "选择趋势日期范围" })}
             </div>
           </div>
-          ${dashboardTrendSvg(dashboard.trend || [])}
-        </section>
-
-        <section class="band dashboard-current-section">
-          <div class="section-head">
-            <div>
-              <div class="section-title">正在上的课程</div>
-            </div>
-          </div>
-          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [])}
+          ${dashboardTrendChartMarkup(dashboard.trend || [])}
         </section>
 
         <section class="band dashboard-pie-section">
@@ -12756,6 +12969,7 @@ function renderDashboard() {
     </div>
     ${dashboardShortcutModal()}
   `;
+  initDashboardTrendChart(dashboard.trend || []);
 }
 
 function applyReadonlyUi() {
@@ -12765,7 +12979,7 @@ function applyReadonlyUi() {
     ".batch-copy-lessons", ".week-copy-btn", ".schedule-add-btn", ".student-badge-removable", ".lesson-create-confirm", ".lesson-create-field",
     ".lesson-create-manual-field", ".lesson-create-student-existing", ".lesson-create-new-students",
     ".batch-copy-confirm", ".batch-copy-field", ".profile-field", ".delete-profile", ".profile-modal-save",
-    ".student-grade-stage-field", ".save-student-grade-stage", ".open-student-stage-batch", ".student-stage-batch-field", ".student-stage-batch-save",
+    ".student-grade-stage-field", ".student-grade-stage-save", ".open-student-stage-batch", ".student-stage-batch-field", ".student-stage-batch-save",
     ".open-user-create-modal", ".create-user", ".new-user-field", ".new-user-teachers", ".user-field", ".user-reset-password", ".user-reset-password-value",
     ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
     ".base-data-add", ".base-data-delete", ".color-config-save", ".color-config-reset", ".color-config-input", ".staff-field", ".delete-staff", ".staff-modal-save",
@@ -12780,6 +12994,14 @@ function applyReadonlyUi() {
   document.querySelectorAll(selectors.join(",")).forEach((element) => {
     element.disabled = true;
     element.title = element.title || READONLY_WRITE_MESSAGE;
+    const customButton = element.matches("select")
+      ? element.nextElementSibling?.querySelector?.(".custom-select-button")
+      : null;
+    if (customButton) {
+      customButton.disabled = true;
+      customButton.setAttribute("aria-disabled", "true");
+      customButton.title = customButton.title || READONLY_WRITE_MESSAGE;
+    }
   });
 }
 
@@ -12851,13 +13073,19 @@ function renderLoadFailure(error) {
 
 function render() {
   if (auth.user && !ensureAccessibleView()) return;
-  closeOpenMultiSelectMenus();
+  if (view !== "dashboard") disposeDashboardTrendChart();
+  if (view !== "studentProfiles" && studentGradeStageModalDraft) {
+    studentGradeStageModalDraft = null;
+    document.body.classList.remove("student-grade-stage-modal-open");
+  }
+  closeSearchablePicker();
   closeDateRangePicker();
   appEl?.classList.remove("login-mode");
   appEl?.classList.toggle("readonly-mode", isReadonlyUser());
   applySidebarState();
   const previousView = lastRenderedView;
   const viewChanged = previousView && previousView !== view;
+  if (viewChanged) dismissToast();
   const enteringTeacherSalaryRules = view === "teacherSalaryRules" && previousView !== "teacherSalaryRules";
   if (enteringTeacherSalaryRules) resetTeacherSalaryRuleCandidateSync();
   applyUserFilterPreset(view);
@@ -12913,8 +13141,10 @@ function render() {
 }
 
 function rerenderContent(renderAction) {
-  closeOpenMultiSelectMenus();
+  closeSearchablePicker();
+  closeDateRangePicker();
   renderAction();
+  cleanupCustomSelectPortals();
   applyReadonlyUi();
   wireEvents();
 }
@@ -12945,10 +13175,54 @@ function patchUserState(row) {
   if (Number(row.id) === Number(auth.user?.id)) auth.user = { ...auth.user, ...row };
 }
 
+function syncInlineStatusPicker(select, value) {
+  if (!select?.isConnected) return;
+  select.value = String(value ?? "");
+  const wrapper = select.nextElementSibling?.matches?.(".custom-select") ? select.nextElementSibling : null;
+  if (wrapper) syncCustomSelect(select, wrapper);
+}
+
+function bindInlineStatusPicker(select, { save, onSaved, successMessage = "状态已更新" } = {}) {
+  if (!select || select.dataset.inlineStatusBound === "1") return;
+  select.dataset.inlineStatusBound = "1";
+  select.addEventListener("change", async () => {
+    if (select.dataset.inlineStatusSaving === "1" || typeof save !== "function") return;
+    const previousValue = select.dataset.originalValue ?? "";
+    const nextValue = select.value;
+    if (nextValue === previousValue) return;
+    select.dataset.inlineStatusSaving = "1";
+    select.disabled = true;
+    const wrapper = select.nextElementSibling?.matches?.(".custom-select") ? select.nextElementSibling : null;
+    const button = wrapper?.querySelector(".custom-select-button");
+    if (button) button.disabled = true;
+    try {
+      const result = await save(nextValue);
+      const savedValue = String(result?.status ?? nextValue);
+      select.dataset.originalValue = savedValue;
+      syncInlineStatusPicker(select, savedValue);
+      if (typeof onSaved === "function") await onSaved(result);
+      showToast(successMessage);
+    } catch (error) {
+      syncInlineStatusPicker(select, previousValue);
+      showToast(error.message || "状态更新失败，已恢复原值", "error");
+    } finally {
+      if (select.isConnected) {
+        select.dataset.inlineStatusSaving = "0";
+        select.disabled = isReadonlyUser();
+        if (button?.isConnected) {
+          button.disabled = select.disabled;
+          button.setAttribute("aria-disabled", select.disabled ? "true" : "false");
+        }
+      }
+    }
+  });
+}
+
 function bindUserAccountRowEvents(row) {
   if (!row || row.dataset.userAccountRowBound === "true") return;
   row.dataset.userAccountRowBound = "true";
   row.querySelectorAll(".user-field").forEach((input) => {
+    if (input.classList.contains("user-inline-status")) return;
     input.addEventListener("change", () => {
       const currentRow = input.closest(".user-row");
       if (!currentRow) return;
@@ -12960,6 +13234,16 @@ function bindUserAccountRowEvents(row) {
         if (Number(result.id) === Number(auth.user?.id)) await load();
         else rerenderContent(renderUserAdmin);
       });
+    });
+  });
+  row.querySelectorAll(".user-inline-status").forEach((select) => {
+    bindInlineStatusPicker(select, {
+      save: (status) => request(`/api/users/${row.dataset.id}`, { method: "PATCH", body: { status } }),
+      onSaved: async (result) => {
+        patchUserState(result);
+        if (Number(result.id) === Number(auth.user?.id)) await load();
+      },
+      successMessage: "账号状态已更新",
     });
   });
   row.querySelectorAll(".multi-select-value.user-row-teachers").forEach((input) => {
@@ -13401,8 +13685,167 @@ function wireEvents() {
   if (!multiSelectEventsBound) {
     multiSelectEventsBound = true;
     document.addEventListener("click", (event) => {
+      const select = multiSelectOwner(event.target);
+      if (select?.classList.contains("schedule-student-popover")) {
+        const menu = multiSelectMenuFor(select);
+        const toggle = select.querySelector(".multi-select-toggle");
+        if (event.target.closest(".multi-select-toggle")) {
+          event.preventDefault();
+          closeOtherMultiSelectMenus(select);
+          if (select.classList.contains("open")) {
+            select._studentClose?.();
+          } else {
+            select._studentDraft = normalizeNameList(select.querySelector(".multi-select-value")?.value || "");
+            const search = menu?.querySelector(".multi-select-search");
+            if (search) search.value = "";
+            select.classList.add("open");
+            toggle?.setAttribute("aria-expanded", "true");
+            mountFloatingMultiSelectMenu(select);
+            select._studentSync?.();
+            positionFloatingMultiSelectMenu(select);
+            requestAnimationFrame(() => multiSelectMenuFor(select)?.querySelector(".multi-select-search")?.focus({ preventScroll: true }));
+          }
+          return;
+        }
+        const searchClear = event.target.closest(".schedule-student-search-clear");
+        if (searchClear) {
+          const search = menu?.querySelector(".multi-select-search");
+          if (search) search.value = "";
+          select._studentSync?.();
+          search?.focus({ preventScroll: true });
+          return;
+        }
+        const selectedBadge = event.target.closest(".schedule-student-selected .student-badge-removable");
+        if (selectedBadge) {
+          select._studentDraft = (select._studentDraft || []).filter((name) => name !== (selectedBadge.dataset.studentName || ""));
+          select._studentSync?.();
+          refreshScheduleStudentPopoverLayout(select);
+          return;
+        }
+        const option = event.target.closest(".multi-select-option");
+        if (option) {
+          const value = option.dataset.value || "";
+          const draft = select._studentDraft || [];
+          select._studentDraft = draft.includes(value) ? draft.filter((name) => name !== value) : normalizeNameList([...draft, value]);
+          select._studentSync?.();
+          refreshScheduleStudentPopoverLayout(select);
+          return;
+        }
+        if (event.target.closest(".schedule-student-cancel")) {
+          select._studentClose?.();
+          return;
+        }
+        if (event.target.closest(".schedule-student-confirm")) {
+          select._studentConfirm?.();
+          return;
+        }
+      } else if (select) {
+        const toggle = select.querySelector(".multi-select-toggle");
+        const search = multiSelectMenuFor(select)?.querySelector(".multi-select-search");
+        if (event.target.closest(".multi-select-toggle")) {
+          event.preventDefault();
+          if (event.target.closest(".multi-select-clear-icon") && select._multiSelectSelectedValues?.().length) {
+            closeMultiSelectMenu(select);
+            if (search) search.value = "";
+            select._multiSelectCommit?.([]);
+            toggle?.blur();
+            return;
+          }
+          closeOtherMultiSelectMenus(select);
+          const isOpen = !select.classList.contains("open");
+          if (!isOpen) closeMultiSelectMenu(select);
+          else {
+            select.classList.add("open");
+            mountFloatingMultiSelectMenu(select);
+          }
+          toggle?.setAttribute("aria-expanded", isOpen ? "true" : "false");
+          if (isOpen) {
+            search?.focus({ preventScroll: true });
+            positionFloatingMultiSelectMenu(select);
+            requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
+          }
+          return;
+        }
+        if (event.target.closest(".multi-select-search-clear")) {
+          if (search) search.value = "";
+          refreshSearchableSelectResults(select);
+          search?.focus({ preventScroll: true });
+          return;
+        }
+        if (event.target.closest(".multi-select-clear")) {
+          closeMultiSelectMenu(select);
+          if (search) search.value = "";
+          select._multiSelectCommit?.([]);
+          return;
+        }
+        const option = event.target.closest(".multi-select-option");
+        if (option) {
+          const value = option.dataset.value || "";
+          if (select.dataset.selectionMode === "single") {
+            select._multiSelectCommit?.(value ? [value] : []);
+            closeMultiSelectMenu(select);
+            toggle?.focus({ preventScroll: true });
+          } else {
+            const next = select._multiSelectSelectedValues?.() || [];
+            const index = next.indexOf(value);
+            if (index >= 0) next.splice(index, 1);
+            else next.push(value);
+            select._multiSelectCommit?.(next);
+          }
+          return;
+        }
+      }
       if (!event.target.closest(".multi-select") && !event.target.closest(".floating-multi-select-menu")) {
         closeOpenMultiSelectMenus();
+      }
+    });
+    document.addEventListener("compositionstart", (event) => {
+      if (event.target.matches?.(".multi-select-search")) event.target.dataset.composing = "1";
+    });
+    document.addEventListener("compositionend", (event) => {
+      if (!event.target.matches?.(".multi-select-search")) return;
+      event.target.dataset.composing = "0";
+      const select = multiSelectOwner(event.target);
+      if (select?.classList.contains("schedule-student-popover")) select._studentSync?.();
+      else refreshSearchableSelectResults(select);
+    });
+    document.addEventListener("input", (event) => {
+      if (!event.target.matches?.(".multi-select-search") || event.target.dataset.composing === "1") return;
+      const select = multiSelectOwner(event.target);
+      if (select?.classList.contains("schedule-student-popover")) select._studentSync?.();
+      else refreshSearchableSelectResults(select);
+    });
+    document.addEventListener("keydown", (event) => {
+      const select = multiSelectOwner(event.target);
+      if (!select || !event.target.closest(".multi-select-menu")) return;
+      const menu = multiSelectMenuFor(select);
+      const toggle = select.querySelector(".multi-select-toggle");
+      const search = menu?.querySelector(".multi-select-search");
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (select.classList.contains("schedule-student-popover")) select._studentClose?.();
+        else closeMultiSelectMenu(select);
+        toggle?.focus({ preventScroll: true });
+        return;
+      }
+      if (select.classList.contains("schedule-student-popover")) {
+        if (event.key === "Enter" && event.target === search) event.preventDefault();
+        return;
+      }
+      const visible = [...(menu?.querySelectorAll(".multi-select-option") || [])].filter((option) => !option.hidden);
+      if (event.target === search && event.key === "Enter") {
+        event.preventDefault();
+        (visible.find((option) => option.classList.contains("selected")) || visible[0])?.click();
+      } else if (event.target === search && event.key === "ArrowDown") {
+        event.preventDefault();
+        visible[0]?.focus();
+      } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+        const index = visible.indexOf(document.activeElement);
+        event.preventDefault();
+        if (event.key === "ArrowDown") visible[Math.min(visible.length - 1, index + 1)]?.focus();
+        else if (index <= 0) search?.focus({ preventScroll: true });
+        else visible[index - 1]?.focus();
       }
     });
     window.addEventListener("resize", positionOpenFloatingMultiSelectMenus);
@@ -13576,7 +14019,20 @@ function wireEvents() {
     button.addEventListener("click", () => {
       sidebarCollapsed = !sidebarCollapsed;
       localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
-      render();
+      applySidebarState();
+      const label = sidebarCollapsed ? "展开侧栏" : "收起侧栏";
+      document.querySelectorAll(".sidebar-toggle").forEach((toggle) => {
+        toggle.setAttribute("aria-label", label);
+        toggle.setAttribute("title", label);
+        toggle.setAttribute("aria-pressed", sidebarCollapsed ? "true" : "false");
+      });
+      document.querySelectorAll(".nav-btn[data-tooltip]").forEach((navButton) => {
+        navButton.setAttribute("title", sidebarCollapsed ? navButton.dataset.tooltip || "" : "");
+      });
+      syncNavExpandToggle();
+      requestAnimationFrame(() => {
+        if (dashboardTrendChart && !dashboardTrendChart.isDisposed?.()) dashboardTrendChart.resize();
+      });
     });
   });
 
@@ -13668,13 +14124,18 @@ function wireEvents() {
         if (!normalized) return alert("常用时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");
         value = normalized;
       }
-      if ([...settingsArray(settingKey), ...(def.historicalValues || [])].some((item) => item === value)) return alert("该值已存在，不能重复新增");
+      if ([...settingsArray(settingKey), ...(def.currentValues || [])].some((item) => item === value)) return alert("该值已存在，不能重复新增");
       const nextValues = settingKey === "custom_time_slots"
         ? uniqueSorted([...settingsArray(settingKey), value].map((item) => normalizeTimeSlot(item)).filter(Boolean))
         : uniqueSorted([...settingsArray(settingKey), value]);
       try {
-        await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
-        await load();
+        const result = await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
+        state.settings = { ...state.settings, ...(result.settings || {}), [settingKey]: JSON.stringify(nextValues) };
+        state.lookups = { ...state.lookups, ...(result.lookups || {}) };
+        state.used_lesson_lookups = result.used_lesson_lookups || state.used_lesson_lookups;
+        renderBaseData();
+        applyReadonlyUi();
+        wireEvents();
       } catch (error) {
         alert(error.message || "保存失败");
       }
@@ -13689,6 +14150,18 @@ function wireEvents() {
     });
   });
 
+  if (!colorConfigPreviewEventsBound) {
+    colorConfigPreviewEventsBound = true;
+    contentEl.addEventListener("input", (event) => {
+      const input = event.target.closest?.(".color-config-input");
+      const row = input?.closest(".color-config-row");
+      const preview = row?.querySelector(".color-config-label > *");
+      if (!input || !preview) return;
+      const variable = input.dataset.colorPart === "background" ? "--badge-bg" : "--badge-fg";
+      preview.style.setProperty(variable, input.value);
+    });
+  }
+
   document.querySelectorAll(".base-data-delete").forEach((button) => {
     button.addEventListener("click", async () => {
       const settingKey = button.dataset.settingKey;
@@ -13697,8 +14170,13 @@ function wireEvents() {
       if (!confirm(`从基础字典删除“${value}”？历史课程不会被修改。`)) return;
       const nextValues = settingsArray(settingKey).filter((item) => item !== value);
       try {
-        await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
-        await load();
+        const result = await request("/api/settings", { method: "POST", body: { [settingKey]: JSON.stringify(nextValues) } });
+        state.settings = { ...state.settings, ...(result.settings || {}), [settingKey]: JSON.stringify(nextValues) };
+        state.lookups = { ...state.lookups, ...(result.lookups || {}) };
+        state.used_lesson_lookups = result.used_lesson_lookups || state.used_lesson_lookups;
+        renderBaseData();
+        applyReadonlyUi();
+        wireEvents();
       } catch (error) {
         alert(error.message || "删除失败");
       }
@@ -14262,39 +14740,49 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".student-profile-main-row").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (event.target.closest("input, select, button, textarea, a, label")) return;
-      const id = Number(row.dataset.id);
-      if (!id) return;
-      if (expandedStudentProfileIds.has(id)) expandedStudentProfileIds.delete(id);
-      else expandedStudentProfileIds.add(id);
-      render();
-    });
-  });
-
-  document.querySelectorAll(".save-student-grade-stage").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const line = button.closest(".student-stage-line");
-      if (!line) return;
-      const payload = {
-        student_name: line.dataset.studentName,
-        stage: line.dataset.stage,
-        start_date: line.querySelector('.student-grade-stage-field[data-field="start_date"]')?.value || "",
-        end_date: line.dataset.stage === "已毕业" ? "" : line.querySelector('.student-grade-stage-field[data-field="end_date"]')?.value || "",
-      };
-      button.disabled = true;
-      try {
-        const result = await request("/api/student-grade-stages", { method: "PUT", body: payload });
-        if (result.student) patchProfileState("students", result.student);
-        showToast("年级阶段已保存");
-        rerenderContent(() => renderProfileDirectory("students"));
-      } catch (error) {
-        button.disabled = false;
-        showToast(error.message || "保存失败", "error");
+  if (!studentGradeStageEventsBound) {
+    studentGradeStageEventsBound = true;
+    contentEl.addEventListener("click", (event) => {
+      const cancelButton = event.target.closest(".student-grade-stage-cancel");
+      if (cancelButton) {
+        event.preventDefault();
+        closeStudentGradeStageModal();
+        return;
       }
+      const saveButton = event.target.closest(".student-grade-stage-save");
+      if (saveButton) {
+        event.preventDefault();
+        saveStudentGradeStageModal(saveButton);
+        return;
+      }
+      if (event.target.classList?.contains("student-grade-stage-modal")) {
+        closeStudentGradeStageModal();
+        return;
+      }
+      const row = event.target.closest(".student-profile-main-row");
+      if (!row || event.target.closest("input, select, button, textarea, a, label, .custom-select, .multi-select")) return;
+      const id = Number(row.dataset.id);
+      if (id) openStudentGradeStageModal(id);
     });
-  });
+    contentEl.addEventListener("change", (event) => {
+      const input = event.target.closest(".student-grade-stage-modal .student-grade-stage-field");
+      if (!input || !studentGradeStageModalDraft) return;
+      const stage = input.dataset.stage;
+      const field = input.dataset.field;
+      if (studentGradeStageModalDraft.stages?.[stage] && field) studentGradeStageModalDraft.stages[stage][field] = String(input.value || "").trim();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !studentGradeStageModalDraft) return;
+      if (activeCustomDateInput || activeDateRangePicker || event.target.closest?.(".custom-select-menu, .multi-select-menu, .custom-date-picker, .date-range-picker-panel")) {
+        event.preventDefault();
+        closeSearchablePicker();
+        closeDateRangePicker();
+        return;
+      }
+      event.preventDefault();
+      closeStudentGradeStageModal();
+    });
+  }
 
   document.querySelectorAll(".open-student-stage-batch").forEach((button) => {
     button.addEventListener("click", () => {
@@ -14401,7 +14889,17 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".profile-field").forEach((input) => {
+  document.querySelectorAll(".profile-inline-status").forEach((select) => {
+    const row = select.closest(".profile-row");
+    if (!row) return;
+    bindInlineStatusPicker(select, {
+      save: (status) => request(`/api/${row.dataset.kind}/${row.dataset.id}`, { method: "PATCH", body: { status } }),
+      onSaved: (result) => patchProfileState(row.dataset.kind, result),
+      successMessage: "档案状态已更新",
+    });
+  });
+
+  document.querySelectorAll(".profile-field:not(.profile-inline-status)").forEach((input) => {
     input.addEventListener("change", () => {
       const row = input.closest(".profile-row");
       const kind = row.dataset.kind;
@@ -15448,6 +15946,24 @@ function wireEvents() {
 
   if (!lessonConflictEventsBound) {
     lessonConflictEventsBound = true;
+    contentEl.addEventListener("change", (event) => {
+      const dateInput = event.target.closest?.(".lesson-conflict-edit-modal .conflict-edit-field[data-field=\"date\"]");
+      if (dateInput) {
+        const value = String(dateInput.value || "").trim();
+        if (value && !isDateValue(value)) dateInput.setAttribute("aria-invalid", "true");
+        else dateInput.removeAttribute("aria-invalid");
+        if (value && !isDateValue(value)) {
+          showToast("请输入 YYYY-MM-DD 格式的有效日期", "error");
+          return;
+        }
+        refreshConflictLessonEditorForDate(dateInput.closest(".lesson-conflict-edit-modal"));
+        return;
+      }
+      const studentInput = event.target.closest?.(".lesson-conflict-edit-modal .multi-select-value.conflict-edit-students");
+      if (studentInput && lessonConflictEditDraft) {
+        lessonConflictEditDraft.student_names = normalizeLessonStudentNames(studentInput.value);
+      }
+    });
     contentEl.addEventListener("click", (event) => {
       const target = event.target;
       const conflictButton = target.closest(".lesson-conflict-btn");
@@ -15488,6 +16004,10 @@ function wireEvents() {
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (event.target instanceof Element && event.target.closest(".custom-select-menu, .multi-select-menu, .custom-date-picker, .date-range-picker-panel")) {
+        closeSearchablePicker();
+        return;
+      }
       if (lessonConflictEditDraft) {
         event.preventDefault();
         closeConflictLessonEditor();
@@ -16653,7 +17173,7 @@ function wireEvents() {
         });
         showToast("文案已复制");
       } catch (error) {
-        alert(error.message || "复制失败");
+        showToast(error.message || "复制失败", "error");
       }
     });
   });
