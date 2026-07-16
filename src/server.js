@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.14-dashboard-filter-option-polish";
+const APP_VERSION = "2026.07.16-date-picker-notice-color-polish";
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -1251,7 +1251,7 @@ async function importOpeningBalancesFromUpload(req) {
   const file = parts.file || parts.xlsx || Object.values(parts).find((part) => part.filename);
   if (!file || !file.content?.length) throw new Error("请先选择 xlsx 文件");
   if (file.filename && !file.filename.toLowerCase().endsWith(".xlsx")) throw new Error("仅支持 .xlsx 文件");
-  return importOpeningBalancesFromWorkbook(file.content);
+  return { ...importOpeningBalancesFromWorkbook(file.content), filename: path.basename(text(file.filename) || "期初余额.xlsx") };
 }
 
 function all(sql, params = []) {
@@ -2549,6 +2549,45 @@ function upsertStudentGradeStage(body = {}) {
       current_grade: currentStudentGradeFromStages(stages, student.grade),
     },
   };
+}
+
+function upsertStudentGradeStageSet(body = {}) {
+  const studentName = text(body.student_name ?? body.name);
+  const stageInputs = Array.isArray(body.stages) ? body.stages : [];
+  if (!studentName) return { error: "学生姓名不能为空", status: 400 };
+  if (!stageInputs.length) return { error: "没有需要保存的年级阶段", status: 400 };
+  if (stageInputs.length > GRADE_ORDER.length) return { error: "年级阶段数量不正确", status: 400 };
+  const normalized = [];
+  const seen = new Set();
+  for (const item of stageInputs) {
+    const payload = normalizeStudentGradeStageInput({ ...item, student_name: studentName });
+    if (payload.error) return payload;
+    if (seen.has(payload.stage)) return { error: `年级阶段重复：${payload.stage}`, status: 400 };
+    seen.add(payload.stage);
+    normalized.push(payload);
+  }
+  const student = get("SELECT * FROM students WHERE name = ?", [studentName]);
+  if (!student) return { error: "学生档案不存在", status: 404 };
+  return withTransaction(() => {
+    const before = [];
+    const after = [];
+    for (const payload of normalized) {
+      const result = upsertStudentGradeStage(payload);
+      if (result.error) throw new Error(result.error);
+      before.push(result.before || null);
+      after.push(result.after);
+    }
+    const stages = studentGradeStages(studentName);
+    return {
+      before,
+      after,
+      student: {
+        ...student,
+        grade_stages: stages,
+        current_grade: currentStudentGradeFromStages(stages, student.grade),
+      },
+    };
+  });
 }
 
 function batchUpdateStudentGradeStages(body = {}) {
@@ -6896,14 +6935,14 @@ function applyStudentPricingRulesToDetails(items) {
   });
 }
 
-function bootstrapLookups() {
+function bootstrapLookups(currentLessonLookups = usedLessonLookups()) {
   return {
     lesson_status: LESSON_STATUS,
     course_status: COURSE_STATUS,
-    status: courseStatusValues(),
-    classrooms: mergeLookupValues(CLASSROOMS, "custom_classrooms"),
-    subjects: mergeLookupValues(SUBJECTS, "custom_subjects"),
-    times: mergeLookupValues([], "custom_time_slots"),
+    status: currentLessonLookups.statuses || [],
+    classrooms: currentLessonLookups.classrooms || [],
+    subjects: currentLessonLookups.subjects || [],
+    times: currentLessonLookups.times || [],
     grades: GRADES,
     staff_roles: STAFF_ROLES,
     expense_categories: EXPENSE_CATEGORIES,
@@ -6913,14 +6952,15 @@ function bootstrapLookups() {
 
 function buildBootstrapLite(monthKey, includeInactive = false) {
   const settings = Object.fromEntries(all("SELECT key, value FROM settings").map((row) => [row.key, row.value]));
+  const currentLessonLookups = usedLessonLookups();
   settings.month_key = monthKey;
   return {
     active_month_key: monthKey,
     settings,
-    lookups: bootstrapLookups(),
+    lookups: bootstrapLookups(currentLessonLookups),
     teachers: teachersForMonth(monthKey, includeInactive),
     students: studentsForMonth(monthKey, includeInactive),
-    used_lesson_lookups: usedLessonLookups(),
+    used_lesson_lookups: currentLessonLookups,
     pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
     student_pricing: [],
     lessons: [],
@@ -6945,14 +6985,15 @@ function buildBootstrap(monthKey, includeInactive = false) {
   syncStudentPricingCandidatesFromLessons();
   const details = feeDetails(monthKey);
   const settings = Object.fromEntries(all("SELECT key, value FROM settings").map((row) => [row.key, row.value]));
+  const currentLessonLookups = usedLessonLookups();
   settings.month_key = monthKey;
   return {
     active_month_key: monthKey,
     settings,
-    lookups: bootstrapLookups(),
+    lookups: bootstrapLookups(currentLessonLookups),
     teachers: teachersForMonth(monthKey, includeInactive),
     students: studentsForMonth(monthKey, includeInactive),
-    used_lesson_lookups: usedLessonLookups(),
+    used_lesson_lookups: currentLessonLookups,
     pricing_standards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count"),
     student_pricing: studentPricingRows(monthKey),
     lessons: all("SELECT *, ? AS weekday FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", ["", monthKey]),
@@ -7567,7 +7608,7 @@ function courseNoticeData(start, end, onlyTeaching = false) {
   if (!rows) return null;
   const classMap = classGroupLookupMap();
   const lessons = rows
-    .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
+    .filter((row) => !onlyTeaching || deriveStatus(row) === "已上")
     .map((row) => courseNoticeLesson(row, classMap));
   const dailyClassMap = new Map();
   const mergedClassMap = new Map();
@@ -7680,7 +7721,7 @@ function teacherCourseNoticeData(start, end, onlyTeaching = false) {
   if (!rows) return null;
   const classMap = classGroupLookupMap();
   const lessons = rows
-    .filter((row) => !onlyTeaching || text(row.lesson_status) === "上课")
+    .filter((row) => !onlyTeaching || deriveStatus(row) === "已上")
     .map((row) => {
       const lesson = courseNoticeLesson(row, classMap);
       lesson.completion_key = `TEACHER|${lesson.teacher_name}|${lesson.completion_key}`;
@@ -7904,18 +7945,145 @@ function recordAuditEvent(req, actor, { action, entity_type, entity_id = "", bef
   );
 }
 
+const OPERATION_LOG_SENSITIVE_KEY = /(password|passcode|token|secret|cookie|authorization|session|sid)/i;
+const OPERATION_LOG_PHONE_KEY = /(phone|mobile|telephone|tel)$/i;
+
+function maskOperationPhone(value) {
+  const raw = text(value);
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) return raw;
+  if (digits.length <= 8) return `${digits.slice(0, 2)}****${digits.slice(-2)}`;
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`;
+}
+
+function redactOperationText(value) {
+  return text(value)
+    .replace(/\b1\d{2}[ -]?\d{4}[ -]?\d{4}\b/g, (phone) => maskOperationPhone(phone))
+    .replace(/\b(password|passcode|token|secret|cookie|authorization|session|sid)\s*[:=]\s*[^\s,，;；]+/gi, "$1=[已脱敏]")
+    .slice(0, 2000);
+}
+
 function safeOperationJson(value) {
   if (value == null) return "";
-  const sensitiveKey = /(password|passcode|token|secret|cookie|authorization|session|sid)/i;
   try {
     return JSON.stringify(value, (key, item) => {
-      if (sensitiveKey.test(key)) return "[已脱敏]";
-      if (typeof item === "string") return item.slice(0, 500);
+      if (OPERATION_LOG_SENSITIVE_KEY.test(key)) return "[已脱敏]";
+      if (OPERATION_LOG_PHONE_KEY.test(key)) return maskOperationPhone(item);
+      if (typeof item === "string") return redactOperationText(item).slice(0, 500);
       return item;
     }).slice(0, 4000);
   } catch {
     return JSON.stringify({ error: "日志详情无法序列化" });
   }
+}
+
+const OPERATION_LOG_FIELD_LABELS = {
+  date: "日期",
+  start_date: "开始日期",
+  end_date: "结束日期",
+  month_key: "月份",
+  teacher_name: "老师",
+  time_slot: "时间",
+  classroom: "教室",
+  status: "状态",
+  grade: "年级",
+  subject: "科目",
+  student_name: "学生",
+  student_names: "学生",
+  name: "姓名",
+  cur_recharge: "实际充值",
+  cur_gift: "赠送",
+  amount: "金额",
+  filename: "文件",
+  source_file: "文件",
+};
+
+function operationLogValue(field, value) {
+  if (value == null || value === "") return "空";
+  if (OPERATION_LOG_SENSITIVE_KEY.test(field)) return "[已脱敏]";
+  if (OPERATION_LOG_PHONE_KEY.test(field)) return maskOperationPhone(value);
+  if (["cur_recharge", "cur_gift", "amount", "unit_price", "custom_price"].includes(field)) {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? `¥${amount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : redactOperationText(value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactOperationText(item)).filter(Boolean).join("、") || "空";
+  if (typeof value === "object") return "已更新";
+  return redactOperationText(value);
+}
+
+function operationLogChanges(details = {}) {
+  const before = details.before && typeof details.before === "object" ? details.before : null;
+  const after = details.after && typeof details.after === "object" ? details.after : null;
+  if (!before && !after) return "";
+  const preferred = Array.isArray(details.changed_fields) ? details.changed_fields : [];
+  const fields = preferred.length ? preferred : [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])]
+    .filter((field) => !["id", "created_at", "updated_at"].includes(field));
+  const changes = fields.filter((field) => {
+    if (OPERATION_LOG_SENSITIVE_KEY.test(field)) return false;
+    return JSON.stringify(before?.[field] ?? "") !== JSON.stringify(after?.[field] ?? "");
+  }).slice(0, 8).map((field) => {
+    const label = OPERATION_LOG_FIELD_LABELS[field] || field;
+    return `${label}由 ${operationLogValue(field, before?.[field])} 改为 ${operationLogValue(field, after?.[field])}`;
+  });
+  return changes.join("；");
+}
+
+function operationLogDetailSummary(row = {}, details = {}) {
+  const parts = [];
+  const changes = operationLogChanges(details);
+  if (changes) parts.push(changes);
+  const filename = details.filename || details.source_file;
+  if (filename) parts.push(`文件 ${path.basename(text(filename))}`);
+  const rangeStart = details.start_date || details.start;
+  const rangeEnd = details.end_date || details.end;
+  if (rangeStart || rangeEnd) parts.push(`日期范围 ${rangeStart || "未设置"} 至 ${rangeEnd || "未设置"}`);
+  const countLabels = {
+    count: "数量",
+    total: "总数",
+    created: "新增",
+    createdCount: "新增",
+    updated: "成功更新",
+    updatedCount: "成功更新",
+    deleted: "删除",
+    success: "成功",
+    succeeded: "成功",
+    failed: "失败",
+    failure: "失败",
+    skipped: "跳过",
+    skippedCount: "跳过",
+    conflict_count: "冲突",
+  };
+  const seenLabels = new Set();
+  for (const [key, label] of Object.entries(countLabels)) {
+    if (details[key] == null || seenLabels.has(label)) continue;
+    const number = Number(details[key]);
+    if (!Number.isFinite(number)) continue;
+    parts.push(`${label} ${number} 条`);
+    seenLabels.add(label);
+  }
+  if (details.role && !text(row.operation_content).includes(text(details.role))) parts.push(`角色 ${roleLabel(details.role)}`);
+  if (details.reason && !text(row.operation_content).includes(text(details.reason))) parts.push(`原因 ${redactOperationText(details.reason)}`);
+  if (Array.isArray(details.changed_labels) && details.changed_labels.length) {
+    parts.push(`配置项 ${details.changed_labels.map(redactOperationText).join("、")}`);
+  }
+  if (["登录系统", "退出系统"].includes(text(row.operation_type)) && row.client_ip) {
+    parts.push(`IP ${redactOperationText(row.client_ip)}`);
+  }
+  return [...new Set(parts.filter(Boolean))].join("；");
+}
+
+function operationLogDisplayContent(row = {}) {
+  let details = {};
+  try {
+    details = row.extra_json ? JSON.parse(row.extra_json) : {};
+  } catch {
+    details = {};
+  }
+  const type = redactOperationText(row.operation_type) || "操作";
+  const content = redactOperationText(row.operation_content);
+  const summary = operationLogDetailSummary(row, details);
+  const base = content.startsWith(type) ? content : `${type}：${content || "已完成"}`;
+  return `${base}${summary ? `；${summary}` : ""}`.slice(0, 2000);
 }
 
 const CLIENT_OPERATION_TYPES = {
@@ -7953,9 +8121,9 @@ function writeOperationLog(operator, {
       VALUES ('黎明教育', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       text(operator?.display_name || operator?.username || "未登录访客").slice(0, 120),
-      text(operator?.username || operator_account).slice(0, 120),
+      maskOperationPhone(operator?.username || operator_account).slice(0, 120),
       text(operation_type).slice(0, 120),
-      text(operation_content).slice(0, 2000),
+      redactOperationText(operation_content),
       text(target_type).slice(0, 120),
       text(target_id).slice(0, 240),
       result_status === "failure" ? "failure" : "success",
@@ -8005,6 +8173,37 @@ function settingsOperationType(keys = []) {
   })[keys[0]] || "修改基础数据";
 }
 
+function parseSettingJsonValue(value, fallback) {
+  try {
+    const parsed = JSON.parse(text(value));
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function settingsOperationContent(keys = [], beforeValues = {}, afterValues = {}) {
+  if (keys.length !== 1) return `修改基础数据：${keys.map(settingOperationLabel).join("、")}`;
+  const key = keys[0];
+  const label = settingOperationLabel(key);
+  if (["course_status_colors", "student_grade_colors", "course_subject_colors"].includes(key)) {
+    const before = parseSettingJsonValue(beforeValues[key], {});
+    const after = parseSettingJsonValue(afterValues[key], {});
+    const names = uniqueSorted([...Object.keys(before), ...Object.keys(after)]);
+    const changed = names.filter((name) => JSON.stringify(before[name] || null) !== JSON.stringify(after[name] || null));
+    const sample = changed.slice(0, 4).map((name) => {
+      const color = after[name] || {};
+      return `${name}${color.background ? `，背景色 ${color.background}` : ""}${color.color ? `，文字色 ${color.color}` : ""}`;
+    }).join("；");
+    return `保存基础数据配色：${label}，共 ${Object.keys(after).length} 项${sample ? `；${sample}` : "，无颜色变更"}${changed.length > 4 ? `；另有 ${changed.length - 4} 项` : ""}`;
+  }
+  const before = Array.isArray(parseSettingJsonValue(beforeValues[key], [])) ? parseSettingJsonValue(beforeValues[key], []) : [];
+  const after = Array.isArray(parseSettingJsonValue(afterValues[key], [])) ? parseSettingJsonValue(afterValues[key], []) : [];
+  const added = after.filter((value) => !before.includes(value));
+  const removed = before.filter((value) => !after.includes(value));
+  return `修改基础数据：${label}${added.length ? `，新增 ${added.join("、")}` : ""}${removed.length ? `，删除 ${removed.join("、")}` : ""}${!added.length && !removed.length ? "，内容已规范化" : ""}`;
+}
+
 function lessonOperationText(row = {}) {
   return [row.date, row.teacher_name, row.time_slot, row.subject, row.student_names]
     .map(text)
@@ -8023,8 +8222,12 @@ function lessonOperationDetails(before = {}, after = {}, extra = {}) {
 function lessonOperationChangeText(before = {}, after = {}) {
   const changes = LESSON_OPERATION_FIELDS
     .filter((field) => text(before?.[field]) !== text(after?.[field]))
-    .map((field) => `${field} ${text(before?.[field]) || "空"} → ${text(after?.[field]) || "空"}`);
-  return changes.length ? changes.join("；") : lessonOperationText(after);
+    .map((field) => `${OPERATION_LOG_FIELD_LABELS[field] || field}由 ${text(before?.[field]) || "空"} 改为 ${text(after?.[field]) || "空"}`);
+  const context = [after.date, after.time_slot, after.teacher_name ? `老师 ${after.teacher_name}` : ""]
+    .map(text)
+    .filter(Boolean)
+    .join("，");
+  return changes.length ? `${context}${context ? "，" : ""}${changes.join("；")}` : lessonOperationText(after);
 }
 
 function userOperationText(row = {}) {
@@ -11981,7 +12184,10 @@ async function handleApi(req, res, url) {
     if (operator_account) { conditions.push("operator_account LIKE ?"); params.push(`%${operator_account}%`); }
     if (operation_type) { conditions.push("operation_type LIKE ?"); params.push(`%${operation_type}%`); }
     if (result_status) { conditions.push("result_status = ?"); params.push(result_status); }
-    if (content) { conditions.push("operation_content LIKE ?"); params.push(`%${content}%`); }
+    if (content) {
+      conditions.push("(operation_content LIKE ? OR extra_json LIKE ?)");
+      params.push(`%${content}%`, `%${content}%`);
+    }
     if (start_date) { conditions.push("datetime(created_at, '+8 hours') >= ?"); params.push(`${start_date} 00:00:00`); }
     if (end_date) { conditions.push("datetime(created_at, '+8 hours') <= ?"); params.push(`${end_date} 23:59:59`); }
     const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -11992,7 +12198,12 @@ async function handleApi(req, res, url) {
     const items = all(
       `SELECT * FROM operation_logs ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [...params, page_size, offset],
-    );
+    ).map((row) => ({
+      ...row,
+      operator_account: maskOperationPhone(row.operator_account),
+      operation_content: redactOperationText(row.operation_content),
+      display_content: operationLogDisplayContent(row),
+    }));
     const operation_types = all("SELECT DISTINCT operation_type FROM operation_logs WHERE operation_type <> '' ORDER BY operation_type")
       .map((row) => row.operation_type);
     return sendJson(res, { items, total, page, page_size, operation_types, result_statuses: ["success", "failure"] });
@@ -12264,7 +12475,26 @@ async function handleApi(req, res, url) {
     return sendJson(res, { student_name: studentName, stages: studentGradeStages(studentName) });
   }
   if ((req.method === "PUT" || req.method === "PATCH") && url.pathname === "/api/student-grade-stages") {
-    const result = upsertStudentGradeStage(await readBody(req));
+    const body = await readBody(req);
+    if (Array.isArray(body.stages)) {
+      const result = upsertStudentGradeStageSet(body);
+      if (result.error) return sendError(res, result.status || 400, result.error);
+      recordAuditEvent(req, user, {
+        action: "upsert_set",
+        entity_type: "student_grade_stages",
+        entity_id: text(body.student_name || body.name),
+        before: result.before,
+        after: result.after,
+      });
+      writeOperationLog(user, {
+        operation_type: "修改学生年级阶段",
+        operation_content: `${text(body.student_name || body.name)} 修改 ${(result.after || []).length} 个年级阶段`,
+        target_type: "student_grade_stages",
+        target_id: (result.after || []).map((row) => `${row.student_name}|${row.stage}`).join(","),
+      });
+      return sendJson(res, { ok: true, rows: result.after, student: result.student });
+    }
+    const result = upsertStudentGradeStage(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, {
       action: "upsert",
@@ -12620,7 +12850,13 @@ async function handleApi(req, res, url) {
           sheet_name: result.sheet_name,
         },
       });
-      writeOperationLog(user, { operation_type: "导入学生期初余额", operation_content: `成功 ${result.imported || 0} 条，跳过 ${result.skipped || 0} 条，失败 ${result.failed || 0} 条`, target_type: "student_opening_balances", target_id: "xlsx" });
+      writeOperationLog(user, {
+        operation_type: "导入学生期初余额",
+        operation_content: `文件 ${result.filename || "期初余额.xlsx"}，成功 ${result.imported || 0} 条，跳过 ${result.skipped || 0} 条，失败 ${result.failed || 0} 条`,
+        target_type: "student_opening_balances",
+        target_id: "xlsx",
+        details: { filename: result.filename || "", success: result.imported || 0, skipped: result.skipped || 0, failed: result.failed || 0 },
+      }, req);
       return sendJson(res, result);
     } catch (error) {
       return sendError(res, 400, error.message || "导入期初余额失败");
@@ -12703,12 +12939,13 @@ async function handleApi(req, res, url) {
       if (normalized.error) return sendError(res, 400, normalized.error);
       body.custom_time_slots = normalized.serialized;
     }
-    for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
     const changedKeys = Object.keys(body).filter((key) => key !== "month_key");
+    const beforeSettings = Object.fromEntries(changedKeys.map((key) => [key, getSetting(key)]));
+    for (const [key, value] of Object.entries(body)) setSetting(key, text(value));
     if (changedKeys.length) {
       writeOperationLog(user, {
         operation_type: settingsOperationType(changedKeys),
-        operation_content: `修改 ${changedKeys.map(settingOperationLabel).join("、")}`,
+        operation_content: settingsOperationContent(changedKeys, beforeSettings, body),
         target_type: "settings",
         target_id: changedKeys.join(","),
         details: { changed_keys: changedKeys, changed_labels: changedKeys.map(settingOperationLabel) },
@@ -12736,12 +12973,15 @@ async function handleApi(req, res, url) {
     const result = deleteLessonsBatch(body.ids || body.lesson_ids);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "batch_delete", entity_type: "lessons", entity_id: "batch", before: { ids: body.ids || body.lesson_ids || [] }, after: { deleted: result.deleted, missing: result.missing } });
+    const deletedDates = uniqueSorted((result.lessons || []).map((row) => text(row.date)).filter(Boolean));
+    const deletedRange = deletedDates.length ? `${deletedDates[0]} 至 ${deletedDates[deletedDates.length - 1]}` : "无有效日期";
     writeOperationLog(user, {
       operation_type: "批量删除课程",
-      operation_content: `批量删除课程 ${result.deleted || 0} 条${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      operation_content: `删除 ${result.deleted || 0} 节课程，日期范围 ${deletedRange}${result.missing?.length ? `，失败 ${result.missing.length} 条` : ""}`,
       target_type: "lessons",
       target_id: (result.lessons || []).map((row) => row.id).join(","),
-    });
+      details: { deleted: result.deleted || 0, failed: result.missing?.length || 0, start_date: deletedDates[0] || "", end_date: deletedDates[deletedDates.length - 1] || "" },
+    }, req);
     return sendJson(res, result);
   }
 
@@ -13143,7 +13383,13 @@ async function handleApi(req, res, url) {
       return { row, carry_over: refreshCarryOverAfter(monthKey) };
     });
     recordAuditEvent(req, user, { action: "create", entity_type: "recharge_records", entity_id: String(created.row?.id || ""), before: null, after: created });
-    writeOperationLog(user, { operation_type: "新增充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(created.row?.id || "") });
+    writeOperationLog(user, {
+      operation_type: "新增充值记录",
+      operation_content: `学生 ${studentName}，实际充值 ¥${curRecharge.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}，赠送 ¥${curGift.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}`,
+      target_type: "recharge_records",
+      target_id: String(created.row?.id || ""),
+      details: { student_name: studentName, month_key: monthKey, cur_recharge: curRecharge, cur_gift: curGift, recharge_date: text(body.recharge_date) },
+    }, req);
     return sendJson(res, { ok: true, row: created.row, carry_over: created.carry_over }, 201);
   }
 
@@ -13194,7 +13440,13 @@ async function handleApi(req, res, url) {
       return { row, carry_over: carryOver };
     });
     recordAuditEvent(req, user, { action: "update", entity_type: "recharge_records", entity_id: String(id), before, after: updated });
-    writeOperationLog(user, { operation_type: "修改充值记录", operation_content: `${studentName} ${monthKey} 现金 ${curRecharge} 赠送 ${curGift}`, target_type: "recharge_records", target_id: String(id) });
+    writeOperationLog(user, {
+      operation_type: "修改充值记录",
+      operation_content: `学生 ${studentName}，实际充值 ¥${curRecharge.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}，赠送 ¥${curGift.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}`,
+      target_type: "recharge_records",
+      target_id: String(id),
+      details: { before, after: updated.row, changed_fields: ["student_name", "month_key", "cur_recharge", "cur_gift", "recharge_date"].filter((field) => text(before[field]) !== text(updated.row[field])) },
+    }, req);
     return sendJson(res, { ok: true, row: updated.row, carry_over: updated.carry_over });
   }
 
