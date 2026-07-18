@@ -109,7 +109,10 @@ const LESSON_CREATE_MANUAL_VALUE = "__manual__";
 const SUMMARY_EXPAND_KEY = "liming:summary-expanded";
 const NAV_EXPANDED_KEY = "liming:nav-expanded-groups";
 const NAV_EXPANSION_MODE_KEY = "liming:nav-expansion-mode";
-const REQUEST_CACHE_TTL = 15000;
+// Session-scoped GET data is safe to reuse until a related write invalidates it.
+// `?perf=1` is deliberately opt-in so production consoles stay quiet.
+const REQUEST_CACHE_TTL = 5 * 60 * 1000;
+const PERF_LOG = new URLSearchParams(window.location.search).get("perf") === "1";
 const RECHARGE_SOURCE_FILTER_KEY = "liming:recharge-source-filter";
 const FINANCE_RANGE_KEY = "liming:finance-range";
 const MATRIX_RANGE_KEY = "liming:matrix-range";
@@ -341,6 +344,9 @@ let roleCreateDraft = null;
 let lessonFilter = readLessonFilter();
 let appliedUserFilterPresetViews = new Set();
 let scheduleMode = false;
+let lessonStudentWidthCache = { signature: "", width: 156 };
+let activeScheduleInlinePicker = null;
+let scheduleInlinePickerEventsBound = false;
 let selectedLessonIds = new Set();
 let lessonBatchDeleting = false;
 let lessonConflictModalOpen = false;
@@ -518,9 +524,25 @@ function isCacheableGetRequest(path, options = {}) {
   return !String(path).startsWith("/api/auth/");
 }
 
-function invalidateRequestCache() {
+function invalidateRequestCache(prefixes = []) {
   requestCacheRevision += 1;
-  requestCache.clear();
+  if (!prefixes.length) {
+    requestCache.clear();
+    return;
+  }
+  for (const key of requestCache.keys()) {
+    const path = key.slice(key.lastIndexOf("|") + 1);
+    if (prefixes.some((prefix) => path.startsWith(prefix))) requestCache.delete(key);
+  }
+}
+
+function cacheInvalidationPrefixes(path = "") {
+  const base = String(path).split("?")[0];
+  if (base.startsWith("/api/student-grade-stages")) return ["/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/auth")) return [];
+  return [];
 }
 
 function requestCacheKey(path) {
@@ -570,7 +592,7 @@ async function request(path, options = {}) {
     }
     if (method !== "GET") {
       clearStudentQueryCache();
-      invalidateRequestCache();
+      invalidateRequestCache(cacheInvalidationPrefixes(path));
     }
     return data;
   })();
@@ -622,7 +644,7 @@ async function requestWithStatus(path, options = {}) {
   }
   if (res.ok && method !== "GET") {
     clearStudentQueryCache();
-    invalidateRequestCache();
+    invalidateRequestCache(cacheInvalidationPrefixes(path));
   }
   return { ok: res.ok, status: res.status, data };
 }
@@ -1680,13 +1702,19 @@ async function load(options = {}) {
     if (loadGeneration !== thisGeneration) return;
   }
   const fullBootstrap = viewNeedsFullBootstrap();
-  // 登录首屏通常只需要设置、字典、月份和首页指标；重数据页进入时再拉完整派生数据。
-  state = normalizeBootstrapState(
-    await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`),
-    previousState,
-    !fullBootstrap,
-  );
-  if (loadGeneration !== thisGeneration) return;
+  // Navigation retains the session bootstrap. View-specific endpoints below
+  // own fresh data; login, refresh and explicit callers still reload it.
+  const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true;
+  if (refreshBootstrap) {
+    state = normalizeBootstrapState(
+      await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`),
+      previousState,
+      !fullBootstrap,
+    );
+    if (loadGeneration !== thisGeneration) return;
+  } else {
+    state = previousState;
+  }
   activeMonth = state.active_month_key || state.settings.month_key || activeMonth;
   if (activeMonth && !months.includes(activeMonth)) months = [activeMonth, ...months];
   localStorage.setItem("liming:month", activeMonth);
@@ -3155,7 +3183,8 @@ function isRealRechargeRow(row) {
 }
 
 function studentProfileByName(name) {
-  return (state.profile_students || []).find((row) => row.name === name) || null;
+  const normalized = String(name || "").trim();
+  return (state.profile_students || []).find((row) => String(row.name || "").trim() === normalized) || null;
 }
 
 function rechargeRows() {
@@ -3165,7 +3194,9 @@ function rechargeRows() {
       const profile = studentProfileByName(row.student_name);
       return {
         ...row,
-        grade: row.grade || profile?.grade || "",
+        // Recharge grade is a historical snapshot. Page presentation, filters
+        // and analysis use the profile's current-grade authority instead.
+        grade: studentCurrentGrade(profile || {}) || row.grade || "未设置",
         status: profile?.status || "在读",
         recharge_notes: row.notes || "",
       };
@@ -4268,17 +4299,6 @@ function statusBadge(value) {
   return renderCourseStatusBadge(value);
 }
 
-function statusSelectCell({ id, value, tdClass = "" }) {
-  const status = rowStatus({ status: value });
-  return `
-    <td class="${tdClass}">
-      <select class="cell-select lesson-field status-select ${statusClass(status)}" data-id="${id}" data-field="status">
-        ${manualSelectOptions(getStatusOptions(status), status, lessonManualLabel("status"), { emptyText: "" })}
-      </select>
-    </td>
-  `;
-}
-
 function isEffective(row) {
   if (typeof row.effective === "boolean") return row.effective;
   const status = rowStatus(row);
@@ -4678,10 +4698,11 @@ function options(values, current, emptyText = "") {
 }
 
 function selectCell({ className, id, field, value, values, emptyText = "", tdClass = "", manualLabel = "" }) {
+  const selectOptions = manualLabel ? manualSelectOptions(values, value, manualLabel, { emptyText }) : options(values, value, emptyText);
   return `
     <td class="${tdClass}">
       <select class="cell-select ${className}" data-id="${id}" data-field="${field}">
-        ${manualLabel ? manualSelectOptions(values, value, manualLabel, { emptyText }) : options(values, value, emptyText)}
+        ${selectOptions}
       </select>
     </td>
   `;
@@ -5276,13 +5297,13 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
   const table = tbody.closest(".lesson-table");
   table?.classList.toggle("is-editing", scheduleMode);
   table?.classList.toggle("is-browsing", !scheduleMode);
+  closeScheduleInlinePicker();
   tbody.innerHTML = lessonRowsHtml(rows);
   applyLessonTableStudentColumnWidth(measureVisibleStudentColumnWidth(rows));
   updateLessonSelectionControls(rows);
   cleanupCustomSelectPortals();
   if (scheduleMode) {
     /* 排课模式才渲染 select/date input，避免浏览态滚动时背着大量控件。 */
-    enhanceCustomSelects();
     enhanceCustomDateInputs();
     tbody.querySelectorAll(".multi-select:not(.schedule-student-popover)").forEach(bindMultiSelectControl);
     tbody.querySelectorAll(".schedule-student-popover").forEach(bindScheduleStudentPopover);
@@ -5526,15 +5547,101 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
   }
 }
 
-function lessonEditorOptions() {
-  return {
-    teachers: getActiveTeacherOptions(),
-    statuses: getStatusOptions(),
-    times: getTimeOptions(),
-    classrooms: getRoomOptions(),
-    grades: getGradeOptions(),
-    subjects: getSubjectOptions(),
-  };
+function lessonInlineConflict(row = {}, field = "") {
+  const lessonId = Number(row.id);
+  if (!lessonId || !["time_slot", "classroom"].includes(field)) return false;
+  return (state.schedule_conflicts?.issues || []).some((issue) => {
+    if (!(issue.lesson_ids || []).map(Number).includes(lessonId)) return false;
+    return field === "classroom" ? issue.type === "classroom" : ["teacher", "student", "classroom", "invalid_time"].includes(issue.type);
+  });
+}
+
+function lessonInlinePickerDisplay(row = {}, field = "") {
+  if (field === "status") return renderCourseStatusBadge(rowStatus(row));
+  if (field === "grade") return renderGradeBadge(row.grade);
+  if (field === "subject") return renderSubjectBadge(row.subject);
+  const value = field === "time_slot" ? lessonCandidateValue(field, row[field]) : (row[field] || "");
+  return `<span class="lesson-cell-text ${lessonInlineConflict(row, field) ? "candidate-conflict-text" : ""}">${escapeHtml(value)}</span>`;
+}
+
+function lessonInlinePickerCell(row, field, tdClass = "") {
+  const fieldLabel = {
+    teacher_name: "授课老师",
+    status: "状态",
+    time_slot: "时间",
+    classroom: "教室",
+    grade: "年级",
+    subject: "科目",
+  }[field] || "课程字段";
+  const interaction = isReadonlyUser()
+    ? ` aria-disabled="true" title="${escapeHtml(READONLY_WRITE_MESSAGE)}"`
+    : ` data-lesson-edit-trigger data-lesson-id="${escapeHtml(row.id)}" data-field="${escapeHtml(field)}" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="编辑${fieldLabel}"`;
+  // 触发属性放在 td 上，使单元格空白、文字和实体标签都属于同一个点击区域；
+  // 事件委托绑定在稳定的 contentEl，tbody 局部重绘不会丢失编辑能力。
+  return `<td class="${tdClass} lesson-edit-cell"${interaction}><span class="lesson-inline-picker">${lessonInlinePickerDisplay(row, field)}</span></td>`;
+}
+
+function scheduleInlinePickerOptions(row = {}, field = "") {
+  const current = row[field] || "";
+  const manualLabel = lessonManualLabel(field);
+  if (field === "time_slot" || field === "classroom") {
+    return lessonCandidateSelectOptions({
+      field,
+      values: field === "time_slot" ? getTimeOptions() : getRoomOptions(),
+      current,
+      candidate: { ...row, student_names: normalizeLessonStudentNames(row.student_names) },
+      emptyText: "未选",
+      manualLabel,
+      excludeLessonId: row.id,
+    });
+  }
+  const values = {
+    teacher_name: getActiveTeacherOptions(),
+    status: getStatusOptions(current),
+    grade: getGradeOptions(),
+    subject: getSubjectOptions(),
+  }[field] || [];
+  return manualSelectOptions(values, current, manualLabel, { emptyText: "未选" });
+}
+
+function closeScheduleInlinePicker({ restoreFocus = false } = {}) {
+  const active = activeScheduleInlinePicker;
+  activeScheduleInlinePicker = null;
+  if (!active) return;
+  active.trigger?.setAttribute("aria-expanded", "false");
+  closeCustomSelects();
+  active.menu?.remove();
+  active.wrapper?.remove();
+  active.select?.remove();
+  if (restoreFocus && active.trigger?.isConnected) active.trigger.focus();
+}
+
+function openScheduleInlinePicker(trigger) {
+  if (!trigger || isReadonlyUser()) return;
+  const row = (state.lessons || []).find((item) => String(item.id) === String(trigger.dataset.lessonId));
+  const field = trigger.dataset.field || "";
+  if (!row || !field) return;
+  closeScheduleInlinePicker();
+  const select = document.createElement("select");
+  select.className = `schedule-inline-picker-native ${field === "status" ? "status-select" : ""}`;
+  select.dataset.id = String(row.id);
+  select.dataset.field = field;
+  select.innerHTML = scheduleInlinePickerOptions(row, field);
+  trigger.appendChild(select);
+  enhanceCustomSelects();
+  const wrapper = select.nextElementSibling?.matches?.(".custom-select") ? select.nextElementSibling : null;
+  const menu = customSelectMenu(wrapper);
+  if (!wrapper || !menu) {
+    select.remove();
+    return;
+  }
+  wrapper.classList.add("schedule-inline-picker-anchor");
+  activeScheduleInlinePicker = { select, wrapper, menu, trigger };
+  trigger.setAttribute("aria-expanded", "true");
+  select.addEventListener("change", () => {
+    Promise.resolve(handleLessonFieldChange(select)).finally(() => closeScheduleInlinePicker());
+  }, { once: true });
+  openCustomSelect(wrapper);
 }
 
 function lessonTextCell(colClass, value, { html = "", title = value } = {}) {
@@ -5544,6 +5651,8 @@ function lessonTextCell(colClass, value, { html = "", title = value } = {}) {
 }
 
 function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
+  const signature = (lessons || []).map((row) => `${row.id}:${row.student_names || ""}`).join("|");
+  if (lessonStudentWidthCache.signature === signature) return lessonStudentWidthCache.width;
   const probe = document.createElement("canvas").getContext("2d");
   const rootStyle = getComputedStyle(document.documentElement);
   const bodyStyle = getComputedStyle(document.body);
@@ -5557,7 +5666,9 @@ function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
     sum + probe.measureText(value).width + badgePadding + (index ? badgeGap : 0)
   ), 0)));
   // 文字宽度加上单元格内边距；排课态另为按钮预留下拉箭头空间。
-  return Math.max(156, Math.ceil(contentWidth + cellPadding));
+  const width = Math.max(156, Math.ceil(contentWidth + cellPadding));
+  lessonStudentWidthCache = { signature, width };
+  return width;
 }
 
 function applyLessonTableStudentColumnWidth(width = measureVisibleStudentColumnWidth()) {
@@ -5569,10 +5680,10 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
     lessonTextCell("col-serial narrow", String(visibleIndex), { title: `当前可见序号 ${visibleIndex}` }),
     lessonTextCell("col-teacher", row.teacher_name),
     lessonTextCell("col-date", row.date),
-    `<td class="readonly col-status">${renderCourseStatusBadge(rowStatus(row))}</td>`,
     lessonTextCell("col-weekday", weekdayCn(row.date)),
-    lessonTextCell("col-time", row.time_slot),
-    lessonTextCell("col-room", row.classroom),
+    lessonTextCell("col-time", row.time_slot, { html: `<span class="${lessonInlineConflict(row, "time_slot") ? "candidate-conflict-text" : ""}">${escapeHtml(row.time_slot || "")}</span>` }),
+    lessonTextCell("col-room", row.classroom, { html: `<span class="${lessonInlineConflict(row, "classroom") ? "candidate-conflict-text" : ""}">${escapeHtml(row.classroom || "")}</span>` }),
+    `<td class="readonly col-status">${renderCourseStatusBadge(rowStatus(row))}</td>`,
     `<td class="readonly col-grade">${renderGradeBadge(row.grade)}</td>`,
     `<td class="readonly col-subject">${renderSubjectBadge(row.subject)}</td>`,
     `<td class="readonly col-students"><div class="lesson-student-badges">${splitStudents(row.student_names).map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("") || '<span class="muted-tip">未填学生</span>'}</div></td>`,
@@ -5581,25 +5692,24 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
   ].join("");
 }
 
-function lessonEditCells(row, visibleIndex, cumulative, editOptions) {
-  const candidate = { ...row, student_names: normalizeLessonStudentNames(row.student_names) };
+function lessonEditCells(row, visibleIndex, cumulative) {
   return `
       <td class="readonly col-serial narrow"><span class="lesson-cell-text">${visibleIndex}</span></td>
-      ${selectCell({ className: "lesson-field", id: row.id, field: "teacher_name", value: row.teacher_name, values: editOptions.teachers, emptyText: "未选", tdClass: "col-teacher", manualLabel: lessonManualLabel("teacher_name") })}
+      ${lessonInlinePickerCell(row, "teacher_name", "col-teacher")}
       ${inputCell({ className: "lesson-field", id: row.id, field: "date", value: row.date, type: "date", tdClass: "col-date" })}
-      ${statusSelectCell({ id: row.id, value: rowStatus(row), tdClass: "col-status" })}
       <td class="readonly col-weekday">${escapeHtml(weekdayCn(row.date))}</td>
-      ${lessonCandidateSelectCell({ id: row.id, field: "time_slot", value: row.time_slot, values: editOptions.times, candidate, emptyText: "未选", tdClass: "col-time", manualLabel: lessonManualLabel("time_slot") })}
-      ${lessonCandidateSelectCell({ id: row.id, field: "classroom", value: row.classroom, values: editOptions.classrooms, candidate, emptyText: "未选", tdClass: "col-room", manualLabel: lessonManualLabel("classroom") })}
-      ${selectCell({ className: "lesson-field", id: row.id, field: "grade", value: row.grade, values: editOptions.grades, emptyText: "未选", tdClass: "col-grade", manualLabel: lessonManualLabel("grade") })}
-      ${selectCell({ className: "lesson-field", id: row.id, field: "subject", value: row.subject, values: editOptions.subjects, emptyText: "未选", tdClass: "col-subject", manualLabel: lessonManualLabel("subject") })}
+      ${lessonInlinePickerCell(row, "time_slot", "col-time")}
+      ${lessonInlinePickerCell(row, "classroom", "col-room")}
+      ${lessonInlinePickerCell(row, "status", "col-status")}
+      ${lessonInlinePickerCell(row, "grade", "col-grade")}
+      ${lessonInlinePickerCell(row, "subject", "col-subject")}
       ${lessonScheduleStudentCell(row)}
       <td class="col-note"><textarea class="cell-input lesson-field wide lesson-note-input" data-id="${row.id}" data-field="notes" rows="1">${escapeHtml(row.notes || "")}</textarea></td>
       <td class="readonly col-index narrow">${cumulative}</td>
   `;
 }
 
-function lessonRow(row, visibleIndex, cumulative, editOptions = null) {
+function lessonRow(row, visibleIndex, cumulative) {
   const lessonId = Number(row.id);
   const checked = selectedLessonIds.has(lessonId) ? "checked" : "";
   const rowWarnings = getLessonWarnings(row.id);         /* [约束5] 从缓存读取该行 warnings */
@@ -5609,7 +5719,7 @@ function lessonRow(row, visibleIndex, cumulative, editOptions = null) {
   return `
     <tr class="${rowWarnings.length ? "has-warnings" : ""}" data-row-id="${row.id}"> <!-- [约束1/边界2] data-row-id 用于行定位与焦点恢复 -->
       <td class="lesson-select-cell col-select"><input class="lesson-select-row" type="checkbox" data-id="${row.id}" aria-label="选择课程" ${checked}>${warningIcon}</td>
-      ${scheduleMode ? lessonEditCells(row, visibleIndex, cumulative, editOptions || lessonEditorOptions()) : lessonReadonlyCells(row, visibleIndex, cumulative)}
+      ${scheduleMode ? lessonEditCells(row, visibleIndex, cumulative) : lessonReadonlyCells(row, visibleIndex, cumulative)}
     </tr>
   `;
 }
@@ -5631,14 +5741,13 @@ function lessonScheduleAddRow(row) {
 function lessonRowsHtml(rows) {
   if (!rows.length) return `<tr><td colspan="13" class="empty">暂无课程记录</td></tr>`;
   let cumulative = 0;
-  const editOptions = scheduleMode ? lessonEditorOptions() : null;
   return rows.map((row, index) => {
     cumulative += splitStudents(row.student_names).length;
     const currentGroup = `${row.date || ""}|${row.teacher_name || ""}`;
     const next = rows[index + 1];
     const nextGroup = next ? `${next.date || ""}|${next.teacher_name || ""}` : "";
     const addRow = scheduleMode && currentGroup !== nextGroup ? lessonScheduleAddRow(row) : "";
-    return `${lessonRow(row, index + 1, cumulative, editOptions)}${addRow}`;
+    return `${lessonRow(row, index + 1, cumulative)}${addRow}`;
   }).join("");
 }
 
@@ -6318,16 +6427,16 @@ function lessonBatchCopyModal() {
           <div class="small-title">原课程</div>
           <div class="table-wrap copy-preview-wrap batch-copy-preview">
             <table class="copy-preview-table">
-              <thead><tr><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th><th>备注</th></tr></thead>
+              <thead><tr><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th>学生</th><th>备注</th></tr></thead>
               <tbody>
                 ${sourceRows.map((row) => `
                   <tr>
                     <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                     <td class="text-cell">${escapeHtml(row.date)}</td>
-                    <td class="text-cell">${renderEntityBadge("status", rowStatus(row))}</td>
                     <td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td>
                     <td class="text-cell">${escapeHtml(row.time_slot)}</td>
                     <td class="text-cell">${escapeHtml(row.classroom)}</td>
+                    <td class="text-cell">${renderEntityBadge("status", rowStatus(row))}</td>
                     <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                     <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
                     <td class="text-cell"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td>
@@ -6340,16 +6449,16 @@ function lessonBatchCopyModal() {
           <div class="small-title">目标课程</div>
           <div class="table-wrap copy-preview-wrap batch-copy-edit-wrap">
             <table class="copy-preview-table batch-copy-edit-table">
-              <thead><tr><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th>学生</th><th>备注</th></tr></thead>
+              <thead><tr><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th>学生</th><th>备注</th></tr></thead>
               <tbody>
                 ${targetRows.map((row, index) => `
                   <tr>
                     <td>${batchCopySelectCell(index, "teacher_name", row.teacher_name)}</td>
                     <td>${batchCopyInputCell(index, "date", row.date, "date")}</td>
-                    <td>${batchCopySelectCell(index, "status", row.status || "待上", { emptyText: "" })}</td>
                     <td class="readonly">${escapeHtml(weekdayCn(row.date))}</td>
                     <td>${batchCopySelectCell(index, "time_slot", row.time_slot)}</td>
                     <td>${batchCopySelectCell(index, "classroom", row.classroom)}</td>
+                    <td>${batchCopySelectCell(index, "status", row.status || "待上", { emptyText: "" })}</td>
                     <td>${batchCopySelectCell(index, "grade", row.grade)}</td>
                     <td>${batchCopySelectCell(index, "subject", row.subject)}</td>
                     <td>${batchCopyInputCell(index, "student_names", row.student_names)}</td>
@@ -6505,7 +6614,7 @@ function renderLessons() {
           <colgroup><col span="10"><col class="col-students"><col span="2"></colgroup>
           <thead>
             <tr>
-              <th class="lesson-select-head col-select"><input class="lesson-select-all" type="checkbox" aria-label="全选当前可见课程" ${rows.length ? "" : "disabled"}></th><th class="col-serial">序号</th><th class="col-teacher">授课老师</th><th class="col-date">日期</th><th class="col-status">状态</th><th class="col-weekday">星期</th><th class="col-time">时间</th><th class="col-room">教室</th><th class="col-grade">年级</th><th class="col-subject">科目</th><th class="col-students">学生</th><th class="col-note">备注</th><th class="col-index">累计序号</th>
+              <th class="lesson-select-head col-select"><input class="lesson-select-all" type="checkbox" aria-label="全选当前可见课程" ${rows.length ? "" : "disabled"}></th><th class="col-serial">序号</th><th class="col-teacher">授课老师</th><th class="col-date">日期</th><th class="col-weekday">星期</th><th class="col-time">时间</th><th class="col-room">教室</th><th class="col-status">状态</th><th class="col-grade">年级</th><th class="col-subject">科目</th><th class="col-students">学生</th><th class="col-note">备注</th><th class="col-index">累计序号</th>
             </tr>
           </thead>
           <tbody id="lessons-tbody"> <!-- [约束1] 固定 id 用于局部重绘定位 -->
@@ -6755,24 +6864,6 @@ function lessonCandidateSelectOptions({
     `),
     manualLabel ? `<option value="${LESSON_CREATE_MANUAL_VALUE}" ${current === LESSON_CREATE_MANUAL_VALUE ? "selected" : ""}>＋ ${escapeHtml(manualLabel)}</option>` : "",
   ].join("");
-}
-
-function lessonCandidateSelectCell({ id, field, value, values, candidate, emptyText = "未选", tdClass = "", manualLabel = "" }) {
-  return `
-    <td class="${tdClass}">
-      <select class="cell-select lesson-field lesson-candidate-field" data-id="${escapeHtml(String(id))}" data-field="${escapeHtml(field)}">
-        ${lessonCandidateSelectOptions({
-          field,
-          values,
-          current: value,
-          candidate,
-          emptyText,
-          manualLabel,
-          excludeLessonId: id,
-        })}
-      </select>
-    </td>
-  `;
 }
 
 function lessonStudentPickerMarkup({
@@ -11760,10 +11851,10 @@ function courseNoticeColumns(mode = "parent") {
   const columns = [
     ["teacher_name", "授课老师"],
     ["date", "日期"],
-    ["status", "状态"],
     ["weekday", "星期"],
     ["time_slot", "时间"],
     ["classroom", "教室"],
+    ["status", "状态"],
     ["grade", "年级"],
     ["subject", "科目"],
     ["student_names", "学生"],
@@ -16280,6 +16371,9 @@ function wireEvents() {
     button.addEventListener("click", () => {
       const startedAt = performance.now();
       const scroll = captureLessonScroll();
+      const focused = document.activeElement?.closest?.(".lesson-field");
+      const focus = focused ? { id: focused.dataset.id, field: focused.dataset.field } : null;
+      const drafts = captureLessonDrafts();
       scheduleMode = !scheduleMode;
       logClientOperation(scheduleMode ? "schedule_mode_start" : "schedule_mode_end", {
         content: `${scheduleMode ? "开始" : "结束"}排课：当前筛选 ${visibleLessonRows().length} 节课程`,
@@ -16291,7 +16385,13 @@ function wireEvents() {
       button.textContent = scheduleMode ? "结束排课" : "开始排课";
       reRenderLessonsTbody();
       restoreLessonScroll(scroll);
-      requestAnimationFrame(() => console.info(`[performance] ${scheduleMode ? "enter" : "exit"} schedule mode: ${(performance.now() - startedAt).toFixed(1)}ms`));
+      restoreLessonDrafts(drafts);
+      if (focus?.id && focus?.field) requestAnimationFrame(() => {
+        document.querySelector(`.lesson-field[data-id="${selectorEscape(focus.id)}"][data-field="${selectorEscape(focus.field)}"]`)?.focus({ preventScroll: true });
+      });
+      requestAnimationFrame(() => {
+        if (PERF_LOG) console.info(`[performance] ${scheduleMode ? "enter" : "exit"} schedule mode: ${(performance.now() - startedAt).toFixed(1)}ms`);
+      });
     });
   });
 
@@ -16320,10 +16420,36 @@ function wireEvents() {
   /* [约束2] 事件委托：将 .lesson-field 的 change 监听挂在 contentEl 上，绑定一次，行替换不受影响 */
   if (!lessonFieldDelegatedBound) {
     lessonFieldDelegatedBound = true;
+    contentEl.addEventListener("click", (event) => {
+      const trigger = event.target.closest("[data-lesson-edit-trigger]");
+      if (!trigger || !contentEl.contains(trigger) || trigger.getAttribute("aria-disabled") === "true") return;
+      event.preventDefault();
+      event.stopPropagation();
+      openScheduleInlinePicker(trigger);
+    });
+    contentEl.addEventListener("keydown", (event) => {
+      if (!(["Enter", " ", "Spacebar"].includes(event.key))) return;
+      const trigger = event.target.closest("[data-lesson-edit-trigger]");
+      if (!trigger || !contentEl.contains(trigger) || trigger.getAttribute("aria-disabled") === "true") return;
+      event.preventDefault();
+      openScheduleInlinePicker(trigger);
+    });
     contentEl.addEventListener("change", (event) => {
       const input = event.target.closest(".lesson-field");
       if (!input) return;
       handleLessonFieldChange(input);   /* [约束3] 配置表驱动，A/B/C 三档分派 */
+    });
+  }
+
+  if (!scheduleInlinePickerEventsBound) {
+    scheduleInlinePickerEventsBound = true;
+    document.addEventListener("click", (event) => {
+      if (!activeScheduleInlinePicker) return;
+      if (event.target.closest("[data-lesson-edit-trigger], .custom-select, .custom-select-menu")) return;
+      closeScheduleInlinePicker();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && activeScheduleInlinePicker) closeScheduleInlinePicker({ restoreFocus: true });
     });
   }
 

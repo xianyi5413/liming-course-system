@@ -10,7 +10,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.16-date-picker-notice-color-polish";
+const APP_VERSION = "2026.07.17-schedule-editing-status-order-fix";
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -2455,11 +2455,20 @@ function teacherProfiles() {
 }
 
 function studentProfiles() {
+  // Fetch stages once: the prior per-student lookup was an N+1 query on every
+  // profile/recharge page entry.
+  const stageRows = studentGradeStages();
+  const stagesByStudent = new Map();
+  for (const stage of stageRows) {
+    const key = text(stage.student_name).trim();
+    if (!stagesByStudent.has(key)) stagesByStudent.set(key, []);
+    stagesByStudent.get(key).push(stage);
+  }
   return all(`
     SELECT *
     FROM students
   `).map((row) => {
-    const gradeStages = studentGradeStages(row.name);
+    const gradeStages = stagesByStudent.get(text(row.name).trim()) || [];
     return {
       ...row,
       first_lesson_date: firstStudentLessonDate(row.name),
