@@ -12277,6 +12277,59 @@ body {
   text-align: center;
 }
 
+/* A schedule cell is static content until clicked.  The single, temporary
+   custom-select anchor is invisible; its body-mounted menu owns editing. */
+.course-table.lesson-table.is-editing td[data-lesson-edit-trigger] {
+  cursor: pointer;
+}
+
+.course-table.lesson-table.is-editing td[data-lesson-edit-trigger]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.course-table.lesson-table.is-editing .lesson-inline-picker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  text-align: center;
+  pointer-events: none;
+}
+
+.course-table.lesson-table.is-editing td.lesson-edit-cell[aria-disabled="true"] {
+  cursor: default;
+}
+
+.course-table.lesson-table.is-editing .lesson-inline-picker .lesson-cell-text {
+  width: 100%;
+}
+
+.course-table.lesson-table .candidate-conflict-text {
+  color: var(--danger);
+}
+
+.course-table.lesson-table td {
+  position: relative;
+}
+
+.schedule-inline-picker-anchor {
+  position: absolute !important;
+  inset: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
 .user-admin-panel:not(.role-admin-panel) .table-wrap {
   width: 100%;
   max-width: 100%;
