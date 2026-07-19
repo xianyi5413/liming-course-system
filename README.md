@@ -2548,8 +2548,8 @@ node --check public/app.js
 | 教师月度调整 | `teacher_adjustments_monthly` | 教师姓名 → month_key → 第1周车费 → 第2周车费 → 第3周车费 → 第4周车费 → 备注 |
 | 教师车费 | `teacher_travel_fees` | 教师姓名 → 周序号 → 周开始日期 → 周结束日期 → 金额 → 备注 → ID → month_key → 创建时间 → 更新时间 |
 | 员工 | `staff` | 员工姓名 → 岗位 → 薪资类型 → 基本工资 → 日薪 → 标准工作天数 → 联系电话 → 状态 → 入职日期 → 离职日期 → 备注 → ID |
-| 员工薪资 | `staff_salary_monthly` | 员工ID → month_key → 实际工资 → 奖金 → 扣款 → 备注 → ID |
-| 员工考勤 | `staff_attendance` | 员工ID → 考勤日期 → 状态 → 计薪单位 → 工时 → 原因 → 备注 → ID → month_key → 更新时间 |
+| 员工薪资 | `staff_salary_monthly` | 员工姓名 → 实际工资 → 奖金 → 扣款 → 备注 → ID → 员工ID → month_key |
+| 员工考勤 | `staff_attendance` | 员工姓名 → 考勤日期 → 状态 → 计薪单位 → 工时 → 原因 → 备注 → ID → 员工ID → month_key → 更新时间 |
 | 日常开销 | `operating_expenses` | 日期 → 类别 → 金额 → 商家 → 备注 → ID → month_key |
 | 角色 | `roles` | 角色代码 → 角色名称 → 说明 → 是否系统角色 → 是否只读 → ID → 创建时间 → 更新时间 |
 | 角色权限 | `role_permissions` | 角色代码 → 权限代码 → 是否启用 → 创建时间 → 更新时间 |

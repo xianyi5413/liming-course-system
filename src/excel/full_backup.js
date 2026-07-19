@@ -59,6 +59,10 @@ function rowsForDefinition(db, definition) {
   if (definition.key === "settings") rows = rows.filter((row) => !SECRET_SETTING_PATTERN.test(String(row.key || "")));
   if (definition.key === "user_auth") rows = rows.map((row) => ({ id: row.id, password_hash: row.password_hash }));
   if (definition.key === "lessons") rows = rows.map((row) => ({ ...row, weekday: weekdayCn(row.date) }));
+  if (["staff_salary_monthly", "staff_attendance"].includes(definition.key)) {
+    const names = new Map(db.prepare("SELECT id, name FROM staff").all().map((row) => [row.id, row.name]));
+    rows = rows.map((row) => ({ ...row, staff_name: names.get(row.staff_id) || "" }));
+  }
   return rows;
 }
 
