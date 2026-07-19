@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
+const { DEFAULT_COURSE_STATUSES, FULL_BY_KEY } = require("../src/excel/field_definitions");
 
 const projectRoot = path.resolve(__dirname, "..");
 const serverScript = path.join(projectRoot, "src", "server.js");
@@ -131,6 +132,7 @@ async function waitForServer(url, child) {
 function insertFixture(db) {
   db.exec(`
     UPDATE settings SET value = '0' WHERE key = 'auto_backup_enabled';
+    INSERT INTO settings(key,value) VALUES ('custom_course_statuses','["调课"]') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     DELETE FROM lessons; DELETE FROM recharge_records; DELETE FROM student_opening_balances;
     DELETE FROM fee_overrides; DELETE FROM student_grade_stages; DELETE FROM student_pricing;
     DELETE FROM teacher_salary_rules; DELETE FROM class_groups; DELETE FROM teacher_adjustments_monthly;
@@ -158,7 +160,7 @@ function insertFixture(db) {
       (23,'未引用离职教师','初三','物理','未引用离校学生',150,2,0,'不应导出');
     INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,teacher_salary_rule_id,month_key,sort_order,created_at,updated_at) VALUES
       (101,'在职教师','2026-04-05','上课','09:00-11:00','A1','初一','数学','在读学生、李 雷','-测试备注','已上','已上',200,'rule',21,'2026-04-01',1,'2026-04-01 08:00:00','2026-04-05 12:00:00'),
-      (102,'离职教师','2026-04-06','上课','13:00-15:00','A2','初二','英语','离校学生','当月引用','已上','已上',180,'rule',22,'2026-04-01',2,'2026-04-01 08:00:00','2026-04-06 16:00:00'),
+      (102,'离职教师','2026-04-06','上课','13:00-15:00','A2','初二','英语','离校学生','当月引用','未上','调课',180,'rule',22,'2026-04-01',2,'2026-04-01 08:00:00','2026-04-06 16:00:00'),
       (201,'未引用离职教师','2026-05-05','上课','09:00-11:00','A3','初三','物理','未引用离校学生','其他月份','已上','已上',150,'rule',23,'2026-05-01',1,'2026-05-01','2026-05-05');
     INSERT INTO recharge_records(id,student_name,grade,prev_actual,prev_gift,cur_recharge,cur_gift,recharge_date,notes,source,month_key) VALUES
       (301,'在读学生','初一',100,50,1000,100,'2026-04-03','@充值备注','manual','2026-04-01'),
@@ -260,8 +262,8 @@ test("enhanced worksheets have the required order", () => {
   assert.deepEqual(workbook.names, expectedSheets);
 });
 
-test("legacy worksheet headers remain compatible", () => {
-  assert.deepEqual(workbook.sheets.get("4月总表").rows[1].slice(0, 4), ["授课老师", "日期", "上课情况", "星期"]);
+test("legacy worksheet names remain compatible while course headers use the current UI order", () => {
+  assert.deepEqual(workbook.sheets.get("4月总表").rows[1].slice(0, 10), ["授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注"]);
   assert.deepEqual(workbook.sheets.get("充值记录").rows[1].slice(0, 4), ["学生姓名", "年级", "上月实际结转", "上月赠送结转"]);
 });
 
@@ -322,7 +324,7 @@ test("inactive students and teachers referenced by the month are retained", () =
 
 test("IDs and relationship fields are preserved", () => {
   const overrides = rowsAsObjects(workbook.sheets.get("单节费用覆盖"));
-  assert.deepEqual(overrides, [{ 课程ID: 101, 学生姓名: "在读学生", 单节费用: 88, month_key: monthKey, 更新时间: "2026-04-05 12:01:00" }]);
+  assert.deepEqual(overrides, [{ 学生姓名: "在读学生", 单节费用: 88, 课程ID: 101, 更新时间: "2026-04-05 12:01:00" }]);
   const salaries = rowsAsObjects(workbook.sheets.get("员工薪资"));
   assert.equal(salaries[0].员工ID, 2);
 });
@@ -348,8 +350,8 @@ test("reference data includes active rows and current-month inactive references"
 test("amounts remain numeric while dates and empty values remain text", () => {
   const expense = rowsAsObjects(workbook.sheets.get("日常开销"))[0];
   assert.equal(expense.金额, 123.45);
-  assert.equal(expense.开销日期, "2026-04-08");
-  assert.equal(rowsAsObjects(workbook.sheets.get("学生档案"))[0].离校时间, "");
+  assert.equal(expense.日期, "2026-04-08");
+  assert.equal(rowsAsObjects(workbook.sheets.get("学生档案"))[0].离校日期, "");
 });
 
 test("formula-like user input is emitted only as inline string data", () => {
@@ -361,10 +363,45 @@ test("formula-like user input is emitted only as inline string data", () => {
   assert.equal(rowsAsObjects(courseSheet)[0].备注, "-测试备注");
 });
 
+test("course raw columns exactly follow the unified current-system definition", () => {
+  const expected = FULL_BY_KEY.lessons.columns.filter((column) => column.is_user_visible).map((column) => column.display_name);
+  assert.deepEqual(workbook.sheets.get("课程原始记录").rows[0], expected);
+});
+
+test("course status has exactly one user-visible column named 状态", () => {
+  const headers = workbook.sheets.get("课程原始记录").rows[0];
+  assert.equal(headers.filter((header) => header === "状态").length, 1);
+  assert.equal(headers.some((header) => /上课状态|课程状态|lesson_status|course_status/.test(header)), false);
+});
+
+test("monthly workbook does not expose the obsolete 上课情况 label", () => {
+  const headers = [...workbook.sheets.values()].flatMap((sheet) => sheet.rows.slice(0, 2).flat());
+  assert.equal(headers.includes("上课情况"), false);
+});
+
+test("course status values match defaults plus the configured custom enum", () => {
+  const statuses = rowsAsObjects(workbook.sheets.get("课程原始记录")).map((row) => row.状态);
+  const allowed = new Set([...DEFAULT_COURSE_STATUSES, "调课"]);
+  assert.ok(statuses.every((status) => allowed.has(status)));
+  assert.ok(statuses.includes("调课"));
+});
+
+test("technical course fields follow all current-system business fields", () => {
+  const headers = workbook.sheets.get("课程原始记录").rows[0];
+  const lastBusiness = headers.indexOf("备注");
+  for (const technical of ["ID", "month_key", "排序", "教师薪资规则ID", "创建时间", "更新时间"]) assert.ok(headers.indexOf(technical) > lastBusiness, technical);
+});
+
+test("monthly export and full backup reference the same course field objects", () => {
+  assert.equal(FULL_BY_KEY.lessons.columns, require("../src/excel/field_definitions").LESSON_COLUMNS);
+  assert.deepEqual(workbook.sheets.get("课程原始记录").rows[0], FULL_BY_KEY.lessons.columns.filter((column) => column.is_user_visible).map((column) => column.display_name));
+});
+
 test("workbook contains no credential or server-infrastructure fields", () => {
   const headers = [...workbook.sheets.values()].flatMap((sheet) => sheet.rows[0] || []).join("|");
   assert.doesNotMatch(headers, /password_hash|session|cookie|token|secret|ssh|docker|绝对路径/i);
   assert.doesNotMatch(workbookBuffer.toString("utf8"), /BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/i);
+  assert.doesNotMatch(workbookBuffer.toString("utf8"), /pbkdf2\$/i);
 });
 
 test("Unicode and spaces survive a complete workbook parse", () => {
