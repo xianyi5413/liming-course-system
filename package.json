@@ -16,6 +16,7 @@
     "backup:p1b:verify": "node scripts/p1b/verify_backup_cli.js",
     "test:p1b": "node --test --test-concurrency=1 tests/p1b/backup_package.test.js",
     "test:p1b:locked": "node scripts/p1b/run_locked_tests.js",
+    "test:p2": "node --test --test-concurrency=1 tests/p2/backup_metadata.test.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",
     "trace:student-balance": "node src/server.js --trace-student-balance=秦小沫",

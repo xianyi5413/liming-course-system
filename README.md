@@ -2592,3 +2592,21 @@ docker run --rm --network none --read-only \
 ```
 
 P1B ZIP 使用标准存储模式并全程分块读写，不把完整 ZIP 读入内存。当前原型明确不支持 ZIP64，因此单文件、ZIP偏移或整包超过传统 ZIP 32 位限制时会安全失败；它也不提供加密或数字签名。固定 Docker Hub digest 从零拉取仍需在网络可达环境完成供应链复现验证，主 `Dockerfile` 保持不变。
+
+## P2：备份元数据与数据库迁移基础层（尚未接入业务系统）
+
+P2 只提供独立、可测试的数据库基础设施，代码位于 `scripts/p2/`，测试位于 `tests/p2/`。当前业务启动流程不会自动执行 P2 迁移，旧 `backup_records`、旧 API、旧页面和 `data/backups/` 均保持原样；本阶段也没有新增网页、HTTP API、调度、恢复、保留策略或百度网盘连接。
+
+迁移由两份版本化 SQL 组成：第一份创建正式迁移来源 `schema_migrations`，第二份创建 `backup_sets`、`backup_copies` 和 `job_runs`。执行器按严格递增版本逐项在独立事务中运行，记录名称、规范化 SQL 的 SHA-256 和 UTC 应用时间；已应用版本不会重复执行，checksum 变化、版本缺口或未知未来版本会被拒绝。`PRAGMA user_version` 同步更新，但不是迁移事实的唯一来源。
+
+`BackupMetadataRepository` 提供备份、存储副本和任务记录的数据访问方法，并在写入前验证状态迁移、相对受管路径、跨平台文件名、备注长度及脱敏错误摘要。`baidu_netdisk` 目前只是中性、未配置的数据模型值，不包含 OAuth、Token 或上传逻辑。`UnifiedBackupReader` 以只读方式合并三类结果：`system_full`、`legacy_business_archive` 和 `legacy_sqlite_snapshot_summary`；旧 SQLite 快照只返回数量与总体积，旧记录中的绝对 `file_path` 不会进入统一结果。
+
+P1B 可继续使用原有 `createBackupPackage()` 纯文件模式。可选的 `createBackupPackageWithMetadata()` 适配器只在调用方显式传入元数据仓库时登记结果；若文件已经发布而元数据登记失败，它会返回稳定的 `P2_METADATA_REGISTRATION_FAILED` 错误并明确标记 `packagePublished=true`，不会静默伪装成完整成功。
+
+Windows 本地 P2 测试只使用内存 SQLite、系统临时目录和合成文件：
+
+```powershell
+npm.cmd run test:p2
+```
+
+P2 迁移尚未集成到 `src/server.js`，也不得直接对正式数据库运行。正式接入、启动顺序、权限、网页和 API 必须在后续批次单独评审与验收。
