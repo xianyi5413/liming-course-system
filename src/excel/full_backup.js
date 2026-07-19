@@ -222,4 +222,4 @@ function restoreFullData({ dbPath, inputPath }) {
   } finally { db.close(); }
 }
 
-module.exports = { FILE_TYPE, BACKUP_FORMAT: FILE_TYPE, FORMAT_VERSION, NULL_MARKER, FullExcelError, fullDataFilename, fullBackupFilename: fullDataFilename, expectedSheetNames, buildFullDataBuffer, buildFullBackupBuffer: buildFullDataBuffer, exportFullData, exportFullBackup: exportFullData, verifyFullData, verifyFullBackup: verifyFullData, restoreFullData, restoreFullBackup: restoreFullData };
+module.exports = { FILE_TYPE, BACKUP_FORMAT: FILE_TYPE, FORMAT_VERSION, NULL_MARKER, FullExcelError, fullDataFilename, fullBackupFilename: fullDataFilename, expectedSheetNames, dataSheet, fieldCatalogSheet, infoSheet, buildFullDataBuffer, buildFullBackupBuffer: buildFullDataBuffer, exportFullData, exportFullBackup: exportFullData, verifyFullData, verifyFullBackup: verifyFullData, restoreFullData, restoreFullBackup: restoreFullData };
