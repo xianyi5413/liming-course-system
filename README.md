@@ -2498,3 +2498,33 @@ node --check public/app.js
 - 微信、企业微信、电话、短信集成
 - 财务凭证 / 发票 / 税务
 - 学生学习记录 / 错题本 / 测评
+
+## P1A：SQLite 一致性快照原型（尚未上线）
+
+P1A 只验证“安全生成一致 SQLite 副本”的技术路径，不是系统完整备份功能，也不连接正式服务器或正式数据库。原型代码位于 `scripts/p1a/`，测试位于 `tests/p1a/`；旧 `scripts/backup_sqlite.js`、`data/backups/` 和 `backup_records` 行为保持不变。
+
+当前原型包含：
+
+- 默认使用 Node `node:sqlite.backup()` 的 Online Backup API；
+- `VACUUM INTO` 作为可替换的快照策略 fallback；
+- 两种策略共用 `integrity_check`、`foreign_key_check`、错误码和安全发布逻辑；
+- 目标已存在时拒绝覆盖；
+- 只识别并清理由 P1A 命名的 `.partial.sqlite` 测试残留；
+- 合成 WAL 数据库、并发提交、中断、句柄关闭、路径及权限测试。
+
+Windows 本地测试使用系统临时目录，不要求修改全局 Node：
+
+```powershell
+npm.cmd run test:p1a
+```
+
+锁定环境测试使用独立的 `Dockerfile.p1a`；专用的 `Dockerfile.p1a.dockerignore` 将构建上下文限制为 P1A 脚本和测试，不会修改或启动正式 Compose project，也不会发送或挂载业务数据：
+
+```bash
+docker build --platform linux/amd64 -f Dockerfile.p1a -t liming-p1a-test .
+docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m liming-p1a-test
+```
+
+锁定环境的目标基线为 Node 24.18.0、Alpine 3.24.1、SQLite 3.53.1、linux/amd64，测试入口会在执行用例前强制核对这些版本。主 `Dockerfile` 仍保持现状；待锁定镜像测试实际通过并单独确认后，再决定是否替换生产基础镜像。
+
+P1A 明确不包含业务文件收集、ZIP、manifest、SHA-256、备份目录、数据库元数据表、网页、API、调度、恢复、保留策略或旧备份迁移。所有测试只允许使用合成数据库和本轮创建的临时文件。

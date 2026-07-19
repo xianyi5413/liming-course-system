@@ -10,6 +10,8 @@
     "db:export-json": "node scripts/export_sqlite_json.js",
     "db:export-postgres": "node scripts/sqlite_to_postgres_sql.js",
     "db:restore": "node scripts/restore_sqlite_backup.js",
+    "test:p1a": "node --test --test-concurrency=1 tests/p1a/sqlite_snapshot.test.js",
+    "test:p1a:locked": "node scripts/p1a/run_locked_tests.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",
     "trace:student-balance": "node src/server.js --trace-student-balance=秦小沫",
