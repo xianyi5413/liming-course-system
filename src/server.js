@@ -6336,16 +6336,310 @@ function coreTeacherSalaryRows(monthKey) {
   return output;
 }
 
+function archiveTableRows(columns, rows) {
+  return [
+    columns.map((column) => column.label),
+    ...rows.map((row) => columns.map((column) => row[column.key] ?? "")),
+  ];
+}
+
+function archiveSheet(name, dataType, columns, rows) {
+  return {
+    name,
+    dataType,
+    recordCount: rows.length,
+    rows: archiveTableRows(columns, rows),
+  };
+}
+
+function monthArchiveData(monthKey) {
+  const lessons = all(
+    "SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id",
+    [monthKey],
+  );
+  const recharges = all(
+    `SELECT * FROM recharge_records
+     WHERE month_key = ? AND ${REAL_RECHARGE_SQL}
+     ORDER BY CASE WHEN recharge_date IS NULL OR TRIM(recharge_date) = '' THEN 1 ELSE 0 END,
+       recharge_date, id, student_name`,
+    [monthKey],
+  );
+  const openingBalances = all(
+    "SELECT * FROM student_opening_balances WHERE month_key = ? ORDER BY student_name, id",
+    [monthKey],
+  );
+  const feeOverrides = all(
+    `SELECT o.lesson_id, o.student_name, o.unit_price, o.updated_at, l.month_key
+     FROM fee_overrides o
+     JOIN lessons l ON l.id = o.lesson_id
+     WHERE l.month_key = ?
+     ORDER BY l.date, o.lesson_id, o.student_name`,
+    [monthKey],
+  );
+  const teacherAdjustments = all(
+    "SELECT * FROM teacher_adjustments_monthly WHERE month_key = ? ORDER BY teacher_name",
+    [monthKey],
+  );
+  const teacherTravelFees = all(
+    "SELECT * FROM teacher_travel_fees WHERE month_key = ? ORDER BY teacher_name, week_index, id",
+    [monthKey],
+  );
+  const staffSalaries = all(
+    `SELECT ssm.*, s.name AS staff_name
+     FROM staff_salary_monthly ssm
+     LEFT JOIN staff s ON s.id = ssm.staff_id
+     WHERE ssm.month_key = ? ORDER BY s.name, ssm.staff_id, ssm.id`,
+    [monthKey],
+  );
+  const staffAttendance = all(
+    `SELECT sa.*, s.name AS staff_name
+     FROM staff_attendance sa
+     LEFT JOIN staff s ON s.id = sa.staff_id
+     WHERE sa.month_key = ? ORDER BY sa.attendance_date, s.name, sa.staff_id, sa.id`,
+    [monthKey],
+  );
+  const expenses = all(
+    "SELECT * FROM operating_expenses WHERE month_key = ? ORDER BY expense_date, id",
+    [monthKey],
+  );
+
+  const studentNames = new Set();
+  for (const lesson of lessons) splitStudents(lesson.student_names).forEach((name) => studentNames.add(name));
+  for (const row of [...recharges, ...openingBalances, ...feeOverrides]) {
+    const name = text(row.student_name);
+    if (name) studentNames.add(name);
+  }
+  const students = all("SELECT * FROM students ORDER BY name, id")
+    .filter((row) => !["离校", "已流出", "已毕业"].includes(text(row.status)) || studentNames.has(text(row.name)));
+  students.forEach((row) => studentNames.add(text(row.name)));
+  const studentStages = all("SELECT * FROM student_grade_stages ORDER BY student_name, start_date, id")
+    .filter((row) => studentNames.has(text(row.student_name)));
+
+  const teacherNames = new Set();
+  const meaningfulTeacherAdjustments = teacherAdjustments.filter((row) => (
+    num(row.week1_transport) !== 0 || num(row.week2_transport) !== 0
+    || num(row.week3_transport) !== 0 || num(row.week4_transport) !== 0 || !!text(row.notes)
+  ));
+  for (const row of [...lessons, ...meaningfulTeacherAdjustments, ...teacherTravelFees]) {
+    const name = text(row.teacher_name);
+    if (name) teacherNames.add(name);
+  }
+  const teachers = all("SELECT * FROM teachers ORDER BY name, id")
+    .filter((row) => text(row.status) !== "离职" || teacherNames.has(text(row.name)));
+  teachers.forEach((row) => teacherNames.add(text(row.name)));
+  const referencedSalaryRuleIds = new Set(lessons.map((row) => Number(row.teacher_salary_rule_id)).filter(Number.isInteger));
+  const teacherSalaryRules = all("SELECT * FROM teacher_salary_rules ORDER BY teacher_name, grade, subject, id")
+    .filter((row) => Number(row.is_active) === 1 || referencedSalaryRuleIds.has(Number(row.id)));
+
+  const referencedStaffIds = new Set(
+    [...staffSalaries, ...staffAttendance].map((row) => Number(row.staff_id)).filter(Number.isInteger),
+  );
+  const staff = all("SELECT * FROM staff ORDER BY name, id")
+    .filter((row) => text(row.status) !== "离职" || referencedStaffIds.has(Number(row.id)));
+
+  return {
+    lessons,
+    recharges,
+    openingBalances,
+    feeOverrides,
+    teacherAdjustments,
+    teacherTravelFees,
+    staffSalaries,
+    staffAttendance,
+    expenses,
+    students,
+    studentStages,
+    teachers,
+    studentPricing: all("SELECT * FROM student_pricing ORDER BY student_name, grade, subject, id"),
+    pricingStandards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count, id"),
+    teacherSalaryRules,
+    classGroups: all("SELECT * FROM class_groups ORDER BY teacher, grade, subject, class_name, id"),
+    staff,
+  };
+}
+
+function monthlyArchiveSheets(monthKey) {
+  const data = monthArchiveData(monthKey);
+  return [
+    archiveSheet("课程原始记录", "原始数据（当月）", [
+      { key: "id", label: "ID" }, { key: "teacher_name", label: "授课老师" },
+      { key: "date", label: "日期" }, { key: "lesson_status", label: "上课情况" },
+      { key: "time_slot", label: "时间" }, { key: "classroom", label: "教室" },
+      { key: "grade", label: "年级" }, { key: "subject", label: "科目" },
+      { key: "student_names", label: "学生姓名列表" }, { key: "notes", label: "备注" },
+      { key: "course_status", label: "课程状态" }, { key: "status", label: "状态" },
+      { key: "teacher_salary", label: "教师薪资" }, { key: "teacher_salary_source", label: "教师薪资来源" },
+      { key: "teacher_salary_rule_id", label: "教师薪资规则ID" }, { key: "month_key", label: "month_key" },
+      { key: "sort_order", label: "排序" }, { key: "created_at", label: "创建时间" },
+      { key: "updated_at", label: "更新时间" },
+    ], data.lessons),
+    archiveSheet("充值原始记录", "原始数据（当月真实充值）", [
+      { key: "id", label: "ID" }, { key: "student_name", label: "学生姓名" },
+      { key: "grade", label: "年级" }, { key: "prev_actual", label: "上月实际结转" },
+      { key: "prev_gift", label: "上月赠送结转" }, { key: "cur_recharge", label: "本月实际充值" },
+      { key: "cur_gift", label: "本月赠送学费" }, { key: "recharge_date", label: "充值日期" },
+      { key: "notes", label: "备注" }, { key: "source", label: "来源" },
+      { key: "month_key", label: "month_key" },
+    ], data.recharges),
+    archiveSheet("期初余额", "参考数据（所选月份原始记录）", [
+      { key: "id", label: "ID" }, { key: "month_key", label: "month_key" },
+      { key: "student_name", label: "学生姓名" }, { key: "grade", label: "年级" },
+      { key: "opening_actual_balance", label: "期初实际余额" },
+      { key: "opening_gift_balance", label: "期初赠送余额" }, { key: "notes", label: "备注" },
+      { key: "created_at", label: "创建时间" }, { key: "updated_at", label: "更新时间" },
+    ], data.openingBalances),
+    archiveSheet("学生档案", "参考数据（有效及当月引用）", [
+      { key: "id", label: "ID" }, { key: "name", label: "学生姓名" }, { key: "grade", label: "年级" },
+      { key: "phone", label: "联系电话" }, { key: "guardian", label: "监护人" },
+      { key: "notes", label: "备注" }, { key: "status", label: "状态" },
+      { key: "joined_at", label: "入学时间" }, { key: "left_at", label: "离校时间" },
+    ], data.students),
+    archiveSheet("学生年级阶段", "参考数据（导出学生的全部阶段）", [
+      { key: "id", label: "ID" }, { key: "student_name", label: "学生姓名" },
+      { key: "stage", label: "年级阶段" }, { key: "start_date", label: "开始日期" },
+      { key: "end_date", label: "结束日期" }, { key: "created_at", label: "创建时间" },
+      { key: "updated_at", label: "更新时间" },
+    ], data.studentStages),
+    archiveSheet("教师档案", "参考数据（有效及当月引用）", [
+      { key: "id", label: "ID" }, { key: "name", label: "教师姓名" }, { key: "phone", label: "联系电话" },
+      { key: "notes", label: "备注" }, { key: "status", label: "状态" },
+      { key: "joined_at", label: "入职时间" }, { key: "left_at", label: "离职时间" },
+    ], data.teachers),
+    archiveSheet("学生单价规则", "参考数据（全部现有规则）", [
+      { key: "id", label: "ID" }, { key: "student_name", label: "学生姓名" },
+      { key: "grade", label: "年级" }, { key: "subject", label: "科目" },
+      { key: "student_names", label: "组合学生" }, { key: "custom_price", label: "自定义单价" },
+      { key: "notes", label: "备注" },
+    ], data.studentPricing),
+    archiveSheet("单节费用覆盖", "原始数据（当月）", [
+      { key: "lesson_id", label: "课程ID" }, { key: "student_name", label: "学生姓名" },
+      { key: "unit_price", label: "单节费用" }, { key: "month_key", label: "month_key" },
+      { key: "updated_at", label: "更新时间" },
+    ], data.feeOverrides),
+    archiveSheet("费用标准", "参考数据（全部现有标准）", [
+      { key: "id", label: "ID" }, { key: "grade", label: "年级" },
+      { key: "student_count", label: "学生人数" }, { key: "unit_price", label: "单价" },
+      { key: "description", label: "说明" },
+    ], data.pricingStandards),
+    archiveSheet("教师薪资规则", "参考数据（启用及当月引用）", [
+      { key: "id", label: "ID" }, { key: "teacher_name", label: "教师姓名" },
+      { key: "grade", label: "年级" }, { key: "subject", label: "科目" },
+      { key: "student_names", label: "学生组合" }, { key: "salary_per_unit", label: "单次薪资" },
+      { key: "unit_hours", label: "单位课时" }, { key: "is_active", label: "是否启用" },
+      { key: "notes", label: "备注" }, { key: "created_at", label: "创建时间" },
+      { key: "updated_at", label: "更新时间" },
+    ], data.teacherSalaryRules),
+    archiveSheet("教师月度调整", "原始数据（当月）", [
+      { key: "teacher_name", label: "教师姓名" }, { key: "month_key", label: "month_key" },
+      { key: "week1_transport", label: "第1周车费" }, { key: "week2_transport", label: "第2周车费" },
+      { key: "week3_transport", label: "第3周车费" }, { key: "week4_transport", label: "第4周车费" },
+      { key: "notes", label: "备注" },
+    ], data.teacherAdjustments),
+    archiveSheet("教师车费", "原始数据（当月）", [
+      { key: "id", label: "ID" }, { key: "month_key", label: "month_key" },
+      { key: "teacher_name", label: "教师姓名" }, { key: "week_index", label: "周序号" },
+      { key: "week_start", label: "周开始日期" }, { key: "week_end", label: "周结束日期" },
+      { key: "amount", label: "金额" }, { key: "notes", label: "备注" },
+      { key: "created_at", label: "创建时间" }, { key: "updated_at", label: "更新时间" },
+    ], data.teacherTravelFees),
+    archiveSheet("班级", "参考数据（全部现有班级）", [
+      { key: "id", label: "ID" }, { key: "teacher", label: "教师" }, { key: "grade", label: "年级" },
+      { key: "subject", label: "科目" }, { key: "students_key", label: "学生键" },
+      { key: "students_display", label: "学生显示名" }, { key: "class_name", label: "班级名称" },
+      { key: "created_at", label: "创建时间" }, { key: "updated_at", label: "更新时间" },
+    ], data.classGroups),
+    archiveSheet("员工", "参考数据（有效及当月引用）", [
+      { key: "id", label: "ID" }, { key: "name", label: "员工姓名" }, { key: "role", label: "岗位" },
+      { key: "base_salary", label: "基本工资" }, { key: "pay_type", label: "薪资类型" },
+      { key: "daily_rate", label: "日薪" }, { key: "standard_work_days", label: "标准工作天数" },
+      { key: "phone", label: "联系电话" }, { key: "status", label: "状态" },
+      { key: "joined_at", label: "入职时间" }, { key: "left_at", label: "离职时间" },
+      { key: "notes", label: "备注" },
+    ], data.staff),
+    archiveSheet("员工薪资", "原始数据（当月）", [
+      { key: "id", label: "ID" }, { key: "staff_id", label: "员工ID" }, { key: "staff_name", label: "员工姓名" },
+      { key: "month_key", label: "month_key" }, { key: "salary_actual", label: "实际工资" },
+      { key: "bonus", label: "奖金" }, { key: "deduction", label: "扣款" }, { key: "notes", label: "备注" },
+    ], data.staffSalaries),
+    archiveSheet("员工考勤", "原始数据（当月）", [
+      { key: "id", label: "ID" }, { key: "staff_id", label: "员工ID" }, { key: "staff_name", label: "员工姓名" },
+      { key: "attendance_date", label: "考勤日期" }, { key: "month_key", label: "month_key" },
+      { key: "status", label: "状态" }, { key: "pay_units", label: "计薪单位" },
+      { key: "hours", label: "工时" }, { key: "reason", label: "原因" },
+      { key: "notes", label: "备注" }, { key: "updated_at", label: "更新时间" },
+    ], data.staffAttendance),
+    archiveSheet("日常开销", "原始数据（当月）", [
+      { key: "id", label: "ID" }, { key: "category", label: "分类" },
+      { key: "expense_date", label: "开销日期" }, { key: "amount", label: "金额" },
+      { key: "vendor", label: "收款方" }, { key: "notes", label: "备注" },
+      { key: "month_key", label: "month_key" },
+    ], data.expenses),
+  ];
+}
+
+function asiaShanghaiIso(date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}+08:00`;
+}
+
+function exportInfoSheet(monthKey, sheetDescriptors, createdAt = new Date()) {
+  const schemaVersion = Number(get("PRAGMA user_version")?.user_version || 0);
+  const worksheetNames = [
+    ...sheetDescriptors.slice(0, 5).map((sheet) => sheet.name),
+    "导出说明",
+    ...sheetDescriptors.slice(5).map((sheet) => sheet.name),
+  ];
+  const metadata = [
+    ["导出类型", "monthly_core_excel"],
+    ["月份", monthKey],
+    ["导出时间（UTC）", createdAt.toISOString()],
+    ["导出时间（Asia/Shanghai）", asiaShanghaiIso(createdAt)],
+    ["应用版本", APP_VERSION],
+    ["数据库schema说明", `SQLite PRAGMA user_version=${schemaVersion}；应用启动时管理结构`],
+    ["工作表清单", worksheetNames.join("、")],
+    ["金额单位", "人民币元"],
+    ["日期格式", "YYYY-MM-DD；时间字段保留数据库原值"],
+    ["空值规则", "数据库 NULL 和空文本均导出为空单元格"],
+    ["用途说明", "月度业务归档；不是系统完整恢复备份；不能直接覆盖恢复整个系统"],
+  ];
+  const infoRecordCount = metadata.length + worksheetNames.length;
+  const worksheetRows = [
+    ...sheetDescriptors.slice(0, 5).map((sheet) => [sheet.name, sheet.recordCount, sheet.dataType]),
+    ["导出说明", infoRecordCount, "说明"],
+    ...sheetDescriptors.slice(5).map((sheet) => [sheet.name, sheet.recordCount, sheet.dataType]),
+  ];
+  const rows = [
+    ["字段", "值"],
+    ...metadata,
+    [],
+    ["工作表", "记录数", "原始数据/计算结果标识"],
+    ...worksheetRows,
+  ];
+  return {
+    name: "导出说明",
+    dataType: "说明",
+    recordCount: infoRecordCount,
+    rows,
+  };
+}
+
 function coreWorkbookSheets(monthKey) {
   const details = feeDetails(monthKey);
   const monthNumber = monthNumberCn(monthKey);
-  return [
-    { name: `${monthNumber}总表`, rows: coreLessonRows(monthKey) },
-    { name: `${monthNumber}学生费用汇总`, rows: coreStudentSummaryRows(monthKey, details) },
-    { name: "学生费用明细", rows: coreFeeDetailRows(monthKey, details) },
-    { name: "充值记录", rows: coreRechargeRows(monthKey, details) },
-    { name: "薪资汇总", rows: coreTeacherSalaryRows(monthKey) },
-  ];
+  const legacySheets = [
+    { name: `${monthNumber}总表`, rows: coreLessonRows(monthKey), dataType: "业务视图（含计算字段）" },
+    { name: `${monthNumber}学生费用汇总`, rows: coreStudentSummaryRows(monthKey, details), dataType: "计算结果" },
+    { name: "学生费用明细", rows: coreFeeDetailRows(monthKey, details), dataType: "计算结果" },
+    { name: "充值记录", rows: coreRechargeRows(monthKey, details), dataType: "业务视图（含未登记提醒）" },
+    { name: "薪资汇总", rows: coreTeacherSalaryRows(monthKey), dataType: "计算结果" },
+  ].map((sheet) => ({ ...sheet, recordCount: Math.max(0, sheet.rows.length - 2 - (sheet.rows.at(-1)?.[0] === "合计" ? 1 : 0)) }));
+  const archiveSheets = monthlyArchiveSheets(monthKey);
+  const infoSheet = exportInfoSheet(monthKey, [...legacySheets, ...archiveSheets]);
+  return [...legacySheets, infoSheet, ...archiveSheets];
 }
 
 function coreWorkbookBuffer(monthKey) {

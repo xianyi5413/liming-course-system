@@ -2499,96 +2499,16 @@ node --check public/app.js
 - 财务凭证 / 发票 / 税务
 - 学生学习记录 / 错题本 / 测评
 
-## P1A：SQLite 一致性快照原型（尚未上线）
+## 月度核心 Excel 增强归档
 
-P1A 只验证“安全生成一致 SQLite 副本”的技术路径，不是系统完整备份功能，也不连接正式服务器或正式数据库。原型代码位于 `scripts/p1a/`，测试位于 `tests/p1a/`；旧 `scripts/backup_sqlite.js`、`data/backups/` 和 `backup_records` 行为保持不变。
+单月核心 Excel 在原有五张人工业务表之后追加原始数据和参考数据工作表。原五张工作表的名称、顺序、字段含义和现有下载入口保持不变；“全部月份核心 Excel”ZIP 继续复用同一份单月工作簿生成逻辑。
 
-当前原型包含：
+新增的“导出说明”会标明导出月份、时间、应用版本、SQLite `user_version`、工作表清单、记录数及数据类型。该文件定位为月度业务归档，不是系统完整恢复备份，不能用于覆盖恢复整个系统。原始表保留数据库 ID、关联字段、月份和备注等现有字段；期初余额只导出所选月份的 `student_opening_balances` 原始记录，不以计算后的月末余额替代。
 
-- 默认使用 Node `node:sqlite.backup()` 的 Online Backup API；
-- `VACUUM INTO` 作为可替换的快照策略 fallback；
-- 两种策略共用 `integrity_check`、`foreign_key_check`、错误码和安全发布逻辑；
-- 目标已存在时拒绝覆盖；
-- 只识别并清理由 P1A 命名的 `.partial.sqlite` 测试残留；
-- 合成 WAL 数据库、并发提交、中断、句柄关闭、路径及权限测试。
+用户文本全部写为 OOXML 字符串单元格，不生成公式或宏；工作簿不包含密码哈希、Session、Cookie、Token、密钥、服务器绝对路径、Docker/SSH 信息。增强导出的构建过程不改写业务表，原有操作日志仍照常记录导出；旧 `backup_records`、`data/backups/`、期初余额导入导出及旧备份下载逻辑保持不变。
 
-Windows 本地测试使用系统临时目录，不要求修改全局 Node：
+本地回归测试只使用系统临时目录中的合成 SQLite 数据：
 
 ```powershell
-npm.cmd run test:p1a
+npm.cmd run test:monthly-core-excel
 ```
-
-锁定环境测试使用独立的 `Dockerfile.p1a`；专用的 `Dockerfile.p1a.dockerignore` 将构建上下文限制为 P1A 脚本和测试，不会修改或启动正式 Compose project，也不会发送或挂载业务数据：
-
-```bash
-docker build --platform linux/amd64 -f Dockerfile.p1a -t liming-p1a-test .
-docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m liming-p1a-test
-```
-
-锁定环境的目标基线为 Node 24.18.0、Alpine 3.24.1、SQLite 3.53.1、linux/amd64，测试入口会在执行用例前强制核对这些版本。主 `Dockerfile` 仍保持现状；待锁定镜像测试实际通过并单独确认后，再决定是否替换生产基础镜像。
-
-P1A 明确不包含业务文件收集、ZIP、manifest、SHA-256、备份目录、数据库元数据表、网页、API、调度、恢复、保留策略或旧备份迁移。所有测试只允许使用合成数据库和本轮创建的临时文件。
-
-## P1B：完整备份包流水线（命令行原型，尚未部署）
-
-P1B 复用 P1A 的一致性 SQLite 快照接口，在独立的 `BACKUP_ROOT/system-v1` 命名空间中生成可验证的完整备份包。它仍是命令行和测试阶段，不包含网页、HTTP API、数据库元数据表、恢复、调度、保留策略或正式服务器部署。
-
-每次执行分别生成唯一任务 UUID 和备份 UUID，并通过带 `+0800` 时区的 Windows 合法时间生成独立目录。ZIP 和旁路 SHA-256 先在同文件系统的 0700 staging 目录内完成并验证关闭，再通过一次目录重命名发布：
-
-```text
-<backup-root>/system-v1/
-└─ liming-system-full-<时间>-<备份ID>/
-   ├─ liming-system-full-<时间>-<备份ID>.zip
-   └─ liming-system-full-<时间>-<备份ID>.zip.sha256
-```
-
-ZIP 内部结构：
-
-```text
-manifest.json
-database/liming-local.sqlite
-files/source-workbooks/
-files/templates/
-metadata/restore-notes.txt
-```
-
-只有上述白名单内容会进入包中。活动数据库 WAL/SHM、`uploads/`、旧 `backups/`、`debug/`、环境变量文件、凭据、日志、仓库源码、`.git/` 和 `node_modules/` 均被排除。可选目录不存在时 manifest 记录 `absent`，存在但为空时记录 `empty`。manifest 记录 UTC 与 Asia/Shanghai 时间、快照策略、运行时版本、`PRAGMA user_version`、数据库校验结果以及每个文件的大小和 SHA-256；不记录源绝对路径或秘密配置。
-
-创建备份包：
-
-```bash
-node scripts/p1b/backup_cli.js \
-  --source-db /isolated/data/liming-local.sqlite \
-  --data-dir /isolated/data \
-  --backup-root /isolated/backups \
-  --strategy online \
-  --trigger manual
-```
-
-计划任务必须给 `--scheduled-for` 提供带时区的 ISO-8601 值；fallback 可显式使用 `--strategy vacuum-into`。CLI 输出仅包含备份 ID、相对产物名称、策略和哈希，不回显输入绝对路径。
-
-只读验证已有备份包：
-
-```bash
-node scripts/p1b/verify_backup_cli.js \
-  --zip /isolated/backups/system-v1/<备份目录>/<备份文件>.zip
-```
-
-验证会重新计算整包 SHA-256、逐文件 SHA-256，并把包内数据库流式复制到受控系统临时目录执行 `integrity_check` 和 `foreign_key_check`；不会修改 ZIP 或旁路文件。
-
-Windows 合成测试：
-
-```powershell
-npm.cmd run test:p1b
-```
-
-锁定 Linux/Alpine 测试使用独立 `Dockerfile.p1b` 和白名单构建上下文，不使用 Compose、业务 Volume 或网络：
-
-```bash
-docker build --platform linux/amd64 -f Dockerfile.p1b -t liming-p1b-test .
-docker run --rm --network none --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev,size=1g \
-  liming-p1b-test
-```
-
-P1B ZIP 使用标准存储模式并全程分块读写，不把完整 ZIP 读入内存。当前原型明确不支持 ZIP64，因此单文件、ZIP偏移或整包超过传统 ZIP 32 位限制时会安全失败；它也不提供加密或数字签名。固定 Docker Hub digest 从零拉取仍需在网络可达环境完成供应链复现验证，主 `Dockerfile` 保持不变。

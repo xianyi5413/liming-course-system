@@ -1,8 +1,0 @@
-*
-!Dockerfile.p1a
-!scripts/
-!scripts/p1a/
-!scripts/p1a/**
-!tests/
-!tests/p1a/
-!tests/p1a/**
