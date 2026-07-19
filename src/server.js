@@ -5,6 +5,8 @@ const zlib = require("node:zlib");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
+const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
+const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -137,7 +139,7 @@ const PERMISSION_TREE = [
       { key: "appearance", label: "外观设置" },
       { key: "baseData", label: "基础数据" },
       { key: "pricing", label: "费用标准" },
-      { key: "audit", label: "数据对账" },
+      { key: "audit", label: "数据中心" },
       { key: "operationLogs", label: "操作日志" },
       { key: "userAdmin", label: "账号权限" },
     ],
@@ -699,6 +701,7 @@ function initDb() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  ensureBackupColumns(db);
 
   const auditColumns = db.prepare("PRAGMA table_info(audit_logs)").all().map((column) => column.name);
   if (!auditColumns.includes("run_id")) {
@@ -974,6 +977,18 @@ function initDb() {
 }
 
 if (!readOnlyBalanceCli) initDb();
+
+let backupServiceInstance = null;
+const pendingDataImports = new Map();
+let dataImportMaintenance = false;
+function backupService() {
+  if (!backupServiceInstance) backupServiceInstance = new BackupService({ dbPath, dataDir, appVersion: APP_VERSION });
+  return backupServiceInstance;
+}
+function cleanupPendingDataImports() {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, item] of pendingDataImports) if (item.created_at < cutoff) { try { fs.rmSync(item.path, { force: true }); } catch {} pendingDataImports.delete(id); }
+}
 
 if (process.argv.includes("--init-db")) {
   console.log(`Database initialized: ${dbPath}`);
@@ -8105,8 +8120,26 @@ function sendBuffer(res, buffer, contentType, filename) {
     "content-type": contentType,
     "content-length": buffer.length,
     "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    "cache-control": "no-store, no-cache, must-revalidate, private",
+    "pragma": "no-cache",
+    "expires": "0",
   });
   res.end(buffer);
+}
+
+function sendFileDownload(res, filePath, contentType, filename) {
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    "content-type": contentType,
+    "content-length": stat.size,
+    "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    "cache-control": "no-store, no-cache, must-revalidate, private",
+    "pragma": "no-cache",
+    "expires": "0",
+  });
+  const stream = fs.createReadStream(filePath);
+  stream.on("error", () => { if (!res.destroyed) res.destroy(); });
+  stream.pipe(res);
 }
 
 function csvEscape(value) {
@@ -9752,6 +9785,7 @@ function roleCan(user, area, action = "read") {
 
 function apiArea(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/data-center")) return "coreExport";
   if (p.startsWith("/api/roles")) return "roles";
   if (p.startsWith("/api/student-grade-stages")) return "students";
   if (p.startsWith("/api/class-groups")) return "students";
@@ -9779,6 +9813,7 @@ function apiArea(req, url) {
 
 function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/data-center")) return ["audit"];
   if (p === "/api/dashboard") return ["dashboard"];
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
   if (p.startsWith("/api/class-groups")) return ["classGroups"];
@@ -9825,6 +9860,7 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
+  if (url.pathname.startsWith("/api/data-center")) return userHasAnyPermission(user, ["audit"]);
   const pageKeys = apiPagePermissionKeys(req, url);
   if (pageKeys.length && !userHasAnyPermission(user, pageKeys)) return false;
   if (pageKeys.length && accessAction === "read") return true;
@@ -12913,6 +12949,71 @@ async function handleApi(req, res, url) {
       writeOperationLog(user, { operation_type: "导出全量数据Excel", operation_content: "全量数据导出失败", target_type: "full_data_export", target_id: "all", result_status: "failure", details: { code: error.code || "FULL_EXCEL_EXPORT_FAILED" } }, req);
       return sendError(res, 500, `导出全量数据失败：${error.message || "未知错误"}`);
     }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/template.xlsx") {
+    writeOperationLog(user, { operation_type: "下载全量数据模板", operation_content: `下载 ${TEMPLATE_FILENAME}`, target_type: "data_center", target_id: "template" }, req);
+    return sendBuffer(res, createTemplateBuffer(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", TEMPLATE_FILENAME);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center") {
+    cleanupPendingDataImports();
+    return sendJson(res, { records: backupService().list(), settings: { managed_directory: "backups/full-excel", remote_status: "not_configured" }, maintenance: dataImportMaintenance });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
+    try {
+      const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id });
+      writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
+      return sendJson(res, { ...result, records: backupService().list() }, 201);
+    } catch (error) {
+      writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: "服务器备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BACKUP_FAILED" } }, req);
+      return sendError(res, error.code === "BACKUP_ALREADY_RUNNING" ? 409 : 500, error.message || "备份失败");
+    }
+  }
+
+  const dataBackupVerify = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/verify$/);
+  if (req.method === "POST" && dataBackupVerify) {
+    try { const record = backupService().verify(Number(dataBackupVerify[1])); writeOperationLog(user, { operation_type: "验证全量数据备份", operation_content: `验证成功：${record.filename}`, target_type: "backup_records", target_id: String(record.id) }, req); return sendJson(res, { ok: true, record }); }
+    catch (error) { return sendError(res, 400, error.message || "验证失败"); }
+  }
+  const dataBackupMetadata = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)$/);
+  if (req.method === "PATCH" && dataBackupMetadata) {
+    const body = await readBody(req); const record = backupService().updateMetadata(Number(dataBackupMetadata[1]), { note: body.note, pinned: body.pinned });
+    writeOperationLog(user, { operation_type: "修改备份备注", operation_content: `更新备份 ${record.id} 的备注或固定状态`, target_type: "backup_records", target_id: String(record.id) }, req); return sendJson(res, { ok: true, record });
+  }
+  const dataBackupDownload = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/download$/);
+  if (req.method === "GET" && dataBackupDownload) {
+    try { const service = backupService(); const database = service.database(); let row; try { row = service.record(database, Number(dataBackupDownload[1])); } finally { database.close(); } if (!row) return sendError(res, 404, "备份记录不存在"); const filename = service.managedPath(row); writeOperationLog(user, { operation_type: "下载全量数据备份", operation_content: `下载备份 ${row.id}`, target_type: "backup_records", target_id: String(row.id) }, req); return sendFileDownload(res, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", row.filename); }
+    catch (error) { return sendError(res, 400, error.message || "下载失败"); }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/import/preview") {
+    cleanupPendingDataImports(); const body = await readRawBody(req); const parts = parseMultipart(req, body); const file = parts.file;
+    if (!file?.content?.length || !/\.xlsx$/i.test(file.filename || "")) return sendError(res, 400, "必须上传xlsx文件");
+    try {
+      const preview = previewImport(file.content, { appVersion: APP_VERSION }); const uploadDir = path.join(dataDir, "uploads", "data-center"); fs.mkdirSync(uploadDir, { recursive: true, mode: 0o700 }); const uploadId = crypto.randomUUID(); const uploadPath = path.join(uploadDir, `${uploadId}.xlsx`); fs.writeFileSync(uploadPath, file.content, { flag: "wx", mode: 0o600 }); pendingDataImports.set(uploadId, { path: uploadPath, user_id: user.id, created_at: Date.now(), preview }); return sendJson(res, { ...preview, upload_id: uploadId });
+    } catch (error) { return sendError(res, 400, error.message || "Excel验证失败"); }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/import/execute") {
+    const body = await readBody(req); const pending = pendingDataImports.get(text(body.upload_id)); const mode = text(body.mode);
+    if (!pending || pending.user_id !== user.id) return sendError(res, 404, "上传文件已失效");
+    const expected = mode === "overwrite" ? "覆盖导入" : "初始化导入";
+    const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
+    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "密码验证失败");
+    if (text(body.confirmation) !== expected) return sendError(res, 400, `请输入确认文字：${expected}`);
+    if (dataImportMaintenance) return sendError(res, 409, "系统正在执行数据导入");
+    dataImportMaintenance = true;
+    try {
+      let before = null;
+      if (mode === "overwrite") before = await backupService().create({ trigger: "pre_restore", retentionClass: "pre_restore", createdByUserId: user.id });
+      const result = importFullExcel({ dbPath, inputPath: pending.path, mode, preBackupSatisfied: !!before, appVersion: APP_VERSION });
+      writeOperationLog(user, { operation_type: mode === "overwrite" ? "覆盖导入全量数据" : "初始化导入全量数据", operation_content: `全量数据导入成功，模式 ${mode}`, target_type: "data_center", target_id: mode, details: { counts: result.preview_counts, pre_backup_id: before?.record?.id || null } }, req);
+      sessions.clear(); clearSessionCookie(res); return sendJson(res, { ...result, pre_backup: before?.record || result.pre_backup, sessions_cleared: true });
+    } catch (error) {
+      writeOperationLog(user, { operation_type: "导入全量数据", operation_content: "全量数据导入失败并回滚", target_type: "data_center", target_id: mode, result_status: "failure", details: { code: error.code || "FULL_EXCEL_IMPORT_FAILED" } }, req); return sendError(res, 400, error.message || "导入失败");
+    } finally { dataImportMaintenance = false; try { fs.rmSync(pending.path, { force: true }); } catch {} pendingDataImports.delete(text(body.upload_id)); }
   }
 
   if (req.method === "GET" && url.pathname === "/api/backups") {

@@ -97,16 +97,18 @@ function assertBusinessEmpty(dbPath) {
   const db = new DatabaseSync(path.resolve(dbPath), { readOnly: true });
   try { const occupied = [...new Set(BUSINESS_TABLES)].filter((table) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count) > 0); if (occupied.length) throw new FullExcelError("FULL_EXCEL_INITIALIZE_TARGET_NOT_EMPTY", "空系统初始化要求业务表为空", { table_count: occupied.length }); } finally { db.close(); }
 }
-function importFullExcel({ dbPath, inputPath, mode, preBackupDir = "", appVersion = "unknown" }) {
+function importFullExcel({ dbPath, inputPath, mode, preBackupDir = "", preBackupSatisfied = false, appVersion = "unknown" }) {
   if (!dbPath || !inputPath || !["initialize", "overwrite"].includes(mode)) throw new FullExcelError("FULL_EXCEL_IMPORT_ARGUMENT_INVALID", "必须提供数据库、Excel和initialize/overwrite模式");
   const normalized = normalizeImport(inputPath, { appVersion }); const verified = verifyFullData(normalized.buffer);
   let preBackup = null;
   if (mode === "initialize") assertBusinessEmpty(dbPath);
   if (mode === "overwrite") {
-    if (!preBackupDir) throw new FullExcelError("FULL_EXCEL_PRE_BACKUP_REQUIRED", "覆盖恢复必须指定导入前备份目录");
-    fs.mkdirSync(path.resolve(preBackupDir), { recursive: true });
-    const outputPath = path.join(path.resolve(preBackupDir), `导入前_${Date.now()}.xlsx`);
-    preBackup = exportFullData({ dbPath, outputPath, appVersion }); verifyFullData(outputPath);
+    if (!preBackupSatisfied) {
+      if (!preBackupDir) throw new FullExcelError("FULL_EXCEL_PRE_BACKUP_REQUIRED", "覆盖恢复必须先生成导入前备份");
+      fs.mkdirSync(path.resolve(preBackupDir), { recursive: true });
+      const outputPath = path.join(path.resolve(preBackupDir), `导入前_${Date.now()}.xlsx`);
+      preBackup = exportFullData({ dbPath, outputPath, appVersion }); verifyFullData(outputPath);
+    }
   }
   const temporary = path.join(path.dirname(path.resolve(inputPath)), `.normalized-${process.pid}-${Date.now()}.xlsx`);
   try { fs.writeFileSync(temporary, normalized.buffer, { flag: "wx", mode: 0o600 }); const result = restoreFullData({ dbPath, inputPath: temporary }); return { ...result, mode, input_kind: normalized.kind, preview_counts: verified.counts, pre_backup: preBackup ? { filename: preBackup.filename, output_path: preBackup.outputPath } : null }; }

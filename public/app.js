@@ -10,7 +10,7 @@ const navGroups = [
   { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "教师档案"]] },
   { key: "operations", label: "运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据中心"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
 /**
@@ -421,7 +421,7 @@ let expenseFilter = (() => {
 })();
 let auditState = { xlsxReport: null, internalReport: null, logs: [], events: [], busy: false, notice: "" };
 let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") || "";
-let backupState = { settings: null, records: [], busy: false, error: "", settingsOpen: false, recordsOpen: false };
+let backupState = { settings: null, records: [], busy: false, error: "", importFile: null, importPreview: null, importMode: "initialize" };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -4610,10 +4610,10 @@ async function refreshAuditEvents() {
 }
 
 async function refreshBackupData({ logView = false } = {}) {
-  const data = await request(`/api/backups${logView ? "?log=1" : ""}`);
+  const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
   backupState = {
     ...backupState,
-    settings: data.settings || backupState.settings || { enabled: true, weekday: 3, last_date: "" },
+    settings: data.settings || backupState.settings || {},
     records: data.records || [],
     error: "",
   };
@@ -9437,117 +9437,78 @@ function backupRecordsModalMarkup() {
   `;
 }
 
+function dataCenterRemoteLabel(value) {
+  const labels = { not_configured: "未配置", pending: "等待上传", uploading: "上传中", success: "上传成功", failed: "上传失败", authorization_expired: "授权过期", legacy: "旧版" };
+  return labels[value] || value || "未配置";
+}
+
+function dataCenterBackupRows() {
+  return (backupState.records || []).map((row) => {
+    const legacy = row.backup_format !== "full_data_excel";
+    const downloadPath = legacy ? `/api/backups/${encodeURIComponent(row.id)}/download` : `/api/data-center/backups/${encodeURIComponent(row.id)}/download`;
+    return `<tr>
+      <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
+      <td>${escapeHtml(legacy ? "旧版业务归档" : (row.retention_class || "全量数据"))}</td>
+      <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
+      <td>${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
+      <td>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</td>
+      <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
+      <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
+      <td>${escapeHtml(row.created_by_user_id || "-")}</td>
+      <td><input class="control backup-note-field" data-id="${escapeHtml(row.id)}" value="${escapeHtml(row.note || "")}" maxlength="500" ${legacy ? "disabled" : ""}></td>
+      <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
+      <td class="data-center-actions">
+        <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button><button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>`}
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="11" class="empty">暂无备份记录</td></tr>`;
+}
+
+function importPreviewMarkup() {
+  const preview = backupState.importPreview;
+  if (!preview) return `<div class="section-subtitle">上传后先执行只读校验；确认前不会修改数据库。</div>`;
+  const counts = Object.entries(preview.preview_counts || {}).map(([sheet, count]) => `<span class="data-count-chip">${escapeHtml(sheet)}：${Number(count || 0)}</span>`).join("");
+  const confirmation = backupState.importMode === "overwrite" ? "覆盖导入" : "初始化导入";
+  return `<div class="data-import-preview">
+    <div class="audit-inline-notice">文件校验通过，请核对各表记录数后再执行。</div>
+    <div class="data-count-list">${counts}</div>
+    <div class="data-confirm-grid">
+      <label class="filter-field"><span>老板密码</span><input class="control data-import-password" type="password" autocomplete="current-password"></label>
+      <label class="filter-field"><span>确认文字：${confirmation}</span><input class="control data-import-confirmation" autocomplete="off"></label>
+      <button class="btn danger data-import-execute" type="button" ${backupState.busy ? "disabled" : ""}>确认执行</button>
+    </div>
+  </div>`;
+}
+
 function renderAudit() {
-  const workbookOptions = (state.source_workbooks || []).map((item) => (
-    `<option value="${escapeHtml(item.filename)}" ${item.filename === auditSourceWorkbook ? "selected" : ""}>${escapeHtml(item.filename)}${item.month_key ? `（${escapeHtml(item.month_key.slice(0, 7))}）` : ""}</option>`
-  )).join("");
-  renderTopbar(
-    `${monthLabel()} 数据对账`,
-    "xlsx 源头比对 + 内部规则校验",
-    `<button class="btn audit-refresh-logs" type="button">历史审计</button>`,
-  );
+  renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
-    ${auditRiskOverview()}
-    ${auditState.notice ? `<div class="audit-inline-notice">${escapeHtml(auditState.notice)}</div>` : ""}
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div>
-          <div class="section-title">数据导出</div>
-          <div class="section-subtitle">${escapeHtml(backupSummaryText())}</div>
-        </div>
-      </div>
+    ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
+    <section class="band audit-panel data-center-section" data-region="import-export">
+      <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">全量 Excel 是唯一数据交换格式；覆盖导入会先创建服务器备份。</div></div></div>
       <div class="audit-toolbar">
-        <button class="btn primary export-core-workbook" type="button" ${auditState.busy ? "disabled" : ""}>导出核心 Excel</button>
-        <button class="btn export-all-core-workbooks" type="button" ${auditState.busy ? "disabled" : ""}>批量导出全部月份</button>
-        <button class="btn backup-settings-open" type="button">自动备份</button>
-        <button class="btn backup-records-open" type="button">查看备份记录</button>
+        <button class="btn primary data-full-export" type="button" ${backupState.busy ? "disabled" : ""}>导出全部数据</button>
+        <button class="btn data-template-download" type="button" ${backupState.busy ? "disabled" : ""}>下载空白模板</button>
       </div>
-      ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
-    </div>
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div class="section-title">源头对账</div>
+      <div class="data-import-grid">
+        <label class="filter-field"><span>Excel 文件</span><input class="control data-import-file" type="file" accept=".xlsx"></label>
+        <label class="filter-field"><span>导入模式</span><select class="control data-import-mode"><option value="initialize" ${backupState.importMode === "initialize" ? "selected" : ""}>空系统初始化导入</option><option value="overwrite" ${backupState.importMode === "overwrite" ? "selected" : ""}>完整覆盖恢复</option></select></label>
+        <button class="btn primary data-import-preview-button" type="button" ${backupState.busy ? "disabled" : ""}>上传并预检</button>
       </div>
-      <div class="audit-toolbar">
-        <input class="control audit-file" type="file" accept=".xlsx">
-        <button class="btn primary audit-run-xlsx" type="button" ${auditState.busy ? "disabled" : ""}>上传并对账</button>
-        <button class="btn audit-fix-critical" type="button" ${auditState.xlsxReport?.counts?.CRITICAL ? "" : "disabled"}>一键以 xlsx 为准修复所有 CRITICAL</button>
-      </div>
-      <div class="audit-toolbar audit-source-import">
-        <select class="control audit-source-workbook" ${workbookOptions ? "" : "disabled"}>
-          ${workbookOptions || `<option value="">未找到 source-workbooks/*.xlsx</option>`}
-        </select>
-        <button class="btn primary audit-import-source" type="button" ${auditState.busy || !workbookOptions ? "disabled" : ""}>导入源文件并对账</button>
-        <span class="audit-toolbar-note">会先备份数据库，再导入课程、充值、学生单价、费用标准和教师交通费。</span>
-      </div>
-      ${auditSourceMeta(auditState.xlsxReport)}
-      <div class="audit-counts">${auditCounts(auditState.xlsxReport)}</div>
-      ${groupedIssueTable(auditState.xlsxReport, "xlsxReport")}
-    </div>
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div class="section-title">内部规则校验</div>
-      </div>
-      <div class="audit-toolbar">
-        <button class="btn primary audit-run-internal" type="button" ${auditState.busy ? "disabled" : ""}>运行内部校验</button>
-      </div>
-      <div class="audit-counts">${auditCounts(auditState.internalReport)}</div>
-      ${groupedIssueTable(auditState.internalReport, "internalReport")}
-    </div>
-
-    <details class="band audit-history" ${auditState.logs.length ? "open" : ""}>
-      <summary class="section-head">
-        <div class="section-title">历史审计</div>
-      </summary>
-      <div class="table-wrap smooth-table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>ID</th><th>时间</th><th>来源</th><th>级别</th><th>实体</th><th>字段</th><th>状态</th><th>说明</th></tr></thead>
-          <tbody>
-            ${auditState.logs.map((log) => `
-              <tr>
-                <td class="text-cell">${log.id}</td>
-                <td class="text-cell">${escapeHtml(log.run_at)}</td>
-                <td class="text-cell">${escapeHtml(log.source)}</td>
-                <td class="text-cell"><span class="severity-pill ${escapeHtml(log.severity)}">${escapeHtml(log.severity)}</span></td>
-                <td class="text-cell">${escapeHtml(log.entity)}</td>
-                <td class="text-cell">${escapeHtml(log.field)}</td>
-                <td class="text-cell">${renderEntityBadge("status", log.status)}</td>
-                <td class="text-cell">${escapeHtml(log.notes)}</td>
-              </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无审计历史</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </details>
-    <details class="band audit-history" ${auditState.events.length ? "open" : ""}>
-      <summary class="section-head">
-        <div class="section-title">操作审计日志</div>
-      </summary>
-      <div class="table-wrap smooth-table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>时间</th><th>操作者</th><th>角色</th><th>动作</th><th>对象</th><th>对象 ID</th><th>IP</th></tr></thead>
-          <tbody>
-            ${auditState.events.map((event) => `
-              <tr>
-                <td class="text-cell">${escapeHtml(formatBeijingTime(event.created_at))}</td>
-                <td class="text-cell">${escapeHtml(event.actor_username)}</td>
-                <td class="text-cell">${escapeHtml(ROLE_LABELS[event.actor_role] || event.actor_role)}</td>
-                <td class="text-cell">${escapeHtml(event.action)}</td>
-                <td class="text-cell">${escapeHtml(event.entity_type)}</td>
-                <td class="text-cell">${escapeHtml(event.entity_id)}</td>
-                <td class="text-cell">${escapeHtml(event.ip || "")}</td>
-              </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无操作审计日志</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </details>
-    ${backupSettingsModalMarkup()}
-    ${backupRecordsModalMarkup()}
-  `;
+      ${importPreviewMarkup()}
+    </section>
+    <section class="band audit-panel data-center-section" data-region="backup-settings">
+      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}；异地备份未配置。</div></div></div>
+      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><span class="audit-toolbar-note">自动备份与百度网盘设置将在后续批次接入。</span></div>
+    </section>
+    <section class="band audit-panel data-center-section" data-region="backup-records">
+      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
+      <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
+        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>服务器</th><th>百度网盘</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
+        <tbody>${dataCenterBackupRows()}</tbody>
+      </table></div>
+    </section>`;
 }
 
 function roleSelectOptions(value) {
@@ -13503,15 +13464,7 @@ async function refreshExpensesForActiveMonth({ keepRange = false } = {}) {
 }
 
 async function refreshAuditForActiveMonth() {
-  state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
-  if (canArea("audit")) {
-    await refreshAuditEvents();
-    await refreshBackupData();
-  }
-  auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
-    || auditSourceWorkbook
-    || state.source_workbooks[0]?.filename
-    || "";
+  if (canArea("audit")) await refreshBackupData();
   rerenderCurrentView(renderAudit);
 }
 
@@ -15330,59 +15283,14 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".export-core-workbook").forEach((button) => {
+  document.querySelectorAll(".data-full-export").forEach((button) => {
     button.addEventListener("click", async () => {
-      const monthKey = state.settings.month_key;
-      auditState.busy = true;
-      render();
-      try {
-        await downloadBlob(
-          `/api/export/core-workbook.xlsx?month=${encodeURIComponent(monthKey)}`,
-          `黎明教育_${monthLabel()}_核心数据.xlsx`,
-        );
-      } catch (error) {
-        alert(error.message || "导出核心 Excel 失败");
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".export-all-core-workbooks").forEach((button) => {
-    button.addEventListener("click", async () => {
-      auditState.busy = true;
-      render();
-      try {
-        await downloadBlob(
-          "/api/export/core-workbooks-all.zip",
-          `黎明教育_全部月份_核心数据_${Date.now()}.zip`,
-        );
-      } catch (error) {
-        alert(error.message || "批量导出全部月份失败");
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".backup-settings-open").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.settingsOpen = true;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-records-open").forEach((button) => {
-    button.addEventListener("click", async () => {
-      backupState.recordsOpen = true;
       backupState.busy = true;
       render();
       try {
-        await refreshBackupData({ logView: true });
+        await downloadBlob("/api/data-center/export.xlsx", `黎明教育_全量数据_${Date.now()}.xlsx`);
       } catch (error) {
-        backupState.error = error.message || "读取备份记录失败";
+        showToast(error.message || "导出全部数据失败", "error");
       } finally {
         backupState.busy = false;
         render();
@@ -15390,37 +15298,63 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".backup-settings-close").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.settingsOpen = false;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-records-close").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.recordsOpen = false;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-settings-save").forEach((button) => {
+  document.querySelectorAll(".data-template-download").forEach((button) => {
     button.addEventListener("click", async () => {
-      const enabled = document.querySelector(".backup-enabled-field")?.checked !== false;
-      const weekday = Number(document.querySelector(".backup-weekday-field")?.value || 3);
       backupState.busy = true;
       render();
       try {
-        const result = await request("/api/backups/settings", {
-          method: "PUT",
-          body: { enabled, weekday },
-        });
-        backupState.settings = result.settings || backupState.settings;
-        backupState.settingsOpen = false;
-        await refreshBackupData();
-        showToast("自动备份设置已保存");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v1.xlsx");
       } catch (error) {
-        backupState.error = error.message || "保存自动备份设置失败";
+        showToast(error.message || "下载模板失败", "error");
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".data-import-file").forEach((input) => {
+    input.addEventListener("change", () => { backupState.importFile = input.files?.[0] || null; backupState.importPreview = null; });
+  });
+
+  document.querySelectorAll(".data-import-mode").forEach((select) => {
+    select.addEventListener("change", () => { backupState.importMode = select.value; backupState.importPreview = null; render(); });
+  });
+
+  document.querySelectorAll(".data-import-preview-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const file = backupState.importFile || document.querySelector(".data-import-file")?.files?.[0];
+      if (!file) return showToast("请选择 xlsx 文件", "error");
+      backupState.busy = true;
+      render();
+      try {
+        const form = new FormData(); form.append("file", file, file.name);
+        const response = await fetch("/api/data-center/import/preview", { method: "POST", body: form, cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        backupState.importPreview = data; backupState.error = "";
+      } catch (error) {
+        backupState.importPreview = null; backupState.error = error.message || "Excel 预检失败";
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".data-import-execute").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const password = document.querySelector(".data-import-password")?.value || "";
+      const confirmation = document.querySelector(".data-import-confirmation")?.value || "";
+      backupState.busy = true;
+      render();
+      try {
+        await request("/api/data-center/import/execute", { method: "POST", body: { upload_id: backupState.importPreview?.upload_id, mode: backupState.importMode, password, confirmation } });
+        backupState.importPreview = null; backupState.importFile = null;
+        alert("导入成功。所有登录会话已清除，请重新登录。");
+        window.location.reload();
+      } catch (error) {
+        backupState.error = error.message || "数据导入失败";
       } finally {
         backupState.busy = false;
         render();
@@ -15433,7 +15367,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        const result = await request("/api/backups/run", { method: "POST", body: { type: "manual" } });
+        const result = await request("/api/data-center/backups", { method: "POST", body: {} });
         backupState.records = result.records || backupState.records;
         backupState.error = "";
         showToast(`已生成备份：${result.record?.filename || ""}`);
@@ -15449,15 +15383,36 @@ function wireEvents() {
 
   document.querySelectorAll(".backup-download").forEach((button) => {
     button.addEventListener("click", async () => {
-      const id = button.dataset.id;
-      if (!id) return;
+      const downloadPath = button.dataset.path;
+      if (!downloadPath) return;
       try {
-        await downloadBlob(`/api/backups/${encodeURIComponent(id)}/download`, "黎明教育_核心数据备份.zip");
+        await downloadBlob(downloadPath, button.dataset.name || "backup.xlsx");
       } catch (error) {
         showToast(error.message || "下载备份失败", "error");
       }
     });
   });
+
+  document.querySelectorAll(".backup-verify").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/verify`, { method: "POST", body: {} }); await refreshBackupData(); showToast("备份验证通过"); }
+      catch (error) { showToast(error.message || "备份验证失败", "error"); }
+      finally { render(); }
+    });
+  });
+
+  document.querySelectorAll(".backup-metadata-save").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || ""; const pinned = Boolean(document.querySelector(`.backup-pinned-field[data-id="${id}"]`)?.checked);
+      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note, pinned } }); await refreshBackupData(); showToast("备份信息已保存"); }
+      catch (error) { showToast(error.message || "保存失败", "error"); }
+      finally { render(); }
+    });
+  });
+
+  document.querySelectorAll(".backup-refresh").forEach((button) => button.addEventListener("click", async () => {
+    try { await refreshBackupData({ logView: true }); } catch (error) { backupState.error = error.message || "读取备份记录失败"; } finally { render(); }
+  }));
 
   document.querySelectorAll(".audit-run-internal").forEach((button) => {
     button.addEventListener("click", async () => {

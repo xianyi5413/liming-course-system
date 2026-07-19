@@ -4402,6 +4402,65 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   }
 }
 
+.data-center-section {
+  margin-bottom: 18px;
+}
+
+.data-import-grid,
+.data-confirm-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.data-import-preview {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.data-count-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.data-count-chip {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.data-center-backup-table .backup-note-field {
+  min-width: 150px;
+}
+
+.data-center-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.mono-cell {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+@media (max-width: 760px) {
+  .data-import-grid,
+  .data-confirm-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .data-import-grid .btn,
+  .data-confirm-grid .btn {
+    width: 100%;
+  }
+}
+
 /* Compact schedule-mode entity selectors keep color on the badge, not the cell. */
 .course-table.lesson-table :is(.col-status, .col-grade, .col-subject) .custom-select-cell {
   display: inline-flex;

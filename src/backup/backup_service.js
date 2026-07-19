@@ -1,0 +1,77 @@
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
+const { exportFullData, fullDataFilename, verifyFullData } = require("../excel/full_backup");
+
+const BACKUP_FORMAT = "full_data_excel";
+const FORMAT_VERSION = 1;
+const MANAGED_SUBDIR = path.join("backups", "full-excel");
+const BACKUP_COLUMNS = {
+  backup_format: "TEXT DEFAULT 'legacy_core_zip'", format_version: "INTEGER DEFAULT 0", trigger: "TEXT DEFAULT ''",
+  retention_class: "TEXT DEFAULT ''", managed_relative_path: "TEXT DEFAULT ''", sha256: "TEXT DEFAULT ''",
+  verified_at: "TEXT DEFAULT ''", schedule_key: "TEXT DEFAULT ''", created_by_user_id: "INTEGER",
+  note: "TEXT DEFAULT ''", pinned: "INTEGER NOT NULL DEFAULT 0", remote_status: "TEXT DEFAULT 'not_configured'",
+  remote_file_id: "TEXT DEFAULT ''", remote_path: "TEXT DEFAULT ''", remote_error_safe: "TEXT DEFAULT ''",
+  remote_updated_at: "TEXT DEFAULT ''", deleted_at: "TEXT DEFAULT ''",
+};
+
+class BackupError extends Error { constructor(code, message, details = {}) { super(message); this.name = "BackupError"; this.code = code; this.details = details; } }
+function ensureBackupColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((column) => column.name));
+  for (const [column, definition] of Object.entries(BACKUP_COLUMNS)) if (!existing.has(column)) db.exec(`ALTER TABLE backup_records ADD COLUMN ${column} ${definition}`);
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_records_schedule_key ON backup_records(schedule_key) WHERE TRIM(COALESCE(schedule_key,'')) <> ''; CREATE INDEX IF NOT EXISTS idx_backup_records_managed ON backup_records(backup_format,status,backup_time DESC);");
+}
+function sha256File(filename) { const hash = crypto.createHash("sha256"); const fd = fs.openSync(filename, "r"); const chunk = Buffer.allocUnsafe(1024 * 1024); try { let length; while ((length = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, length)); return hash.digest("hex"); } finally { fs.closeSync(fd); } }
+function inside(root, target) { const relative = path.relative(root, target); return relative && !relative.startsWith("..") && !path.isAbsolute(relative); }
+function safeMessage(error) { return String(error?.code || error?.name || "BACKUP_FAILED").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); }
+
+class BackupService {
+  constructor({ dbPath, dataDir, appVersion = "unknown", remoteUploader = null }) { this.dbPath = path.resolve(dbPath); this.dataDir = path.resolve(dataDir); this.root = path.resolve(this.dataDir, MANAGED_SUBDIR); this.appVersion = appVersion; this.remoteUploader = remoteUploader; }
+  database() { const db = new DatabaseSync(this.dbPath); ensureBackupColumns(db); return db; }
+  ensureRoot() {
+    if (!inside(this.dataDir, this.root)) throw new BackupError("BACKUP_ROOT_INVALID", "受管备份目录无效");
+    const parent = path.dirname(this.root); fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(this.root) && fs.lstatSync(this.root).isSymbolicLink()) throw new BackupError("BACKUP_ROOT_SYMLINK", "受管备份目录不能是符号链接");
+    fs.mkdirSync(this.root, { recursive: true, mode: 0o700 }); try { fs.chmodSync(this.root, 0o700); } catch {}
+    return this.root;
+  }
+  acquireLock() { this.ensureRoot(); const lock = path.join(this.root, ".backup.lock"); try { const fd = fs.openSync(lock, "wx", 0o600); fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })); fs.closeSync(fd); return lock; } catch (error) { if (error.code === "EEXIST") throw new BackupError("BACKUP_ALREADY_RUNNING", "已有备份任务正在执行"); throw error; } }
+  releaseLock(lock) { try { fs.rmSync(lock, { force: true }); } catch {} }
+  insertRecord(db, options) {
+    const result = db.prepare(`INSERT INTO backup_records(backup_type,included_months,filename,file_path,file_size,status,message,scheduled_date,backup_format,format_version,trigger,retention_class,managed_relative_path,sha256,verified_at,schedule_key,created_by_user_id,note,pinned,remote_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.trigger === "automatic" ? "auto" : "manual", 0, options.filename, "", 0, "creating", "", options.scheduledDate || "", BACKUP_FORMAT, FORMAT_VERSION, options.trigger, options.retentionClass, "", "", "", options.scheduleKey || "", options.createdByUserId || null, options.note || "", options.pinned ? 1 : 0, options.remoteEnabled ? "pending" : "not_configured");
+    return Number(result.lastInsertRowid);
+  }
+  record(db, id) { return db.prepare("SELECT * FROM backup_records WHERE id=?").get(Number(id)); }
+  dto(row) { return { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), remote_status: row.remote_status || (row.backup_format === BACKUP_FORMAT ? "not_configured" : "legacy"), remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; }
+  list(limit = 100) { const db = this.database(); try { return db.prepare("SELECT * FROM backup_records ORDER BY backup_time DESC,id DESC LIMIT ?").all(Math.max(1, Math.min(500, Number(limit) || 100))).map((row) => this.dto(row)); } finally { db.close(); } }
+  managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
+  verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(safeMessage(error), id); } catch {} throw error; } finally { db.close(); } }
+  async create(options = {}) {
+    const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false;
+    try {
+      id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
+      staging = path.join(this.root, `.staging-${id}-${crypto.randomUUID()}`); fs.mkdirSync(staging, { mode: 0o700 });
+      const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, createdAt: options.createdAt || new Date() }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
+      published = path.join(this.root, filename); checksumFile = `${published}.sha256`; if (fs.existsSync(published) || fs.existsSync(checksumFile)) throw new BackupError("BACKUP_TARGET_EXISTS", "备份目标已存在");
+      fs.renameSync(staged, published); publishedByThisRun = true;
+      try { fs.renameSync(stagedHash, checksumFile); checksumPublishedByThisRun = true; }
+      catch (error) { fs.rmSync(published, { force: true }); publishedByThisRun = false; throw error; }
+      const relative = path.relative(this.dataDir, published); const size = fs.statSync(published).size; db.prepare("UPDATE backup_records SET managed_relative_path=?,file_size=?,sha256=?,status='success',verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(relative, size, digest, id);
+      let row = this.record(db, id);
+      if (options.remoteEnabled && this.remoteUploader) {
+        db.prepare("UPDATE backup_records SET remote_status='uploading',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+        try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published }); db.prepare("UPDATE backup_records SET remote_status='success',remote_file_id=?,remote_path=?,remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(remote.file_id || "", remote.path || "", id); }
+        catch (error) { db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(safeMessage(error), id); }
+      }
+      row = this.record(db, id); return { ok: true, record: this.dto(row) };
+    } catch (error) {
+      if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(safeMessage(error), id); } catch {}
+      if (publishedByThisRun && published) try { fs.rmSync(published, { force: true }); } catch {} if (checksumPublishedByThisRun && checksumFile) try { fs.rmSync(checksumFile, { force: true }); } catch {}
+      throw error;
+    } finally { if (staging && inside(this.root, staging)) try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} db.close(); this.releaseLock(lock); }
+  }
+  updateMetadata(id, values = {}) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); db.prepare("UPDATE backup_records SET note=?,pinned=? WHERE id=?").run(String(values.note ?? row.note ?? "").slice(0, 500), values.pinned === undefined ? Number(row.pinned || 0) : values.pinned ? 1 : 0, id); return this.dto(this.record(db, id)); } finally { db.close(); } }
+}
+
+module.exports = { BACKUP_FORMAT, FORMAT_VERSION, MANAGED_SUBDIR, BACKUP_COLUMNS, BackupError, BackupService, ensureBackupColumns, sha256File };
