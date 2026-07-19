@@ -25,6 +25,18 @@ function initDatabase(dbPath) {
   assert.equal(result.status, 0, result.stderr);
 }
 
+function emptyManagedData(dbPath) {
+  const db = new DatabaseSync(dbPath);
+  const tables = [...new Set([...FULL_TABLE_DEFINITIONS]
+    .sort((left, right) => right.restore_order - left.restore_order)
+    .map((definition) => definition.source_table))];
+  db.exec("PRAGMA foreign_keys = OFF");
+  for (const table of tables) db.exec(`DELETE FROM ${table}`);
+  db.exec("PRAGMA foreign_keys = ON");
+  for (const table of tables) assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
+  db.close();
+}
+
 function seedCompleteData(db) {
   db.exec(`
     INSERT INTO settings(key,value) VALUES ('custom_course_statuses','["调课"]') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
@@ -83,7 +95,7 @@ before(() => {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-full-excel-"));
   sourcePath = path.join(tempRoot, "source A", "source.sqlite"); targetPath = path.join(tempRoot, "target B", "target.sqlite"); backupPath = path.join(tempRoot, "output with space", "黎明教育_系统完整数据备份_20260719_120000.xlsx");
   initDatabase(sourcePath); const source = new DatabaseSync(sourcePath); seedCompleteData(source); sourceSnapshot = snapshot(source); source.close();
-  initDatabase(targetPath);
+  initDatabase(targetPath); emptyManagedData(targetPath);
   exportFullBackup({ dbPath: sourcePath, outputPath: backupPath, appVersion: "test-version", createdAt: new Date("2026-07-19T04:00:00Z") });
   verified = verifyFullBackup(backupPath);
 });
@@ -117,7 +129,7 @@ test("primary keys, foreign keys, amounts, dates and compatibility statuses surv
 test("validator rejects an unknown column", () => { const buffer = rebuiltWorkbook((sheets) => { sheets.find((sheet) => sheet.name === "员工").rows[0][0] = "未知字段"; }); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_COLUMNS_INVALID"); });
 test("validator rejects a missing required worksheet", () => { const buffer = rebuiltWorkbook((sheets) => sheets.splice(sheets.findIndex((sheet) => sheet.name === "课程原始记录"), 1)); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_SHEET_MISSING"); });
 test("validator rejects broken relations", () => { const buffer = rebuiltWorkbook((sheets) => { const sheet = sheets.find((item) => item.name === "单节费用覆盖"); const index = sheet.rows[0].indexOf("课程ID"); sheet.rows[1][index] = 999999; }); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_RELATION_INVALID"); });
-test("complete restore replaces initialized defaults and preserves every field", () => {
+test("complete restore fills a schema-only empty database and preserves every field", () => {
   const result = restoreFullBackup({ dbPath: targetPath, inputPath: backupPath }); assert.equal(result.integrity_check, "ok"); assert.equal(result.foreign_key_violation_count, 0);
   const target = new DatabaseSync(targetPath, { readOnly: true }); assert.deepEqual(snapshot(target), sourceSnapshot); assert.equal(target.prepare("SELECT COUNT(*) AS count FROM backup_records").get().count, 0); assert.equal(target.prepare("SELECT value FROM settings WHERE key='baidu_access_token'").get(), undefined); target.close();
 });
@@ -135,6 +147,7 @@ test("database constraint failure rolls back the entire overwrite transaction", 
 });
 test("export, verify and restore CLI complete an isolated round trip", () => {
   const cliBackup = path.join(tempRoot, "cli", "cli-full.xlsx"); const cliTarget = path.join(tempRoot, "cli-target", "target.sqlite"); initDatabase(cliTarget);
+  emptyManagedData(cliTarget);
   const run = (script, args) => spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", script), ...args], { cwd: root, encoding: "utf8" });
   const exported = run("export_full_excel.js", ["--db", sourcePath, "--output", cliBackup, "--app-version", "cli-test"]); assert.equal(exported.status, 0, exported.stderr); assert.equal(JSON.parse(exported.stdout).ok, true);
   const checked = run("verify_full_excel.js", ["--input", cliBackup]); assert.equal(checked.status, 0, checked.stderr); assert.equal(JSON.parse(checked.stdout).ok, true);
