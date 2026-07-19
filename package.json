@@ -14,7 +14,6 @@
     "excel:full:verify": "node scripts/excel_backup/verify_full_excel.js",
     "excel:full:restore": "node scripts/excel_backup/restore_full_excel.js",
     "test:full-excel": "node --test --test-concurrency=1 tests/full_excel_restore.test.js",
-    "test:monthly-core-excel": "node --test --test-concurrency=1 tests/monthly_core_excel.test.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",
     "trace:student-balance": "node src/server.js --trace-student-balance=秦小沫",

@@ -7,7 +7,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { FULL_TABLE_DEFINITIONS, EXCLUDED_TABLES } = require("../src/excel/field_definitions");
+const { FULL_TABLE_DEFINITIONS, EXCLUDED_TABLES, WORKBOOK_SEQUENCE } = require("../src/excel/field_definitions");
 const { createWorkbook, parseWorkbook } = require("../src/excel/xlsx_codec");
 const { BACKUP_FORMAT, FORMAT_VERSION, exportFullBackup, verifyFullBackup, restoreFullBackup } = require("../src/excel/full_backup");
 
@@ -103,12 +103,14 @@ before(() => {
 after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-full-excel-")) fs.rmSync(tempRoot, { recursive: true, force: true }); });
 
 test("complete export uses the fixed format and version", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); });
+test("workbook uses the fixed full-data worksheet order", () => { assert.deepEqual(verified.workbook.sheets.map((sheet) => sheet.name), WORKBOOK_SEQUENCE.map((item) => typeof item === "string" ? item : item.sheet_name)); });
+test("workbook has no monthly summaries or aggregate worksheets", () => { assert.deepEqual(verified.workbook.sheets.map((sheet) => sheet.name).filter((name) => /月总表|费用汇总|薪资汇总|月末余额|图表|趋势/.test(name)), []); });
 test("every recoverable definition has an exact worksheet", () => { assert.ok(FULL_TABLE_DEFINITIONS.every((definition) => verified.workbook.sheetMap.has(definition.sheet_name))); });
 test("field definitions cover every source-table column", () => {
   const db = new DatabaseSync(sourcePath, { readOnly: true });
-  for (const table of new Set(FULL_TABLE_DEFINITIONS.map((definition) => definition.source_table))) {
+  for (const table of new Set(FULL_TABLE_DEFINITIONS.filter((definition) => definition.restore_source).map((definition) => definition.source_table))) {
     const actual = db.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all().map((row) => row.name).sort();
-    const defined = [...new Set(FULL_TABLE_DEFINITIONS.filter((definition) => definition.source_table === table).flatMap((definition) => definition.columns.map((column) => column.source_field).filter(Boolean)))].sort();
+    const defined = [...new Set(FULL_TABLE_DEFINITIONS.filter((definition) => definition.source_table === table && definition.restore_source).flatMap((definition) => definition.columns.map((column) => column.source_field).filter(Boolean)))].sort();
     assert.deepEqual(defined, actual, table);
   }
   db.close();
@@ -120,14 +122,14 @@ test("password hashes exist only in the sensitive authentication sheet", () => {
   for (const sheet of verified.workbook.sheets.filter((sheet) => sheet.name !== "账号认证数据")) assert.equal(sheet.rows.flat().some((value) => String(value).startsWith("pbkdf2$")), false);
 });
 test("formula-like business text remains string data and no formula nodes are generated", () => {
-  const lessonSheet = verified.workbook.sheetMap.get("课程原始记录");
+  const lessonSheet = verified.workbook.sheetMap.get("所有课程数据");
   assert.doesNotMatch(lessonSheet.xml, /<f\b/i);
   const noteIndex = lessonSheet.rows[0].indexOf("备注");
   assert.equal(lessonSheet.rows[1][noteIndex], "=公式文本");
 });
 test("primary keys, foreign keys, amounts, dates and compatibility statuses survive validation", () => { assert.equal(verified.data.lessons[0].id, 701); assert.equal(verified.data.lessons[0].teacher_salary_rule_id, 501); assert.equal(verified.data.fee_overrides[0].lesson_id, 701); assert.equal(verified.data.operating_expenses[0].amount, 88.8); assert.equal(verified.data.lessons[0].lesson_status, "上课"); assert.equal(verified.data.lessons[0].course_status, "未上"); });
 test("validator rejects an unknown column", () => { const buffer = rebuiltWorkbook((sheets) => { sheets.find((sheet) => sheet.name === "员工").rows[0][0] = "未知字段"; }); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_COLUMNS_INVALID"); });
-test("validator rejects a missing required worksheet", () => { const buffer = rebuiltWorkbook((sheets) => sheets.splice(sheets.findIndex((sheet) => sheet.name === "课程原始记录"), 1)); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_SHEET_MISSING"); });
+test("validator rejects a missing required worksheet", () => { const buffer = rebuiltWorkbook((sheets) => sheets.splice(sheets.findIndex((sheet) => sheet.name === "所有课程数据"), 1)); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_SHEET_ORDER_INVALID"); });
 test("validator rejects broken relations", () => { const buffer = rebuiltWorkbook((sheets) => { const sheet = sheets.find((item) => item.name === "单节费用覆盖"); const index = sheet.rows[0].indexOf("课程ID"); sheet.rows[1][index] = 999999; }); assert.throws(() => verifyFullBackup(buffer), (error) => error.code === "FULL_EXCEL_RELATION_INVALID"); });
 test("complete restore fills a schema-only empty database and preserves every field", () => {
   const result = restoreFullBackup({ dbPath: targetPath, inputPath: backupPath }); assert.equal(result.integrity_check, "ok"); assert.equal(result.foreign_key_violation_count, 0);
@@ -140,7 +142,7 @@ test("database constraint failure rolls back the entire overwrite transaction", 
   const broken = path.join(tempRoot, "duplicate-student.xlsx");
   fs.writeFileSync(broken, rebuiltWorkbook((sheets) => {
     const studentSheet = sheets.find((sheet) => sheet.name === "学生档案"); const duplicate = [...studentSheet.rows[1]]; duplicate[studentSheet.rows[0].indexOf("ID")] = 9999; studentSheet.rows.push(duplicate);
-    const info = sheets.find((sheet) => sheet.name === "完整备份说明"); const countRow = info.rows.find((row) => row[0] === "学生档案"); countRow[2] = Number(countRow[2]) + 1;
+    const info = sheets.find((sheet) => sheet.name === "导出说明"); const countRow = info.rows.find((row) => row[0] === "学生档案"); countRow[2] = Number(countRow[2]) + 1;
   }));
   assert.throws(() => restoreFullBackup({ dbPath: targetPath, inputPath: broken }));
   const dbAfter = new DatabaseSync(targetPath, { readOnly: true }); assert.deepEqual(snapshot(dbAfter), before); dbAfter.close();

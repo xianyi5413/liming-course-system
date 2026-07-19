@@ -4,8 +4,7 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
-const { MONTHLY_SHEET_DEFINITIONS } = require("./excel/field_definitions");
-const { createWorkbook } = require("./excel/xlsx_codec");
+const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -12894,60 +12893,29 @@ async function handleApi(req, res, url) {
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
   }
 
-  if (req.method === "GET" && url.pathname === "/api/export/core-workbook.xlsx") {
-    const monthKey = normalizeExportMonthKey(url.searchParams.get("month"));
-    if (!monthKey) return sendError(res, 400, "month must be YYYY-MM or YYYY-MM-01");
+  if (req.method === "GET" && url.pathname === "/api/data-center/export.xlsx") {
     try {
-      const filename = coreWorkbookFilename(monthKey);
-      const buffer = coreWorkbookBuffer(monthKey);
+      db.exec("BEGIN");
+      let exported;
+      try { exported = buildFullDataBuffer(db, { appVersion: APP_VERSION }); db.exec("COMMIT"); }
+      catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+      const filename = fullDataFilename(exported.createdAt);
       writeOperationLog(user, {
-        operation_type: "导出单月核心Excel",
-        operation_content: `导出月份 ${monthKey.slice(0, 7)}，文件 ${filename}`,
-        target_type: "core_export",
-        target_id: monthKey,
-        details: { month_key: monthKey, filename, file_size: buffer.length },
+        operation_type: "导出全量数据Excel",
+        operation_content: `导出文件 ${filename}`,
+        target_type: "full_data_export",
+        target_id: "all",
+        details: { filename, file_size: exported.buffer.length },
       }, req);
-      return sendBuffer(
-        res,
-        buffer,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename,
-      );
+      return sendBuffer(res, exported.buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
     } catch (error) {
-      console.error("core workbook export failed", error);
-      writeOperationLog(user, { operation_type: "导出单月核心Excel", operation_content: `导出月份 ${monthKey.slice(0, 7)} 失败：${error.message || "未知错误"}`, target_type: "core_export", target_id: monthKey, result_status: "failure", details: { month_key: monthKey, reason: error.message || "未知错误" } }, req);
-      return sendError(res, 500, `导出核心 Excel 失败：${error.message || "未知错误"}`);
-    }
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/export/core-workbooks-all.zip") {
-    try {
-      const stamp = exportTimestamp();
-      const months = allCoreExportMonths();
-      const filename = allCoreWorkbookZipFilename(stamp);
-      const buffer = allCoreWorkbookZipBuffer(months, stamp);
-      writeOperationLog(user, {
-        operation_type: "批量导出全部月份核心Excel",
-        operation_content: `导出 ${months.length} 个月份，文件 ${filename}`,
-        target_type: "core_export",
-        target_id: "all_months",
-        details: { months, filename, file_size: buffer.length },
-      }, req);
-      return sendBuffer(
-        res,
-        buffer,
-        "application/zip",
-        filename,
-      );
-    } catch (error) {
-      console.error("all core workbooks export failed", error);
-      writeOperationLog(user, { operation_type: "批量导出全部月份核心Excel", operation_content: `批量导出失败：${error.message || "未知错误"}`, target_type: "core_export", target_id: "all_months", result_status: "failure", details: { reason: error.message || "未知错误" } }, req);
-      return sendError(res, 500, `批量导出核心 Excel 失败：${error.message || "未知错误"}`);
+      console.error("full data Excel export failed", error.code || error.name || "error");
+      writeOperationLog(user, { operation_type: "导出全量数据Excel", operation_content: "全量数据导出失败", target_type: "full_data_export", target_id: "all", result_status: "failure", details: { code: error.code || "FULL_EXCEL_EXPORT_FAILED" } }, req);
+      return sendError(res, 500, `导出全量数据失败：${error.message || "未知错误"}`);
     }
   }
 
   if (req.method === "GET" && url.pathname === "/api/backups") {
-    const auto = maybeRunAutomaticBackup("api");
     const records = backupRecords();
     if (url.searchParams.get("log") === "1") {
       writeOperationLog(user, {
@@ -12958,37 +12926,15 @@ async function handleApi(req, res, url) {
         details: { count: records.length },
       }, req);
     }
-    return sendJson(res, { settings: backupSettings(), records, auto_check: auto });
+    return sendJson(res, { settings: { enabled: false, legacy: true }, records, auto_check: { checked: false, reason: "legacy_scheduler_retired" } });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/backups/settings") {
-    const settings = saveBackupSettings(await readBody(req));
-    writeOperationLog(user, {
-      operation_type: "修改自动备份设置",
-      operation_content: `${settings.enabled ? "启用" : "停用"}自动备份，频率 ${weekdayOperationLabel(settings.weekday)}`,
-      target_type: "backup_settings",
-      target_id: "auto_backup",
-      details: settings,
-    }, req);
-    return sendJson(res, { ok: true, settings });
+    return sendError(res, 410, "旧月度备份设置已停用，请使用数据中心");
   }
 
   if (req.method === "POST" && url.pathname === "/api/backups/run") {
-    try {
-      const result = createCoreBackup("manual");
-      writeOperationLog(user, {
-        operation_type: "手动备份核心数据",
-        operation_content: backupOperationText(result.record),
-        target_type: "backup_records",
-        target_id: String(result.record.id || ""),
-        details: result.record,
-      }, req);
-      return sendJson(res, { ...result, records: backupRecords() });
-    } catch (error) {
-      console.error("manual core backup failed", error);
-      writeOperationLog(user, { operation_type: "手动备份核心数据", operation_content: `手动备份失败：${error.message || "未知错误"}`, target_type: "backup_records", target_id: "manual", result_status: "failure", details: { reason: error.message || "未知错误" } }, req);
-      return sendError(res, 500, `手动备份失败：${error.message || "未知错误"}`);
-    }
+    return sendError(res, 410, "旧月度备份已停用，请使用数据中心全量备份");
   }
 
   const backupDownloadMatch = url.pathname.match(/^\/api\/backups\/(\d+)\/download$/);
@@ -14210,9 +14156,4 @@ server.listen(port, () => {
   console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
-  const autoBackup = maybeRunAutomaticBackup("startup");
-  if (autoBackup?.due) {
-    const record = autoBackup.record || {};
-    console.log(`Auto backup ${autoBackup.ok ? "completed" : "failed"}: ${record.filename || autoBackup.error || ""}`);
-  }
 });
