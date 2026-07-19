@@ -9499,8 +9499,17 @@ function renderAudit() {
       ${importPreviewMarkup()}
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-settings">
-      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}；异地备份未配置。</div></div></div>
-      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><span class="audit-toolbar-note">自动备份与百度网盘设置将在后续批次接入。</span></div>
+      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}；时间按 Asia/Shanghai 解释。</div></div></div>
+      <div class="data-backup-settings-grid">
+        <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
+        <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
+        <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
+        <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
+        <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
+        <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
+        <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
+      </div>
+      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">异地备份未配置，不影响服务器备份健康状态。</span></div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
@@ -15390,6 +15399,22 @@ function wireEvents() {
       } catch (error) {
         showToast(error.message || "下载备份失败", "error");
       }
+    });
+  });
+
+  document.querySelectorAll(".backup-settings-save").forEach((button) => {
+    button.addEventListener("click", async () => {
+      backupState.busy = true;
+      try {
+        const result = await request("/api/data-center/settings", { method: "PUT", body: {
+          enabled: Boolean(document.querySelector(".data-backup-enabled")?.checked), time: document.querySelector(".data-backup-time")?.value,
+          timezone: document.querySelector(".data-backup-timezone")?.value, daily_retention: Number(document.querySelector(".data-backup-daily")?.value),
+          monthly_retention: Number(document.querySelector(".data-backup-monthly")?.value), manual_retention: Number(document.querySelector(".data-backup-manual")?.value),
+          retry_count: Number(document.querySelector(".data-backup-retries")?.value),
+        } });
+        backupState.settings = { ...backupState.settings, ...result.settings }; showToast("备份设置已保存");
+      } catch (error) { backupState.error = error.message || "保存备份设置失败"; }
+      finally { backupState.busy = false; render(); }
     });
   });
 

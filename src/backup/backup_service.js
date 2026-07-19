@@ -20,7 +20,7 @@ class BackupError extends Error { constructor(code, message, details = {}) { sup
 function ensureBackupColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((column) => column.name));
   for (const [column, definition] of Object.entries(BACKUP_COLUMNS)) if (!existing.has(column)) db.exec(`ALTER TABLE backup_records ADD COLUMN ${column} ${definition}`);
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_records_schedule_key ON backup_records(schedule_key) WHERE TRIM(COALESCE(schedule_key,'')) <> ''; CREATE INDEX IF NOT EXISTS idx_backup_records_managed ON backup_records(backup_format,status,backup_time DESC);");
+  db.exec("DROP INDEX IF EXISTS idx_backup_records_schedule_key; CREATE UNIQUE INDEX idx_backup_records_schedule_key ON backup_records(schedule_key) WHERE TRIM(COALESCE(schedule_key,'')) <> '' AND status='success'; CREATE INDEX IF NOT EXISTS idx_backup_records_managed ON backup_records(backup_format,status,backup_time DESC);");
 }
 function sha256File(filename) { const hash = crypto.createHash("sha256"); const fd = fs.openSync(filename, "r"); const chunk = Buffer.allocUnsafe(1024 * 1024); try { let length; while ((length = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, length)); return hash.digest("hex"); } finally { fs.closeSync(fd); } }
 function inside(root, target) { const relative = path.relative(root, target); return relative && !relative.startsWith("..") && !path.isAbsolute(relative); }
@@ -50,6 +50,7 @@ class BackupService {
   async create(options = {}) {
     const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false;
     try {
+      if (options.scheduleKey && db.prepare("SELECT 1 FROM backup_records WHERE schedule_key=? AND status='success' LIMIT 1").get(options.scheduleKey)) throw new BackupError("BACKUP_SCHEDULE_ALREADY_SUCCESSFUL", "该计划日期已经成功备份");
       id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
       staging = path.join(this.root, `.staging-${id}-${crypto.randomUUID()}`); fs.mkdirSync(staging, { mode: 0o700 });
       const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, createdAt: options.createdAt || new Date() }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
@@ -72,6 +73,38 @@ class BackupService {
     } finally { if (staging && inside(this.root, staging)) try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} db.close(); this.releaseLock(lock); }
   }
   updateMetadata(id, values = {}) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); db.prepare("UPDATE backup_records SET note=?,pinned=? WHERE id=?").run(String(values.note ?? row.note ?? "").slice(0, 500), values.pinned === undefined ? Number(row.pinned || 0) : values.pinned ? 1 : 0, id); return this.dto(this.record(db, id)); } finally { db.close(); } }
+  promoteMonthly(id, monthKey) {
+    const db = this.database();
+    try {
+      const existing = db.prepare("SELECT id FROM backup_records WHERE backup_format=? AND retention_class='monthly' AND status='success' AND schedule_key LIKE ? LIMIT 1").get(BACKUP_FORMAT, `full-data:${String(monthKey).slice(0, 7)}%`);
+      if (!existing) db.prepare("UPDATE backup_records SET retention_class='monthly' WHERE id=? AND backup_format=? AND status='success'").run(id, BACKUP_FORMAT);
+      return this.dto(this.record(db, id));
+    } finally { db.close(); }
+  }
+  applyRetention(policy = {}) {
+    const limits = { daily: Math.max(1, Number(policy.daily || 14)), monthly: Math.max(1, Number(policy.monthly || 12)), manual: Math.max(1, Number(policy.manual || 20)) };
+    const db = this.database(); const removed = []; const skipped = [];
+    try {
+      const successful = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
+      const candidates = [];
+      for (const retentionClass of ["daily", "monthly", "manual"]) {
+        const rows = successful.filter((row) => row.retention_class === retentionClass && !Number(row.pinned || 0));
+        candidates.push(...rows.slice(limits[retentionClass]));
+      }
+      const remainingIds = new Set(successful.map((row) => Number(row.id)));
+      for (const row of candidates) {
+        if (remainingIds.size <= 1) { skipped.push({ id: row.id, reason: "last_valid_backup" }); continue; }
+        if (!row.verified_at) { skipped.push({ id: row.id, reason: "not_verified" }); continue; }
+        try {
+          const filename = this.managedPath(row); const checksum = `${filename}.sha256`;
+          fs.rmSync(filename); if (fs.existsSync(checksum)) fs.rmSync(checksum);
+          db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='retention_cleanup' WHERE id=?").run(row.id);
+          remainingIds.delete(Number(row.id)); removed.push({ id: row.id, bytes: Number(row.file_size || 0), reason: `${row.retention_class}_limit` });
+        } catch (error) { skipped.push({ id: row.id, reason: safeMessage(error) }); }
+      }
+      return { removed, skipped, policy: limits };
+    } finally { db.close(); }
+  }
 }
 
 module.exports = { BACKUP_FORMAT, FORMAT_VERSION, MANAGED_SUBDIR, BACKUP_COLUMNS, BackupError, BackupService, ensureBackupColumns, sha256File };

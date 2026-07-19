@@ -7,6 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
+const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, startBackupScheduler } = require("./backup/scheduler");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -945,6 +946,15 @@ function initDb() {
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_enabled', '1')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_weekday', '3')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('auto_backup_last_date', '')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_auto_enabled', '0')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_time', '02:30')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_timezone', 'Asia/Shanghai')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_daily_retention', '14')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_monthly_retention', '12')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_manual_retention', '20')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_retry_count', '3')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_enabled', '0')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_directory', '/apps/liming-course-system')").run();
   const currentMonth = db.prepare("SELECT value FROM settings WHERE key = 'month_key'").get().value;
   db.prepare(`
     INSERT OR IGNORE INTO teacher_adjustments_monthly(
@@ -12958,7 +12968,13 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center") {
     cleanupPendingDataImports();
-    return sendJson(res, { records: backupService().list(), settings: { managed_directory: "backups/full-excel", remote_status: "not_configured" }, maintenance: dataImportMaintenance });
+    return sendJson(res, { records: backupService().list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", remote_status: "not_configured" }, maintenance: dataImportMaintenance });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {
+    const settings = saveFullBackupSettings(dbPath, await readBody(req));
+    writeOperationLog(user, { operation_type: "修改全量备份设置", operation_content: `自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, remote_enabled: settings.remote_enabled } }, req);
+    return sendJson(res, { ok: true, settings });
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
@@ -14258,3 +14274,6 @@ server.listen(port, () => {
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
 });
+
+const backupScheduler = startBackupScheduler({ dbPath, dataDir });
+server.on("close", () => backupScheduler.stop());

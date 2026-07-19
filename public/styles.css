@@ -4414,6 +4414,13 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   align-items: end;
 }
 
+.data-backup-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 .data-import-preview {
   display: grid;
   gap: 12px;
@@ -4451,7 +4458,8 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 
 @media (max-width: 760px) {
   .data-import-grid,
-  .data-confirm-grid {
+  .data-confirm-grid,
+  .data-backup-settings-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
