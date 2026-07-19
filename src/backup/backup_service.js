@@ -64,7 +64,7 @@ class BackupService {
         db.prepare("UPDATE backup_records SET remote_status='uploading',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
         try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published }); db.prepare("UPDATE backup_records SET remote_status='success',remote_file_id=?,remote_path=?,remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(remote.file_id || "", remote.path || "", id); }
         catch (error) { db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(safeMessage(error), id); }
-      }
+      } else if (options.remoteEnabled) db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe='BAIDU_NOT_CONFIGURED',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
       row = this.record(db, id); return { ok: true, record: this.dto(row) };
     } catch (error) {
       if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(safeMessage(error), id); } catch {}
@@ -103,6 +103,30 @@ class BackupService {
         } catch (error) { skipped.push({ id: row.id, reason: safeMessage(error) }); }
       }
       return { removed, skipped, policy: limits };
+    } finally { db.close(); }
+  }
+  async retryRemote(id, remoteDirectory) {
+    if (!this.remoteUploader) throw new BackupError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置"); const db = this.database();
+    try {
+      const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const localPath = this.managedPath(row);
+      db.prepare("UPDATE backup_records SET remote_status='uploading',remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      try { const remote = await this.remoteUploader({ record: this.dto(row), localPath, remoteDirectory }); db.prepare("UPDATE backup_records SET remote_status='success',remote_file_id=?,remote_path=?,remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(remote.file_id || "", remote.path || "", id); }
+      catch (error) { db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(safeMessage(error), id); throw error; }
+      return this.dto(this.record(db, id));
+    } finally { db.close(); }
+  }
+  async deleteBackup(id, { remoteDeleter = null } = {}) {
+    const db = this.database(); const result = { local: "not_present", remote: "not_present" };
+    try {
+      const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
+      if (row.backup_format !== BACKUP_FORMAT) throw new BackupError("BACKUP_PATH_UNMANAGED", "旧版备份不能由新体系删除");
+      if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading") throw new BackupError("BACKUP_BUSY", "备份正在使用中");
+      const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ").get(BACKUP_FORMAT).count);
+      if (row.status === "success" && validCount <= 1) throw new BackupError("BACKUP_LAST_VALID", "不能删除最后一份有效全量备份");
+      try { const filename = this.managedPath(row); fs.rmSync(filename); try { fs.rmSync(`${filename}.sha256`, { force: true }); } catch {} db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='manual_delete' WHERE id=?").run(id); result.local = "deleted"; }
+      catch (error) { if (error.code !== "BACKUP_FILE_MISSING") throw error; db.prepare("UPDATE backup_records SET status='missing',message='BACKUP_FILE_MISSING' WHERE id=?").run(id); result.local = "missing"; }
+      if (row.remote_path && remoteDeleter) { try { await remoteDeleter(row.remote_path); db.prepare("UPDATE backup_records SET remote_status='deleted',remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id); result.remote = "deleted"; } catch (error) { db.prepare("UPDATE backup_records SET remote_status='delete_failed',remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(safeMessage(error), id); result.remote = "delete_failed"; } }
+      return { ok: true, result, record: this.dto(this.record(db, id)) };
     } finally { db.close(); }
   }
 }

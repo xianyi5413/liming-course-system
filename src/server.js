@@ -8,6 +8,7 @@ const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup")
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, startBackupScheduler } = require("./backup/scheduler");
+const { BaiduBackupManager } = require("./backup/baidu_provider");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -989,12 +990,14 @@ function initDb() {
 if (!readOnlyBalanceCli) initDb();
 
 let backupServiceInstance = null;
+let baiduBackupManagerInstance = null;
 const pendingDataImports = new Map();
 let dataImportMaintenance = false;
 function backupService() {
-  if (!backupServiceInstance) backupServiceInstance = new BackupService({ dbPath, dataDir, appVersion: APP_VERSION });
+  if (!backupServiceInstance) backupServiceInstance = new BackupService({ dbPath, dataDir, appVersion: APP_VERSION, remoteUploader: (options) => baiduBackupManager().upload({ ...options, remoteDirectory: options.remoteDirectory || loadFullBackupSettings(dbPath).remote_directory }) });
   return backupServiceInstance;
 }
+function baiduBackupManager() { if (!baiduBackupManagerInstance) baiduBackupManagerInstance = new BaiduBackupManager({ dataDir }); return baiduBackupManagerInstance; }
 function cleanupPendingDataImports() {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, item] of pendingDataImports) if (item.created_at < cutoff) { try { fs.rmSync(item.path, { force: true }); } catch {} pendingDataImports.delete(id); }
@@ -12968,7 +12971,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center") {
     cleanupPendingDataImports();
-    return sendJson(res, { records: backupService().list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", remote_status: "not_configured" }, maintenance: dataImportMaintenance });
+    return sendJson(res, { records: backupService().list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", remote_status: baiduBackupManager().status() }, maintenance: dataImportMaintenance });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {
@@ -12979,7 +12982,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
     try {
-      const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id });
+      const settings = loadFullBackupSettings(dbPath); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: settings.remote_enabled });
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
       return sendJson(res, { ...result, records: backupService().list() }, 201);
     } catch (error) {
@@ -13002,6 +13005,34 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && dataBackupDownload) {
     try { const service = backupService(); const database = service.database(); let row; try { row = service.record(database, Number(dataBackupDownload[1])); } finally { database.close(); } if (!row) return sendError(res, 404, "备份记录不存在"); const filename = service.managedPath(row); writeOperationLog(user, { operation_type: "下载全量数据备份", operation_content: `下载备份 ${row.id}`, target_type: "backup_records", target_id: String(row.id) }, req); return sendFileDownload(res, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", row.filename); }
     catch (error) { return sendError(res, 400, error.message || "下载失败"); }
+  }
+
+  const dataBackupRemoteRetry = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/remote-retry$/);
+  if (req.method === "POST" && dataBackupRemoteRetry) {
+    try { const settings = loadFullBackupSettings(dbPath); const record = await backupService().retryRemote(Number(dataBackupRemoteRetry[1]), settings.remote_directory); writeOperationLog(user, { operation_type: "重试百度网盘备份", operation_content: `备份 ${record.id} 远端上传成功`, target_type: "backup_records", target_id: String(record.id) }, req); return sendJson(res, { ok: true, record }); }
+    catch (error) { return sendError(res, 400, error.message || "百度网盘上传失败"); }
+  }
+
+  const dataBackupDelete = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)$/);
+  if (req.method === "DELETE" && dataBackupDelete) {
+    if (normalizeRole(user.role) !== "owner") return sendError(res, 403, "仅老板可以删除完整备份"); const body = await readBody(req); const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
+    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "密码验证失败"); if (text(body.confirmation) !== "删除备份") return sendError(res, 400, "请输入确认文字：删除备份");
+    try { const result = await backupService().deleteBackup(Number(dataBackupDelete[1]), { remoteDeleter: (remotePath) => baiduBackupManager().client.deleteFile(remotePath) }); writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `备份 ${dataBackupDelete[1]}：服务器 ${result.result.local}，百度 ${result.result.remote}`, target_type: "backup_records", target_id: dataBackupDelete[1], details: result.result }, req); return sendJson(res, result); }
+    catch (error) { return sendError(res, 400, error.message || "删除备份失败"); }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/baidu/authorize") {
+    try { return sendJson(res, baiduBackupManager().beginAuthorization()); } catch (error) { return sendError(res, 400, error.message || "百度网盘未配置"); }
+  }
+  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/callback") {
+    try { await baiduBackupManager().finishAuthorization(url.searchParams.get("code"), url.searchParams.get("state")); res.writeHead(302, { location: "/?baidu=connected", "cache-control": "no-store" }); return res.end(); }
+    catch (error) { return sendError(res, 400, error.message || "百度授权失败"); }
+  }
+  if (req.method === "POST" && url.pathname === "/api/data-center/baidu/test") {
+    try { return sendJson(res, await baiduBackupManager().testConnection()); } catch (error) { return sendError(res, 400, error.message || "百度连接测试失败"); }
+  }
+  if (req.method === "POST" && url.pathname === "/api/data-center/baidu/disconnect") {
+    const result = baiduBackupManager().disconnect(); writeOperationLog(user, { operation_type: "解除百度网盘授权", operation_content: "已删除本地受保护的百度授权凭据", target_type: "data_center", target_id: "baidu" }, req); return sendJson(res, result);
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/import/preview") {

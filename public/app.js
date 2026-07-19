@@ -9438,7 +9438,7 @@ function backupRecordsModalMarkup() {
 }
 
 function dataCenterRemoteLabel(value) {
-  const labels = { not_configured: "未配置", pending: "等待上传", uploading: "上传中", success: "上传成功", failed: "上传失败", authorization_expired: "授权过期", legacy: "旧版" };
+  const labels = { not_configured: "未配置", not_authorized: "等待授权", authorized: "已授权", refresh_required: "等待刷新", pending: "等待上传", uploading: "上传中", success: "上传成功", failed: "上传失败", authorization_expired: "授权过期", delete_failed: "远端删除失败", deleted: "已删除", legacy: "旧版" };
   return labels[value] || value || "未配置";
 }
 
@@ -9459,7 +9459,7 @@ function dataCenterBackupRows() {
       <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
       <td class="data-center-actions">
         <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
-        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button><button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>`}
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button><button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button><button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
       </td>
     </tr>`;
   }).join("") || `<tr><td colspan="11" class="empty">暂无备份记录</td></tr>`;
@@ -9508,8 +9508,10 @@ function renderAudit() {
         <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
         <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
         <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
+        <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled ? "checked" : ""}><span>启用百度网盘备份</span></label>
+        <label class="filter-field"><span>百度网盘目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || "/apps/liming-course-system")}"></label>
       </div>
-      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">异地备份未配置，不影响服务器备份健康状态。</span></div>
+      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><button class="btn baidu-connect" type="button">连接/重新授权</button><button class="btn baidu-test" type="button">测试连接</button><button class="btn baidu-disconnect" type="button">解除授权</button><span class="audit-toolbar-note">百度网盘：${escapeHtml(dataCenterRemoteLabel(backupState.settings?.remote_status))}。未配置不影响服务器备份健康状态。</span></div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
@@ -15411,6 +15413,7 @@ function wireEvents() {
           timezone: document.querySelector(".data-backup-timezone")?.value, daily_retention: Number(document.querySelector(".data-backup-daily")?.value),
           monthly_retention: Number(document.querySelector(".data-backup-monthly")?.value), manual_retention: Number(document.querySelector(".data-backup-manual")?.value),
           retry_count: Number(document.querySelector(".data-backup-retries")?.value),
+          remote_enabled: Boolean(document.querySelector(".data-backup-remote-enabled")?.checked), remote_directory: document.querySelector(".data-backup-remote-directory")?.value,
         } });
         backupState.settings = { ...backupState.settings, ...result.settings }; showToast("备份设置已保存");
       } catch (error) { backupState.error = error.message || "保存备份设置失败"; }
@@ -15437,6 +15440,31 @@ function wireEvents() {
 
   document.querySelectorAll(".backup-refresh").forEach((button) => button.addEventListener("click", async () => {
     try { await refreshBackupData({ logView: true }); } catch (error) { backupState.error = error.message || "读取备份记录失败"; } finally { render(); }
+  }));
+
+  document.querySelectorAll(".backup-remote-retry").forEach((button) => button.addEventListener("click", async () => {
+    try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-retry`, { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘上传成功"); }
+    catch (error) { showToast(error.message || "百度网盘上传失败", "error"); } finally { render(); }
+  }));
+
+  document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", async () => {
+    const password = prompt("请输入老板密码"); if (password == null) return; const confirmation = prompt("请输入确认文字：删除备份"); if (confirmation == null) return;
+    try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}`, { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); showToast("备份删除流程已完成"); }
+    catch (error) { showToast(error.message || "删除备份失败", "error"); } finally { render(); }
+  }));
+
+  document.querySelectorAll(".baidu-connect").forEach((button) => button.addEventListener("click", async () => {
+    try { const result = await request("/api/data-center/baidu/authorize", { method: "POST", body: {} }); window.location.assign(result.authorization_url); }
+    catch (error) { showToast(error.message || "无法发起百度授权", "error"); }
+  }));
+  document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
+    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); showToast("百度网盘连接正常"); }
+    catch (error) { showToast(error.message || "百度网盘连接失败", "error"); }
+  }));
+  document.querySelectorAll(".baidu-disconnect").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确认解除百度网盘授权？服务器本地备份不会删除。")) return;
+    try { await request("/api/data-center/baidu/disconnect", { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘授权已解除"); }
+    catch (error) { showToast(error.message || "解除授权失败", "error"); } finally { render(); }
   }));
 
   document.querySelectorAll(".audit-run-internal").forEach((button) => {
