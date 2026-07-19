@@ -10,6 +10,9 @@ RUN mkdir -p /p1b-readonly \
   && chmod 0555 /p1b-readonly \
   && chown -R node:node /workspace
 
+ENV P1B_TEST_PROFILE=safe \
+    P1B_LOCKED_SUITE_TIMEOUT_MS=90000
+
 USER node
 
 CMD ["node", "scripts/p1b/run_locked_tests.js"]

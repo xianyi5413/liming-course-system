@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile, fork, spawnSync } = require("node:child_process");
 const { promisify } = require("node:util");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 
 const { STRATEGIES } = require("../../scripts/p1a/sqlite_snapshot");
 const { createSyntheticDatabase } = require("../../scripts/p1a/synthetic_database");
@@ -25,12 +25,28 @@ const {
 } = require("../../scripts/p1b/backup_package");
 const { readZipIndex } = require("../../scripts/p1b/zip_store");
 const { verifyBackupPackage } = require("../../scripts/p1b/verify_backup");
+const {
+  ChildSupervisor,
+  installSignalCleanup,
+  waitForExit,
+  waitForMessage: waitForManagedMessage,
+} = require("../../scripts/p1a/child_process_safety");
 
 const execFileAsync = promisify(execFile);
 const workerScript = path.resolve(__dirname, "../../scripts/p1b/test_worker.js");
 const backupCli = path.resolve(__dirname, "../../scripts/p1b/backup_cli.js");
 const verifyCli = path.resolve(__dirname, "../../scripts/p1b/verify_backup_cli.js");
 const FIXED_NOW = new Date("2026-07-19T08:30:00.000Z");
+const TEST_PROFILE = process.env.P1B_TEST_PROFILE || "full";
+const faultTest = TEST_PROFILE === "safe" ? test.skip : test;
+const childSupervisor = new ChildSupervisor({ label: "P1B test child" });
+const removeSignalCleanup = installSignalCleanup(childSupervisor);
+
+after(async () => {
+  removeSignalCleanup();
+  await childSupervisor.terminateAll({ requestStop: true });
+  assert.equal(childSupervisor.runningCount(), 0);
+});
 
 function safeRemoveTestDirectory(directory, label) {
   const relative = path.relative(path.resolve(os.tmpdir()), path.resolve(directory));
@@ -100,38 +116,12 @@ async function withFixture(label, options, callback) {
   }
 }
 
-function waitForMessage(child, predicate, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => finish(new Error("Timed out waiting for worker message")), timeoutMs);
-    const onMessage = (message) => {
-      if (message?.type === "error") finish(new Error(`Worker failed with ${message.code}`));
-      else if (predicate(message)) finish(null, message);
-    };
-    const onExit = (code, signal) => finish(new Error(`Worker exited early: code=${code} signal=${signal}`));
-    const onError = (error) => finish(error);
-    function finish(error, message) {
-      clearTimeout(timeout);
-      child.off("message", onMessage);
-      child.off("exit", onExit);
-      child.off("error", onError);
-      if (error) reject(error);
-      else resolve(message);
-    }
-    child.on("message", onMessage);
-    child.once("exit", onExit);
-    child.once("error", onError);
-  });
+function waitForMessage(child, predicate, timeoutMs = 10000) {
+  return waitForManagedMessage(child, predicate, { timeoutMs, label: "P1B worker", requestStop: true });
 }
 
-function waitForExit(child, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    if (child.exitCode !== null || child.signalCode !== null) return resolve({ code: child.exitCode, signal: child.signalCode });
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for worker exit")), timeoutMs);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      resolve({ code, signal });
-    });
-  });
+function trackFork(script, args, options, label, maxRuntimeMs = 20000) {
+  return childSupervisor.track(fork(script, args, options), { label, maxRuntimeMs });
 }
 
 async function rewriteSidecar(result) {
@@ -260,9 +250,10 @@ test("the platform standard ZIP reader accepts the generated archive", async () 
       execution = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
         encoding: "utf8",
         env: { ...process.env, P1B_ZIP_INTEROP: result.zipPath },
+        timeout: 10000,
       });
     } else {
-      execution = spawnSync("busybox", ["unzip", "-l", result.zipPath], { encoding: "utf8" });
+      execution = spawnSync("busybox", ["unzip", "-l", result.zipPath], { encoding: "utf8", timeout: 10000 });
     }
     assert.equal(execution.status, 0, execution.stderr || execution.stdout);
   });
@@ -271,7 +262,7 @@ test("the platform standard ZIP reader accepts the generated archive", async () 
 test("verification CLI recomputes package, component and SQLite checks", async () => {
   await withFixture("verify-cli", async (fixture) => {
     const result = await fixture.create();
-    const execution = await execFileAsync(process.execPath, [verifyCli, "--zip", result.zipPath], { encoding: "utf8" });
+    const execution = await execFileAsync(process.execPath, [verifyCli, "--zip", result.zipPath], { encoding: "utf8", timeout: 15000 });
     const output = JSON.parse(execution.stdout);
     assert.equal(output.ok, true);
     assert.equal(output.package_sha256, result.packageSha256);
@@ -382,7 +373,7 @@ test("non-root locked container rejects an unwritable backup root", { skip: !pro
       "--backup-root", process.env.P1B_READ_ONLY_DIR,
       "--strategy", STRATEGIES.ONLINE,
       "--trigger", "manual",
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", timeout: 15000 });
     assert.equal(cli.status, 3);
     const cliError = JSON.parse(cli.stderr);
     assert.equal(cliError.error_code, ERROR_CODES.IO_PERMISSION_DENIED);
@@ -441,17 +432,22 @@ test("a target appearing immediately before publication is preserved and staging
 });
 
 for (const stage of ["staging", "zip", "publish"]) {
-  test(`process interruption at ${stage} leaves no formal package and controlled cleanup succeeds`, async () => {
+  faultTest(`process interruption at ${stage} leaves no formal package and controlled cleanup succeeds`, async () => {
     await withFixture(`interrupt-${stage}`, async (fixture) => {
       if (stage === "zip") {
-        await createLargeFile(path.join(fixture.dataDirectory, "source-workbooks", "large.bin"), 8 * 1024 * 1024);
+        await createLargeFile(path.join(fixture.dataDirectory, "source-workbooks", "large.bin"), 2 * 1024 * 1024);
       }
-      const worker = fork(workerScript, [fixture.sourceDatabase, fixture.dataDirectory, fixture.backupRoot, stage, STRATEGIES.ONLINE], {
+      const worker = trackFork(workerScript, [fixture.sourceDatabase, fixture.dataDirectory, fixture.backupRoot, stage, STRATEGIES.ONLINE], {
         stdio: ["ignore", "ignore", "ignore", "ipc"],
-      });
-      await waitForMessage(worker, (message) => message?.type === "stage" && message.stage === stage, 30000);
-      worker.kill("SIGKILL");
-      await waitForExit(worker);
+        env: { ...process.env, P1B_WORKER_MAX_MS: "15000" },
+      }, `P1B ${stage} interrupt worker`, 18000);
+      try {
+        await waitForMessage(worker, (message) => message?.type === "stage" && message.stage === stage, 10000);
+        worker.kill("SIGKILL");
+        await waitForExit(worker, 3000, `P1B ${stage} interrupt worker`);
+      } finally {
+        await childSupervisor.terminate(worker, { requestStop: true });
+      }
 
       const managed = path.join(fixture.backupRoot, MANAGED_NAMESPACE);
       const entries = fs.readdirSync(managed);
@@ -513,7 +509,7 @@ test("symbolic-link escape in an included directory is rejected", async () => {
   });
 });
 
-test("large files are streamed with bounded chunks during creation and verification", async () => {
+faultTest("large files are streamed with bounded chunks during creation and verification", async () => {
   await withFixture("large", async (fixture) => {
     await createLargeFile(path.join(fixture.dataDirectory, "source-workbooks", "large synthetic.bin"), 24 * 1024 * 1024);
     const result = await fixture.create();
@@ -534,7 +530,7 @@ test("creation CLI accepts required parameters and does not log secret-looking p
       "--strategy", STRATEGIES.ONLINE,
       "--trigger", "scheduled",
       "--scheduled-for", "2026-07-20T02:30:00+08:00",
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", timeout: 15000 });
     const output = JSON.parse(execution.stdout);
     assert.equal(output.ok, true);
     assert.equal(execution.stdout.includes("TokenSecretCookie"), false);
@@ -552,7 +548,7 @@ test("creation CLI accepts required parameters and does not log secret-looking p
         "--source-db", path.join(fixture.root, "TokenSecretCookie-missing.sqlite"),
         "--data-dir", fixture.dataDirectory,
         "--backup-root", fixture.backupRoot,
-      ], { encoding: "utf8" });
+      ], { encoding: "utf8", timeout: 15000 });
     } catch (error) {
       failed = error;
     }
@@ -563,7 +559,7 @@ test("creation CLI accepts required parameters and does not log secret-looking p
 });
 
 test("CLI argument failures use a stable error code without a stack trace", () => {
-  const execution = spawnSync(process.execPath, [backupCli, "--source-db"], { encoding: "utf8" });
+  const execution = spawnSync(process.execPath, [backupCli, "--source-db"], { encoding: "utf8", timeout: 10000 });
   assert.equal(execution.status, 2);
   const output = JSON.parse(execution.stderr);
   assert.equal(output.error_code, ERROR_CODES.INVALID_ARGUMENT);

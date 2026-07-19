@@ -2522,8 +2522,9 @@ npm.cmd run test:p1a
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.p1a -t liming-p1a-test .
-docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m liming-p1a-test
 ```
+
+构建只能在非生产环境或已批准的镜像构建环境进行。运行锁定测试时不得直接使用无资源上限的 `docker run`；必须使用[测试资源安全规范](docs/test-resource-safety.md)中的固定容器名、资源限制、外层 timeout 和 trap 清理命令。
 
 锁定环境的目标基线为 Node 24.18.0、Alpine 3.24.1、SQLite 3.53.1、linux/amd64，测试入口会在执行用例前强制核对这些版本。主 `Dockerfile` 仍保持现状；待锁定镜像测试实际通过并单独确认后，再决定是否替换生产基础镜像。
 
@@ -2586,10 +2587,9 @@ npm.cmd run test:p1b
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.p1b -t liming-p1b-test .
-docker run --rm --network none --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev,size=1g \
-  liming-p1b-test
 ```
+
+构建只能在非生产环境或已批准的镜像构建环境进行。运行锁定测试时不得直接使用无资源上限的 `docker run`；必须使用[测试资源安全规范](docs/test-resource-safety.md)中的固定容器名、资源限制、外层 timeout 和 trap 清理命令。
 
 P1B ZIP 使用标准存储模式并全程分块读写，不把完整 ZIP 读入内存。当前原型明确不支持 ZIP64，因此单文件、ZIP偏移或整包超过传统 ZIP 32 位限制时会安全失败；它也不提供加密或数字签名。固定 Docker Hub digest 从零拉取仍需在网络可达环境完成供应链复现验证，主 `Dockerfile` 保持不变。
 
@@ -2610,3 +2610,7 @@ npm.cmd run test:p2
 ```
 
 P2 迁移尚未集成到 `src/server.js`，也不得直接对正式数据库运行。正式接入、启动顺序、权限、网页和 API 必须在后续批次单独评审与验收。
+
+## 测试资源安全
+
+P1A/P1B 锁定容器默认只运行安全功能验收 profile。故障注入、进程强杀、长时间并发和大文件测试不得在承载正式业务的服务器执行。服务器验收必须同时设置 CPU、内存、swap、PID、tmpfs、网络、只读文件系统和总执行时间限制，并通过固定容器名与 shell `trap` 清理容器。完整事故口径、A/B 测试分类和经审核后才能使用的受限命令见 [docs/test-resource-safety.md](docs/test-resource-safety.md)。

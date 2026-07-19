@@ -1,11 +1,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { fork } = require("node:child_process");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 
 const {
@@ -23,9 +24,27 @@ const {
   createSyntheticDatabase,
   syntheticCounts,
 } = require("../../scripts/p1a/synthetic_database");
+const {
+  ChildSupervisor,
+  installSignalCleanup,
+  isChildRunning,
+  waitForExit,
+  waitForMessage: waitForManagedMessage,
+} = require("../../scripts/p1a/child_process_safety");
 
 const writerScript = path.resolve(__dirname, "../../scripts/p1a/concurrent_writer.js");
 const workerScript = path.resolve(__dirname, "../../scripts/p1a/snapshot_worker.js");
+const lifecycleHarnessScript = path.resolve(__dirname, "../../scripts/p1a/lifecycle_harness.js");
+const TEST_PROFILE = process.env.P1A_TEST_PROFILE || "full";
+const faultTest = TEST_PROFILE === "safe" ? test.skip : test;
+const childSupervisor = new ChildSupervisor({ label: "P1A test child" });
+const removeSignalCleanup = installSignalCleanup(childSupervisor);
+
+after(async () => {
+  removeSignalCleanup();
+  await childSupervisor.terminateAll({ requestStop: true });
+  assert.equal(childSupervisor.runningCount(), 0);
+});
 
 async function inTempDirectory(label, callback) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `liming-p1a-${label}-`));
@@ -49,7 +68,7 @@ function stagingFiles(directory) {
   return fs.readdirSync(directory).filter(isStagingName);
 }
 
-async function waitForStagingCreation(directory, child, timeoutMs = 20000) {
+async function waitForStagingCreation(directory, child, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const files = stagingFiles(directory);
@@ -57,64 +76,63 @@ async function waitForStagingCreation(directory, child, timeoutMs = 20000) {
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error("Snapshot worker exited before a staging artifact was observed");
     }
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  await childSupervisor.terminate(child, { requestStop: true });
   throw new Error("Timed out waiting for a staging artifact");
 }
 
-function waitForMessage(child, predicate, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => finish(new Error("Timed out waiting for child process message")), timeoutMs);
-    const onMessage = (message) => {
-      if (message?.type === "error") {
-        finish(new Error(`Child process failed with ${message.code}`));
-      } else if (predicate(message)) {
-        finish(null, message);
-      }
-    };
-    const onError = (error) => finish(error);
-    const onExit = (code, signal) => finish(new Error(`Child exited before expected message: code=${code} signal=${signal}`));
-    function finish(error, message) {
-      clearTimeout(timeout);
-      child.off("message", onMessage);
-      child.off("error", onError);
-      child.off("exit", onExit);
-      if (error) reject(error);
-      else resolve(message);
-    }
-    child.on("message", onMessage);
-    child.once("error", onError);
-    child.once("exit", onExit);
-  });
-}
-
-function waitForExit(child, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve({ code: child.exitCode, signal: child.signalCode });
-      return;
-    }
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for child exit")), timeoutMs);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      resolve({ code, signal });
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-  });
+function waitForMessage(child, predicate, timeoutMs = 5000, label = "P1A child") {
+  return waitForManagedMessage(child, predicate, { timeoutMs, label, requestStop: true });
 }
 
 async function stopChild(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  if (child.connected) child.send({ type: "stop" });
+  await childSupervisor.terminate(child, { requestStop: true });
+}
+
+function trackFork(script, args, options, label, maxRuntimeMs = 8000) {
+  return childSupervisor.track(fork(script, args, options), { label, maxRuntimeMs });
+}
+
+function processIsAlive(pid) {
   try {
-    await waitForExit(child, 5000);
-  } catch {
-    child.kill("SIGKILL");
-    await waitForExit(child, 5000);
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
   }
+}
+
+async function waitForCondition(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for a bounded test condition");
+}
+
+function writerMarker(directory) {
+  return path.join(directory, `.p1a-writer-exit-${crypto.randomUUID()}.txt`);
+}
+
+function forceKillPid(pid) {
+  if (!pid || !processIsAlive(pid)) return;
+  try { process.kill(pid, "SIGKILL"); } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+async function startLifecycleHarness(directory, mode) {
+  const source = path.join(directory, `${mode}-source.sqlite`);
+  const marker = writerMarker(directory);
+  createSyntheticDatabase(source, { rows: 20, payloadBytes: 64 });
+  const harness = trackFork(lifecycleHarnessScript, [mode, source, marker], {
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  }, `lifecycle harness ${mode}`, 7000);
+  const ready = await waitForMessage(harness, (message) => message?.type === "writer-ready", 3000, `lifecycle harness ${mode}`);
+  return { harness, marker, writerPid: ready.writerPid };
 }
 
 test("runtime capability detection reports node:sqlite backup support", () => {
@@ -184,9 +202,18 @@ test("Online Backup remains consistent while another WAL connection commits", as
   await inTempDirectory("concurrent", async (directory) => {
     const source = path.join(directory, "source.sqlite");
     const target = path.join(directory, "concurrent.sqlite");
-    createSyntheticDatabase(source, { rows: 300, payloadBytes: 2048 });
+    const marker = writerMarker(directory);
+    createSyntheticDatabase(source, { rows: 800, payloadBytes: 2048 });
 
-    const writer = fork(writerScript, [source, "1"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    const writer = trackFork(writerScript, [source, "10"], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: {
+        ...process.env,
+        P1A_WRITER_MAX_MS: "5000",
+        P1A_WRITER_MAX_COMMITS: "100",
+        P1A_WRITER_EXIT_MARKER: marker,
+      },
+    }, "bounded concurrent writer", 7000);
     let commitsDuringSnapshot = 0;
     const countCommit = (message) => {
       if (message?.type === "commit") commitsDuringSnapshot += 1;
@@ -194,6 +221,9 @@ test("Online Backup remains consistent while another WAL connection commits", as
     try {
       const ready = await waitForMessage(writer, (message) => message?.type === "ready");
       assert.ok(ready.sequence >= 300);
+      assert.equal(ready.intervalMs, 10);
+      assert.equal(ready.maxRuntimeMs, 5000);
+      assert.equal(ready.maxCommits, 100);
       writer.on("message", countCommit);
       const result = await createSnapshot({
         sourcePath: source,
@@ -211,7 +241,10 @@ test("Online Backup remains consistent while another WAL connection commits", as
     } finally {
       writer.off("message", countCommit);
       await stopChild(writer);
+      await waitForCondition(() => fs.existsSync(marker));
+      assert.equal(processIsAlive(writer.pid), false);
     }
+    assert.equal(childSupervisor.runningCount(), 0);
   });
 });
 
@@ -355,18 +388,22 @@ test("non-root locked container rejects a read-only output directory", {
   });
 });
 
-test("killing Online Backup leaves no final target and cleanup recognizes residue", async () => {
+faultTest("killing Online Backup leaves no final target and cleanup recognizes residue", async () => {
   await inTempDirectory("interrupt-online", async (directory) => {
     const source = path.join(directory, "large-source.sqlite");
     const target = path.join(directory, "online-final.sqlite");
-    createSyntheticDatabase(source, { rows: 2500, payloadBytes: 8192 });
-    const worker = fork(workerScript, [source, target, STRATEGIES.ONLINE], {
+    createSyntheticDatabase(source, { rows: 800, payloadBytes: 1024 });
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.ONLINE], {
       stdio: ["ignore", "ignore", "ignore", "ipc"],
-      env: { ...process.env, P1A_BACKUP_RATE: "1" },
-    });
-    await waitForMessage(worker, (message) => message?.type === "progress" && message.remainingPages > 0, 20000);
-    worker.kill("SIGKILL");
-    await waitForExit(worker, 10000);
+      env: { ...process.env, P1A_BACKUP_RATE: "1", P1A_WORKER_MAX_MS: "8000" },
+    }, "Online Backup interrupt worker", 9000);
+    try {
+      await waitForMessage(worker, (message) => message?.type === "progress" && message.remainingPages > 0, 5000);
+      worker.kill("SIGKILL");
+      await waitForExit(worker, 3000, "Online Backup interrupt worker");
+    } finally {
+      await stopChild(worker);
+    }
 
     assert.equal(fs.existsSync(target), false);
     assert.ok(stagingFiles(directory).length >= 1);
@@ -376,18 +413,22 @@ test("killing Online Backup leaves no final target and cleanup recognizes residu
   });
 });
 
-test("killing VACUUM INTO pipeline before publication leaves only recognized residue", async () => {
+faultTest("killing VACUUM INTO pipeline before publication leaves only recognized residue", async () => {
   await inTempDirectory("interrupt-vacuum", async (directory) => {
     const source = path.join(directory, "source.sqlite");
     const target = path.join(directory, "vacuum-final.sqlite");
-    createSyntheticDatabase(source, { rows: 500, payloadBytes: 2048 });
-    const worker = fork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
+    createSyntheticDatabase(source, { rows: 120, payloadBytes: 512 });
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
       stdio: ["ignore", "ignore", "ignore", "ipc"],
-      env: { ...process.env, P1A_HOLD_AFTER_SNAPSHOT_MS: "10000" },
-    });
-    await waitForMessage(worker, (message) => message?.type === "snapshot-ready", 20000);
-    worker.kill("SIGKILL");
-    await waitForExit(worker, 10000);
+      env: { ...process.env, P1A_HOLD_AFTER_SNAPSHOT_MS: "2000", P1A_WORKER_MAX_MS: "6000" },
+    }, "VACUUM post-snapshot interrupt worker", 7000);
+    try {
+      await waitForMessage(worker, (message) => message?.type === "snapshot-ready", 3000);
+      worker.kill("SIGKILL");
+      await waitForExit(worker, 3000, "VACUUM post-snapshot interrupt worker");
+    } finally {
+      await stopChild(worker);
+    }
 
     assert.equal(fs.existsSync(target), false);
     assert.ok(stagingFiles(directory).length >= 1);
@@ -397,24 +438,167 @@ test("killing VACUUM INTO pipeline before publication leaves only recognized res
   });
 });
 
-test("killing VACUUM INTO while its staging file is being written never publishes target", async () => {
+faultTest("killing VACUUM INTO while its staging file is being written never publishes target", async () => {
   await inTempDirectory("interrupt-vacuum-write", async (directory) => {
     const source = path.join(directory, "large-source.sqlite");
     const target = path.join(directory, "vacuum-final.sqlite");
-    createSyntheticDatabase(source, { rows: 10000, payloadBytes: 4096 });
-    const worker = fork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
+    createSyntheticDatabase(source, { rows: 2000, payloadBytes: 1024 });
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
       stdio: ["ignore", "ignore", "ignore", "ipc"],
-      env: { ...process.env, P1A_HOLD_AFTER_SNAPSHOT_MS: "0" },
-    });
+      env: { ...process.env, P1A_HOLD_AFTER_SNAPSHOT_MS: "0", P1A_WORKER_MAX_MS: "8000" },
+    }, "VACUUM write interrupt worker", 9000);
 
-    const stagingName = await waitForStagingCreation(directory, worker, 20000);
-    worker.kill("SIGKILL");
-    await waitForExit(worker, 10000);
+    let stagingName;
+    try {
+      stagingName = await waitForStagingCreation(directory, worker, 5000);
+      worker.kill("SIGKILL");
+      await waitForExit(worker, 3000, "VACUUM write interrupt worker");
+    } finally {
+      await stopChild(worker);
+    }
 
     assert.equal(fs.existsSync(target), false);
     assert.equal(isStagingName(stagingName), true);
     const cleanup = cleanupStaleArtifacts(directory);
     assert.ok(cleanup.removed.includes(stagingName));
+    assert.equal(stagingFiles(directory).length, 0);
+  });
+});
+
+faultTest("bounded writer exits after a normal parent stop without a residual process", async () => {
+  await inTempDirectory("writer-normal-exit", async (directory) => {
+    const { harness, marker, writerPid } = await startLifecycleHarness(directory, "normal");
+    try {
+      await waitForExit(harness, 3000, "normal lifecycle harness");
+      await waitForCondition(() => fs.existsSync(marker) && !processIsAlive(writerPid));
+      assert.match(fs.readFileSync(marker, "utf8"), /ipc-stop|max-runtime|max-commits/);
+    } finally {
+      await stopChild(harness);
+      forceKillPid(writerPid);
+    }
+  });
+});
+
+faultTest("writer exits when its parent is killed and the IPC channel disconnects", async () => {
+  await inTempDirectory("writer-parent-killed", async (directory) => {
+    const { harness, marker, writerPid } = await startLifecycleHarness(directory, "hold");
+    try {
+      harness.kill("SIGKILL");
+      await waitForExit(harness, 3000, "killed lifecycle harness");
+      await waitForCondition(() => !processIsAlive(writerPid), 4000);
+      if (fs.existsSync(marker)) assert.match(fs.readFileSync(marker, "utf8"), /disconnect|max-runtime/);
+    } finally {
+      await stopChild(harness);
+      forceKillPid(writerPid);
+    }
+  });
+});
+
+faultTest("writer exits when its IPC channel is explicitly disconnected", async () => {
+  await inTempDirectory("writer-ipc-disconnect", async (directory) => {
+    const { harness, marker, writerPid } = await startLifecycleHarness(directory, "ipc-disconnect");
+    try {
+      await waitForExit(harness, 3000, "IPC lifecycle harness");
+      await waitForCondition(() => fs.existsSync(marker) && !processIsAlive(writerPid));
+      assert.equal(fs.readFileSync(marker, "utf8").trim(), "disconnect");
+    } finally {
+      await stopChild(harness);
+      forceKillPid(writerPid);
+    }
+  });
+});
+
+faultTest("SIGINT cleanup leaves no writer process", async () => {
+  await inTempDirectory("writer-sigint", async (directory) => {
+    const { harness, marker, writerPid } = await startLifecycleHarness(directory, "hold");
+    try {
+      harness.kill("SIGINT");
+      await waitForExit(harness, 4000, "SIGINT lifecycle harness");
+      await waitForCondition(() => !processIsAlive(writerPid), 4000);
+      if (fs.existsSync(marker)) assert.match(fs.readFileSync(marker, "utf8"), /ipc-stop|SIGTERM|disconnect|max-runtime/);
+    } finally {
+      await stopChild(harness);
+      forceKillPid(writerPid);
+    }
+  });
+});
+
+faultTest("snapshot worker hard timeout leaves only controlled staging residue", async () => {
+  await inTempDirectory("worker-timeout", async (directory) => {
+    const source = path.join(directory, "source.sqlite");
+    const target = path.join(directory, "must-not-exist.sqlite");
+    const unrelated = path.join(directory, "keep-me.txt");
+    createSyntheticDatabase(source, { rows: 60, payloadBytes: 128 });
+    fs.writeFileSync(unrelated, "keep", "utf8");
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: { ...process.env, P1A_WORKER_MAX_MS: "500", P1A_HOLD_AFTER_SNAPSHOT_MS: "5000" },
+    }, "hard-timeout snapshot worker", 2500);
+    try {
+      await waitForMessage(worker, (message) => message?.type === "snapshot-ready", 1500, "hard-timeout snapshot worker");
+      const result = await waitForExit(worker, 2000, "hard-timeout snapshot worker");
+      assert.equal(result.code, 124);
+    } finally {
+      await stopChild(worker);
+    }
+    assert.equal(fs.existsSync(target), false);
+    assert.ok(stagingFiles(directory).length >= 1);
+    cleanupStaleArtifacts(directory);
+    assert.equal(stagingFiles(directory).length, 0);
+    assert.equal(fs.readFileSync(unrelated, "utf8"), "keep");
+  });
+});
+
+faultTest("parent hard deadline escalates a blocked worker and confirms exit", async () => {
+  await inTempDirectory("worker-parent-deadline", async (directory) => {
+    const source = path.join(directory, "source.sqlite");
+    const target = path.join(directory, "must-not-exist.sqlite");
+    createSyntheticDatabase(source, { rows: 20, payloadBytes: 64 });
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: {
+        ...process.env,
+        P1A_ALLOW_TEST_BLOCK: "1",
+        P1A_TEST_BLOCK_MS: "3000",
+        P1A_WORKER_MAX_MS: "5000",
+      },
+    }, "blocked snapshot worker", 500);
+    await waitForMessage(worker, (message) => message?.type === "blocking", 1000, "blocked snapshot worker");
+    const result = await waitForExit(worker, 3000, "blocked snapshot worker");
+    assert.equal(childSupervisor.didTimeOut(worker), true);
+    assert.equal(result.signal === "SIGKILL" || result.code !== 0, true);
+    assert.equal(isChildRunning(worker), false);
+    assert.equal(worker.listenerCount("message"), 0);
+    assert.equal(worker.listenerCount("exit"), 0);
+    assert.equal(worker.listenerCount("error"), 0);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(stagingFiles(directory).length, 0);
+  });
+});
+
+faultTest("message deadline terminates the worker and removes all wait listeners", async () => {
+  await inTempDirectory("worker-message-deadline", async (directory) => {
+    const source = path.join(directory, "source.sqlite");
+    const target = path.join(directory, "must-not-exist.sqlite");
+    createSyntheticDatabase(source, { rows: 20, payloadBytes: 64 });
+    const worker = trackFork(workerScript, [source, target, STRATEGIES.VACUUM_INTO], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: {
+        ...process.env,
+        P1A_ALLOW_TEST_BLOCK: "1",
+        P1A_TEST_BLOCK_MS: "3000",
+        P1A_WORKER_MAX_MS: "5000",
+      },
+    }, "message-timeout snapshot worker", 5000);
+    await assert.rejects(
+      waitForMessage(worker, () => false, 200, "message-timeout snapshot worker"),
+      (error) => error.code === "P1A_CHILD_TIMEOUT",
+    );
+    assert.equal(isChildRunning(worker), false);
+    assert.equal(worker.listenerCount("message"), 0);
+    assert.equal(worker.listenerCount("exit"), 0);
+    assert.equal(worker.listenerCount("error"), 0);
+    assert.equal(fs.existsSync(target), false);
     assert.equal(stagingFiles(directory).length, 0);
   });
 });

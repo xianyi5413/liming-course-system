@@ -9,7 +9,9 @@ RUN mkdir -p /p1a-readonly \
   && chmod 0555 /p1a-readonly \
   && chown -R node:node /workspace
 
-ENV P1A_READ_ONLY_DIR=/p1a-readonly
+ENV P1A_READ_ONLY_DIR=/p1a-readonly \
+    P1A_TEST_PROFILE=safe \
+    P1A_LOCKED_SUITE_TIMEOUT_MS=90000
 
 USER node
 
