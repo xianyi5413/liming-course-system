@@ -120,13 +120,18 @@ function assertExistingPathNoSymlink(inputPath, expectedType) {
       if (error?.code === "ENOENT") {
         throw new P1BError(ERROR_CODES.SOURCE_NOT_FOUND, "Required backup source does not exist", { cause: error });
       }
-      throw error;
+      throw classifyError(error, ERROR_CODES.UNKNOWN, "path-access");
     }
     if (stat.isSymbolicLink()) {
       throw new P1BError(ERROR_CODES.SYMLINK_REJECTED, "Symbolic links are not allowed in backup paths");
     }
   }
-  const finalStat = fs.statSync(resolved);
+  let finalStat;
+  try {
+    finalStat = fs.statSync(resolved);
+  } catch (error) {
+    throw classifyError(error, ERROR_CODES.UNKNOWN, "path-access");
+  }
   if (expectedType === "file" && !finalStat.isFile()) {
     throw new P1BError(ERROR_CODES.INVALID_ARGUMENT, "Expected a regular file");
   }
@@ -138,7 +143,15 @@ function assertExistingPathNoSymlink(inputPath, expectedType) {
 
 function ensurePrivateDirectory(directory) {
   const resolved = path.resolve(directory);
-  if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { mode: 0o700 });
+  if (!fs.existsSync(resolved)) {
+    try {
+      fs.mkdirSync(resolved, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw classifyError(error, ERROR_CODES.UNKNOWN, "managed-directory-create");
+      }
+    }
+  }
   const checked = assertExistingPathNoSymlink(resolved, "directory");
   if (process.platform !== "win32" && (checked.stat.mode & 0o077) !== 0) {
     throw new P1BError(ERROR_CODES.IO_PERMISSION_DENIED, "Managed backup directory permissions must be 0700");

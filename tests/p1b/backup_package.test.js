@@ -14,6 +14,7 @@ const { createSyntheticDatabase } = require("../../scripts/p1a/synthetic_databas
 const {
   ERROR_CODES,
   MANAGED_NAMESPACE,
+  classifyError,
   cleanupStaleStaging,
   normalizeArchivePath,
   sha256File,
@@ -357,10 +358,38 @@ for (const targetType of ["zip", "sha256"]) {
 
 test("non-root locked container rejects an unwritable backup root", { skip: !process.env.P1B_READ_ONLY_DIR }, async () => {
   await withFixture("permission", async (fixture) => {
+    const before = fs.readdirSync(process.env.P1B_READ_ONLY_DIR).sort();
+    let coreError;
     await assert.rejects(
       fixture.create({ backupRoot: process.env.P1B_READ_ONLY_DIR, spaceProbe: () => 1024n ** 4n }),
-      (error) => error.code === ERROR_CODES.IO_PERMISSION_DENIED,
+      (error) => {
+        coreError = error;
+        assert.equal(error.code, ERROR_CODES.IO_PERMISSION_DENIED);
+        assert.ok(["EROFS", "EACCES", "EPERM"].includes(error.cause?.code));
+        assert.equal(error.message, "Backup output is not writable");
+        assert.equal(error.message.includes(process.env.P1B_READ_ONLY_DIR), false);
+        return true;
+      },
     );
+    assert.ok(coreError);
+    assert.deepEqual(fs.readdirSync(process.env.P1B_READ_ONLY_DIR).sort(), before);
+    assert.equal(fs.existsSync(path.join(process.env.P1B_READ_ONLY_DIR, MANAGED_NAMESPACE)), false);
+
+    const cli = spawnSync(process.execPath, [
+      backupCli,
+      "--source-db", fixture.sourceDatabase,
+      "--data-dir", fixture.dataDirectory,
+      "--backup-root", process.env.P1B_READ_ONLY_DIR,
+      "--strategy", STRATEGIES.ONLINE,
+      "--trigger", "manual",
+    ], { encoding: "utf8" });
+    assert.equal(cli.status, 3);
+    const cliError = JSON.parse(cli.stderr);
+    assert.equal(cliError.error_code, ERROR_CODES.IO_PERMISSION_DENIED);
+    assert.equal(cli.stderr.includes(process.env.P1B_READ_ONLY_DIR), false);
+    assert.equal(cli.stderr.includes(" at "), false);
+    assert.deepEqual(fs.readdirSync(process.env.P1B_READ_ONLY_DIR).sort(), before);
+    assert.equal(fs.existsSync(path.join(process.env.P1B_READ_ONLY_DIR, MANAGED_NAMESPACE)), false);
   });
 });
 
@@ -539,6 +568,15 @@ test("CLI argument failures use a stable error code without a stack trace", () =
   const output = JSON.parse(execution.stderr);
   assert.equal(output.error_code, ERROR_CODES.INVALID_ARGUMENT);
   assert.equal(execution.stderr.includes(" at "), false);
+  for (const systemCode of ["EROFS", "EACCES", "EPERM"]) {
+    const original = Object.assign(new Error("sensitive path /must/not/appear"), { code: systemCode });
+    const classified = classifyError(original, ERROR_CODES.UNKNOWN, "test");
+    assert.equal(classified.code, ERROR_CODES.IO_PERMISSION_DENIED);
+    assert.equal(classified.cause, original);
+    assert.equal(classified.cause.code, systemCode);
+    assert.equal(classified.message, "Backup output is not writable");
+    assert.equal(classified.message.includes("/must/not/appear"), false);
+  }
 });
 
 test("generated filenames are Windows legal and all handles close", async () => {
