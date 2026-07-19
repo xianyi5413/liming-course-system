@@ -1,0 +1,10 @@
+*
+!Dockerfile.p1b
+!scripts/
+!scripts/p1a/
+!scripts/p1a/**
+!scripts/p1b/
+!scripts/p1b/**
+!tests/
+!tests/p1b/
+!tests/p1b/**

@@ -2528,3 +2528,67 @@ docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512
 锁定环境的目标基线为 Node 24.18.0、Alpine 3.24.1、SQLite 3.53.1、linux/amd64，测试入口会在执行用例前强制核对这些版本。主 `Dockerfile` 仍保持现状；待锁定镜像测试实际通过并单独确认后，再决定是否替换生产基础镜像。
 
 P1A 明确不包含业务文件收集、ZIP、manifest、SHA-256、备份目录、数据库元数据表、网页、API、调度、恢复、保留策略或旧备份迁移。所有测试只允许使用合成数据库和本轮创建的临时文件。
+
+## P1B：完整备份包流水线（命令行原型，尚未部署）
+
+P1B 复用 P1A 的一致性 SQLite 快照接口，在独立的 `BACKUP_ROOT/system-v1` 命名空间中生成可验证的完整备份包。它仍是命令行和测试阶段，不包含网页、HTTP API、数据库元数据表、恢复、调度、保留策略或正式服务器部署。
+
+每次执行分别生成唯一任务 UUID 和备份 UUID，并通过带 `+0800` 时区的 Windows 合法时间生成独立目录。ZIP 和旁路 SHA-256 先在同文件系统的 0700 staging 目录内完成并验证关闭，再通过一次目录重命名发布：
+
+```text
+<backup-root>/system-v1/
+└─ liming-system-full-<时间>-<备份ID>/
+   ├─ liming-system-full-<时间>-<备份ID>.zip
+   └─ liming-system-full-<时间>-<备份ID>.zip.sha256
+```
+
+ZIP 内部结构：
+
+```text
+manifest.json
+database/liming-local.sqlite
+files/source-workbooks/
+files/templates/
+metadata/restore-notes.txt
+```
+
+只有上述白名单内容会进入包中。活动数据库 WAL/SHM、`uploads/`、旧 `backups/`、`debug/`、环境变量文件、凭据、日志、仓库源码、`.git/` 和 `node_modules/` 均被排除。可选目录不存在时 manifest 记录 `absent`，存在但为空时记录 `empty`。manifest 记录 UTC 与 Asia/Shanghai 时间、快照策略、运行时版本、`PRAGMA user_version`、数据库校验结果以及每个文件的大小和 SHA-256；不记录源绝对路径或秘密配置。
+
+创建备份包：
+
+```bash
+node scripts/p1b/backup_cli.js \
+  --source-db /isolated/data/liming-local.sqlite \
+  --data-dir /isolated/data \
+  --backup-root /isolated/backups \
+  --strategy online \
+  --trigger manual
+```
+
+计划任务必须给 `--scheduled-for` 提供带时区的 ISO-8601 值；fallback 可显式使用 `--strategy vacuum-into`。CLI 输出仅包含备份 ID、相对产物名称、策略和哈希，不回显输入绝对路径。
+
+只读验证已有备份包：
+
+```bash
+node scripts/p1b/verify_backup_cli.js \
+  --zip /isolated/backups/system-v1/<备份目录>/<备份文件>.zip
+```
+
+验证会重新计算整包 SHA-256、逐文件 SHA-256，并把包内数据库流式复制到受控系统临时目录执行 `integrity_check` 和 `foreign_key_check`；不会修改 ZIP 或旁路文件。
+
+Windows 合成测试：
+
+```powershell
+npm.cmd run test:p1b
+```
+
+锁定 Linux/Alpine 测试使用独立 `Dockerfile.p1b` 和白名单构建上下文，不使用 Compose、业务 Volume 或网络：
+
+```bash
+docker build --platform linux/amd64 -f Dockerfile.p1b -t liming-p1b-test .
+docker run --rm --network none --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+  liming-p1b-test
+```
+
+P1B ZIP 使用标准存储模式并全程分块读写，不把完整 ZIP 读入内存。当前原型明确不支持 ZIP64，因此单文件、ZIP偏移或整包超过传统 ZIP 32 位限制时会安全失败；它也不提供加密或数字签名。固定 Docker Hub digest 从零拉取仍需在网络可达环境完成供应链复现验证，主 `Dockerfile` 保持不变。
