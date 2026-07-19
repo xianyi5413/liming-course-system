@@ -123,8 +123,8 @@ function fieldCatalogSheet() {
   const headers = ["工作表", "source_table", "field_key", "display_name", "column_order", "data_type", "nullable", "restore_required", "restore_source", "primary_key", "relation_field", "sensitive", "enum_values", "date_format", "amount_unit"];
   return { name: "字段定义", rows: [headers, ...FULL_TABLE_DEFINITIONS.flatMap((definition) => definition.columns.map((column) => [definition.sheet_name, column.source_table, column.field_key, column.display_name, column.column_order, column.data_type, Number(column.nullable), Number(column.restore_required), Number(column.restore_source), Number(column.primary_key), Number(column.relation_field), Number(column.sensitive), column.enum_values.join("|"), column.date_format, column.amount_unit]))] };
 }
-function infoSheet({ appVersion, createdAt, counts, schemaVersion, excludedSettings }) {
-  return { name: "导出说明", rows: [["字段", "值"], ["file_type", FILE_TYPE], ["format_version", FORMAT_VERSION], ["导出时间（UTC）", createdAt.toISOString()], ["导出时间（Asia/Shanghai）", `${safeTimestamp(createdAt).replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, "$1-$2-$3T$4:$5:$6")}+08:00`], ["应用版本", appVersion || "unknown"], ["schema_version_source", "pragma_user_version"], ["schema_version", schemaVersion], ["恢复模式", "空系统初始化或完整覆盖恢复"], ["空值编码", NULL_MARKER], ["敏感数据", "账号认证数据含密码哈希；文件必须按高度敏感数据保管"], ["参考明细", "所有学生费用明细、所有课时明细 restore_source=0，恢复不依赖"], ["排除设置数量", excludedSettings], [], ["工作表", "source_table", "记录数", "restore_source"], ...FULL_TABLE_DEFINITIONS.map((definition) => [definition.sheet_name, definition.source_table, counts[definition.key], Number(definition.restore_source)]), [], ["未导出表", "分类", "原因"], ...EXCLUDED_TABLES.map((item) => [item.table, item.classification, item.reason])] };
+function infoSheet({ appVersion, appGitCommit, createdAt, counts, schemaVersion, excludedSettings }) {
+  return { name: "导出说明", rows: [["字段", "值"], ["file_type", FILE_TYPE], ["format_version", FORMAT_VERSION], ["导出时间（UTC）", createdAt.toISOString()], ["导出时间（Asia/Shanghai）", `${safeTimestamp(createdAt).replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, "$1-$2-$3T$4:$5:$6")}+08:00`], ["应用版本", appVersion || "unknown"], ["Git commit", String(appGitCommit || "").slice(0, 40) || "unknown"], ["schema_version_source", "pragma_user_version"], ["schema_version", schemaVersion], ["恢复模式", "空系统初始化或完整覆盖恢复"], ["空值编码", NULL_MARKER], ["敏感数据", "账号认证数据含密码哈希；文件必须按高度敏感数据保管"], ["参考明细", "所有学生费用明细、所有课时明细 restore_source=0，恢复不依赖"], ["排除设置数量", excludedSettings], [], ["工作表", "source_table", "记录数", "restore_source"], ...FULL_TABLE_DEFINITIONS.map((definition) => [definition.sheet_name, definition.source_table, counts[definition.key], Number(definition.restore_source)]), [], ["未导出表", "分类", "原因"], ...EXCLUDED_TABLES.map((item) => [item.table, item.classification, item.reason])] };
 }
 function expectedSheetNames() { return WORKBOOK_SEQUENCE.map((item) => typeof item === "string" ? item : item.sheet_name); }
 
@@ -141,12 +141,12 @@ function buildFullDataBuffer(db, options = {}) {
   const counts = Object.fromEntries(definitionsAndRows.map(({ definition, rows }) => [definition.key, rows.length]));
   const schemaVersion = Number(db.prepare("PRAGMA user_version").get().user_version || 0);
   const excludedSettings = Number(db.prepare("SELECT COUNT(*) AS count FROM settings").get().count) - counts.settings;
-  const info = infoSheet({ appVersion: options.appVersion, createdAt, counts, schemaVersion, excludedSettings }); const catalog = fieldCatalogSheet();
+  const info = infoSheet({ appVersion: options.appVersion, appGitCommit: options.appGitCommit, createdAt, counts, schemaVersion, excludedSettings }); const catalog = fieldCatalogSheet();
   const sheets = WORKBOOK_SEQUENCE.map((item) => item === "导出说明" ? info : item === "字段定义" ? catalog : dataSheet(item, byKey.get(item.key).rows));
   return { buffer: createWorkbook(sheets), counts, createdAt, schemaVersion, sheets: sheets.map((sheet) => sheet.name) };
 }
 
-function exportFullData({ dbPath, outputPath, appVersion = "unknown", createdAt = new Date() }) {
+function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date() }) {
   if (!dbPath || !outputPath) throw new FullExcelError("FULL_EXCEL_ARGUMENT_REQUIRED", "必须提供数据库和输出路径");
   const source = path.resolve(dbPath); const target = path.resolve(outputPath);
   if (!fs.existsSync(source)) throw new FullExcelError("FULL_EXCEL_SOURCE_NOT_FOUND", "源数据库不存在");
@@ -154,7 +154,7 @@ function exportFullData({ dbPath, outputPath, appVersion = "unknown", createdAt 
   fs.mkdirSync(path.dirname(target), { recursive: true }); const temporary = `${target}.partial-${process.pid}`; const db = new DatabaseSync(source, { readOnly: true });
   try {
     db.exec("BEGIN"); let result;
-    try { result = buildFullDataBuffer(db, { appVersion, createdAt }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+    try { result = buildFullDataBuffer(db, { appVersion, appGitCommit, createdAt }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
     fs.writeFileSync(temporary, result.buffer, { flag: "wx", mode: 0o600 }); fs.renameSync(temporary, target);
     return { ...result, outputPath: target, filename: path.basename(target) };
   } catch (error) { try { if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true }); } catch {} throw error; } finally { db.close(); }

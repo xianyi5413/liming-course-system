@@ -23,6 +23,8 @@
     "test:data-center": "node --test --test-concurrency=1 tests/backup_service.test.js",
     "test:backup-scheduler": "node --test --test-concurrency=1 tests/backup_scheduler.test.js",
     "test:baidu-backup": "node --test --test-concurrency=1 tests/baidu_backup.test.js",
+    "test:data-center-contract": "node --test --test-concurrency=1 tests/data_center_contract.test.js",
+    "test:data-center-api": "node --test --test-concurrency=1 tests/data_center_api.test.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",
     "trace:student-balance": "node src/server.js --trace-student-balance=秦小沫",

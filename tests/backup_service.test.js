@@ -64,6 +64,11 @@ test("cross-process lock rejects a concurrent backup", async () => {
   finally { service.releaseLock(lock); }
 });
 
+test("a stale lock from a terminated process is reclaimed without touching other files", () => {
+  const lock = path.join(dataDir, "backups", "full-excel", ".backup.lock"); fs.writeFileSync(lock, JSON.stringify({ pid: 2147483647, started_at: "2000-01-01T00:00:00.000Z" }), { flag: "wx" });
+  const acquired = service.acquireLock(); assert.equal(acquired, lock); service.releaseLock(acquired); assert.equal(fs.existsSync(lock), false);
+});
+
 test("legacy records remain visible and are not converted to managed backups", () => {
   const legacy = service.list().find((row) => row.filename === "legacy.zip"); assert.ok(legacy); assert.equal(legacy.backup_format, "legacy_core_zip"); assert.equal(legacy.managed_relative_path, "");
 });

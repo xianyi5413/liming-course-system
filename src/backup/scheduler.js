@@ -70,8 +70,8 @@ function dueState(dbPath, settings, now = new Date()) {
   } finally { db.close(); }
 }
 
-function startBackupScheduler({ dbPath, dataDir, intervalMs = 60_000, childScript = path.resolve(__dirname, "../../scripts/excel_backup/run_scheduled_backup.js"), logger = console } = {}) {
-  let child = null; let stopped = false;
+function startBackupScheduler({ dbPath, dataDir, intervalMs = 60_000, timeoutMs = 15 * 60_000, childScript = path.resolve(__dirname, "../../scripts/excel_backup/run_scheduled_backup.js"), logger = console } = {}) {
+  let child = null; let childTimeout = null; let stopped = false;
   const check = () => {
     if (stopped || child) return;
     try {
@@ -80,11 +80,12 @@ function startBackupScheduler({ dbPath, dataDir, intervalMs = 60_000, childScrip
       child = spawn(process.execPath, [childScript, "--scheduled-for", due.scheduled_for, "--schedule-key", due.key], { cwd: path.resolve(__dirname, "../.."), env: { ...process.env, DB_PATH: dbPath, DATA_DIR: dataDir }, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => logger.info?.(`[backup-job] ${String(chunk).trim().slice(0, 500)}`));
       child.stderr.on("data", (chunk) => logger.error?.(`[backup-job] ${String(chunk).trim().slice(0, 500)}`));
-      child.on("exit", (code) => { logger.info?.(`[backup-job] exit=${Number(code)}`); child = null; });
+      const launched = child; childTimeout = setTimeout(() => { if (child === launched) { logger.error?.("[backup-job] timeout"); launched.kill("SIGTERM"); } }, Math.max(1_000, timeoutMs)); childTimeout.unref();
+      child.on("exit", (code) => { if (childTimeout) clearTimeout(childTimeout); childTimeout = null; logger.info?.(`[backup-job] exit=${Number(code)}`); if (child === launched) child = null; });
     } catch (error) { logger.error?.(`[backup-scheduler] ${String(error.code || error.name || "CHECK_FAILED")}`); }
   };
   const timer = setInterval(check, Math.max(1_000, intervalMs)); timer.unref(); setImmediate(check);
-  return { check, stop() { stopped = true; clearInterval(timer); if (child) child.kill("SIGTERM"); }, running() { return Boolean(child); } };
+  return { check, stop() { stopped = true; clearInterval(timer); if (childTimeout) clearTimeout(childTimeout); if (child) child.kill("SIGTERM"); }, running() { return Boolean(child); } };
 }
 
 module.exports = { DEFAULT_BACKUP_SETTINGS, SETTING_KEYS, normalizeSettings, loadBackupSettings, saveBackupSettings, shanghaiParts, scheduleKey, dueState, startBackupScheduler };

@@ -419,8 +419,6 @@ let expenseFilter = (() => {
     return { month_key: "", start: "", end: "", category: "", q: "" };
   }
 })();
-let auditState = { xlsxReport: null, internalReport: null, logs: [], events: [], busy: false, notice: "" };
-let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") || "";
 let backupState = { settings: null, records: [], busy: false, error: "", importFile: null, importPreview: null, importMode: "initialize" };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
@@ -1473,7 +1471,6 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
     finance: keepPreviousPageData ? previousState.finance || null : null,
     profile_teachers: keepPreviousPageData ? previousState.profile_teachers || [] : [],
     profile_students: keepPreviousPageData ? previousState.profile_students || [] : [],
-    source_workbooks: keepPreviousPageData ? previousState.source_workbooks || [] : [],
     users: keepPreviousPageData ? previousState.users || [] : [],
     roles: keepPreviousPageData ? previousState.roles || [] : [],
     permission_tree: keepPreviousPageData ? previousState.permission_tree || [] : [],
@@ -1603,20 +1600,11 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   }
 
   if (view === "audit") {
-    state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
-    if (!stillCurrent()) return false;
     if (canArea("audit")) {
-      await refreshAuditEvents();
-      if (!stillCurrent()) return false;
       await refreshBackupData();
       if (!stillCurrent()) return false;
     } else {
-      auditState.events = [];
       backupState = { ...backupState, settings: null, records: [], error: "" };
-    }
-    if (!auditSourceWorkbook && state.source_workbooks.length) {
-      auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
-        || state.source_workbooks[0].filename;
     }
   }
 
@@ -4423,192 +4411,6 @@ function balanceDetailCards(row) {
   `;
 }
 
-function severityRank(severity) {
-  return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, WARN: 4 }[severity] ?? 9;
-}
-
-function issueValue(issue, key) {
-  return issue[key] ?? "";
-}
-
-function hasApplicablePatch(issue) {
-  const patch = issue?.patch || null;
-  if (!patch) return false;
-  if (patch.type === "lesson" && patch.id) return true;
-  if (patch.type === "student" && patch.name) return true;
-  if (patch.type === "insert_lesson" && patch.lesson) return true;
-  return false;
-}
-
-function issueRows(issues, sourceKey) {
-  return [...issues].sort((a, b) => severityRank(a.severity) - severityRank(b.severity)).map((issue, index) => `
-    <tr>
-      <td class="text-cell"><span class="severity-pill ${escapeHtml(issue.severity)}">${escapeHtml(issue.severity)}</span></td>
-      <td class="text-cell">${escapeHtml(issue.type || issue.source || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.entity || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.field || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.xlsx_value ?? issue.after_value ?? "")}</td>
-      <td class="text-cell">${escapeHtml(issue.db_value ?? issue.before_value ?? "")}</td>
-      <td class="text-cell">${escapeHtml(issue.message || issue.notes || "")}</td>
-      <td class="text-cell audit-actions">
-        ${hasApplicablePatch(issue) ? `<button class="btn audit-apply-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id || ""}">${issue.patch?.type === "insert_lesson" ? "从 xlsx 补录" : "以 xlsx 为准"}</button>` : ""}
-        ${issue.audit_log_id ? `<button class="btn audit-ignore-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id}" data-issue-key="${escapeHtml(issue.issue_key || "")}">忽略此项</button>` : ""}
-      </td>
-    </tr>
-  `).join("");
-}
-
-function auditSourceMeta(report) {
-  if (!report) return "";
-  const fileName = String(report.source_file || "").split(/[\\/]/).pop();
-  const reconcile = report.reconcile || {};
-  const internalOnly = auditInternalOnlyCount(report);
-  return `
-    <div class="audit-source-meta">
-      <span>月份：${escapeHtml(report.month_key || state?.settings?.month_key || "")}</span>
-      <span>工作表：${escapeHtml(report.sheet_name || "-")}</span>
-      <span>扫描课程：${Number(report.scanned_lessons || 0)}</span>
-      ${report.reconcile ? `<span>导入前课程：${Number(reconcile.dbCourseCountBefore || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>导入后课程：${Number(reconcile.dbCourseCountAfter || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>系统多余：${Number(reconcile.internalOnly || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>源文件新增：${Number(reconcile.sourceOnly || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>字段变更：${Number(reconcile.changed || 0)}</span>` : ""}
-      ${fileName ? `<span>文件：${escapeHtml(fileName)}</span>` : ""}
-      ${internalOnly ? `<span>系统中存在 ${internalOnly} 条源文件不存在的课程记录。</span><button class="btn danger audit-clean-internal-only" type="button">处理系统多余课程</button>` : ""}
-    </div>
-  `;
-}
-
-function groupedIssueTable(report, sourceKey) {
-  if (!report) return `<div class="empty audit-empty">尚未运行对账</div>`;
-  const issues = report.issues || [];
-  if (!issues.length) return `<div class="empty audit-empty">未发现差异</div>`;
-  const bySeverity = {};
-  for (const issue of issues) {
-    if (!bySeverity[issue.severity]) bySeverity[issue.severity] = [];
-    bySeverity[issue.severity].push(issue);
-  }
-  return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "WARN"].filter((severity) => bySeverity[severity]?.length).map((severity) => `
-    <details class="audit-group" ${["CRITICAL", "HIGH"].includes(severity) ? "open" : ""}>
-      <summary><span class="severity-pill ${severity}">${severity}</span><strong>${bySeverity[severity].length}</strong></summary>
-      <div class="table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>级别</th><th>类型</th><th>实体</th><th>字段</th><th>xlsx/建议值</th><th>数据库值</th><th>说明</th><th>操作</th></tr></thead>
-          <tbody>${issueRows(bySeverity[severity], sourceKey)}</tbody>
-        </table>
-      </div>
-    </details>
-  `).join("");
-}
-
-function auditCounts(report) {
-  const counts = report?.counts || {};
-  return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "WARN"].map((key) => `
-    <span class="audit-count"><span class="severity-pill ${key}">${key}</span>${counts[key] || 0}</span>
-  `).join("");
-}
-
-function combinedAuditCounts() {
-  const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const report of [auditState.xlsxReport, auditState.internalReport]) {
-    for (const key of Object.keys(counts)) counts[key] += Number(report?.counts?.[key] || 0);
-  }
-  return counts;
-}
-
-function auditRiskOverview() {
-  const counts = combinedAuditCounts();
-  const hasReport = !!(auditState.xlsxReport || auditState.internalReport);
-  const critical = counts.CRITICAL || 0;
-  const high = counts.HIGH || 0;
-  const warn = counts.WARN || 0;
-  const status = !hasReport
-    ? "尚未运行对账"
-    : critical
-      ? `需要先处理 ${critical} 条 CRITICAL`
-      : high
-        ? `还有 ${high} 条 HIGH 需要复核`
-        : "未发现高风险差异";
-  return `
-    <div class="audit-risk-overview ${critical ? "has-critical" : ""}">
-      <div>
-        <div class="audit-risk-kicker">对账优先级</div>
-        <div class="audit-risk-title">${escapeHtml(status)}</div>
-        <div class="audit-risk-note">先处理影响定价、学生名单、老师、日期和时段的差异；低风险备注类问题可以后置。</div>
-      </div>
-      <div class="audit-risk-counts">
-        ${["CRITICAL", "HIGH", "MEDIUM", "WARN"].map((key) => `
-          <div class="audit-risk-card ${key}">
-            <span>${key}</span>
-            <strong>${counts[key] || 0}</strong>
-          </div>
-        `).join("")}
-      </div>
-    </div>
-  `;
-}
-
-function auditIssueByLogId(sourceKey, logId) {
-  const report = auditState[sourceKey];
-  return (report?.issues || []).find((issue) => String(issue.audit_log_id || "") === String(logId || ""));
-}
-
-function auditInternalOnlyIssues(report) {
-  return (report?.issues || []).filter((issue) => issue.type === "internal-only");
-}
-
-function auditInternalOnlyCount(report) {
-  return Number(report?.reconcile?.internalOnly || auditInternalOnlyIssues(report).length || 0);
-}
-
-function basenameFromPath(value) {
-  return String(value || "").split(/[\\/]/).pop();
-}
-
-function auditSourceFilename(report) {
-  const reportFile = basenameFromPath(report?.source_file);
-  const monthKey = report?.month_key || state?.settings?.month_key || activeMonth;
-  const workbooks = state.source_workbooks || [];
-  const reportWorkbook = workbooks.find((item) => item.filename === reportFile && item.month_key === monthKey);
-  if (reportWorkbook) return reportWorkbook.filename;
-  const selectedWorkbook = workbooks.find((item) => item.filename === auditSourceWorkbook && item.month_key === monthKey);
-  if (selectedWorkbook) return selectedWorkbook.filename;
-  const matched = workbooks.find((item) => item.month_key === monthKey);
-  return matched?.filename || "";
-}
-
-function removeAuditIssueByLogId(sourceKey, logId) {
-  const report = auditState[sourceKey];
-  if (!report?.issues) return;
-  report.issues = report.issues.filter((issue) => String(issue.audit_log_id || "") !== String(logId || ""));
-  report.counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const issue of report.issues) report.counts[issue.severity] = (report.counts[issue.severity] || 0) + 1;
-  report.issue_count = report.issues.length;
-}
-
-function removeAuditIssueByIdentity(sourceKey, logId, issueKey) {
-  const report = auditState[sourceKey];
-  if (!report?.issues) return;
-  report.issues = report.issues.filter((issue) => {
-    const sameLog = logId && String(issue.audit_log_id || "") === String(logId);
-    const sameIssue = issueKey && String(issue.issue_key || "") === String(issueKey);
-    return !(sameLog || sameIssue);
-  });
-  report.counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const issue of report.issues) report.counts[issue.severity] = (report.counts[issue.severity] || 0) + 1;
-  report.issue_count = report.issues.length;
-}
-
-async function refreshAuditLogs() {
-  const data = await request("/api/audit/logs?limit=200");
-  auditState.logs = data.logs || [];
-}
-
-async function refreshAuditEvents() {
-  const data = await request("/api/audit/events?limit=200");
-  auditState.events = data.events || [];
-}
-
 async function refreshBackupData({ logView = false } = {}) {
   const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
   backupState = {
@@ -4617,74 +4419,6 @@ async function refreshBackupData({ logView = false } = {}) {
     records: data.records || [],
     error: "",
   };
-}
-
-async function applyAuditIssue(issue) {
-  const confirmCritical = issue.severity === "CRITICAL";
-  if (confirmCritical && !confirm(`确认以 xlsx/建议值修复 CRITICAL：${issue.entity} ${issue.field}？`)) return;
-  const result = await request("/api/audit/apply", {
-    method: "POST",
-    body: { issues: [issue], confirm_critical: confirmCritical },
-  });
-  if (issue.audit_log_id) removeAuditIssueByLogId("xlsxReport", issue.audit_log_id);
-  if (issue.audit_log_id) removeAuditIssueByLogId("internalReport", issue.audit_log_id);
-  await refreshAuditLogs();
-  alert(`修复完成：${result.fixed} 条，跳过 ${result.skipped} 条。已备份：${result.backup}`);
-  await load();
-}
-
-function internalOnlyLessonLine(row) {
-  return [
-    `#${row.id || row.lessonId || ""}`,
-    row.date || "",
-    row.student || row.student_names || "",
-    row.teacher || row.teacher_name || "",
-    row.time_slot || "",
-    row.subject || "",
-    row.classroom || "",
-    `金额:${row.amount ?? row.teacher_salary ?? ""}`,
-    `创建:${row.created_at || ""}`,
-    `更新:${row.updated_at || ""}`,
-  ].filter(Boolean).join(" | ");
-}
-
-async function handleInternalOnlyCleanup() {
-  const report = auditState.xlsxReport;
-  if (!report) return alert("请先运行源头对账");
-  const monthKey = report.month_key || state.settings.month_key;
-  const filename = auditSourceFilename(report);
-  const preview = await request("/api/reconcile/internal-only-lessons/preview", {
-    method: "POST",
-    body: { month: monthKey, filename },
-  });
-  if (!preview.canApply || !preview.lessons?.length) {
-    auditState.xlsxReport = { ...report, reconcile: { ...(report.reconcile || {}), internalOnly: 0 } };
-    render();
-    return alert(preview.warning || "当前没有系统多余课程。");
-  }
-  const shown = preview.lessons.map(internalOnlyLessonLine).join("\n");
-  const message = [
-    `这些课程存在于系统数据库中，但不在当前月份源文件中。`,
-    `确认后将从系统课程记录中删除，仅限当前月份，共 ${preview.internalOnlyCount} 条。此操作不可撤销。是否继续？`,
-    "",
-    shown,
-  ].join("\n");
-  if (!confirm(message)) return;
-  const result = await request("/api/reconcile/internal-only-lessons/apply", {
-    method: "POST",
-    body: {
-      month: monthKey,
-      filename: preview.source_file || filename,
-      confirm: true,
-      expectedCount: preview.internalOnlyCount,
-      lessonIds: preview.lessons.map((row) => row.id || row.lessonId).filter(Boolean),
-    },
-  });
-  auditState.xlsxReport = result.audit || auditState.xlsxReport;
-  await refreshAuditLogs();
-  await refreshAuditEvents();
-  alert(`已清理 ${result.deletedCount || 0} 条系统多余课程。已备份：${result.backup || "已生成"}`);
-  await load();
 }
 
 function options(values, current, emptyText = "") {
@@ -9321,119 +9055,6 @@ function renderStudentQuery() {
   contentEl.innerHTML = `
     ${studentQueryControls(studentNames)}
     <div class="student-query-results">${studentQueryResultsMarkup(report)}</div>
-  `;
-}
-
-const BACKUP_WEEKDAYS = [
-  ["0", "周日"],
-  ["1", "周一"],
-  ["2", "周二"],
-  ["3", "周三"],
-  ["4", "周四"],
-  ["5", "周五"],
-  ["6", "周六"],
-];
-
-function backupWeekdayLabel(value) {
-  return BACKUP_WEEKDAYS.find(([key]) => String(key) === String(value))?.[1] || "周三";
-}
-
-function backupTypeLabel(value) {
-  return value === "auto" ? "自动" : "手动";
-}
-
-function backupStatusLabel(value) {
-  if (value === "success") return "成功";
-  if (value === "failed") return "失败";
-  return value || "-";
-}
-
-function formatFileSize(bytes) {
-  const size = Number(bytes || 0);
-  if (!Number.isFinite(size) || size <= 0) return "0 KB";
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  return `${Math.max(1, Math.round(size / 1024))} KB`;
-}
-
-function backupSummaryText() {
-  const settings = backupState.settings || { enabled: true, weekday: 3 };
-  const prefix = settings.enabled ? `自动备份：每${backupWeekdayLabel(settings.weekday)}` : "自动备份：已关闭";
-  return `${prefix}；已保存 ${(backupState.records || []).length} 条记录，最多保留最近 5 次成功备份`;
-}
-
-function backupSettingsModalMarkup() {
-  if (!backupState.settingsOpen) return "";
-  const settings = backupState.settings || { enabled: true, weekday: 3, last_date: "" };
-  return `
-    <div class="modal-backdrop backup-settings-modal">
-      <div class="modal-panel backup-modal-panel">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">自动备份</div>
-            <div class="modal-subtitle">备份内容为所有月份核心 Excel zip，默认每周三检查一次。</div>
-          </div>
-          <button class="btn backup-settings-close" type="button">关闭</button>
-        </div>
-        <div class="backup-settings-grid">
-          <label class="history-toggle backup-enable-toggle">
-            <input class="backup-enabled-field" type="checkbox" ${settings.enabled ? "checked" : ""}>
-            <span>启用自动备份</span>
-          </label>
-          <label class="filter-field">
-            <span>每周几</span>
-            <select class="control backup-weekday-field">
-              ${BACKUP_WEEKDAYS.map(([key, label]) => `<option value="${key}" ${String(settings.weekday) === key ? "selected" : ""}>${label}</option>`).join("")}
-            </select>
-          </label>
-          <div class="backup-last-run">上次计划检查：${escapeHtml(settings.last_date || "暂无")}</div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn backup-settings-close" type="button">取消</button>
-          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
-          <button class="btn primary backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function backupRecordsModalMarkup() {
-  if (!backupState.recordsOpen) return "";
-  const rows = backupState.records || [];
-  return `
-    <div class="modal-backdrop backup-records-modal">
-      <div class="modal-panel backup-records-panel">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">备份记录</div>
-            <div class="modal-subtitle">仅保留最近 5 次成功备份；失败记录用于排查。</div>
-          </div>
-          <button class="btn backup-records-close" type="button">关闭</button>
-        </div>
-        <div class="table-wrap smooth-table-wrap">
-          <table class="audit-table backup-record-table uniform-table nowrap-table">
-            <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>月份数</th><th>大小</th><th class="wide">文件名</th><th>下载</th></tr></thead>
-            <tbody>
-              ${rows.map((row) => `
-                <tr>
-                  <td class="text-cell">${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "")}</td>
-                  <td class="text-cell">${escapeHtml(backupTypeLabel(row.backup_type))}</td>
-                  <td class="text-cell">${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
-                  <td class="text-cell right">${Number(row.included_months || 0)}</td>
-                  <td class="text-cell right">${escapeHtml(formatFileSize(row.file_size))}</td>
-                  <td class="text-cell" title="${escapeHtml(row.message || row.filename || "")}">${escapeHtml(row.filename || row.message || "-")}</td>
-                  <td><button class="btn backup-download" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>下载</button></td>
-                </tr>
-              `).join("") || `<tr><td colspan="7" class="empty">暂无备份记录</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-        <div class="modal-actions">
-          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
-          <button class="btn primary backup-records-close" type="button">关闭</button>
-        </div>
-      </div>
-    </div>
   `;
 }
 
@@ -15231,69 +14852,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".audit-run-xlsx").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const file = document.querySelector(".audit-file")?.files?.[0];
-      if (!file) return alert("请先选择 xlsx 文件");
-      auditState.busy = true;
-      render();
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch(`/api/audit/xlsx-diff?month=${encodeURIComponent(state.settings.month_key)}`, {
-          method: "POST",
-          body: form,
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        auditState.xlsxReport = data;
-        await refreshAuditLogs();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".audit-source-workbook").forEach((select) => {
-    select.addEventListener("change", () => {
-      auditSourceWorkbook = select.value;
-      localStorage.setItem("liming:audit-source-workbook", auditSourceWorkbook);
-    });
-  });
-
-  document.querySelectorAll(".audit-import-source").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const filename = document.querySelector(".audit-source-workbook")?.value || auditSourceWorkbook;
-      if (!filename) return alert("请选择 source-workbooks 里的 xlsx 文件");
-      const workbook = (state.source_workbooks || []).find((item) => item.filename === filename) || {};
-      const monthKey = workbook.month_key || state.settings.month_key;
-      if (!confirm(`导入 ${filename} 到 ${monthKey.slice(0, 7)}？系统会先备份数据库。`)) return;
-      auditState.busy = true;
-      auditState.notice = "";
-      render();
-      try {
-        const result = await request("/api/import/source-workbook", {
-          method: "POST",
-          body: { filename, month_key: monthKey },
-        });
-        activeMonth = result.month_key || monthKey;
-        localStorage.setItem("liming:month", activeMonth);
-        auditState.xlsxReport = result.audit || null;
-        auditState.notice = `已导入 ${filename}：课程 ${result.lessons || 0} 条，充值 ${result.recharges || 0} 条，学生单价 ${result.student_prices || 0} 条，费用标准 ${result.pricing_standards || 0} 条，教师交通费 ${result.teacher_adjustments || 0} 条。`;
-        await refreshAuditLogs();
-        await load();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
   document.querySelectorAll(".data-full-export").forEach((button) => {
     button.addEventListener("click", async () => {
       backupState.busy = true;
@@ -15466,95 +15024,6 @@ function wireEvents() {
     try { await request("/api/data-center/baidu/disconnect", { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘授权已解除"); }
     catch (error) { showToast(error.message || "解除授权失败", "error"); } finally { render(); }
   }));
-
-  document.querySelectorAll(".audit-run-internal").forEach((button) => {
-    button.addEventListener("click", async () => {
-      auditState.busy = true;
-      render();
-      try {
-        auditState.internalReport = await request(`/api/audit/internal-checks?month=${encodeURIComponent(state.settings.month_key)}`);
-        await refreshAuditLogs();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".audit-refresh-logs").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await refreshAuditLogs();
-      await refreshAuditEvents();
-      render();
-    });
-  });
-
-  document.querySelectorAll(".audit-clean-internal-only").forEach((button) => {
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        await handleInternalOnlyCleanup();
-      } catch (error) {
-        alert(error.message || "处理系统多余课程失败");
-      } finally {
-        button.disabled = false;
-      }
-    });
-  });
-
-  document.querySelectorAll(".audit-apply-one").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const issue = auditIssueByLogId(button.dataset.source, button.dataset.logId);
-      if (!issue) return;
-      await applyAuditIssue(issue);
-    });
-  });
-
-  document.querySelectorAll(".audit-ignore-one").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!button.dataset.logId) return;
-      const sourceKey = button.dataset.source;
-      const logId = button.dataset.logId;
-      const issueKey = button.dataset.issueKey || "";
-      const scrollTop = window.scrollY;
-      button.disabled = true;
-      button.textContent = "忽略中";
-      try {
-        const result = await request("/api/audit/ignore", {
-          method: "POST",
-          body: {
-            ids: [Number(logId)],
-            issue_keys: issueKey ? [issueKey] : [],
-          },
-        });
-        removeAuditIssueByIdentity(sourceKey, logId, issueKey);
-        await refreshAuditLogs();
-        auditState.notice = `已忽略 ${result.ignored_keys || result.ignored} 类问题，之后相同问题不会再提示。`;
-        render();
-        requestAnimationFrame(() => window.scrollTo(0, scrollTop));
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = "忽略此项";
-        alert(error.message);
-      }
-    });
-  });
-
-  document.querySelectorAll(".audit-fix-critical").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const issues = (auditState.xlsxReport?.issues || []).filter((issue) => issue.severity === "CRITICAL" && hasApplicablePatch(issue));
-      if (!issues.length) return;
-      if (!confirm(`确认以 xlsx 为准修复 ${issues.length} 条 CRITICAL？此操作会先备份数据库。`)) return;
-      const result = await request("/api/audit/apply", { method: "POST", body: { issues, confirm_critical: true } });
-      await refreshAuditLogs();
-      alert(`修复完成：${result.fixed} 条，跳过 ${result.skipped} 条。已备份：${result.backup}`);
-      await load();
-    });
-  });
 
   document.querySelectorAll(".user-admin-tab").forEach((button) => {
     button.addEventListener("click", () => {

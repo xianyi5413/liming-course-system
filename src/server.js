@@ -15,7 +15,8 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = "2026.07.17-schedule-editing-status-order-fix";
+const APP_VERSION = process.env.APP_VERSION || "2026.07.17-schedule-editing-status-order-fix";
+const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -1001,6 +1002,13 @@ function baiduBackupManager() { if (!baiduBackupManagerInstance) baiduBackupMana
 function cleanupPendingDataImports() {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, item] of pendingDataImports) if (item.created_at < cutoff) { try { fs.rmSync(item.path, { force: true }); } catch {} pendingDataImports.delete(id); }
+  const uploadDir = path.join(dataDir, "uploads", "data-center");
+  try {
+    for (const entry of fs.readdirSync(uploadDir, { withFileTypes: true })) {
+      const filename = path.join(uploadDir, entry.name); const active = [...pendingDataImports.values()].some((item) => item.path === filename);
+      if (entry.isFile() && /^[0-9a-f-]{36}\.xlsx$/i.test(entry.name) && !active && fs.statSync(filename).mtimeMs < cutoff) fs.rmSync(filename, { force: true });
+    }
+  } catch {}
 }
 
 if (process.argv.includes("--init-db")) {
@@ -6119,16 +6127,6 @@ ${worksheetRels}
   return zipStore(files);
 }
 
-function monthLabelCn(monthKey) {
-  const year = monthKey.slice(0, 4);
-  const month = Number(monthKey.slice(5, 7));
-  return `${year}年${month}月`;
-}
-
-function monthNumberCn(monthKey) {
-  return `${Number(monthKey.slice(5, 7))}月`;
-}
-
 function normalizeExportMonthKey(value) {
   const raw = text(value);
   const match = raw.match(/^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/);
@@ -6155,501 +6153,10 @@ function exportTimestamp(date = new Date()) {
   ].join("");
 }
 
-function coreWorkbookFilename(monthKey, stamp = exportTimestamp()) {
-  return `黎明教育_${monthLabelCn(monthKey)}_核心数据_${stamp}.xlsx`;
-}
-
-function coreLessonRows(monthKey) {
-  const lessons = all(
-    "SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id",
-    [monthKey],
-  );
-  let sequence = 0;
-  const rows = lessons.map((lesson) => {
-    if (isEffective(lesson)) sequence += 1;
-    return [
-      lesson.teacher_name,
-      lesson.date,
-      weekdayCn(lesson.date),
-      lesson.time_slot,
-      lesson.classroom,
-      deriveStatus(lesson),
-      lesson.grade,
-      lesson.subject,
-      lesson.student_names,
-      lesson.notes,
-      effectiveTeacherSalary(lesson),
-      splitStudents(lesson.student_names).length,
-      sequence,
-    ];
-  });
-  return [
-    [`${monthLabelCn(monthKey)}黎明教育课程安排`],
-    ["授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资", "学生人数", "累计序号"],
-    ...rows,
-  ];
-}
-
-function coreStudentSummaryRows(monthKey, details) {
-  const summaryRows = studentSummary(details, monthKey);
-  const includedStudentNames = coreStudentSummaryIncludedNames(details, summaryRows);
-  const rows = summaryRows.filter((row) => includedStudentNames.has(text(row.student_name)));
-  return [
-    [`${monthLabelCn(monthKey)} 学生费用汇总`],
-    ["学生姓名", "年级", "上课次数", "课程总费用", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "本月实际消费", "本月赠送消费", "本月实际余额", "本月赠送余额"],
-    ...rows.map((row) => [
-      row.student_name,
-      row.grade,
-      row.lesson_count,
-      row.total_fee,
-      row.prev_actual,
-      row.prev_gift,
-      row.cur_recharge,
-      row.cur_gift,
-      row.actual_consumption,
-      row.gift_consumption,
-      row.actual_balance,
-      row.gift_balance,
-    ]),
-  ];
-}
-
-function coreStudentSummaryIncludedNames(details, summaryRows) {
-  const included = new Set();
-  for (const detail of details) {
-    const studentName = text(detail.student_name);
-    if (studentName) included.add(studentName);
-  }
-  for (const row of summaryRows) {
-    const studentName = text(row.student_name);
-    if (!studentName) continue;
-    const rechargeNotes = text(row.recharge_notes);
-    const hasRechargeSignal = num(row.cur_recharge) !== 0
-      || num(row.cur_gift) !== 0
-      || !!text(row.recharge_date)
-      || (!!rechargeNotes && !rechargeNotes.startsWith("自动结转"));
-    const hasPositiveBalance = num(row.actual_balance) > 0 || num(row.gift_balance) > 0;
-    if (hasRechargeSignal || hasPositiveBalance) included.add(studentName);
-  }
-  return included;
-}
-
-function coreFeeDetailRows(monthKey, details) {
-  const sorted = [...details].sort((a, b) => [
-    text(a.student_name),
-    text(a.date),
-    text(a.time_slot),
-    String(a.lesson_id || "").padStart(8, "0"),
-    String(a.student_index || "").padStart(4, "0"),
-  ].join("|").localeCompare([
-    text(b.student_name),
-    text(b.date),
-    text(b.time_slot),
-    String(b.lesson_id || "").padStart(8, "0"),
-    String(b.student_index || "").padStart(4, "0"),
-  ].join("|"), "zh-Hans-CN"));
-  return [
-    [`${monthLabelCn(monthKey)} 黎明教育学生费用明细`],
-    ["学生姓名", "授课老师", "日期", "状态", "星期", "时间", "教室", "年级", "科目", "备注", "单人费用"],
-    ...sorted.map((row) => [
-      row.student_name,
-      row.teacher_name,
-      row.date,
-      deriveStatus(row),
-      row.weekday,
-      row.time_slot,
-      row.classroom,
-      row.grade,
-      row.subject,
-      row.notes,
-      row.unit_price,
-    ]),
-  ];
-}
-
-function unregisteredRechargeRows(details, rechargeRows) {
-  const registered = new Set(rechargeRows.map((row) => text(row.student_name)).filter(Boolean));
-  const profiles = new Map(all("SELECT name, grade FROM students").map((row) => [row.name, row]));
-  const byStudent = new Map();
-  for (const detail of details) {
-    const studentName = text(detail.student_name);
-    if (!studentName || registered.has(studentName) || byStudent.has(studentName)) continue;
-    const profile = profiles.get(studentName) || {};
-    byStudent.set(studentName, {
-      student_name: studentName,
-      grade: detail.grade || profile.grade || "",
-    });
-  }
-  return [...byStudent.values()].sort((a, b) => compareGradeName(a.grade, b.grade) || a.student_name.localeCompare(b.student_name, "zh-Hans-CN"));
-}
-
-function coreRechargeRows(monthKey, details) {
-  const recharges = all(
-    `SELECT * FROM recharge_records
-     WHERE month_key = ?
-       AND ${REAL_RECHARGE_SQL}
-     ORDER BY CASE WHEN recharge_date IS NULL OR TRIM(recharge_date) = '' THEN 1 ELSE 0 END,
-       recharge_date, id, student_name`,
-    [monthKey],
-  );
-  const profiles = new Map(all("SELECT name, grade FROM students").map((row) => [row.name, row]));
-  const missing = unregisteredRechargeRows(details, recharges);
-  const maxRows = Math.max(recharges.length, missing.length);
-  const rows = [];
-  for (let index = 0; index < maxRows; index += 1) {
-    const recharge = recharges[index] || {};
-    const profile = profiles.get(recharge.student_name) || {};
-    const miss = missing[index] || {};
-    rows.push([
-      recharge.student_name || "",
-      recharge.grade || profile.grade || "",
-      recharge.id ? num(recharge.prev_actual) : "",
-      recharge.id ? num(recharge.prev_gift) : "",
-      recharge.id ? num(recharge.cur_recharge) : "",
-      recharge.id ? num(recharge.cur_gift) : "",
-      recharge.recharge_date || "",
-      recharge.notes || "",
-      "",
-      miss.student_name || "",
-      miss.grade || "",
-    ]);
-  }
-  return [
-    ["充值记录（静态导出；右侧 J/K 列为未登记充值提醒）", "", "", "", "", "", "", "", "", "未登记充值提醒", ""],
-    ["学生姓名", "年级", "上月实际结转", "上月赠送结转", "本月实际充值", "本月赠送学费", "充值日期", "备注", "", "未登记姓名", "未登记年级"],
-    ...rows,
-  ];
-}
-
-function coreTeacherSalaryRows(monthKey) {
-  const rows = teacherSummary(monthKey);
-  const weeks = teacherMonthWeeks(monthKey);
-  const totals = rows.reduce((acc, row) => {
-    acc.lesson_count += num(row.lesson_count);
-    acc.salary_total = moneyRound(acc.salary_total + num(row.salary_total));
-    for (const week of weeks) {
-      const key = teacherTravelField(week.week_index);
-      acc[key] = moneyRound(num(acc[key]) + num(row[key]));
-    }
-    acc.total_salary = moneyRound(acc.total_salary + num(row.total_salary));
-    return acc;
-  }, {
-    lesson_count: 0,
-    salary_total: 0,
-    total_salary: 0,
-  });
-  const output = [
-    [`${monthLabelCn(monthKey)} 薪资汇总`],
-    ["教师姓名", "上课课时数", "课时合计", ...weeks.map((week) => week.label), "薪资合计", "备注"],
-    ...rows.map((row) => [
-      row.teacher_name,
-      row.lesson_count,
-      row.salary_total,
-      ...weeks.map((week) => row[teacherTravelField(week.week_index)]),
-      row.total_salary,
-      row.notes,
-    ]),
-  ];
-  if (rows.length) {
-    output.push([
-      "合计",
-      totals.lesson_count,
-      totals.salary_total,
-      ...weeks.map((week) => totals[teacherTravelField(week.week_index)] || 0),
-      totals.total_salary,
-      "",
-    ]);
-  }
-  return output;
-}
-
-function archiveTableRows(columns, rows) {
-  return [
-    columns.map((column) => column.label),
-    ...rows.map((row) => columns.map((column) => row[column.key] ?? "")),
-  ];
-}
-
-function archiveSheet(name, dataType, columns, rows) {
-  return {
-    name,
-    dataType,
-    recordCount: rows.length,
-    rows: archiveTableRows(columns, rows),
-  };
-}
-
-function monthArchiveData(monthKey) {
-  const lessons = all(
-    "SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id",
-    [monthKey],
-  );
-  const recharges = all(
-    `SELECT * FROM recharge_records
-     WHERE month_key = ? AND ${REAL_RECHARGE_SQL}
-     ORDER BY CASE WHEN recharge_date IS NULL OR TRIM(recharge_date) = '' THEN 1 ELSE 0 END,
-       recharge_date, id, student_name`,
-    [monthKey],
-  );
-  const openingBalances = all(
-    "SELECT * FROM student_opening_balances WHERE month_key = ? ORDER BY student_name, id",
-    [monthKey],
-  );
-  const feeOverrides = all(
-    `SELECT o.lesson_id, o.student_name, o.unit_price, o.updated_at, l.month_key
-     FROM fee_overrides o
-     JOIN lessons l ON l.id = o.lesson_id
-     WHERE l.month_key = ?
-     ORDER BY l.date, o.lesson_id, o.student_name`,
-    [monthKey],
-  );
-  const teacherAdjustments = all(
-    "SELECT * FROM teacher_adjustments_monthly WHERE month_key = ? ORDER BY teacher_name",
-    [monthKey],
-  );
-  const teacherTravelFees = all(
-    "SELECT * FROM teacher_travel_fees WHERE month_key = ? ORDER BY teacher_name, week_index, id",
-    [monthKey],
-  );
-  const staffSalaries = all(
-    `SELECT ssm.*, s.name AS staff_name
-     FROM staff_salary_monthly ssm
-     LEFT JOIN staff s ON s.id = ssm.staff_id
-     WHERE ssm.month_key = ? ORDER BY s.name, ssm.staff_id, ssm.id`,
-    [monthKey],
-  );
-  const staffAttendance = all(
-    `SELECT sa.*, s.name AS staff_name
-     FROM staff_attendance sa
-     LEFT JOIN staff s ON s.id = sa.staff_id
-     WHERE sa.month_key = ? ORDER BY sa.attendance_date, s.name, sa.staff_id, sa.id`,
-    [monthKey],
-  );
-  const expenses = all(
-    "SELECT * FROM operating_expenses WHERE month_key = ? ORDER BY expense_date, id",
-    [monthKey],
-  );
-
-  const studentNames = new Set();
-  for (const lesson of lessons) splitStudents(lesson.student_names).forEach((name) => studentNames.add(name));
-  for (const row of [...recharges, ...openingBalances, ...feeOverrides]) {
-    const name = text(row.student_name);
-    if (name) studentNames.add(name);
-  }
-  const students = all("SELECT * FROM students ORDER BY name, id")
-    .filter((row) => !["离校", "已流出", "已毕业"].includes(text(row.status)) || studentNames.has(text(row.name)));
-  students.forEach((row) => studentNames.add(text(row.name)));
-  const studentStages = all("SELECT * FROM student_grade_stages ORDER BY student_name, start_date, id")
-    .filter((row) => studentNames.has(text(row.student_name)));
-
-  const teacherNames = new Set();
-  const meaningfulTeacherAdjustments = teacherAdjustments.filter((row) => (
-    num(row.week1_transport) !== 0 || num(row.week2_transport) !== 0
-    || num(row.week3_transport) !== 0 || num(row.week4_transport) !== 0 || !!text(row.notes)
-  ));
-  for (const row of [...lessons, ...meaningfulTeacherAdjustments, ...teacherTravelFees]) {
-    const name = text(row.teacher_name);
-    if (name) teacherNames.add(name);
-  }
-  const teachers = all("SELECT * FROM teachers ORDER BY name, id")
-    .filter((row) => text(row.status) !== "离职" || teacherNames.has(text(row.name)));
-  teachers.forEach((row) => teacherNames.add(text(row.name)));
-  const referencedSalaryRuleIds = new Set(lessons.map((row) => Number(row.teacher_salary_rule_id)).filter(Number.isInteger));
-  const teacherSalaryRules = all("SELECT * FROM teacher_salary_rules ORDER BY teacher_name, grade, subject, id")
-    .filter((row) => Number(row.is_active) === 1 || referencedSalaryRuleIds.has(Number(row.id)));
-
-  const referencedStaffIds = new Set(
-    [...staffSalaries, ...staffAttendance].map((row) => Number(row.staff_id)).filter(Number.isInteger),
-  );
-  const staff = all("SELECT * FROM staff ORDER BY name, id")
-    .filter((row) => text(row.status) !== "离职" || referencedStaffIds.has(Number(row.id)));
-
-  return {
-    lessons,
-    recharges,
-    openingBalances,
-    feeOverrides,
-    teacherAdjustments,
-    teacherTravelFees,
-    staffSalaries,
-    staffAttendance,
-    expenses,
-    students,
-    studentStages,
-    teachers,
-    studentPricing: all("SELECT * FROM student_pricing ORDER BY student_name, grade, subject, id"),
-    pricingStandards: all("SELECT * FROM pricing_standards ORDER BY grade, student_count, id"),
-    teacherSalaryRules,
-    classGroups: all("SELECT * FROM class_groups ORDER BY teacher, grade, subject, class_name, id"),
-    staff,
-  };
-}
-
-function monthlyArchiveSheets(monthKey) {
-  const data = monthArchiveData(monthKey);
-  const rowsByKey = {
-    lessons: data.lessons.map((row) => ({ ...row, weekday: weekdayCn(row.date), status: deriveStatus(row) })),
-    recharge_records: data.recharges,
-    student_opening_balances: data.openingBalances,
-    students: data.students,
-    student_grade_stages: data.studentStages,
-    teachers: data.teachers,
-    student_pricing: data.studentPricing,
-    fee_overrides: data.feeOverrides,
-    pricing_standards: data.pricingStandards,
-    teacher_salary_rules: data.teacherSalaryRules,
-    teacher_adjustments_monthly: data.teacherAdjustments,
-    teacher_travel_fees: data.teacherTravelFees,
-    class_groups: data.classGroups,
-    staff: data.staff,
-    staff_salary_monthly: data.staffSalaries,
-    staff_attendance: data.staffAttendance,
-    operating_expenses: data.expenses,
-  };
-  const typeByKey = {
-    lessons: "原始数据（当月）", recharge_records: "原始数据（当月真实充值）",
-    student_opening_balances: "参考数据（所选月份原始记录）",
-    students: "参考数据（有效及当月引用）", student_grade_stages: "参考数据（导出学生的全部阶段）",
-    teachers: "参考数据（有效及当月引用）", student_pricing: "参考数据（全部现有规则）",
-    fee_overrides: "原始数据（当月）", pricing_standards: "参考数据（全部现有标准）",
-    teacher_salary_rules: "参考数据（启用及当月引用）", teacher_adjustments_monthly: "原始数据（当月）",
-    teacher_travel_fees: "原始数据（当月）", class_groups: "参考数据（全部现有班级）",
-    staff: "参考数据（有效及当月引用）", staff_salary_monthly: "原始数据（当月）",
-    staff_attendance: "原始数据（当月）", operating_expenses: "原始数据（当月）",
-  };
-  return MONTHLY_SHEET_DEFINITIONS.map((definition) => archiveSheet(
-    definition.sheet_name,
-    typeByKey[definition.key],
-    definition.columns.filter((column) => column.is_user_visible).map((column) => ({ key: column.field_key, label: column.display_name })),
-    rowsByKey[definition.key] || [],
-  ));
-}
-
-function asiaShanghaiIso(date) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}+08:00`;
-}
-
-function exportInfoSheet(monthKey, sheetDescriptors, createdAt = new Date()) {
-  const schemaVersion = Number(get("PRAGMA user_version")?.user_version || 0);
-  const worksheetNames = [
-    ...sheetDescriptors.slice(0, 5).map((sheet) => sheet.name),
-    "导出说明",
-    ...sheetDescriptors.slice(5).map((sheet) => sheet.name),
-  ];
-  const metadata = [
-    ["导出类型", "monthly_core_excel"],
-    ["月份", monthKey],
-    ["导出时间（UTC）", createdAt.toISOString()],
-    ["导出时间（Asia/Shanghai）", asiaShanghaiIso(createdAt)],
-    ["应用版本", APP_VERSION],
-    ["数据库schema说明", `SQLite PRAGMA user_version=${schemaVersion}；应用启动时管理结构`],
-    ["工作表清单", worksheetNames.join("、")],
-    ["金额单位", "人民币元"],
-    ["日期格式", "YYYY-MM-DD；时间字段保留数据库原值"],
-    ["空值规则", "数据库 NULL 和空文本均导出为空单元格"],
-    ["用途说明", "月度业务归档；不是系统完整恢复备份；不能直接覆盖恢复整个系统"],
-  ];
-  const infoRecordCount = metadata.length + worksheetNames.length;
-  const worksheetRows = [
-    ...sheetDescriptors.slice(0, 5).map((sheet) => [sheet.name, sheet.recordCount, sheet.dataType]),
-    ["导出说明", infoRecordCount, "说明"],
-    ...sheetDescriptors.slice(5).map((sheet) => [sheet.name, sheet.recordCount, sheet.dataType]),
-  ];
-  const rows = [
-    ["字段", "值"],
-    ...metadata,
-    [],
-    ["工作表", "记录数", "原始数据/计算结果标识"],
-    ...worksheetRows,
-  ];
-  return {
-    name: "导出说明",
-    dataType: "说明",
-    recordCount: infoRecordCount,
-    rows,
-  };
-}
-
-function coreWorkbookSheets(monthKey) {
-  const details = feeDetails(monthKey);
-  const monthNumber = monthNumberCn(monthKey);
-  const legacySheets = [
-    { name: `${monthNumber}总表`, rows: coreLessonRows(monthKey), dataType: "业务视图（含计算字段）" },
-    { name: `${monthNumber}学生费用汇总`, rows: coreStudentSummaryRows(monthKey, details), dataType: "计算结果" },
-    { name: "学生费用明细", rows: coreFeeDetailRows(monthKey, details), dataType: "计算结果" },
-    { name: "充值记录", rows: coreRechargeRows(monthKey, details), dataType: "业务视图（含未登记提醒）" },
-    { name: "薪资汇总", rows: coreTeacherSalaryRows(monthKey), dataType: "计算结果" },
-  ].map((sheet) => ({ ...sheet, recordCount: Math.max(0, sheet.rows.length - 2 - (sheet.rows.at(-1)?.[0] === "合计" ? 1 : 0)) }));
-  const archiveSheets = monthlyArchiveSheets(monthKey);
-  const infoSheet = exportInfoSheet(monthKey, [...legacySheets, ...archiveSheets]);
-  return [...legacySheets, infoSheet, ...archiveSheets];
-}
-
-function coreWorkbookBuffer(monthKey) {
-  return createWorkbook(coreWorkbookSheets(monthKey));
-}
-
-function allCoreExportMonths() {
-  const months = allPartitionedMonths()
-    .filter(validMonthKey)
-    .sort((a, b) => a.localeCompare(b));
-  if (months.length) return months;
-  const fallback = text(getSetting("month_key"));
-  return validMonthKey(fallback) ? [fallback] : [];
-}
-
-function allCoreWorkbookZipFilename(stamp = exportTimestamp()) {
-  return `黎明教育_全部月份_核心数据_${stamp}.zip`;
-}
-
-function allCoreWorkbookZipBuffer(months = allCoreExportMonths(), stamp = exportTimestamp()) {
-  if (!months.length) throw new Error("暂无可导出的月份");
-  const files = months.map((monthKey) => ({
-    name: `${monthKey.slice(0, 7)}/${coreWorkbookFilename(monthKey, stamp)}`,
-    data: coreWorkbookBuffer(monthKey),
-  }));
-  return zipStore(files);
-}
-
 function backupDirPath() {
   const backupDir = path.join(dataDir, "backups");
   fs.mkdirSync(backupDir, { recursive: true });
   return backupDir;
-}
-
-function uniqueFilePath(dir, filename) {
-  const parsed = path.parse(filename);
-  let target = path.join(dir, filename);
-  let suffix = 1;
-  while (fs.existsSync(target)) {
-    target = path.join(dir, `${parsed.name}_${suffix}${parsed.ext}`);
-    suffix += 1;
-  }
-  return target;
-}
-
-function insertBackupRecord(record) {
-  const result = db.prepare(`
-    INSERT INTO backup_records(
-      backup_time, backup_type, included_months, filename, file_path, file_size, status, message, scheduled_date
-    )
-    VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    text(record.backup_type) || "manual",
-    num(record.included_months),
-    text(record.filename),
-    text(record.file_path),
-    num(record.file_size),
-    text(record.status) || "success",
-    text(record.message),
-    text(record.scheduled_date),
-  );
-  return get("SELECT * FROM backup_records WHERE id = ?", [Number(result.lastInsertRowid)]);
 }
 
 function backupRecordDto(row = {}) {
@@ -6666,65 +6173,6 @@ function backupRecordDto(row = {}) {
   };
 }
 
-function enforceBackupRetention(limit = 5) {
-  const rows = all(`
-    SELECT id, file_path
-    FROM backup_records
-    WHERE status = 'success' AND TRIM(COALESCE(file_path, '')) <> ''
-    ORDER BY backup_time DESC, id DESC
-  `);
-  for (const row of rows.slice(limit)) {
-    const filePath = text(row.file_path);
-    if (filePath) {
-      try {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      } catch (error) {
-        console.warn("failed to remove old backup", filePath, error.message || error);
-      }
-    }
-    db.prepare("DELETE FROM backup_records WHERE id = ?").run(Number(row.id));
-  }
-}
-
-function createCoreBackup(type = "manual", options = {}) {
-  const backupType = type === "auto" ? "auto" : "manual";
-  const stamp = exportTimestamp();
-  const months = allCoreExportMonths();
-  const filename = `${backupType === "auto" ? "黎明教育_自动备份" : "黎明教育_手动备份"}_全部月份_核心数据_${stamp}.zip`;
-  const backupDir = backupDirPath();
-  let record = null;
-  try {
-    const buffer = allCoreWorkbookZipBuffer(months, stamp);
-    const filePath = uniqueFilePath(backupDir, filename);
-    fs.writeFileSync(filePath, buffer);
-    record = insertBackupRecord({
-      backup_type: backupType,
-      included_months: months.length,
-      filename: path.basename(filePath),
-      file_path: filePath,
-      file_size: buffer.length,
-      status: "success",
-      message: "",
-      scheduled_date: options.scheduledDate || "",
-    });
-    enforceBackupRetention();
-    return { ok: true, record: backupRecordDto(record), months };
-  } catch (error) {
-    record = insertBackupRecord({
-      backup_type: backupType,
-      included_months: months.length,
-      filename,
-      file_path: "",
-      file_size: 0,
-      status: "failed",
-      message: error.message || "备份失败",
-      scheduled_date: options.scheduledDate || "",
-    });
-    if (options.throwOnError === false) return { ok: false, record: backupRecordDto(record), error: error.message || "备份失败" };
-    throw error;
-  }
-}
-
 function backupRecords(limit = 50) {
   return all(`
     SELECT *
@@ -6732,43 +6180,6 @@ function backupRecords(limit = 50) {
     ORDER BY backup_time DESC, id DESC
     LIMIT ?
   `, [Math.max(1, Math.min(200, Number(limit) || 50))]).map(backupRecordDto);
-}
-
-function backupSettings() {
-  const weekday = Number(getSetting("auto_backup_weekday"));
-  return {
-    enabled: text(getSetting("auto_backup_enabled")) !== "0",
-    weekday: Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : 3,
-    last_date: text(getSetting("auto_backup_last_date")),
-  };
-}
-
-function saveBackupSettings(body = {}) {
-  const weekday = Number(body.weekday);
-  const normalizedWeekday = Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : 3;
-  setSetting("auto_backup_enabled", body.enabled === false || body.enabled === 0 || body.enabled === "0" ? "0" : "1");
-  setSetting("auto_backup_weekday", String(normalizedWeekday));
-  return backupSettings();
-}
-
-let autoBackupRunning = false;
-
-function maybeRunAutomaticBackup(reason = "check") {
-  if (readOnlyBalanceCli || autoBackupRunning) return { ok: true, checked: false, reason };
-  const settings = backupSettings();
-  if (!settings.enabled) return { ok: true, checked: true, due: false, reason: "disabled" };
-  const today = todayKey();
-  const now = parseDateKey(today) || new Date();
-  if (now.getDay() !== settings.weekday) return { ok: true, checked: true, due: false, reason: "weekday" };
-  if (settings.last_date === today) return { ok: true, checked: true, due: false, reason: "already_run" };
-  autoBackupRunning = true;
-  try {
-    const result = createCoreBackup("auto", { scheduledDate: today, throwOnError: false });
-    setSetting("auto_backup_last_date", today);
-    return { ...result, checked: true, due: true, reason };
-  } finally {
-    autoBackupRunning = false;
-  }
 }
 
 function backupRecordForDownload(id) {
@@ -9804,7 +9215,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/class-groups")) return "students";
   if (p === "/api/dashboard") return "dashboard";
   if (p.startsWith("/api/users")) return "users";
-  if (p === "/api/export/core-workbook.xlsx" || p === "/api/export/core-workbooks-all.zip" || p.startsWith("/api/backups")) return "coreExport";
+  if (p.startsWith("/api/backups")) return "coreExport";
   if (p.startsWith("/api/export/finance") || p === "/api/finance-summary") return "finance";
   if (p === "/api/teacher-adjustments" || p === "/api/teacher-travel-fees") return "teacherTransport";
   if (p.includes("teacher-salary")) return "teacherSalary";
@@ -9859,7 +9270,7 @@ function apiPagePermissionKeys(req, url) {
   if (p.startsWith("/api/teacher-salary-rules")) return ["teacherSalaryRules"];
   if (p.startsWith("/api/finance-summary")) return ["finance"];
   if (p.startsWith("/api/operation-logs")) return ["operationLogs"];
-  if (p === "/api/export/core-workbook.xlsx" || p === "/api/export/core-workbooks-all.zip" || p.startsWith("/api/backups")) return ["audit"];
+  if (p.startsWith("/api/backups")) return ["audit"];
   if (p.startsWith("/api/staff-salary")) return ["staffPayroll"];
   if (p.startsWith("/api/staff-attendance")) return ["staffAttendance"];
   if (p.startsWith("/api/operating-expenses")) return ["expenses"];
@@ -12540,7 +11951,7 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/audit/xlsx-diff") {
     const result = await runXlsxAuditFromUpload(req, url);
-    writeOperationLog(user, { operation_type: "数据对账", operation_content: `Excel 数据对账，发现 ${result.issue_count || result.issues?.length || 0} 项`, target_type: "audit", target_id: text(result.run_id || "xlsx"), details: { run_id: result.run_id || "", issue_count: result.issue_count || result.issues?.length || 0, source_file: path.basename(text(result.source_file)) } }, req);
+    writeOperationLog(user, { operation_type: "数据检查", operation_content: `Excel 数据检查，发现 ${result.issue_count || result.issues?.length || 0} 项`, target_type: "audit", target_id: text(result.run_id || "xlsx"), details: { run_id: result.run_id || "", issue_count: result.issue_count || result.issues?.length || 0, source_file: path.basename(text(result.source_file)) } }, req);
     return sendJson(res, result);
   }
   if (req.method === "POST" && url.pathname === "/api/audit/apply") {
@@ -12946,7 +12357,7 @@ async function handleApi(req, res, url) {
     try {
       db.exec("BEGIN");
       let exported;
-      try { exported = buildFullDataBuffer(db, { appVersion: APP_VERSION }); db.exec("COMMIT"); }
+      try { exported = buildFullDataBuffer(db, { appVersion: APP_VERSION, appGitCommit: APP_GIT_COMMIT }); db.exec("COMMIT"); }
       catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
       const filename = fullDataFilename(exported.createdAt);
       writeOperationLog(user, {
@@ -13051,16 +12462,17 @@ async function handleApi(req, res, url) {
     if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "密码验证失败");
     if (text(body.confirmation) !== expected) return sendError(res, 400, `请输入确认文字：${expected}`);
     if (dataImportMaintenance) return sendError(res, 409, "系统正在执行数据导入");
-    dataImportMaintenance = true;
+    dataImportMaintenance = true; let importLock = "";
     try {
-      let before = null;
-      if (mode === "overwrite") before = await backupService().create({ trigger: "pre_restore", retentionClass: "pre_restore", createdByUserId: user.id });
+      const service = backupService(); let before = null;
+      if (mode === "overwrite") before = await service.create({ trigger: "pre_restore", retentionClass: "pre_restore", createdByUserId: user.id });
+      importLock = service.acquireLock();
       const result = importFullExcel({ dbPath, inputPath: pending.path, mode, preBackupSatisfied: !!before, appVersion: APP_VERSION });
       writeOperationLog(user, { operation_type: mode === "overwrite" ? "覆盖导入全量数据" : "初始化导入全量数据", operation_content: `全量数据导入成功，模式 ${mode}`, target_type: "data_center", target_id: mode, details: { counts: result.preview_counts, pre_backup_id: before?.record?.id || null } }, req);
       sessions.clear(); clearSessionCookie(res); return sendJson(res, { ...result, pre_backup: before?.record || result.pre_backup, sessions_cleared: true });
     } catch (error) {
       writeOperationLog(user, { operation_type: "导入全量数据", operation_content: "全量数据导入失败并回滚", target_type: "data_center", target_id: mode, result_status: "failure", details: { code: error.code || "FULL_EXCEL_IMPORT_FAILED" } }, req); return sendError(res, 400, error.message || "导入失败");
-    } finally { dataImportMaintenance = false; try { fs.rmSync(pending.path, { force: true }); } catch {} pendingDataImports.delete(text(body.upload_id)); }
+    } finally { if (importLock) backupService().releaseLock(importLock); dataImportMaintenance = false; try { fs.rmSync(pending.path, { force: true }); } catch {} pendingDataImports.delete(text(body.upload_id)); }
   }
 
   if (req.method === "GET" && url.pathname === "/api/backups") {
@@ -13075,14 +12487,6 @@ async function handleApi(req, res, url) {
       }, req);
     }
     return sendJson(res, { settings: { enabled: false, legacy: true }, records, auto_check: { checked: false, reason: "legacy_scheduler_retired" } });
-  }
-
-  if (req.method === "PUT" && url.pathname === "/api/backups/settings") {
-    return sendError(res, 410, "旧月度备份设置已停用，请使用数据中心");
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/backups/run") {
-    return sendError(res, 410, "旧月度备份已停用，请使用数据中心全量备份");
   }
 
   const backupDownloadMatch = url.pathname.match(/^\/api\/backups\/(\d+)\/download$/);
