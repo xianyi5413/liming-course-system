@@ -51,8 +51,13 @@ class BaiduBackupManager {
   constructor({ dataDir, appKey = process.env.BAIDU_APP_KEY, appSecret = process.env.BAIDU_APP_SECRET, redirectUri = process.env.BAIDU_REDIRECT_URI, encryptionKey = process.env.BACKUP_ENCRYPTION_KEY, fetchImpl, endpoints } = {}) {
     this.dataDir = path.resolve(dataDir); this.encryptionKey = encryptionKey; this.states = new Map(); this.tokenStore = new TokenStore(path.join(this.dataDir, "backups", "full-excel", ".secrets", "baidu-token.json")); this.client = new BaiduClient({ appKey, appSecret, redirectUri, tokenStore: this.tokenStore, fetchImpl, endpoints });
   }
-  configured() { try { this.client.assertConfigured(); if (!this.encryptionKey) return false; return true; } catch { return false; } }
-  status() { if (!this.configured()) return "not_configured"; return this.tokenStore.status(); }
+  configurationStatus() {
+    const oauthConfigured = Boolean(this.client.appKey && this.client.appSecret && this.client.redirectUri);
+    const encryptionConfigured = Boolean(this.encryptionKey);
+    return { oauth_configured: oauthConfigured, encryption_configured: encryptionConfigured, status: oauthConfigured && encryptionConfigured ? this.tokenStore.status() : "not_configured" };
+  }
+  configured() { const status = this.configurationStatus(); return status.oauth_configured && status.encryption_configured; }
+  status() { return this.configurationStatus().status; }
   beginAuthorization() { this.client.assertConfigured(); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
   async finishAuthorization(code, state) { const expiry = this.states.get(String(state)); this.states.delete(String(state)); if (!expiry || expiry < Date.now()) throw new BaiduError("BAIDU_OAUTH_STATE_INVALID", "百度授权state无效或已过期"); await this.client.exchangeCode(String(code)); return { ok: true, status: this.status() }; }
   disconnect() { this.tokenStore.clear(); return { ok: true, status: this.status() }; }

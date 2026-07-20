@@ -29,6 +29,20 @@ function safeMessage(error) { return String(error?.code || error?.name || "BACKU
 class BackupService {
   constructor({ dbPath, dataDir, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", remoteUploader = null }) { this.dbPath = path.resolve(dbPath); this.dataDir = path.resolve(dataDir); this.root = path.resolve(this.dataDir, MANAGED_SUBDIR); this.appVersion = appVersion; this.appGitCommit = String(appGitCommit).slice(0, 40); this.remoteUploader = remoteUploader; }
   database() { const db = new DatabaseSync(this.dbPath); ensureBackupColumns(db); return db; }
+  rootStatus() {
+    try {
+      if (!inside(this.dataDir, this.root)) return { status: "invalid" };
+      if (fs.existsSync(this.root)) {
+        if (fs.lstatSync(this.root).isSymbolicLink() || !fs.statSync(this.root).isDirectory()) return { status: "invalid" };
+        fs.accessSync(this.root, fs.constants.R_OK | fs.constants.W_OK);
+        return { status: "available" };
+      }
+      let candidate = path.dirname(this.root);
+      while (!fs.existsSync(candidate) && inside(this.dataDir, candidate)) candidate = path.dirname(candidate);
+      fs.accessSync(candidate, fs.constants.R_OK | fs.constants.W_OK);
+      return { status: "not_created" };
+    } catch { return { status: "unwritable" }; }
+  }
   ensureRoot() {
     if (!inside(this.dataDir, this.root)) throw new BackupError("BACKUP_ROOT_INVALID", "受管备份目录无效");
     const parent = path.dirname(this.root); fs.mkdirSync(parent, { recursive: true, mode: 0o700 });

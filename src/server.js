@@ -12382,7 +12382,9 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center") {
     cleanupPendingDataImports();
-    return sendJson(res, { records: backupService().list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", remote_status: baiduBackupManager().status() }, maintenance: dataImportMaintenance });
+    const service = backupService();
+    const remote = baiduBackupManager().configurationStatus();
+    return sendJson(res, { records: service.list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status, encryption_status: remote.encryption_configured ? "configured" : "not_configured" }, maintenance: dataImportMaintenance });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {

@@ -419,7 +419,21 @@ let expenseFilter = (() => {
     return { month_key: "", start: "", end: "", category: "", q: "" };
   }
 })();
-let backupState = { settings: null, records: [], busy: false, error: "", importFile: null, importPreview: null, importMode: "initialize" };
+const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
+  enabled: false,
+  time: "02:30",
+  timezone: "Asia/Shanghai",
+  daily_retention: 14,
+  monthly_retention: 12,
+  manual_retention: 20,
+  retry_count: 3,
+  remote_enabled: false,
+  remote_directory: "/apps/liming-course-system",
+  remote_status: "not_configured",
+  encryption_status: "not_configured",
+  local_storage_status: "not_created",
+});
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize" };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -1601,10 +1615,10 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
 
   if (view === "audit") {
     if (canArea("audit")) {
-      await refreshBackupData();
+      await refreshBackupData({ tolerateFailure: true });
       if (!stillCurrent()) return false;
     } else {
-      backupState = { ...backupState, settings: null, records: [], error: "" };
+      backupState = { ...backupState, settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, records: [], error: "", loadError: "" };
     }
   }
 
@@ -4411,14 +4425,40 @@ function balanceDetailCards(row) {
   `;
 }
 
-async function refreshBackupData({ logView = false } = {}) {
-  const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
-  backupState = {
-    ...backupState,
-    settings: data.settings || backupState.settings || {},
-    records: data.records || [],
-    error: "",
-  };
+function normalizeDataCenterSettings(settings = {}) {
+  return { ...DATA_CENTER_DEFAULT_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+}
+
+function safeDataCenterLoadError(error) {
+  const status = Number(error?.status || 0);
+  if (status === 401) return "登录状态已失效";
+  if (status === 403) return "当前账号没有数据中心权限";
+  if (status >= 500) return "服务器暂时无法读取数据中心信息";
+  const message = String(error?.message || "").trim();
+  return /^[A-Z0-9_-]{3,100}$/.test(message) ? message : "数据中心信息暂时不可用";
+}
+
+async function refreshBackupData({ logView = false, tolerateFailure = false } = {}) {
+  try {
+    const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
+    backupState = {
+      ...backupState,
+      settings: normalizeDataCenterSettings(data.settings),
+      records: Array.isArray(data.records) ? data.records : [],
+      error: "",
+      loadError: "",
+    };
+    return true;
+  } catch (error) {
+    backupState = {
+      ...backupState,
+      settings: normalizeDataCenterSettings(backupState.settings),
+      records: Array.isArray(backupState.records) ? backupState.records : [],
+      loadError: safeDataCenterLoadError(error),
+    };
+    if (!tolerateFailure) throw error;
+    return false;
+  }
 }
 
 function options(values, current, emptyText = "") {
@@ -4906,7 +4946,8 @@ function bindNavigationEvents() {
     event.preventDefault();
     setActiveView(nextView);
     renderViewTransitionSkeleton();
-    await load({ refreshGlobal: false });
+    try { await load({ refreshGlobal: false }); }
+    catch (error) { renderLoadFailure(error); }
   });
 }
 
@@ -9063,6 +9104,25 @@ function dataCenterRemoteLabel(value) {
   return labels[value] || value || "未配置";
 }
 
+function backupStatusLabel(value) {
+  const labels = { creating: "创建中", success: "成功", failed: "失败", verifying: "验证中", restoring: "恢复中", deleted: "已删除", missing: "文件缺失" };
+  return labels[value] || value || "未知";
+}
+
+function formatFileSize(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const amount = bytes / (1024 ** index);
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function dataCenterStorageLabel(value) {
+  const labels = { available: "可用", not_created: "尚未创建（首次备份时创建）", unwritable: "暂不可写", invalid: "路径无效" };
+  return labels[value] || "状态未知";
+}
+
 function dataCenterBackupRows() {
   return (backupState.records || []).map((row) => {
     const legacy = row.backup_format !== "full_data_excel";
@@ -9105,6 +9165,7 @@ function importPreviewMarkup() {
 function renderAudit() {
   renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
+    ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
     ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
     <section class="band audit-panel data-center-section" data-region="import-export">
       <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">全量 Excel 是唯一数据交换格式；覆盖导入会先创建服务器备份。</div></div></div>
@@ -9120,7 +9181,7 @@ function renderAudit() {
       ${importPreviewMarkup()}
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-settings">
-      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}；时间按 Asia/Shanghai 解释。</div></div></div>
+      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}（${escapeHtml(dataCenterStorageLabel(backupState.settings?.local_storage_status))}）；时间按 Asia/Shanghai 解释。</div></div></div>
       <div class="data-backup-settings-grid">
         <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
         <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
@@ -9132,7 +9193,7 @@ function renderAudit() {
         <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled ? "checked" : ""}><span>启用百度网盘备份</span></label>
         <label class="filter-field"><span>百度网盘目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || "/apps/liming-course-system")}"></label>
       </div>
-      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><button class="btn baidu-connect" type="button">连接/重新授权</button><button class="btn baidu-test" type="button">测试连接</button><button class="btn baidu-disconnect" type="button">解除授权</button><span class="audit-toolbar-note">百度网盘：${escapeHtml(dataCenterRemoteLabel(backupState.settings?.remote_status))}。未配置不影响服务器备份健康状态。</span></div>
+      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><button class="btn baidu-connect" type="button">连接/重新授权</button><button class="btn baidu-test" type="button">测试连接</button><button class="btn baidu-disconnect" type="button">解除授权</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}；百度网盘：${escapeHtml(dataCenterRemoteLabel(backupState.settings?.remote_status))}；备份加密密钥：${backupState.settings?.encryption_status === "configured" ? "已配置" : "未配置"}。未配置项不影响页面打开。</span></div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
@@ -14997,7 +15058,14 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".backup-refresh").forEach((button) => button.addEventListener("click", async () => {
-    try { await refreshBackupData({ logView: true }); } catch (error) { backupState.error = error.message || "读取备份记录失败"; } finally { render(); }
+    await refreshBackupData({ logView: true, tolerateFailure: true });
+    render();
+  }));
+
+  document.querySelectorAll(".data-center-reload").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    await refreshBackupData({ tolerateFailure: true });
+    render();
   }));
 
   document.querySelectorAll(".backup-remote-retry").forEach((button) => button.addEventListener("click", async () => {
