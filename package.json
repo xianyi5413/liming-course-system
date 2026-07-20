@@ -15,6 +15,7 @@
     "excel:full:restore": "node scripts/excel_backup/restore_full_excel.js",
     "excel:template": "node scripts/excel_backup/create_template.js",
     "excel:import": "node scripts/excel_backup/import_full_excel.js",
+    "excel:acceptance-fixture": "node scripts/excel_backup/create_acceptance_fixture.js",
     "backup:encrypt": "node scripts/excel_backup/encrypted_backup.js encrypt",
     "backup:decrypt": "node scripts/excel_backup/encrypted_backup.js decrypt",
     "backup:encrypted:verify": "node scripts/excel_backup/encrypted_backup.js verify",

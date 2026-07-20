@@ -9168,7 +9168,7 @@ function renderAudit() {
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
     ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
     <section class="band audit-panel data-center-section" data-region="import-export">
-      <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">全量 Excel 是唯一数据交换格式；覆盖导入会先创建服务器备份。</div></div></div>
+      <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">完整备份含 22 张可见业务表和 4 张 veryHidden 恢复表；空白模板不含内部恢复数据。覆盖导入会先创建服务器备份。</div></div></div>
       <div class="audit-toolbar">
         <button class="btn primary data-full-export" type="button" ${backupState.busy ? "disabled" : ""}>导出全部数据</button>
         <button class="btn data-template-download" type="button" ${backupState.busy ? "disabled" : ""}>下载空白模板</button>
@@ -14933,7 +14933,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v1.xlsx");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v2.xlsx");
       } catch (error) {
         showToast(error.message || "下载模板失败", "error");
       } finally {

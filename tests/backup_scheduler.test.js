@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 const { BackupService } = require("../src/backup/backup_service");
+const { FORMAT_VERSION, verifyFullData } = require("../src/excel/full_backup");
 const { loadBackupSettings, saveBackupSettings, shanghaiParts, dueState } = require("../src/backup/scheduler");
 
 const root = path.resolve(__dirname, ".."); let tempRoot; let dataDir; let dbPath;
@@ -31,6 +32,8 @@ test("scheduler waits before the configured time and becomes due afterward", () 
 test("isolated scheduled child creates one backup and restart check does not duplicate it", async () => {
   const run = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/run_scheduled_backup.js"), "--scheduled-for", "2026-07-21", "--schedule-key", "full-data:2026-07-21"], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, DB_PATH: dbPath, APP_VERSION: "scheduler-test" }, encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr); assert.equal(JSON.parse(run.stdout).ok, true);
+  const db = new DatabaseSync(dbPath, { readOnly: true }); const record = db.prepare("SELECT format_version,managed_relative_path FROM backup_records WHERE schedule_key=? AND status='success'").get("full-data:2026-07-21"); db.close();
+  assert.equal(Number(record.format_version), FORMAT_VERSION); assert.equal(verifyFullData(path.join(dataDir, record.managed_relative_path)).version, FORMAT_VERSION);
   const state = dueState(dbPath, loadBackupSettings(dbPath), new Date("2026-07-20T19:00:00Z")); assert.equal(state.reason, "already_successful");
   const again = new BackupService({ dbPath, dataDir });
   await assert.rejects(() => again.create({ trigger: "automatic", scheduledDate: "2026-07-21", scheduleKey: "full-data:2026-07-21" }), (error) => error.code === "BACKUP_SCHEDULE_ALREADY_SUCCESSFUL");

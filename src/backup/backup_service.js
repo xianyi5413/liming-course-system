@@ -2,10 +2,9 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { exportFullData, fullDataFilename, verifyFullData } = require("../excel/full_backup");
+const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = require("../excel/full_backup");
 
 const BACKUP_FORMAT = "full_data_excel";
-const FORMAT_VERSION = 1;
 const MANAGED_SUBDIR = path.join("backups", "full-excel");
 const BACKUP_COLUMNS = {
   backup_format: "TEXT DEFAULT 'legacy_core_zip'", format_version: "INTEGER DEFAULT 0", trigger: "TEXT DEFAULT ''",

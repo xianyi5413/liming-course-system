@@ -6,7 +6,7 @@ const { spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 const { BackupService, ensureBackupColumns, sha256File } = require("../src/backup/backup_service");
-const { verifyFullData } = require("../src/excel/full_backup");
+const { FORMAT_VERSION, expectedVisibleSheetNames, verifyFullData } = require("../src/excel/full_backup");
 
 const root = path.resolve(__dirname, "..");
 let tempRoot; let dataDir; let dbPath; let service; let created;
@@ -41,7 +41,10 @@ test("backup_records receives only the incremental data-center columns", () => {
 test("manual backup atomically publishes a validated full Excel and checksum", () => {
   assert.equal(created.ok, true); assert.equal(created.record.status, "success"); assert.equal(created.record.backup_format, "full_data_excel");
   const filename = path.join(dataDir, created.record.managed_relative_path); assert.equal(fs.existsSync(filename), true); assert.equal(fs.existsSync(`${filename}.sha256`), true);
-  assert.equal(verifyFullData(filename).ok, true); assert.equal(sha256File(filename), created.record.sha256);
+  const verified = verifyFullData(filename);
+  assert.equal(verified.ok, true); assert.equal(verified.version, FORMAT_VERSION); assert.equal(created.record.format_version, FORMAT_VERSION);
+  assert.deepEqual(verified.workbook.sheets.filter((sheet) => sheet.state === "visible").map((sheet) => sheet.name), expectedVisibleSheetNames());
+  assert.equal(sha256File(filename), created.record.sha256);
 });
 
 test("managed backup paths are relative and do not expose host paths", () => {

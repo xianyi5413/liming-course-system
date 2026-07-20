@@ -3,19 +3,30 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
+const { DatabaseSync } = require("node:sqlite");
 const { MAGIC, encryptFile, decryptFile, verifyEncryptedFile } = require("../src/backup/encryption");
 const { BaiduBackupManager, BaiduClient, TokenStore, safeRemotePath } = require("../src/backup/baidu_provider");
+const { FORMAT_VERSION, exportFullData, verifyFullData } = require("../src/excel/full_backup");
 
+const projectRoot = path.resolve(__dirname, "..");
 let tempRoot; let plain; const key = crypto.randomBytes(32).toString("base64"); const wrongKey = crypto.randomBytes(32).toString("base64");
-before(() => { tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-baidu-")); plain = path.join(tempRoot, "全量 数据.xlsx"); fs.writeFileSync(plain, Buffer.concat([Buffer.from("PRIVATE-EXCEL-CONTENT"), crypto.randomBytes(5 * 1024 * 1024)])); });
+before(() => {
+  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-baidu-")); const dbPath = path.join(tempRoot, "synthetic.sqlite"); plain = path.join(tempRoot, "全量 数据.xlsx");
+  const initialized = spawnSync(process.execPath, [path.join(projectRoot, "src/server.js"), "--init-db"], { cwd: projectRoot, env: { ...process.env, DATA_DIR: tempRoot, DB_PATH: dbPath }, encoding: "utf8" }); assert.equal(initialized.status, 0, initialized.stderr);
+  const db = new DatabaseSync(dbPath);
+  try { db.prepare("INSERT INTO operation_logs(operation_type,operation_content,result_status,extra_json) VALUES (?,?,?,?)").run("合成远端测试", "PRIVATE-EXCEL-CONTENT".repeat(260000), "success", JSON.stringify({ synthetic: true })); }
+  finally { db.close(); }
+  exportFullData({ dbPath, outputPath: plain, createdAt: new Date("2026-07-20T04:00:00Z") }); assert.equal(verifyFullData(plain).version, FORMAT_VERSION);
+});
 after(() => { if (tempRoot) fs.rmSync(tempRoot, { recursive: true, force: true }); });
 
 test("AES-256-GCM encryption is authenticated, random and round-trips", async () => {
   const first = path.join(tempRoot, "first.enc"); const second = path.join(tempRoot, "second.enc"); const output = path.join(tempRoot, "restored.xlsx");
   await encryptFile({ inputPath: plain, outputPath: first, key }); await encryptFile({ inputPath: plain, outputPath: second, key });
   assert.equal(fs.readFileSync(first).subarray(0, MAGIC.length).equals(MAGIC), true); assert.notDeepEqual(fs.readFileSync(first).subarray(0, 64), fs.readFileSync(second).subarray(0, 64));
-  assert.equal((await verifyEncryptedFile({ inputPath: first, key })).ok, true); await decryptFile({ inputPath: first, outputPath: output, key }); assert.deepEqual(fs.readFileSync(output), fs.readFileSync(plain));
+  assert.equal((await verifyEncryptedFile({ inputPath: first, key })).ok, true); await decryptFile({ inputPath: first, outputPath: output, key }); assert.deepEqual(fs.readFileSync(output), fs.readFileSync(plain)); assert.equal(verifyFullData(output).version, FORMAT_VERSION);
 });
 
 test("wrong key and tampering fail without publishing plaintext", async () => {
