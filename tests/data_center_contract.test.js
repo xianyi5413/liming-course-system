@@ -32,8 +32,11 @@ test("full backup downloads explicitly disable browser caching", () => {
   assert.match(server, /cache-control": "no-store, no-cache, must-revalidate, private"/); assert.match(server, /"pragma": "no-cache"/);
 });
 
-test("the browser page never references password hashes or secret variables", () => {
-  assert.doesNotMatch(app, /password_hash|BAIDU_APP_SECRET|BACKUP_ENCRYPTION_KEY|access_token|refresh_token/);
+test("the browser page may name required environment variables but never embeds secret values", () => {
+  assert.doesNotMatch(app, /password_hash|access_token|refresh_token/);
+  assert.match(app, /BAIDU_APP_KEY=\\nBAIDU_APP_SECRET=\\nBAIDU_REDIRECT_URI=\\nBACKUP_ENCRYPTION_KEY=/);
+  assert.doesNotMatch(app, /BAIDU_APP_SECRET=[^\\n"']/);
+  assert.doesNotMatch(app, /BACKUP_ENCRYPTION_KEY=[^\\n"']/);
 });
 
 test("Compose persists app data while nginx cannot mount the data volume", () => {

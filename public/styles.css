@@ -4421,6 +4421,113 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   margin-bottom: 14px;
 }
 
+.data-backup-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.data-backup-subcard {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-hover);
+}
+
+.baidu-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.baidu-status-grid > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.baidu-status-grid span,
+.data-preflight-record {
+  color: var(--muted);
+}
+
+.data-preflight-panel {
+  margin-bottom: 18px;
+}
+
+.data-preflight-list,
+.data-preflight-issue,
+.baidu-guide-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.data-preflight-issue {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.data-preflight-issue > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preflight-message {
+  white-space: pre-line;
+}
+
+.baidu-guide-panel {
+  width: min(920px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+.baidu-guide-steps section {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-hover);
+}
+
+.baidu-guide-steps h3 {
+  margin: 0 0 8px;
+}
+
+.copy-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy-row :is(code, pre) {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.baidu-env-template {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  white-space: pre-wrap;
+}
+
+.opening-balance-month-repair-box {
+  display: grid;
+  gap: 6px;
+  min-width: 150px;
+}
+
 .data-import-preview {
   display: grid;
   gap: 12px;
@@ -4461,6 +4568,16 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   .data-confirm-grid,
   .data-backup-settings-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .data-backup-card-grid,
+  .baidu-status-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .copy-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .data-import-grid .btn,
@@ -7093,7 +7210,7 @@ td.empty {
 .fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(11),
 .student-query-detail-table :is(td, th):nth-child(10),
 .recharge-table:not(.opening-balance-table) :is(td, th):nth-child(7),
-.opening-balance-table :is(td, th):nth-child(6),
+.opening-balance-table :is(td, th):nth-child(7),
 .student-pricing-table :is(td, th):nth-child(4),
 .student-pricing-table :is(td, th):nth-child(7),
 .teacher-salary-rule-table :is(td, th):nth-child(4),
@@ -7125,7 +7242,7 @@ td.empty {
 .fee-detail-table.uniform-table:not(.student-query-detail-table) :is(td, th):not(:nth-child(11)),
 .student-query-detail-table.uniform-table :is(td, th):not(:nth-child(10)),
 .recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(7)),
-.opening-balance-table.uniform-table :is(td, th):not(:nth-child(6)),
+.opening-balance-table.uniform-table :is(td, th):not(:nth-child(7)),
 .student-pricing-table.uniform-table :is(td, th):not(:nth-child(4)):not(:nth-child(7)),
 .pricing-table.uniform-table :is(td, th):not(:nth-child(5)),
 .teacher-salary-table.uniform-table :is(td, th):nth-child(1),
@@ -7166,7 +7283,7 @@ table th,
 .fee-detail-table:not(.student-query-detail-table) td:nth-child(11),
 .student-query-detail-table td:nth-child(10),
 .recharge-table:not(.opening-balance-table) td:nth-child(7),
-.opening-balance-table td:nth-child(6),
+.opening-balance-table td:nth-child(7),
 .student-pricing-table td:nth-child(4),
 .student-pricing-table td:nth-child(7),
 .teacher-salary-rule-table td:nth-child(4),
@@ -7202,8 +7319,8 @@ table th,
 .student-history-table td:nth-child(n + 3),
 .recharge-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table td:nth-child(4),
 .opening-balance-table td:nth-child(5),
+.opening-balance-table td:nth-child(6),
 .student-pricing-table td:nth-child(5),
 .teacher-salary-rule-table td:nth-child(5),
 .teacher-detail-table td:nth-child(12),
@@ -7248,7 +7365,7 @@ table th,
 .fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11),
 .student-query-detail-table :is(th, td):nth-child(10),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(7),
-.opening-balance-table :is(th, td):nth-child(6),
+.opening-balance-table :is(th, td):nth-child(7),
 .student-pricing-table :is(th, td):nth-child(7),
 .teacher-salary-rule-table :is(th, td):nth-child(7),
 .teacher-profile-table :is(th, td).profile-notes-col,
@@ -7280,8 +7397,8 @@ table th,
 
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(4),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(5),
-.opening-balance-table :is(th, td):nth-child(4),
 .opening-balance-table :is(th, td):nth-child(5),
+.opening-balance-table :is(th, td):nth-child(6),
 .student-pricing-table :is(th, td):nth-child(5),
 .teacher-salary-rule-table :is(th, td):nth-child(5),
 .fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
@@ -7326,8 +7443,8 @@ table th,
 .student-query-detail-table.uniform-table td:nth-child(11),
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table.uniform-table td:nth-child(4),
 .opening-balance-table.uniform-table td:nth-child(5),
+.opening-balance-table.uniform-table td:nth-child(6),
 .student-pricing-table.uniform-table td:nth-child(5),
 .teacher-salary-rule-table.uniform-table td:nth-child(5),
 .teacher-detail-table.uniform-table td:nth-child(12),
@@ -7498,7 +7615,7 @@ table th,
 
 .teacher-profile-table td.profile-notes-col .cell-input,
 .recharge-table:not(.opening-balance-table) td:nth-child(7) .cell-input,
-.opening-balance-table td:nth-child(6) .cell-input,
+.opening-balance-table td:nth-child(7) .cell-input,
 .student-pricing-table td:nth-child(7) .cell-input,
 .teacher-salary-rule-table td:nth-child(7) .cell-input {
   text-align: left;

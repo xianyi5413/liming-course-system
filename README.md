@@ -153,12 +153,59 @@ npm.cmd run excel:import -- execute --input "D:\backup\全量数据.xlsx" --db "
 
 百度网盘采用开放平台接口。上传前在本地临时文件中使用 AES-256-GCM 加密，远端只接收密文；Token 保存在私有文件中，状态接口不回传令牌。密钥遗失将无法解密远端副本。百度未配置是中性状态，不影响本地备份健康。
 
+### 数据完整性预检与期初余额月份
+
+全量导出、手动备份、自动备份、覆盖恢复前备份以及百度上传前的本地备份共用只读预检。预检至少检查期初余额月份、课程日期、已有充值日期的格式、学生/教师/员工姓名、价格与班级关键字段、账号角色及恢复关系。现有业务模型允许旧充值记录不填写具体日期，因此空充值日期原样保存，只有非空但格式非法的值才阻断。失败使用稳定错误码 `BACKUP_DATA_PREFLIGHT_FAILED`：已创建的 `backup_records` 记录转为 `failed`，但不发布 Excel、`.sha256` 或 staging 文件，也不会启动远端上传。
+
+“期初余额缺少月份”的根因是旧的独立期初余额 Excel 导入器曾把 `month_key` 固定写成空字符串，而表结构允许该旧值；完整 Excel 映射没有丢失数据库中本来有效的月份。当前规则如下：
+
+- 数据库中已有合法月份时，导出、可见“期初余额”表、`__关系映射`、验证和恢复统一使用 `YYYY-MM-01`，可见值与内部恢复值不一致会被拒绝。
+- 不用页面当前月、备份执行月或记录创建日期填补旧空值，也不丢弃错误记录。
+- 旧备注中若只有一个明确的“YYYY年M月.xlsx”来源，可作为页面建议，但不会静默写库；老板仍需在期初余额页逐条选择并确认。
+- 修复前显示记录 ID、学生、年级、实际余额、赠送余额和原备注；修复只更新目标记录的月份，并写入审计事件和操作日志，然后重新预检。
+- 新建、编辑和独立 Excel 导入期初余额都必须明确填写月份，从源头阻止新增空月份。
+
+数据中心在预检失败时显示问题类型、数量、前几条记录、“查看问题记录”“重新检查”和“下载错误清单”。普通日志只保存稳定错误码，不保存完整业务行或秘密配置。
+
+### 小白配置百度网盘
+
+服务器本地备份与百度网盘备份是两份独立副本：本地备份无需百度账号或网络即可工作；百度备份只在本地备份成功后，把临时加密得到的 `.xlsx.enc` 上传到远端，不会上传明文 Excel。接入前先阅读[百度网盘开放平台](https://pan.baidu.com/union)和[百度官方 OAuth 2.0 接入指南](https://openauth.baidu.com/doc/)，页面名称及申请条件以官方最新文档为准。
+
+1. 在百度网盘开放平台创建应用并申请所需网盘权限。App Key 用来标识应用；App Secret 用来证明服务端应用身份，必须保密；OAuth 回调地址用于接收一次性授权码；备份加密密钥用于 AES-256-GCM 加密远端副本。
+2. 后端真实回调路由固定为 `/api/data-center/baidu/callback`。本地示例是 `http://127.0.0.1:5177/api/data-center/baidu/callback`；正式示例是 `https://你的正式域名/api/data-center/baidu/callback`。百度开放平台登记值、`BAIDU_REDIRECT_URI` 和实际访问协议/域名/路径必须完全一致。系统只显示明确配置的正式地址，不根据浏览器来源猜测。
+3. 在服务器环境变量中配置四项，普通网页只显示“已配置/未配置”，不保存或回传真实值：
+
+```env
+BAIDU_APP_KEY=
+BAIDU_APP_SECRET=
+BAIDU_REDIRECT_URI=
+BACKUP_ENCRYPTION_KEY=
+```
+
+4. 在可信终端生成 32 字节随机密钥：
+
+```powershell
+npm.cmd run backup:key:generate
+```
+
+Linux 使用 `npm run backup:key:generate`。命令只输出一次，不写文件、不写数据库。立即离线保存；密钥丢失后，百度网盘中的既有加密文件无法恢复。不要把 Secret 或密钥提交 Git、写入 Excel、聊天记录或普通日志。
+
+5. 保存环境变量后，由部署管理员重建或重启应用容器，例如在正式 Compose 工作目录执行 `docker compose up -d --no-deps --force-recreate app`。本说明不授权在开发验收中操作正式服务器。
+6. 返回“设置 → 数据中心 → 百度网盘备份”，确认 App Key、App Secret、回调地址和加密密钥四项都为“已配置”。缺任一项时，“连接/重新授权”“测试连接”和“启用百度网盘备份”保持禁用，并列出缺项；本地“立即备份”仍可用。
+7. 四项齐全后点击“连接/重新授权”，在百度完成 OAuth；回到数据中心确认授权及 Token 状态，点击“测试连接”，最后再启用百度网盘备份。解除授权只删除本地受保护的 Token，不删除服务器备份。
+8. 成功后在网盘远端目录确认只存在 `.enc` 文件。不要手工上传明文全量 Excel。Token 需要刷新时系统在实际调用前使用 Refresh Token；授权失效则重新授权。
+
+状态接口 `GET /api/data-center/baidu/status` 只返回四项配置布尔值、授权状态、Token 状态、明确配置的回调地址、后端回调路由、远端目录、缺项和最近测试的安全结果。它不返回 App Secret、Access Token、Refresh Token、加密密钥或密码哈希。Token 文件位于应用数据目录的私有受管子目录，权限设计为 `0600`。
+
+常见问题：回调不匹配时核对协议、域名、端口和完整路径；“尚缺少”时补齐环境变量并重新创建容器；Token 过期且不能刷新时重新授权；远端上传失败不影响已成功发布的服务器本地备份；密钥错误或丢失时不能绕过认证解密。当前正式服务器尚未因本分支配置或授权百度网盘。
+
 ## 测试与验收
 
 ```powershell
 npm.cmd run test:full-excel
 npm.cmd run test:excel-import
 npm.cmd run test:data-center
+npm.cmd run test:data-preflight
 npm.cmd run test:backup-scheduler
 npm.cmd run test:baidu-backup
 npm.cmd run test:data-center-contract

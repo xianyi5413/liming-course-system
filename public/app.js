@@ -433,7 +433,22 @@ const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
   encryption_status: "not_configured",
   local_storage_status: "not_created",
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize" };
+const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
+  app_key_configured: false,
+  app_secret_configured: false,
+  redirect_uri_configured: false,
+  encryption_key_configured: false,
+  authorized: false,
+  authorization_status: "not_authorized",
+  token_status: "not_configured",
+  redirect_uri: "",
+  callback_route: "/api/data-center/baidu/callback",
+  remote_directory: "/apps/liming-course-system",
+  missing_items: ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"],
+  last_test_at: "",
+  last_test_result: "not_tested",
+});
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -683,7 +698,11 @@ async function downloadBlob(path, fallbackFilename) {
       auth.user = null;
       renderLogin(data.error || "请先登录");
     }
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const error = new Error(data.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    error.path = path;
+    error.data = data;
+    throw error;
   }
   const blob = await res.blob();
   const filename = downloadFilenameFromDisposition(res.headers.get("content-disposition"), fallbackFilename);
@@ -3249,7 +3268,6 @@ function rechargeModalMarkup() {
 
 function openingBalanceRows() {
   return [...(state.opening_balances || [])]
-    .filter((row) => numberValue(row.opening_actual_balance) !== 0 || numberValue(row.opening_gift_balance) !== 0)
     .map((row) => {
       const profile = studentProfileByName(row.student_name);
       return {
@@ -3293,6 +3311,7 @@ function openingBalanceModalMarkup() {
           <button class="btn opening-balance-modal-cancel" type="button">取消</button>
         </div>
         <div class="lesson-create-form opening-balance-form-grid">
+          <label>所属月份<input id="new-opening-month" class="control opening-balance-modal-field" data-field="month_key" type="month" value="" required></label>
           <label>学生姓名${filterComboControl({ id: "new-opening-student", className: "opening-balance-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-opening-grade", className: "opening-balance-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
           <label>期初实际余额<input id="new-opening-actual" class="control money-input opening-balance-modal-field" data-field="opening_actual_balance" type="number" step="0.01" value="0"></label>
@@ -4444,6 +4463,8 @@ async function refreshBackupData({ logView = false, tolerateFailure = false } = 
     backupState = {
       ...backupState,
       settings: normalizeDataCenterSettings(data.settings),
+      baidu: { ...DATA_CENTER_DEFAULT_BAIDU, ...(data.baidu || {}) },
+      preflight: data.preflight || null,
       records: Array.isArray(data.records) ? data.records : [],
       error: "",
       loadError: "",
@@ -8391,19 +8412,22 @@ function renderOpeningBalances() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>月份</th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}">
                 <td class="select-col"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
+                <td>${/^\d{4}-(0[1-9]|1[0-2])-01$/.test(String(row.month_key || ""))
+                  ? `<input class="cell-input opening-balance-field" data-field="month_key" type="month" value="${escapeHtml(String(row.month_key).slice(0, 7))}">`
+                  : `<div class="opening-balance-month-repair-box"><input class="cell-input opening-balance-month-repair" type="month" value="${escapeHtml(String((backupState.preflight?.issues || []).flatMap((issue) => issue.records || []).find((item) => Number(item.record_id) === Number(row.id))?.suggested_month || "").slice(0, 7))}"><button class="btn primary opening-balance-month-repair-confirm" type="button">确认补充月份</button></div>`}</td>
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
                 <td><input class="cell-input wide opening-balance-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无期初余额</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9162,11 +9186,80 @@ function importPreviewMarkup() {
   </div>`;
 }
 
+function dataPreflightMarkup() {
+  const result = backupState.preflight;
+  if (!result || result.ok) return "";
+  if (result.check_failed) return `<div class="audit-inline-notice danger data-preflight-panel"><div><strong>数据完整性预检暂时不可用</strong><div>${escapeHtml(result.user_message || "请稍后重新检查")}</div></div><button class="btn data-preflight-recheck" type="button">重新检查</button></div>`;
+  const issueRows = (result.issues || []).map((issue) => `
+    <div class="data-preflight-issue">
+      <div><strong>${escapeHtml(issue.label || issue.code)}</strong><span>${Number(issue.count || 0)} 条</span></div>
+      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.student_name || "")}　${escapeHtml(record.grade || "")}　实际余额 ${escapeHtml(record.actual_balance ?? "-")} 元　赠送余额 ${escapeHtml(record.gift_balance ?? "-")} 元${record.notes ? `　备注：${escapeHtml(record.notes)}` : ""}${record.suggested_month ? `　可核对建议：${escapeHtml(record.suggested_month)}` : ""}</div>`).join("")}
+    </div>`).join("");
+  return `<section class="band data-preflight-panel danger">
+    <div class="section-head"><div><div class="section-title">数据完整性预检未通过</div><div class="section-subtitle preflight-message">${escapeHtml(result.user_message || "请修复问题后重新检查")}</div></div><span class="data-count-chip">共 ${Number(result.issue_count || 0)} 个问题</span></div>
+    <div class="data-preflight-list">${issueRows}</div>
+    <div class="audit-toolbar"><button class="btn primary data-preflight-view" type="button">查看问题记录</button><button class="btn data-preflight-recheck" type="button">重新检查</button><button class="btn data-preflight-download" type="button">下载错误清单</button></div>
+  </section>`;
+}
+
+function baiduConfiguredLabel(value) { return value ? "已配置" : "未配置"; }
+function baiduAuthorizationLabel(value) { return ({ authorized: "已授权", expired: "已过期", not_authorized: "未授权" })[value] || "未授权"; }
+function baiduTokenLabel(value) { return ({ valid: "有效", refresh_required: "需要刷新", expired: "已过期", not_found: "不存在", not_configured: "未配置" })[value] || "未知"; }
+function baiduMissingLabel(items = []) {
+  const labels = { BAIDU_APP_KEY: "App Key", BAIDU_APP_SECRET: "App Secret", BAIDU_REDIRECT_URI: "回调地址", BACKUP_ENCRYPTION_KEY: "备份加密密钥" };
+  return items.map((item) => labels[item] || item).join("、");
+}
+
+function baiduGuideMarkup() {
+  if (!backupState.showBaiduGuide) return "";
+  const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
+  const callbackRoute = baidu.callback_route || "/api/data-center/baidu/callback";
+  const localCallback = `${window.location.origin}${callbackRoute}`;
+  const configuredCallback = baidu.redirect_uri || "";
+  const envTemplate = "BAIDU_APP_KEY=\nBAIDU_APP_SECRET=\nBAIDU_REDIRECT_URI=\nBACKUP_ENCRYPTION_KEY=";
+  return `<div class="modal-backdrop baidu-guide-modal"><div class="modal-panel baidu-guide-panel">
+    <div class="modal-head"><div><div class="modal-title">百度网盘配置步骤</div><div class="modal-subtitle">秘密信息只在服务器配置，页面不会保存或显示真实值。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
+    <div class="baidu-guide-steps">
+      <section><h3>第1步：创建百度开放平台应用</h3><p>在百度开放平台创建应用，准备 App Key、App Secret、OAuth 回调地址，并申请网盘所需权限。页面名称可能变化，请以 README 中的官方文档为准。</p></section>
+      <section><h3>第2步：填写回调地址</h3><p>后端真实回调路由：<code>${escapeHtml(callbackRoute)}</code></p><div class="copy-row"><code>${escapeHtml(configuredCallback || "BAIDU_REDIRECT_URI 尚未配置")}</code><button class="btn baidu-copy-callback" type="button" ${configuredCallback ? "" : "disabled"}>复制地址</button></div><p>本地开发参考：<code>${escapeHtml(localCallback)}</code>。正式域名必须由管理员明确配置 <code>BAIDU_REDIRECT_URI</code>，系统不会根据浏览器地址猜测。</p></section>
+      <section><h3>第3步：配置服务器秘密</h3><p>以下四项不能在普通网页保存。当前状态：App Key ${baiduConfiguredLabel(baidu.app_key_configured)}、App Secret ${baiduConfiguredLabel(baidu.app_secret_configured)}、回调地址 ${baiduConfiguredLabel(baidu.redirect_uri_configured)}、加密密钥 ${baiduConfiguredLabel(baidu.encryption_key_configured)}。</p><div class="copy-row"><pre class="baidu-env-template">${escapeHtml(envTemplate)}</pre><button class="btn baidu-copy-env" type="button">复制空白模板</button></div></section>
+      <section><h3>第4步：生成加密密钥</h3><p>在可信终端运行 <code>npm run backup:key:generate</code>，离线保存一次性输出。密钥丢失后，百度网盘中的加密备份无法恢复。</p></section>
+      <section><h3>第5步：重启后检查</h3><p>保存服务器配置 → 重启应用容器 → 返回数据中心 → 确认4项配置状态 → 连接/重新授权 → 完成百度授权 → 测试连接 → 再启用百度网盘备份。</p></section>
+    </div>
+  </div></div>`;
+}
+
+function baiduSettingsCardMarkup() {
+  const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
+  const missing = Array.isArray(baidu.missing_items) ? baidu.missing_items : [];
+  const ready = missing.length === 0;
+  const callback = baidu.redirect_uri || "未配置（请设置 BAIDU_REDIRECT_URI）";
+  return `<div class="data-backup-subcard baidu-backup-card">
+    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">只上传 AES-256-GCM 加密后的 .enc 文件；服务器本地备份不依赖百度配置。</div></div><button class="btn baidu-guide-open" type="button">查看配置步骤</button></div>
+    <div class="audit-toolbar-note">百度网盘：${escapeHtml(dataCenterRemoteLabel(baidu.status))}；备份加密密钥：${baidu.encryption_key_configured ? "已配置" : "未配置"}</div>
+    <div class="baidu-status-grid">
+      <div><span>百度应用 App Key</span><strong>${baiduConfiguredLabel(baidu.app_key_configured)}</strong></div>
+      <div><span>百度应用 App Secret</span><strong>${baiduConfiguredLabel(baidu.app_secret_configured)}</strong></div>
+      <div><span>备份加密密钥</span><strong>${baiduConfiguredLabel(baidu.encryption_key_configured)}</strong></div>
+      <div><span>百度授权</span><strong>${baiduAuthorizationLabel(baidu.authorization_status)}</strong></div>
+      <div><span>Token 状态</span><strong>${baiduTokenLabel(baidu.token_status)}</strong></div>
+      <div><span>最近测试时间</span><strong>${escapeHtml(baidu.last_test_at ? formatBeijingTime(baidu.last_test_at) : "尚未测试")}</strong></div>
+      <div><span>最近测试结果</span><strong>${escapeHtml(baidu.last_test_result === "success" ? "成功" : baidu.last_test_result === "not_tested" ? "尚未测试" : baidu.last_test_result || "尚未测试")}</strong></div>
+    </div>
+    <label class="filter-field wide"><span>OAuth 回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>
+    <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}"></label>
+    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && ready && baidu.authorized ? "checked" : ""} ${ready && baidu.authorized ? "" : "disabled"}><span>启用百度网盘备份</span></label>
+    ${ready ? "" : `<div class="audit-inline-notice neutral baidu-missing-notice">尚缺少：${escapeHtml(baiduMissingLabel(missing))}。请先按配置步骤在服务器设置环境变量。</div>`}
+    <div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${ready ? "" : "disabled"}>连接/重新授权</button><button class="btn baidu-test" type="button" ${ready && baidu.authorized ? "" : "disabled"}>测试连接</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized ? "" : "disabled"}>解除授权</button></div>
+  </div>`;
+}
+
 function renderAudit() {
   renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
     ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
+    ${dataPreflightMarkup()}
     <section class="band audit-panel data-center-section" data-region="import-export">
       <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">完整备份含 22 张可见业务表和 4 张 veryHidden 恢复表；空白模板不含内部恢复数据。覆盖导入会先创建服务器备份。</div></div></div>
       <div class="audit-toolbar">
@@ -9182,18 +9275,22 @@ function renderAudit() {
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-settings">
       <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}（${escapeHtml(dataCenterStorageLabel(backupState.settings?.local_storage_status))}）；时间按 Asia/Shanghai 解释。</div></div></div>
-      <div class="data-backup-settings-grid">
-        <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
-        <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
-        <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
-        <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
-        <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
-        <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
-        <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
-        <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled ? "checked" : ""}><span>启用百度网盘备份</span></label>
-        <label class="filter-field"><span>百度网盘目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || "/apps/liming-course-system")}"></label>
+      <div class="data-backup-card-grid">
+        <div class="data-backup-subcard local-backup-card">
+          <div class="section-head"><div><div class="section-title">服务器本地备份</div><div class="section-subtitle">独立生成并验证全量 Excel，本功能不依赖百度配置。</div></div></div>
+          <div class="data-backup-settings-grid">
+            <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
+            <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
+            <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
+            <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
+            <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
+            <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
+            <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
+          </div>
+          <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
+        </div>
+        ${baiduSettingsCardMarkup()}
       </div>
-      <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><button class="btn baidu-connect" type="button">连接/重新授权</button><button class="btn baidu-test" type="button">测试连接</button><button class="btn baidu-disconnect" type="button">解除授权</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}；百度网盘：${escapeHtml(dataCenterRemoteLabel(backupState.settings?.remote_status))}；备份加密密钥：${backupState.settings?.encryption_status === "configured" ? "已配置" : "未配置"}。未配置项不影响页面打开。</span></div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
@@ -9201,7 +9298,8 @@ function renderAudit() {
         <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>服务器</th><th>百度网盘</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
-    </section>`;
+    </section>
+    ${baiduGuideMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -14201,11 +14299,13 @@ function wireEvents() {
 
   document.querySelectorAll(".add-opening-balance").forEach((button) => {
     button.addEventListener("click", async () => {
+      const monthKey = document.querySelector("#new-opening-month")?.value || "";
       const studentName = document.querySelector("#new-opening-student")?.value.trim() || "";
       const grade = document.querySelector("#new-opening-grade")?.value.trim() || "";
       const actual = document.querySelector("#new-opening-actual")?.value || "0";
       const gift = document.querySelector("#new-opening-gift")?.value || "0";
       const notes = document.querySelector("#new-opening-notes")?.value || "";
+      if (!monthKey) return alert("请选择期初余额所属月份");
       if (!studentName) return alert("请填写学生姓名");
       if (optionalNumberValue(actual) === null) return alert("请填写有效的期初实际余额");
       if (optionalNumberValue(gift) === null) return alert("请填写有效的期初赠送余额");
@@ -14215,6 +14315,7 @@ function wireEvents() {
         await request("/api/opening-balances", {
           method: "POST",
           body: {
+            month_key: monthKey,
             student_name: studentName,
             grade,
             opening_actual_balance: optionalNumberValue(actual) || 0,
@@ -14920,10 +15021,30 @@ function wireEvents() {
       try {
         await downloadBlob("/api/data-center/export.xlsx", `黎明教育_全量数据_${Date.now()}.xlsx`);
       } catch (error) {
+        if (error.data?.preflight) backupState.preflight = error.data.preflight;
         showToast(error.message || "导出全部数据失败", "error");
       } finally {
         backupState.busy = false;
         render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".opening-balance-month-repair-confirm").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest(".opening-balance-row");
+      const monthKey = row?.querySelector(".opening-balance-month-repair")?.value || "";
+      if (!row || !monthKey) return showToast("请先选择明确的业务月份", "error");
+      if (!confirm(`确认将 ${row.dataset.studentName} 的期初余额月份补充为 ${monthKey}？此操作会记录日志。`)) return;
+      button.disabled = true;
+      try {
+        const result = await request(`/api/data-center/preflight/opening-balances/${encodeURIComponent(row.dataset.id)}/repair`, { method: "POST", body: { month_key: monthKey, confirmation: "确认补充月份" } });
+        backupState.preflight = result.preflight || backupState.preflight;
+        showToast("期初余额月份已补充并重新检查");
+        await load({ refreshGlobal: false });
+      } catch (error) {
+        button.disabled = false;
+        showToast(error.message || "补充月份失败", "error");
       }
     });
   });
@@ -15002,8 +15123,11 @@ function wireEvents() {
         backupState.error = "";
         showToast(`已生成备份：${result.record?.filename || ""}`);
       } catch (error) {
-        backupState.error = error.message || "手动备份失败";
-        showToast(backupState.error, "error");
+        if (error.data?.preflight) backupState.preflight = error.data.preflight;
+        const message = error.message || "手动备份失败";
+        await refreshBackupData({ tolerateFailure: true });
+        backupState.error = message;
+        showToast(message, "error");
       } finally {
         backupState.busy = false;
         render();
@@ -15068,6 +15192,27 @@ function wireEvents() {
     render();
   }));
 
+  document.querySelectorAll(".data-preflight-recheck").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try { backupState.preflight = await request("/api/data-center/preflight"); backupState.error = ""; }
+    catch (error) { backupState.error = error.message || "重新检查失败"; }
+    finally { render(); }
+  }));
+  document.querySelectorAll(".data-preflight-download").forEach((button) => button.addEventListener("click", async () => {
+    try { await downloadBlob("/api/data-center/preflight.csv", "数据完整性问题.csv"); }
+    catch (error) { showToast(error.message || "下载错误清单失败", "error"); }
+  }));
+  document.querySelectorAll(".data-preflight-view").forEach((button) => button.addEventListener("click", async () => {
+    const opening = (backupState.preflight?.issues || []).find((issue) => ["OPENING_BALANCE_MONTH_MISSING", "OPENING_BALANCE_MONTH_INVALID"].includes(issue.code));
+    const first = opening?.records?.[0];
+    if (!first || !canView("openingBalances")) return showToast("当前账号不能进入期初余额页面", "error");
+    openingBalanceFilter = { student: first.student_name || "", grade: first.grade || "" };
+    setActiveView("openingBalances");
+    renderViewTransitionSkeleton();
+    try { await load({ refreshGlobal: false }); }
+    catch (error) { renderLoadFailure(error); }
+  }));
+
   document.querySelectorAll(".backup-remote-retry").forEach((button) => button.addEventListener("click", async () => {
     try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-retry`, { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘上传成功"); }
     catch (error) { showToast(error.message || "百度网盘上传失败", "error"); } finally { render(); }
@@ -15091,6 +15236,18 @@ function wireEvents() {
     if (!confirm("确认解除百度网盘授权？服务器本地备份不会删除。")) return;
     try { await request("/api/data-center/baidu/disconnect", { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘授权已解除"); }
     catch (error) { showToast(error.message || "解除授权失败", "error"); } finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-guide-open").forEach((button) => button.addEventListener("click", () => { backupState.showBaiduGuide = true; render(); }));
+  document.querySelectorAll(".baidu-guide-close").forEach((button) => button.addEventListener("click", () => { backupState.showBaiduGuide = false; render(); }));
+  document.querySelectorAll(".baidu-guide-modal").forEach((modal) => modal.addEventListener("click", (event) => { if (event.target === modal) { backupState.showBaiduGuide = false; render(); } }));
+  document.querySelectorAll(".baidu-copy-callback").forEach((button) => button.addEventListener("click", async () => {
+    const value = backupState.baidu?.redirect_uri || "";
+    if (!value) return;
+    try { await navigator.clipboard.writeText(value); showToast("回调地址已复制"); } catch { showToast("复制失败，请手动选择地址", "error"); }
+  }));
+  document.querySelectorAll(".baidu-copy-env").forEach((button) => button.addEventListener("click", async () => {
+    const value = "BAIDU_APP_KEY=\nBAIDU_APP_SECRET=\nBAIDU_REDIRECT_URI=\nBACKUP_ENCRYPTION_KEY=";
+    try { await navigator.clipboard.writeText(value); showToast("空白配置模板已复制"); } catch { showToast("复制失败，请手动选择模板", "error"); }
   }));
 
   document.querySelectorAll(".user-admin-tab").forEach((button) => {

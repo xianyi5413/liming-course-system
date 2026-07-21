@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
+const { assertDataPreflight } = require("./data_preflight");
 const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = require("../excel/full_backup");
 
 const BACKUP_FORMAT = "full_data_excel";
@@ -75,6 +76,7 @@ class BackupService {
     try {
       if (options.scheduleKey && db.prepare("SELECT 1 FROM backup_records WHERE schedule_key=? AND status='success' LIMIT 1").get(options.scheduleKey)) throw new BackupError("BACKUP_SCHEDULE_ALREADY_SUCCESSFUL", "该计划日期已经成功备份");
       id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
+      assertDataPreflight(db);
       staging = path.join(this.root, `.staging-${id}-${crypto.randomUUID()}`); fs.mkdirSync(staging, { mode: 0o700 });
       const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, appGitCommit: this.appGitCommit, createdAt: options.createdAt || new Date() }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
       published = path.join(this.root, filename); checksumFile = `${published}.sha256`; if (fs.existsSync(published) || fs.existsSync(checksumFile)) throw new BackupError("BACKUP_TARGET_EXISTS", "备份目标已存在");

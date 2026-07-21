@@ -19,10 +19,10 @@ async function waitForServer(processHandle, port, stderr) {
   throw new Error(`server did not start: ${stderr()}`);
 }
 
-async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prepareFilesystem } = {}, action) {
+async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prepareFilesystem, environment = {} } = {}, action) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-data-center-page-"));
   const database = path.join(tempRoot, "data.sqlite");
-  const baseEnv = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "" };
+  const baseEnv = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "", ...environment };
   const initialized = spawnSync(process.execPath, [path.join(root, "src/server.js"), "--init-db"], { cwd: root, env: baseEnv, encoding: "utf8" });
   assert.equal(initialized.status, 0, initialized.stderr);
   const db = new DatabaseSync(database);
@@ -102,8 +102,81 @@ test("fresh database opens with no backup directory, optional secrets or records
     assert.match(settingsText, /备份加密密钥：未配置/);
     assert.match(settingsText, /尚未创建/);
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('暂无备份记录')"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-connect')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-test')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-disconnect')?.disabled"), true);
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("Baidu configuration guide opens without exposing secret values", async () => {
+  await withBrowserScenario({ environment: { BAIDU_APP_KEY: "PAGE-APP-KEY-SECRET", BAIDU_APP_SECRET: "PAGE-APP-SECRET", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback", BACKUP_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64") } }, async ({ browser }) => {
+    await browser.login("boss", "123456");
+    await browser.openDataCenter();
+    await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-connect')?.disabled"), false);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-test')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    const pageText = await browser.evaluate("document.body.textContent");
+    assert.doesNotMatch(pageText, /PAGE-APP-KEY-SECRET|PAGE-APP-SECRET/);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-backup-card input[readonly]')?.value"), "http://127.0.0.1:5177/api/data-center/baidu/callback");
+    await browser.click(".baidu-guide-open");
+    await browser.waitFor("Boolean(document.querySelector('.baidu-guide-modal'))");
+    const guide = await browser.evaluate("document.querySelector('.baidu-guide-modal')?.textContent");
+    for (const step of ["第1步", "第2步", "第3步", "第4步", "第5步", "npm run backup:key:generate"]) assert.match(guide, new RegExp(step));
+    assert.doesNotMatch(guide, /PAGE-APP-KEY-SECRET|PAGE-APP-SECRET/);
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("authorized Baidu state enables test, disconnect and remote-backup controls", async () => {
+  const environment = { BAIDU_APP_KEY: "K", BAIDU_APP_SECRET: "S", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback", BACKUP_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString("base64") };
+  const prepareFilesystem = ({ tempRoot }) => {
+    const directory = path.join(tempRoot, "backups", "full-excel", ".secrets");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "baidu-token.json"), JSON.stringify({ access_token: "SYNTHETIC-TOKEN", refresh_token: "SYNTHETIC-REFRESH", expires_at: Date.now() + 3600000 }));
+  };
+  await withBrowserScenario({ environment, prepareFilesystem }, async ({ browser }) => {
+    await browser.login("boss", "123456");
+    await browser.openDataCenter();
+    await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-test')?.disabled"), false);
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-disconnect')?.disabled"), false);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
+    assert.doesNotMatch(await browser.evaluate("document.body.textContent"), /SYNTHETIC-TOKEN|SYNTHETIC-REFRESH/);
+    assert.deepEqual(browser.exceptions, []);
+  });
+});
+
+test("manual backup shows an actionable missing-month issue and succeeds after explicit repair", async () => {
+  const prepareDatabase = (db) => db.prepare("INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (8801,'','浏览器缺月学生','初一',1000,200,'从源Excel 2026年2月.xlsx 迁移')").run();
+  await withBrowserScenario({ prepareDatabase }, async ({ browser, database }) => {
+    await browser.login("boss", "123456");
+    await browser.openDataCenter();
+    await assertThreeRegions(browser);
+    await browser.click(".backup-run-now");
+    await browser.waitFor("Boolean(document.querySelector('.data-preflight-panel.danger')) && document.body.textContent.includes('浏览器缺月学生')");
+    assert.equal(await browser.evaluate("document.querySelector('.data-preflight-panel')?.textContent.includes('请先补充记录所属月份')"), true);
+    await browser.click(".data-preflight-view");
+    await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('期初余额') && document.body.textContent.includes('浏览器缺月学生')");
+    await browser.evaluate("document.querySelector('.opening-balance-month-repair').value='2026-02'");
+    await browser.evaluate("window.confirm=()=>true");
+    await browser.click(".opening-balance-month-repair-confirm");
+    await browser.waitFor("document.querySelector('.opening-balance-field[data-field=\"month_key\"]')?.value === '2026-02'");
+    const db = new DatabaseSync(database, { readOnly: true });
+    assert.equal(db.prepare("SELECT month_key FROM student_opening_balances WHERE id=8801").get().month_key, "2026-02-01");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM operation_logs WHERE operation_type='补充期初余额月份' AND target_id='8801'").get().count, 1);
+    db.close();
+    await browser.openDataCenter();
+    await assertThreeRegions(browser);
+    await browser.click(".backup-run-now");
+    await browser.waitFor("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('成功')");
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.data-preflight-panel.danger'))"), false);
+    assert.deepEqual(browser.exceptions, []);
+    assert.equal(browser.consoleErrors.every((message) => /422 \(Unprocessable Entity\)/.test(message)), true, JSON.stringify(browser.consoleErrors));
   });
 });
 

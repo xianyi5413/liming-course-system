@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
+const { assertDataPreflight, normalizeBusinessMonth, validMonth } = require("../backup/data_preflight");
 const { createWorkbook, parseWorkbook, sanitizeCellText, validateWorkbookStructure, MAX_CELL_TEXT_LENGTH } = require("./xlsx_codec");
 const {
   DEFAULT_COURSE_STATUSES, VISIBLE_SHEET_DEFINITIONS, VISIBLE_SHEET_NAMES, HIDDEN_SHEET_NAMES,
@@ -113,6 +114,10 @@ function visibleRecords(definition, sourceData, context) {
   }
   const sorted = [...rows].sort(compareRows(definition.sort_fields));
   if (definition.key === "lessons") return sorted.map((source) => ({ source, visible: { ...source, weekday: weekdayCn(source.date), display_status: deriveStatus(source, context.allowedStatuses) } }));
+  if (definition.key === "student_opening_balances") return sorted.map((original) => {
+    const source = { ...original, month_key: normalizeBusinessMonth(original.month_key) };
+    return { source, visible: { ...source } };
+  });
   if (definition.key === "students") return sorted.map((source) => ({ source, visible: { ...source, grade_timeline: gradeTimeline((sourceData.student_grade_stages || []).filter((row) => text(row.student_name) === text(source.name)).sort(compareRows(["start_date", "id"]))) } }));
   if (definition.key === "teacher_salary_rules") return sorted.map((source) => ({ source, visible: { ...source, active_label: Number(source.is_active) ? "启用" : "停用" } }));
   if (definition.key === "staff_salary_monthly" || definition.key === "staff_attendance") return sorted.map((source) => ({ source, visible: { ...source, staff_name: context.staffNames.get(Number(source.staff_id)) || "" } }));
@@ -174,6 +179,9 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
     if (!source) return;
     mappedRows.add(`${definition.source_table}\u0000${key}`);
     const represented = new Set(definition.columns.map((column) => column.source_field).filter(Boolean));
+    if (definition.key === "student_opening_balances") {
+      addMapping(mapping, chunks, definition.sheet_name, rowNumber, definition.source_table, key, "month_key", source.month_key);
+    }
     if (definition.key === "teacher_salary_rules") represented.add("is_active");
     if (definition.key === "operation_logs") represented.add("result_status");
     if (definition.key === "roles") { represented.add("readonly"); represented.add("is_system"); }
@@ -236,11 +244,12 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
 
 function buildFullDataBuffer(db, options = {}) {
   ensureSchemaCompatible(db);
+  const preflight = assertDataPreflight(db);
   const integrity = db.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]); const foreignKeys = db.prepare("PRAGMA foreign_key_check").all();
   if (integrity.length !== 1 || integrity[0] !== "ok") throw new FullExcelError("FULL_EXCEL_SOURCE_INTEGRITY_FAILED", "源数据库完整性检查失败");
   if (foreignKeys.length) throw new FullExcelError("FULL_EXCEL_SOURCE_FOREIGN_KEY_FAILED", "源数据库存在外键错误");
   const sourceData = sourceDataFromDb(db); const allSettingCount = Number(db.prepare("SELECT COUNT(*) AS count FROM settings").get().count);
-  return buildFullDataBufferFromSourceData(sourceData, { ...options, schemaVersion: Number(db.prepare("PRAGMA user_version").get().user_version || 0), excludedSettings: allSettingCount - sourceData.settings.length });
+  return { ...buildFullDataBufferFromSourceData(sourceData, { ...options, schemaVersion: Number(db.prepare("PRAGMA user_version").get().user_version || 0), excludedSettings: allSettingCount - sourceData.settings.length }), preflight };
 }
 
 function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date() }) {
@@ -323,6 +332,11 @@ function reconstructData(workbook, parsedVisible, mappings) {
       for (const column of definition.columns) {
         if (column.source_field) row[column.source_field] = item.value[column.field_key];
       }
+      if (definition.key === "student_opening_balances" && Object.prototype.hasOwnProperty.call(technical, "month_key")) {
+        const visibleMonth = normalizeBusinessMonth(row.month_key);
+        const hiddenMonth = normalizeBusinessMonth(technical.month_key);
+        if (visibleMonth !== hiddenMonth) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_MONTH_MISMATCH", "期初余额可见月份与内部恢复月份不一致");
+      }
       // Hidden recovery mappings carry exact null values and reassembled long text.
       // They must win over the human-readable preview stored in the visible sheet.
       Object.assign(row, technical);
@@ -352,6 +366,10 @@ function validateGradeTimeline(value, label) {
 function validateData(data, parsedVisible) {
   const ids = (table, field = "id") => new Set((data[table] || []).map((row) => row[field])); const requireRef = (rows, field, valid, label, nullable = false) => rows.forEach((row) => { if (nullable && (row[field] === null || row[field] === "" || row[field] === undefined)) return; if (!valid.has(row[field])) throw new FullExcelError("FULL_EXCEL_RELATION_INVALID", `${label}关联不存在`); });
   requireRef(data.fee_overrides, "lesson_id", ids("lessons"), "单节费用课程"); requireRef([...data.staff_salary_monthly, ...data.staff_attendance], "staff_id", ids("staff"), "员工"); requireRef([...data.user_teacher_bindings, ...data.user_page_permissions, ...data.user_filter_presets], "user_id", ids("users"), "账号"); requireRef(data.users, "role", ids("roles", "code"), "账号角色"); requireRef(data.lessons, "teacher_salary_rule_id", ids("teacher_salary_rules"), "课程薪资规则", true);
+  for (const row of data.student_opening_balances || []) {
+    row.month_key = normalizeBusinessMonth(row.month_key);
+    if (!validMonth(row.month_key)) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_MONTH_INVALID", "期初余额月份必须为YYYY-MM-01");
+  }
   for (const row of parsedVisible.students) validateGradeTimeline(row.value.grade_timeline, row.value.name);
 }
 

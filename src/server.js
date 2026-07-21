@@ -9,6 +9,7 @@ const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel 
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, startBackupScheduler } = require("./backup/scheduler");
 const { BaiduBackupManager } = require("./backup/baidu_provider");
+const { DataPreflightError, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -1090,7 +1091,6 @@ function openingBalanceRows() {
     SELECT ob.*, COALESCE(NULLIF(ob.grade, ''), s.grade, '') AS display_grade
     FROM student_opening_balances ob
     LEFT JOIN students s ON s.name = ob.student_name
-    WHERE COALESCE(ob.opening_actual_balance, 0) <> 0 OR COALESCE(ob.opening_gift_balance, 0) <> 0
     ORDER BY ob.student_name
   `).map((row) => ({
     ...row,
@@ -1100,7 +1100,7 @@ function openingBalanceRows() {
 
 function openingBalanceMap() {
   return new Map(openingBalanceRows().map((row) => [row.student_name, {
-    month_key: "",
+    month_key: row.month_key || "",
     actual_balance: num(row.opening_actual_balance),
     gift_balance: num(row.opening_gift_balance),
     grade: text(row.grade),
@@ -1108,9 +1108,10 @@ function openingBalanceMap() {
   }]));
 }
 
-const OPENING_BALANCE_IMPORT_HEADERS = ["学生姓名", "年级", "期初现金余额", "期初赠送余额", "备注"];
+const OPENING_BALANCE_IMPORT_HEADERS = ["月份", "学生姓名", "年级", "期初现金余额", "期初赠送余额", "备注"];
 
 const OPENING_BALANCE_HEADER_ALIASES = {
+  month_key: new Set(["月份", "所属月份", "期初月份"]),
   student_name: new Set(["学生姓名", "姓名", "学生"]),
   grade: new Set(["年级"]),
   opening_actual_balance: new Set(["期初现金余额", "期初现金", "现金余额", "实际余额", "期初实际余额"]),
@@ -1128,6 +1129,7 @@ function openingBalanceExportRows() {
     ...openingBalanceRows()
       .sort((a, b) => compareGradeName(a.grade, b.grade) || text(a.student_name).localeCompare(text(b.student_name), "zh-Hans-CN"))
       .map((row) => [
+        normalizeBusinessMonth(row.month_key),
         row.student_name,
         row.grade || "",
         moneyRound(row.opening_actual_balance).toFixed(2),
@@ -1173,7 +1175,7 @@ function openingBalanceImportHeader(rows) {
       const field = openingBalanceHeaderField(value);
       if (field && columns[field] == null) columns[field] = index;
     }
-    if (columns.student_name != null
+    if (columns.month_key != null && columns.student_name != null
       && (columns.opening_actual_balance != null || columns.opening_gift_balance != null)) {
       return { source_row: row.source_row, columns };
     }
@@ -1205,7 +1207,7 @@ function importOpeningBalancesFromWorkbook(buffer) {
       imported: 0,
       skipped: 0,
       failed: 1,
-      details: [{ row: 0, status: "failed", message: "未找到期初余额表头，请使用学生姓名、期初现金余额、期初赠送余额等列" }],
+      details: [{ row: 0, status: "failed", message: "未找到期初余额表头，请使用月份、学生姓名、期初现金余额、期初赠送余额等列" }],
     };
   }
 
@@ -1222,13 +1224,19 @@ function importOpeningBalancesFromWorkbook(buffer) {
     INSERT INTO student_opening_balances(
       month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes
     )
-    VALUES ('', ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   withTransaction(() => {
     for (const row of sheet.rows.filter((item) => item.source_row > header.source_row)) {
       if (!row.values.some((value) => text(value))) continue;
       const studentName = text(openingBalanceImportCell(row, header.columns, "student_name"));
+      const monthKey = normalizeBusinessMonth(openingBalanceImportCell(row, header.columns, "month_key"), { acceptMonthInput: true });
+      if (!validMonth(monthKey)) {
+        failed += 1;
+        details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "月份不能为空且必须为YYYY-MM或YYYY-MM-01" });
+        continue;
+      }
       if (!studentName) {
         failed += 1;
         details.push({ row: row.source_row, status: "failed", message: "学生姓名为空" });
@@ -1272,7 +1280,7 @@ function importOpeningBalancesFromWorkbook(buffer) {
       const profile = profiles.get(studentName);
       const grade = text(openingBalanceImportCell(row, header.columns, "grade")) || text(profile?.grade);
       const notes = text(openingBalanceImportCell(row, header.columns, "notes"));
-      insert.run(studentName, grade, actual.value, gift.value, notes);
+      insert.run(monthKey, studentName, grade, actual.value, gift.value, notes);
       existingNames.add(studentName);
       imported += 1;
       details.push({ row: row.source_row, student_name: studentName, status: "imported", message: "导入成功" });
@@ -7585,6 +7593,45 @@ function sendError(res, status, message) {
   sendJson(res, { error: message }, status);
 }
 
+function safeDataPreflight() {
+  try { return runDataPreflight(db); }
+  catch (error) {
+    return {
+      ok: false,
+      check_failed: true,
+      checked_at_utc: new Date().toISOString(),
+      issue_count: 0,
+      issue_types: 0,
+      issues: [],
+      user_message: "数据完整性预检暂时无法完成，请稍后重新检查",
+      error_code: String(error?.code || "BACKUP_DATA_PREFLIGHT_CHECK_FAILED").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100),
+    };
+  }
+}
+
+function sendDataPreflightFailure(res, error, fallbackMessage, fallbackStatus = 500) {
+  if (error instanceof DataPreflightError || error?.code === "BACKUP_DATA_PREFLIGHT_FAILED") {
+    const preflight = error?.details?.preflight || safeDataPreflight();
+    return sendJson(res, { error: preflight.user_message || fallbackMessage, code: "BACKUP_DATA_PREFLIGHT_FAILED", preflight }, 422);
+  }
+  return sendError(res, fallbackStatus, fallbackMessage);
+}
+
+function dataPreflightCsvRows(result) {
+  const rows = [["问题代码", "问题类型", "记录ID", "学生姓名", "年级", "月份", "建议月份", "说明"]];
+  for (const issue of result.issues || []) for (const record of issue.records || []) rows.push([
+    issue.code,
+    issue.label,
+    record.record_id ?? "",
+    record.student_name ?? "",
+    record.grade ?? "",
+    record.month_key ?? "",
+    record.suggested_month ?? "",
+    record.requires_confirmation ? "必须由老板确认后修复" : "",
+  ]);
+  return rows;
+}
+
 function setSecurityHeaders(res) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
@@ -8103,9 +8150,11 @@ function deleteStudentProfilesBatch(ids) {
 function normalizedOpeningBalancePayload(body) {
   const studentName = text(body.student_name);
   if (!studentName) return { error: "学生姓名不能为空", status: 400 };
+  const monthKey = normalizeBusinessMonth(body.month_key, { acceptMonthInput: true });
+  if (!validMonth(monthKey)) return { error: "期初余额月份不能为空且必须为YYYY-MM", status: 400 };
   const profile = get("SELECT grade FROM students WHERE name = ?", [studentName]);
   const payload = {
-    month_key: text(body.month_key),
+    month_key: monthKey,
     student_name: studentName,
     grade: text(body.grade) || text(profile?.grade),
     opening_actual_balance: num(body.opening_actual_balance),
@@ -12371,7 +12420,7 @@ async function handleApi(req, res, url) {
     } catch (error) {
       console.error("full data Excel export failed", error.code || error.name || "error");
       writeOperationLog(user, { operation_type: "导出全量数据Excel", operation_content: "全量数据导出失败", target_type: "full_data_export", target_id: "all", result_status: "failure", details: { code: error.code || "FULL_EXCEL_EXPORT_FAILED" } }, req);
-      return sendError(res, 500, `导出全量数据失败：${error.message || "未知错误"}`);
+      return sendDataPreflightFailure(res, error, `导出全量数据失败：${error.message || "未知错误"}`);
     }
   }
 
@@ -12380,27 +12429,69 @@ async function handleApi(req, res, url) {
     return sendBuffer(res, createTemplateBuffer(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", TEMPLATE_FILENAME);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/data-center/preflight") {
+    return sendJson(res, safeDataPreflight());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/preflight.csv") {
+    return sendCsv(res, dataPreflightCsvRows(safeDataPreflight()), `数据完整性问题_${exportTimestamp()}.csv`);
+  }
+
+  const openingBalanceRepair = url.pathname.match(/^\/api\/data-center\/preflight\/opening-balances\/(\d+)\/repair$/);
+  if (req.method === "POST" && openingBalanceRepair) {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以补充期初余额月份");
+    const id = Number(openingBalanceRepair[1]);
+    const before = get("SELECT * FROM student_opening_balances WHERE id=?", [id]);
+    if (!before) return sendError(res, 404, "期初余额记录不存在");
+    if (validMonth(before.month_key)) return sendError(res, 409, "该期初余额已有有效月份");
+    const body = await readBody(req);
+    const monthKey = normalizeBusinessMonth(body.month_key, { acceptMonthInput: true });
+    if (!validMonth(monthKey)) return sendError(res, 400, "请选择明确的业务月份");
+    if (text(body.confirmation) !== "确认补充月份") return sendError(res, 400, "请输入确认文字：确认补充月份");
+    db.prepare("UPDATE student_opening_balances SET month_key=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(monthKey, id);
+    const after = get("SELECT * FROM student_opening_balances WHERE id=?", [id]);
+    recordAuditEvent(req, user, { action: "repair_month", entity_type: "student_opening_balances", entity_id: String(id), before, after });
+    writeOperationLog(user, { operation_type: "补充期初余额月份", operation_content: `${after.student_name} ${monthKey}`, target_type: "student_opening_balances", target_id: String(id), details: { record_id: id, month_key: monthKey } }, req);
+    return sendJson(res, { ok: true, row: after, preflight: safeDataPreflight() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/status") {
+    const settings = loadFullBackupSettings(dbPath);
+    return sendJson(res, { ...baiduBackupManager().configurationStatus(), remote_directory: settings.remote_directory });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/data-center") {
     cleanupPendingDataImports();
     const service = backupService();
     const remote = baiduBackupManager().configurationStatus();
-    return sendJson(res, { records: service.list(), settings: { ...loadFullBackupSettings(dbPath), managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status, encryption_status: remote.encryption_configured ? "configured" : "not_configured" }, maintenance: dataImportMaintenance });
+    const settings = loadFullBackupSettings(dbPath);
+    return sendJson(res, {
+      records: service.list(),
+      settings: { ...settings, managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status, encryption_status: remote.encryption_configured ? "configured" : "not_configured" },
+      baidu: { ...remote, remote_directory: settings.remote_directory },
+      preflight: safeDataPreflight(),
+      maintenance: dataImportMaintenance,
+    });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {
-    const settings = saveFullBackupSettings(dbPath, await readBody(req));
+    const body = await readBody(req);
+    const remote = baiduBackupManager().configurationStatus();
+    if (body.remote_enabled && remote.missing_items.length) return sendJson(res, { error: `尚缺少：${remote.missing_items.join("、")}`, code: "BAIDU_CONFIGURATION_INCOMPLETE", baidu: remote }, 400);
+    if (body.remote_enabled && !remote.authorized) return sendJson(res, { error: "请先完成百度网盘授权并测试连接", code: "BAIDU_AUTHORIZATION_REQUIRED", baidu: remote }, 400);
+    const settings = saveFullBackupSettings(dbPath, body);
     writeOperationLog(user, { operation_type: "修改全量备份设置", operation_content: `自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, remote_enabled: settings.remote_enabled } }, req);
     return sendJson(res, { ok: true, settings });
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
     try {
-      const settings = loadFullBackupSettings(dbPath); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: settings.remote_enabled });
+      const settings = loadFullBackupSettings(dbPath); const remote = baiduBackupManager(); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: settings.remote_enabled && remote.configured() });
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
       return sendJson(res, { ...result, records: backupService().list() }, 201);
     } catch (error) {
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: "服务器备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BACKUP_FAILED" } }, req);
-      return sendError(res, error.code === "BACKUP_ALREADY_RUNNING" ? 409 : 500, error.message || "备份失败");
+      return sendDataPreflightFailure(res, error, error.message || "备份失败", error.code === "BACKUP_ALREADY_RUNNING" ? 409 : 500);
     }
   }
 
@@ -12422,7 +12513,7 @@ async function handleApi(req, res, url) {
 
   const dataBackupRemoteRetry = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/remote-retry$/);
   if (req.method === "POST" && dataBackupRemoteRetry) {
-    try { const settings = loadFullBackupSettings(dbPath); const record = await backupService().retryRemote(Number(dataBackupRemoteRetry[1]), settings.remote_directory); writeOperationLog(user, { operation_type: "重试百度网盘备份", operation_content: `备份 ${record.id} 远端上传成功`, target_type: "backup_records", target_id: String(record.id) }, req); return sendJson(res, { ok: true, record }); }
+    try { const settings = loadFullBackupSettings(dbPath); if (!baiduBackupManager().configured()) throw Object.assign(new Error("百度网盘配置尚未完成"), { code: "BAIDU_CONFIGURATION_INCOMPLETE" }); const record = await backupService().retryRemote(Number(dataBackupRemoteRetry[1]), settings.remote_directory); writeOperationLog(user, { operation_type: "重试百度网盘备份", operation_content: `备份 ${record.id} 远端上传成功`, target_type: "backup_records", target_id: String(record.id) }, req); return sendJson(res, { ok: true, record }); }
     catch (error) { return sendError(res, 400, error.message || "百度网盘上传失败"); }
   }
 

@@ -33,3 +33,55 @@ test("an account with explicit audit permission can read the data center", async
 test("owner creates and verifies a managed full Excel backup", async () => { const created = await fetch(`http://127.0.0.1:${port}/api/data-center/backups`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" }); const data = await created.json(); assert.equal(created.status, 201); backupRecord = data.record; assert.equal(backupRecord.backup_format, "full_data_excel"); assert.equal(backupRecord.status, "success"); const verified = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${backupRecord.id}/verify`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" }); assert.equal(verified.status, 200); });
 test("managed backup download is private, no-store and parseable", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${backupRecord.id}/download`, { headers: { cookie: ownerCookie } }); assert.equal(response.status, 200); assert.match(response.headers.get("cache-control"), /no-store/); assert.match(response.headers.get("content-disposition"), /attachment/); const bytes = Buffer.from(await response.arrayBuffer()); assert.equal(bytes.subarray(0, 2).toString(), "PK"); });
 test("legacy list endpoint remains available to authorized data-center users", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/backups`, { headers: { cookie: ownerCookie } }); const data = await response.json(); assert.equal(response.status, 200); assert.equal(data.records.some((row) => row.id === backupRecord.id), true); });
+test("Baidu status endpoint returns configuration booleans without secrets or tokens", async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/status`, { headers: { cookie: ownerCookie } });
+  const data = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(data.missing_items, ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"]);
+  assert.equal(data.callback_route, "/api/data-center/baidu/callback");
+  assert.equal(data.token_status, "not_configured");
+  assert.doesNotMatch(JSON.stringify(data), /access_token|refresh_token|password_hash/i);
+});
+test("remote backup cannot be enabled until all four server secrets are configured", async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) });
+  const data = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(data.code, "BAIDU_CONFIGURATION_INCOMPLETE");
+  assert.equal(data.baidu.app_secret_configured, false);
+});
+test("owner explicitly repairs one legacy opening-balance month and the operation is audited", async () => {
+  const db = new DatabaseSync(databasePath);
+  db.prepare("INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'','接口缺月学生','初一',100,20,'来源 2026年2月.xlsx')").run();
+  db.close();
+
+  const failed = await fetch(`http://127.0.0.1:${port}/api/data-center/backups`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" });
+  const failure = await failed.json();
+  assert.equal(failed.status, 422);
+  assert.equal(failure.code, "BACKUP_DATA_PREFLIGHT_FAILED");
+  assert.equal(failure.preflight.issues.find((item) => item.code === "OPENING_BALANCE_MONTH_MISSING").records[0].student_name, "接口缺月学生");
+
+  const auditCookie = await login("audit-user");
+  const forbidden = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: auditCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02", confirmation: "确认补充月份" }) });
+  assert.equal(forbidden.status, 403);
+
+  const unconfirmed = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02" }) });
+  assert.equal(unconfirmed.status, 400);
+
+  const repaired = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02", confirmation: "确认补充月份" }) });
+  const result = await repaired.json();
+  assert.equal(repaired.status, 200);
+  assert.equal(result.row.month_key, "2026-02-01");
+  assert.equal(result.preflight.ok, true);
+  const checked = new DatabaseSync(databasePath, { readOnly: true });
+  assert.equal(checked.prepare("SELECT month_key FROM student_opening_balances WHERE id=9901").get().month_key, "2026-02-01");
+  assert.equal(checked.prepare("SELECT COUNT(*) AS count FROM operation_logs WHERE operation_type='补充期初余额月份' AND target_id='9901'").get().count, 1);
+  checked.close();
+});
+test("new opening balances require an explicit month and normalize only user-entered YYYY-MM", async () => {
+  const missing = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ student_name: "新期初学生", grade: "初一", opening_actual_balance: 10, opening_gift_balance: 0 }) });
+  assert.equal(missing.status, 400);
+  const created = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-06", student_name: "新期初学生", grade: "初一", opening_actual_balance: 10, opening_gift_balance: 0 }) });
+  const result = await created.json();
+  assert.equal(created.status, 201);
+  assert.equal(result.row.month_key, "2026-06-01");
+});

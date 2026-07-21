@@ -21,6 +21,7 @@ class TokenStore {
   write(token) { const directory = path.dirname(this.filename); fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); try { fs.chmodSync(directory, 0o700); } catch {} const temporary = `${this.filename}.tmp-${process.pid}-${crypto.randomUUID()}`; fs.writeFileSync(temporary, JSON.stringify(token), { flag: "wx", mode: 0o600 }); fs.chmodSync(temporary, 0o600); fs.renameSync(temporary, this.filename); }
   clear() { try { fs.rmSync(this.filename, { force: true }); } catch {} }
   status() { const token = this.read(); if (!token) return "not_authorized"; return Number(token.expires_at || 0) > Date.now() + 60_000 ? "authorized" : token.refresh_token ? "refresh_required" : "authorization_expired"; }
+  tokenStatus() { const token = this.read(); if (!token) return "not_found"; return Number(token.expires_at || 0) > Date.now() + 60_000 ? "valid" : token.refresh_token ? "refresh_required" : "expired"; }
 }
 
 class BaiduClient {
@@ -49,19 +50,49 @@ class BaiduClient {
 
 class BaiduBackupManager {
   constructor({ dataDir, appKey = process.env.BAIDU_APP_KEY, appSecret = process.env.BAIDU_APP_SECRET, redirectUri = process.env.BAIDU_REDIRECT_URI, encryptionKey = process.env.BACKUP_ENCRYPTION_KEY, fetchImpl, endpoints } = {}) {
-    this.dataDir = path.resolve(dataDir); this.encryptionKey = encryptionKey; this.states = new Map(); this.tokenStore = new TokenStore(path.join(this.dataDir, "backups", "full-excel", ".secrets", "baidu-token.json")); this.client = new BaiduClient({ appKey, appSecret, redirectUri, tokenStore: this.tokenStore, fetchImpl, endpoints });
+    this.dataDir = path.resolve(dataDir); this.encryptionKey = encryptionKey; this.states = new Map(); this.lastTestAt = ""; this.lastTestResult = "not_tested"; this.tokenStore = new TokenStore(path.join(this.dataDir, "backups", "full-excel", ".secrets", "baidu-token.json")); this.client = new BaiduClient({ appKey, appSecret, redirectUri, tokenStore: this.tokenStore, fetchImpl, endpoints });
   }
   configurationStatus() {
-    const oauthConfigured = Boolean(this.client.appKey && this.client.appSecret && this.client.redirectUri);
-    const encryptionConfigured = Boolean(this.encryptionKey);
-    return { oauth_configured: oauthConfigured, encryption_configured: encryptionConfigured, status: oauthConfigured && encryptionConfigured ? this.tokenStore.status() : "not_configured" };
+    const fields = {
+      BAIDU_APP_KEY: Boolean(this.client.appKey),
+      BAIDU_APP_SECRET: Boolean(this.client.appSecret),
+      BAIDU_REDIRECT_URI: Boolean(this.client.redirectUri),
+      BACKUP_ENCRYPTION_KEY: Boolean(this.encryptionKey),
+    };
+    const missingItems = Object.entries(fields).filter(([, configured]) => !configured).map(([name]) => name);
+    const oauthConfigured = fields.BAIDU_APP_KEY && fields.BAIDU_APP_SECRET && fields.BAIDU_REDIRECT_URI;
+    const tokenStatus = oauthConfigured ? this.tokenStore.tokenStatus() : "not_configured";
+    const authorizationStatus = tokenStatus === "valid" || tokenStatus === "refresh_required" ? "authorized" : tokenStatus === "expired" ? "expired" : "not_authorized";
+    const status = missingItems.length ? "not_configured" : this.tokenStore.status();
+    return {
+      app_key_configured: fields.BAIDU_APP_KEY,
+      app_secret_configured: fields.BAIDU_APP_SECRET,
+      redirect_uri_configured: fields.BAIDU_REDIRECT_URI,
+      encryption_key_configured: fields.BACKUP_ENCRYPTION_KEY,
+      oauth_configured: oauthConfigured,
+      encryption_configured: fields.BACKUP_ENCRYPTION_KEY,
+      authorized: authorizationStatus === "authorized",
+      authorization_status: authorizationStatus,
+      token_status: tokenStatus,
+      redirect_uri: fields.BAIDU_REDIRECT_URI ? String(this.client.redirectUri) : "",
+      callback_route: "/api/data-center/baidu/callback",
+      missing_items: missingItems,
+      last_test_at: this.lastTestAt,
+      last_test_result: this.lastTestResult,
+      status,
+    };
   }
   configured() { const status = this.configurationStatus(); return status.oauth_configured && status.encryption_configured; }
   status() { return this.configurationStatus().status; }
-  beginAuthorization() { this.client.assertConfigured(); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
+  beginAuthorization() { if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用、回调地址和备份加密密钥配置"); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
   async finishAuthorization(code, state) { const expiry = this.states.get(String(state)); this.states.delete(String(state)); if (!expiry || expiry < Date.now()) throw new BaiduError("BAIDU_OAUTH_STATE_INVALID", "百度授权state无效或已过期"); await this.client.exchangeCode(String(code)); return { ok: true, status: this.status() }; }
   disconnect() { this.tokenStore.clear(); return { ok: true, status: this.status() }; }
-  testConnection() { return this.client.testConnection(); }
+  async testConnection() {
+    if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用、回调地址和备份加密密钥配置");
+    this.lastTestAt = new Date().toISOString();
+    try { const result = await this.client.testConnection(); this.lastTestResult = "success"; return result; }
+    catch (error) { this.lastTestResult = String(error?.code || "failed").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); throw error; }
+  }
   async upload({ record, localPath, remoteDirectory }) { if (!this.configured()) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘或加密密钥尚未配置"); const temporary = path.join(path.dirname(localPath), `.remote-${record.id}-${crypto.randomUUID()}.xlsx.enc`); try { await encryptFile({ inputPath: localPath, outputPath: temporary, key: this.encryptionKey }); const remotePath = `${safeRemotePath(remoteDirectory)}/${path.basename(localPath)}.enc`; return await this.client.uploadFile(temporary, remotePath); } finally { try { fs.rmSync(temporary, { force: true }); } catch {} } }
 }
 

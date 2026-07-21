@@ -73,3 +73,60 @@ test("provider failure is retryable and cleans encrypted temporary files", async
   const store = new TokenStore(path.join(tempRoot, "failed-token.json")); store.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 }); const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore: store, fetchImpl: async () => Response.json({ errno: -6 }) });
   await assert.rejects(() => client.uploadFile(plain, "/apps/liming/file.enc"), (error) => error.code === "BAIDU_API_FAILED"); assert.throws(() => safeRemotePath("/outside/file.enc"), (error) => error.code === "BAIDU_REMOTE_PATH_INVALID");
 });
+
+test("configuration status distinguishes every missing server setting without returning values", () => {
+  const missing = new BaiduBackupManager({ dataDir: path.join(tempRoot, "status-missing"), appKey: "", appSecret: "", redirectUri: "", encryptionKey: "" }).configurationStatus();
+  assert.deepEqual(missing.missing_items, ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"]);
+  assert.equal(missing.token_status, "not_configured");
+  const onlyKey = new BaiduBackupManager({ dataDir: path.join(tempRoot, "status-key"), appKey: "VISIBLE-APP-KEY", appSecret: "", redirectUri: "", encryptionKey: "" }).configurationStatus();
+  assert.equal(onlyKey.app_key_configured, true);
+  assert.deepEqual(onlyKey.missing_items, ["BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"]);
+  assert.doesNotMatch(JSON.stringify(onlyKey), /VISIBLE-APP-KEY/);
+  const complete = { appKey: "K", appSecret: "S", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: key };
+  for (const [field, environmentName] of [["appSecret", "BAIDU_APP_SECRET"], ["redirectUri", "BAIDU_REDIRECT_URI"], ["encryptionKey", "BACKUP_ENCRYPTION_KEY"]]) {
+    const values = { ...complete, [field]: "" };
+    const status = new BaiduBackupManager({ dataDir: path.join(tempRoot, `missing-${field}`), ...values }).configurationStatus();
+    assert.deepEqual(status.missing_items, [environmentName]);
+  }
+  assert.throws(() => new BaiduBackupManager({ dataDir: path.join(tempRoot, "status-incomplete"), appKey: "K", appSecret: "S", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: "" }).beginAuthorization(), (error) => error.code === "BAIDU_CONFIGURATION_INCOMPLETE");
+});
+
+test("fully configured authorization, expiry and disconnect states are explicit and safe", () => {
+  const manager = new BaiduBackupManager({ dataDir: path.join(tempRoot, "status-full"), appKey: "K", appSecret: "S", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: key });
+  const initial = manager.configurationStatus();
+  assert.equal(initial.authorized, false);
+  assert.equal(initial.token_status, "not_found");
+  manager.tokenStore.write({ access_token: "DO-NOT-RETURN", refresh_token: "DO-NOT-RETURN-EITHER", expires_at: Date.now() + 3600000 });
+  const active = manager.configurationStatus();
+  assert.equal(active.authorized, true);
+  assert.equal(active.token_status, "valid");
+  assert.equal(active.redirect_uri, "https://example.test/api/data-center/baidu/callback");
+  assert.doesNotMatch(JSON.stringify(active), /DO-NOT-RETURN/);
+  manager.tokenStore.write({ access_token: "EXPIRED", expires_at: 0 });
+  assert.equal(manager.configurationStatus().authorization_status, "expired");
+  assert.equal(manager.configurationStatus().token_status, "expired");
+  manager.disconnect();
+  assert.equal(manager.configurationStatus().token_status, "not_found");
+});
+
+test("connection test status records only a safe result code", async () => {
+  const manager = new BaiduBackupManager({ dataDir: path.join(tempRoot, "status-test"), appKey: "K", appSecret: "TOP-SECRET", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: key, fetchImpl: async () => Response.json({ errno: -6 }) });
+  manager.tokenStore.write({ access_token: "ACCESS-SECRET", refresh_token: "REFRESH-SECRET", expires_at: Date.now() + 3600000 });
+  await assert.rejects(() => manager.testConnection(), (error) => error.code === "BAIDU_API_FAILED");
+  const status = manager.configurationStatus();
+  assert.match(status.last_test_at, /^\d{4}-/);
+  assert.equal(status.last_test_result, "BAIDU_API_FAILED");
+  assert.doesNotMatch(JSON.stringify(status), /TOP-SECRET|ACCESS-SECRET|REFRESH-SECRET/);
+});
+
+test("backup key generator emits one valid AES-256 key and writes no files", () => {
+  const directory = path.join(tempRoot, "key-cli"); fs.mkdirSync(directory);
+  const before = fs.readdirSync(directory);
+  const result = spawnSync(process.execPath, [path.join(projectRoot, "scripts", "excel_backup", "generate_backup_key.js")], { cwd: directory, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trim().split(/\r?\n/);
+  const generated = lines.at(-1);
+  assert.equal(Buffer.from(generated, "base64").length, 32);
+  assert.equal(result.stdout.split(generated).length - 1, 1);
+  assert.deepEqual(fs.readdirSync(directory), before);
+});
