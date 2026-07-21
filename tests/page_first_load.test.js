@@ -26,11 +26,13 @@ function seed(db) {
     INSERT INTO teachers(id,name,status) VALUES (7101,'首次加载老师','在职');
     INSERT INTO students(id,name,grade,status) VALUES (7201,'首次加载学生','初一','在读');
     INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes) VALUES (7301,'首次加载学生','初一','数学','首次加载学生',188.50,'首次加载单价');
+    INSERT INTO class_groups(id,teacher,grade,subject,students_key,students_display,class_name) VALUES (7351,'首次加载老师','初一','数学','首次加载学生','首次加载学生','首次加载班级');
+    INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES (7401,'首次加载老师','初一','数学','首次加载学生',220,2,1,'首次加载薪资规则');
     UPDATE pricing_standards SET unit_price=166.00,description='首次加载规则' WHERE grade='初一' AND student_count=1;
     INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,month_key,sort_order)
       VALUES (7501,'首次加载老师','2026-07-08','上课','09:00-11:00','A1','初一','数学','首次加载学生','首次加载课程','已上','已上',220.00,'manual','2026-07-01',1);
     INSERT INTO recharge_records(id,student_name,grade,cur_recharge,cur_gift,recharge_date,notes,source,month_key) VALUES (7601,'首次加载学生','初一',1000,100,'2026-07-03','首次加载充值','manual','2026-07-01');
-    INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (7701,'','首次加载学生','初一',500,50,'全局期初余额');
+    INSERT INTO student_opening_balances(id,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (7701,'首次加载学生','初一',500,50,'全局期初余额');
     INSERT INTO teacher_travel_fees(id,month_key,teacher_name,week_index,week_start,week_end,amount,notes) VALUES (7801,'2026-07-01','首次加载老师',1,'2026-07-01','2026-07-07',30,'首次加载车费');
     INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,month_key,sort_order)
       VALUES (7502,'首次加载老师','2026-08-08','上课','09:00-11:00','A2','初一','数学','首次加载学生','八月课程','已上','已上',230.00,'manual','2026-08-01',1);
@@ -67,6 +69,13 @@ const scenarios = [
   { name: "学生单价", group: "students", view: "studentPricing", title: "学生单价规则", row: ".student-pricing-rule-row", text: "首次加载学生" },
   { name: "教师薪资汇总", group: "teachers", view: "teacherSalary", title: "薪资汇总", row: ".teacher-salary-summary-row", text: "首次加载老师" },
   { name: "教师车费明细", group: "teachers", view: "teacherTravelFees", title: "车费明细", row: ".teacher-travel-fee-row", text: "首次加载老师" },
+  { name: "充值记录", group: "students", view: "recharges", title: "充值记录", row: ".recharge-row", text: "首次加载学生", direct: true },
+  { name: "期初余额", group: "students", view: "openingBalances", title: "期初余额", row: ".opening-balance-row", text: "首次加载学生", direct: true },
+  { name: "班级管理", group: "students", view: "classGroups", title: "班级管理", row: ".class-group-row", text: "首次加载老师", direct: true },
+  { name: "学生档案", group: "students", view: "studentProfiles", title: "学生档案", row: ".profile-row[data-kind=\"students\"]", text: "首次加载学生", direct: true },
+  { name: "教师课时明细", group: "teachers", view: "teacherDetail", title: "课时明细", row: ".teacher-detail-table tbody tr:not(.empty)", text: "首次加载老师", direct: true },
+  { name: "教师薪资规则", group: "teachers", view: "teacherSalaryRules", title: "薪资规则", row: ".teacher-salary-rule-row", text: "首次加载老师", direct: true },
+  { name: "教师档案", group: "teachers", view: "teacherProfiles", title: "老师档案", row: ".profile-row[data-kind=\"teachers\"]", text: "首次加载老师", direct: true },
 ];
 
 for (const scenario of scenarios) test(`${scenario.name} from a fresh home session loads current data on first click`, async () => withBrowser(async (browser) => {
@@ -75,7 +84,7 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
   await openView(browser, scenario.group, scenario.view);
   await browser.waitFor(`document.querySelector('#topbar')?.textContent.includes(${JSON.stringify(scenario.title)}) && document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0 && document.body.textContent.includes(${JSON.stringify(scenario.text)})`);
   assert.equal(await browser.evaluate("document.querySelector('.month-select')?.value || '2026-07-01'"), MONTH);
-  assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
+  if (!scenario.direct) assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   await openView(browser, "home", "dashboard"); await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('首页')");
   await openView(browser, scenario.group, scenario.view); await browser.waitFor(`document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0`);

@@ -11,6 +11,7 @@ const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFull
 const { BaiduBackupManager } = require("./backup/baidu_provider");
 const { DataPreflightError, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
 const { studentPriceStatus, teacherPriceStatus } = require("./domain/price_status");
+const { migrateOpeningBalancesToGlobal } = require("./domain/opening_balance_migration");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -436,7 +437,6 @@ function initDb() {
 
     CREATE TABLE IF NOT EXISTS student_opening_balances (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      month_key TEXT NOT NULL DEFAULT '',
       student_name TEXT NOT NULL,
       grade TEXT DEFAULT '',
       opening_actual_balance REAL DEFAULT 0,
@@ -444,7 +444,7 @@ function initDb() {
       notes TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE (month_key, student_name)
+      UNIQUE (student_name)
     );
 
     CREATE TABLE IF NOT EXISTS teacher_adjustments (
@@ -725,6 +725,9 @@ function initDb() {
   if (!operationLogColumns.includes("user_agent")) {
     db.prepare("ALTER TABLE operation_logs ADD COLUMN user_agent TEXT DEFAULT ''").run();
   }
+  if (!operationLogColumns.includes("extra_json")) {
+    db.prepare("ALTER TABLE operation_logs ADD COLUMN extra_json TEXT DEFAULT ''").run();
+  }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_logs_issue_key ON audit_logs(issue_key)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_events_entity ON audit_events(entity_type, entity_id)").run();
@@ -781,6 +784,14 @@ function initDb() {
     });
   }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_recharge_records_month_student ON recharge_records(month_key, student_name)").run();
+  try {
+    migrateOpeningBalancesToGlobal(db);
+  } catch (error) {
+    if (error?.code === "OPENING_BALANCE_MIGRATION_CONFLICT") {
+      console.error(`[opening balance migration] ${JSON.stringify({ code: error.code, conflicts: error.conflicts })}`);
+    }
+    throw error;
+  }
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_opening_balances_student ON student_opening_balances(student_name)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_grade_stages_student ON student_grade_stages(student_name)").run();
 
@@ -1109,7 +1120,6 @@ function openingBalanceRows() {
 
 function openingBalanceMap() {
   return new Map(openingBalanceRows().map((row) => [row.student_name, {
-    month_key: row.month_key || "",
     actual_balance: num(row.opening_actual_balance),
     gift_balance: num(row.opening_gift_balance),
     grade: text(row.grade),
@@ -1117,10 +1127,9 @@ function openingBalanceMap() {
   }]));
 }
 
-const OPENING_BALANCE_IMPORT_HEADERS = ["月份", "学生姓名", "年级", "期初现金余额", "期初赠送余额", "备注"];
+const OPENING_BALANCE_IMPORT_HEADERS = ["学生姓名", "年级", "期初实际余额", "期初赠送余额", "备注"];
 
 const OPENING_BALANCE_HEADER_ALIASES = {
-  month_key: new Set(["月份", "所属月份", "期初月份"]),
   student_name: new Set(["学生姓名", "姓名", "学生"]),
   grade: new Set(["年级"]),
   opening_actual_balance: new Set(["期初现金余额", "期初现金", "现金余额", "实际余额", "期初实际余额"]),
@@ -1138,7 +1147,6 @@ function openingBalanceExportRows() {
     ...openingBalanceRows()
       .sort((a, b) => compareGradeName(a.grade, b.grade) || text(a.student_name).localeCompare(text(b.student_name), "zh-Hans-CN"))
       .map((row) => [
-        normalizeBusinessMonth(row.month_key),
         row.student_name,
         row.grade || "",
         moneyRound(row.opening_actual_balance).toFixed(2),
@@ -1184,7 +1192,7 @@ function openingBalanceImportHeader(rows) {
       const field = openingBalanceHeaderField(value);
       if (field && columns[field] == null) columns[field] = index;
     }
-    if (columns.month_key != null && columns.student_name != null
+    if (columns.student_name != null
       && (columns.opening_actual_balance != null || columns.opening_gift_balance != null)) {
       return { source_row: row.source_row, columns };
     }
@@ -1216,7 +1224,7 @@ function importOpeningBalancesFromWorkbook(buffer) {
       imported: 0,
       skipped: 0,
       failed: 1,
-      details: [{ row: 0, status: "failed", message: "未找到期初余额表头，请使用月份、学生姓名、期初现金余额、期初赠送余额等列" }],
+      details: [{ row: 0, status: "failed", message: "未找到期初余额表头，请使用学生姓名、期初实际余额、期初赠送余额等列" }],
     };
   }
 
@@ -1231,21 +1239,15 @@ function importOpeningBalancesFromWorkbook(buffer) {
   let failed = 0;
   const insert = db.prepare(`
     INSERT INTO student_opening_balances(
-      month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes
+      student_name, grade, opening_actual_balance, opening_gift_balance, notes
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
   `);
 
   withTransaction(() => {
     for (const row of sheet.rows.filter((item) => item.source_row > header.source_row)) {
       if (!row.values.some((value) => text(value))) continue;
       const studentName = text(openingBalanceImportCell(row, header.columns, "student_name"));
-      const monthKey = normalizeBusinessMonth(openingBalanceImportCell(row, header.columns, "month_key"), { acceptMonthInput: true });
-      if (!validMonth(monthKey)) {
-        failed += 1;
-        details.push({ row: row.source_row, student_name: studentName, status: "failed", message: "月份不能为空且必须为YYYY-MM或YYYY-MM-01" });
-        continue;
-      }
       if (!studentName) {
         failed += 1;
         details.push({ row: row.source_row, status: "failed", message: "学生姓名为空" });
@@ -1282,14 +1284,14 @@ function importOpeningBalancesFromWorkbook(buffer) {
       }
       if (existingNames.has(studentName)) {
         skipped += 1;
-        details.push({ row: row.source_row, student_name: studentName, status: "skipped", message: "已存在，跳过" });
+        details.push({ row: row.source_row, student_name: studentName, status: "skipped", message: "该学生已存在期初余额，请直接编辑原记录。" });
         continue;
       }
 
       const profile = profiles.get(studentName);
       const grade = text(openingBalanceImportCell(row, header.columns, "grade")) || text(profile?.grade);
       const notes = text(openingBalanceImportCell(row, header.columns, "notes"));
-      insert.run(monthKey, studentName, grade, actual.value, gift.value, notes);
+      insert.run(studentName, grade, actual.value, gift.value, notes);
       existingNames.add(studentName);
       imported += 1;
       details.push({ row: row.source_row, student_name: studentName, status: "imported", message: "导入成功" });
@@ -7635,15 +7637,14 @@ function sendDataPreflightFailure(res, error, fallbackMessage, fallbackStatus = 
 }
 
 function dataPreflightCsvRows(result) {
-  const rows = [["问题代码", "问题类型", "记录ID", "学生姓名", "年级", "月份", "建议月份", "说明"]];
+  const rows = [["问题代码", "问题类型", "记录ID", "学生姓名", "年级", "关联记录", "说明"]];
   for (const issue of result.issues || []) for (const record of issue.records || []) rows.push([
     issue.code,
     issue.label,
     record.record_id ?? "",
     record.student_name ?? "",
     record.grade ?? "",
-    record.month_key ?? "",
-    record.suggested_month ?? "",
+    record.record_ids ?? "",
     record.requires_confirmation ? "必须由老板确认后修复" : "",
   ]);
   return rows;
@@ -8167,11 +8168,8 @@ function deleteStudentProfilesBatch(ids) {
 function normalizedOpeningBalancePayload(body) {
   const studentName = text(body.student_name);
   if (!studentName) return { error: "学生姓名不能为空", status: 400 };
-  const monthKey = normalizeBusinessMonth(body.month_key, { acceptMonthInput: true });
-  if (!validMonth(monthKey)) return { error: "期初余额月份不能为空且必须为YYYY-MM", status: 400 };
   const profile = get("SELECT grade FROM students WHERE name = ?", [studentName]);
   const payload = {
-    month_key: monthKey,
     student_name: studentName,
     grade: text(body.grade) || text(profile?.grade),
     opening_actual_balance: num(body.opening_actual_balance),
@@ -8195,15 +8193,14 @@ function createOpeningBalance(body) {
     return { error: "期初现金余额和期初赠送余额不能同时为 0", status: 400 };
   }
   if (get("SELECT id FROM student_opening_balances WHERE student_name = ?", [payload.student_name])) {
-    return { error: "该学生已有期初余额", status: 409 };
+    return { error: "该学生已存在期初余额，请直接编辑原记录。", status: 409 };
   }
   const result = db.prepare(`
     INSERT INTO student_opening_balances(
-      month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes
+      student_name, grade, opening_actual_balance, opening_gift_balance, notes
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
   `).run(
-    payload.month_key,
     payload.student_name,
     payload.grade,
     payload.opening_actual_balance,
@@ -8225,11 +8222,10 @@ function updateOpeningBalance(id, body) {
     return { ok: true, deleted: true, before };
   }
   const duplicate = get("SELECT id FROM student_opening_balances WHERE student_name = ? AND id <> ?", [payload.student_name, id]);
-  if (duplicate) return { error: "该学生已有期初余额", status: 409 };
+  if (duplicate) return { error: "该学生已存在期初余额，请直接编辑原记录。", status: 409 };
   db.prepare(`
     UPDATE student_opening_balances
-    SET month_key = ?,
-        student_name = ?,
+    SET student_name = ?,
         grade = ?,
         opening_actual_balance = ?,
         opening_gift_balance = ?,
@@ -8237,7 +8233,6 @@ function updateOpeningBalance(id, body) {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
-    payload.month_key,
     payload.student_name,
     payload.grade,
     payload.opening_actual_balance,
@@ -12461,24 +12456,6 @@ async function handleApi(req, res, url) {
     return sendCsv(res, dataPreflightCsvRows(safeDataPreflight()), `数据完整性问题_${exportTimestamp()}.csv`);
   }
 
-  const openingBalanceRepair = url.pathname.match(/^\/api\/data-center\/preflight\/opening-balances\/(\d+)\/repair$/);
-  if (req.method === "POST" && openingBalanceRepair) {
-    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以补充期初余额月份");
-    const id = Number(openingBalanceRepair[1]);
-    const before = get("SELECT * FROM student_opening_balances WHERE id=?", [id]);
-    if (!before) return sendError(res, 404, "期初余额记录不存在");
-    if (validMonth(before.month_key)) return sendError(res, 409, "该期初余额已有有效月份");
-    const body = await readBody(req);
-    const monthKey = normalizeBusinessMonth(body.month_key, { acceptMonthInput: true });
-    if (!validMonth(monthKey)) return sendError(res, 400, "请选择明确的业务月份");
-    if (text(body.confirmation) !== "确认补充月份") return sendError(res, 400, "请输入确认文字：确认补充月份");
-    db.prepare("UPDATE student_opening_balances SET month_key=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(monthKey, id);
-    const after = get("SELECT * FROM student_opening_balances WHERE id=?", [id]);
-    recordAuditEvent(req, user, { action: "repair_month", entity_type: "student_opening_balances", entity_id: String(id), before, after });
-    writeOperationLog(user, { operation_type: "补充期初余额月份", operation_content: `${after.student_name} ${monthKey}`, target_type: "student_opening_balances", target_id: String(id), details: { record_id: id, month_key: monthKey } }, req);
-    return sendJson(res, { ok: true, row: after, preflight: safeDataPreflight() });
-  }
-
   if (req.method === "GET" && url.pathname === "/api/data-center/baidu/status") {
     const settings = loadFullBackupSettings(dbPath);
     const remote = baiduBackupManager().configurationStatus();
@@ -12750,14 +12727,23 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/opening-balances") {
-    return sendJson(res, { scope: "global", opening_balances: openingBalanceRows() });
+    const legacyMonthIgnored = url.searchParams.has("month_key") || url.searchParams.has("month");
+    return sendJson(res, {
+      scope: "global",
+      opening_balances: openingBalanceRows(),
+      ...(legacyMonthIgnored ? { deprecated_fields: ["month_key"], deprecation_notice: "期初余额已改为全局数据，月份参数已忽略" } : {}),
+    });
   }
   if (req.method === "POST" && url.pathname === "/api/opening-balances") {
-    const result = createOpeningBalance(await readBody(req));
+    const body = await readBody(req);
+    const result = createOpeningBalance(body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, { action: "create", entity_type: "student_opening_balances", entity_id: String(result.id), before: null, after: result.row });
     writeOperationLog(user, { operation_type: "新增学生期初余额", operation_content: studentOperationText(result.row), target_type: "student_opening_balances", target_id: String(result.id) });
-    return sendJson(res, result, 201);
+    return sendJson(res, {
+      ...result,
+      ...(Object.prototype.hasOwnProperty.call(body, "month_key") ? { deprecated_fields: ["month_key"], deprecation_notice: "期初余额月份字段已忽略且未写入" } : {}),
+    }, 201);
   }
   if (req.method === "POST" && url.pathname === "/api/opening-balances/batch-delete") {
     const body = await readBody(req);
@@ -12781,7 +12767,8 @@ async function handleApi(req, res, url) {
   const openingBalanceMatch = url.pathname.match(/^\/api\/opening-balances\/(\d+)$/);
   if (openingBalanceMatch && req.method === "PUT") {
     const id = Number(openingBalanceMatch[1]);
-    const result = updateOpeningBalance(id, await readBody(req));
+    const body = await readBody(req);
+    const result = updateOpeningBalance(id, body);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, {
       action: result.deleted ? "delete_zero" : "update",
@@ -12791,7 +12778,10 @@ async function handleApi(req, res, url) {
       after: result.deleted ? { deleted: true } : result.row,
     });
     writeOperationLog(user, { operation_type: result.deleted ? "删除学生期初余额" : "修改学生期初余额", operation_content: studentOperationText(result.row || result.before), target_type: "student_opening_balances", target_id: String(id) });
-    return sendJson(res, result);
+    return sendJson(res, {
+      ...result,
+      ...(Object.prototype.hasOwnProperty.call(body, "month_key") ? { deprecated_fields: ["month_key"], deprecation_notice: "期初余额月份字段已忽略且未写入" } : {}),
+    });
   }
   if (openingBalanceMatch && req.method === "DELETE") {
     const id = Number(openingBalanceMatch[1]);
@@ -13638,10 +13628,10 @@ function buildStudentBalanceTrace(studentName) {
   if (!name) return null;
   const profile = get("SELECT id, name, grade, status, joined_at, left_at FROM students WHERE name = ?", [name]);
   const openingRows = all(
-    `SELECT id, month_key, student_name, grade, opening_actual_balance, opening_gift_balance, notes, created_at, updated_at
+    `SELECT id, student_name, grade, opening_actual_balance, opening_gift_balance, notes, created_at, updated_at
      FROM student_opening_balances
      WHERE student_name = ?
-     ORDER BY month_key, id`,
+     ORDER BY id`,
     [name],
   );
   const recharges = all(

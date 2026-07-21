@@ -4522,12 +4522,6 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   white-space: pre-wrap;
 }
 
-.opening-balance-month-repair-box {
-  display: grid;
-  gap: 6px;
-  min-width: 150px;
-}
-
 .data-import-preview {
   display: grid;
   gap: 12px;
@@ -8343,6 +8337,27 @@ table th,
   min-width: 136px;
 }
 
+.unified-filter-bar {
+  align-items: flex-end;
+}
+
+.unified-filter-field {
+  flex: 1 1 156px;
+  min-width: 136px;
+  max-width: 240px;
+}
+
+.unified-filter-field .multi-select,
+.unified-filter-field .multi-select-toggle,
+.unified-filter-field .unified-filter-control {
+  width: 100%;
+  min-width: 0;
+}
+
+.unified-filter-field .multi-select-toggle {
+  min-height: 36px;
+}
+
 .filter-combo {
   position: relative;
   display: inline-flex;
@@ -9974,6 +9989,19 @@ table th,
   .date-range-inputs .control {
     width: 100%;
     min-width: 0;
+  }
+
+  .unified-filter-field {
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .unified-filter-bar .filter-summary {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    margin-left: 0;
+    white-space: normal;
   }
 
   .date-range-inputs {

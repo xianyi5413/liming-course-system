@@ -50,27 +50,70 @@ test("remote backup cannot be enabled until all four server secrets are configur
   assert.equal(data.code, "BAIDU_CONFIGURATION_INCOMPLETE");
   assert.equal(data.baidu.app_secret_configured, false);
 });
-test("blank legacy opening-balance month passes preflight without inference or mutation", async () => {
+test("global opening balance passes preflight and the persisted table has no month column", async () => {
   const db = new DatabaseSync(databasePath);
-  db.prepare("INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'','接口缺月学生','初一',100,20,'来源 2026年2月.xlsx')").run();
+  db.prepare("INSERT INTO student_opening_balances(id,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'接口全局学生','初一',100,20,'全局期初')").run();
   db.close();
 
   const response = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight`, { headers: { cookie: ownerCookie } });
   const result = await response.json();
   assert.equal(response.status, 200);
   assert.equal(result.ok, true);
-  assert.equal(result.issues.some((item) => /OPENING_BALANCE_MONTH/.test(item.code)), false);
+  assert.equal(result.issues.some((item) => /OPENING_BALANCE/.test(item.code)), false);
   const checked = new DatabaseSync(databasePath, { readOnly: true });
-  assert.equal(checked.prepare("SELECT month_key FROM student_opening_balances WHERE id=9901").get().month_key, "");
+  assert.equal(checked.prepare("PRAGMA table_info(student_opening_balances)").all().some((column) => column.name === "month_key"), false);
   checked.close();
 });
-test("new opening balances require an explicit month and normalize only user-entered YYYY-MM", async () => {
-  const missing = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ student_name: "新期初学生", grade: "初一", opening_actual_balance: 10, opening_gift_balance: 0 }) });
-  assert.equal(missing.status, 400);
+test("opening-balance API creates without month, ignores legacy month and rejects duplicate students", async () => {
+  const createdWithoutMonth = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ student_name: "新期初学生", grade: "初一", opening_actual_balance: 10, opening_gift_balance: 0 }) });
+  const first = await createdWithoutMonth.json();
+  assert.equal(createdWithoutMonth.status, 201);
+  assert.equal(Object.prototype.hasOwnProperty.call(first.row, "month_key"), false);
   const created = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-06", student_name: "新期初学生", grade: "初一", opening_actual_balance: 10, opening_gift_balance: 0 }) });
   const result = await created.json();
-  assert.equal(created.status, 201);
-  assert.equal(result.row.month_key, "2026-06-01");
+  assert.equal(created.status, 409);
+  assert.equal(result.error, "该学生已存在期初余额，请直接编辑原记录。");
+  const legacy = await fetch(`http://127.0.0.1:${port}/api/opening-balances`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-06", student_name: "兼容旧请求学生", grade: "初一", opening_actual_balance: 20, opening_gift_balance: 0 }) });
+  const legacyResult = await legacy.json();
+  assert.equal(legacy.status, 201);
+  assert.deepEqual(legacyResult.deprecated_fields, ["month_key"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(legacyResult.row, "month_key"), false);
+  const queried = await fetch(`http://127.0.0.1:${port}/api/opening-balances?month_key=2027-01-01`, { headers: { cookie: ownerCookie } });
+  const queriedResult = await queried.json();
+  assert.equal(queried.status, 200);
+  assert.deepEqual(queriedResult.deprecated_fields, ["month_key"]);
+  assert.equal(queriedResult.opening_balances.some((row) => row.student_name === "新期初学生"), true);
+});
+
+test("global opening balance remains the single base for cumulative February March and June balances", async () => {
+  const db = new DatabaseSync(databasePath);
+  db.exec(`
+    INSERT INTO students(id,name,grade,status) VALUES (9951,'余额回归学生','初一','在读');
+    INSERT INTO teachers(id,name,status) VALUES (9951,'余额回归老师','在职');
+    INSERT INTO student_opening_balances(id,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9951,'余额回归学生','初一',1000,100,'全局起点');
+    INSERT INTO recharge_records(id,student_name,grade,cur_recharge,cur_gift,recharge_date,notes,source,month_key) VALUES
+      (9951,'余额回归学生','初一',500,50,'2026-02-10','二月现金与赠送','manual','2026-02-01'),
+      (9952,'余额回归学生','初一',200,0,'2026-03-10','跨月充值','manual','2026-03-01');
+    INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,month_key,sort_order) VALUES
+      (9951,'余额回归老师','2026-02-08','上课','09:00-11:00','A1','初一','数学','余额回归学生','单节覆盖','已上','已上',200,'manual','2026-02-01',1),
+      (9952,'余额回归老师','2026-03-08','请假','09:00-11:00','A1','初一','数学','余额回归学生','请假不收费','请假','请假',0,'auto','2026-03-01',1),
+      (9953,'余额回归老师','2026-06-08','试听','09:00-11:00','A1','初一','数学','余额回归学生','试听不收费','试听','试听',0,'auto','2026-06-01',1);
+    INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes) VALUES (9951,'余额回归学生','初一','数学','余额回归学生',120,'学生单价规则');
+    INSERT INTO fee_overrides(lesson_id,student_name,unit_price) VALUES (9951,'余额回归学生',100);
+  `);
+  db.close();
+  const summary = async (month) => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/bootstrap?month=${month}`, { headers: { cookie: ownerCookie } });
+    const data = await response.json(); assert.equal(response.status, 200);
+    const row = data.derived.student_summary_to_date.find((item) => item.student_name === "余额回归学生");
+    assert.ok(row, month); return row;
+  };
+  const february = await summary("2026-02-01");
+  const march = await summary("2026-03-01");
+  const june = await summary("2026-06-01");
+  assert.deepEqual([february.actual_balance, february.gift_balance], [1400, 150]);
+  assert.deepEqual([march.actual_balance, march.gift_balance], [1600, 150]);
+  assert.deepEqual([june.actual_balance, june.gift_balance], [1600, 150]);
 });
 
 test("owner-only one-time Baidu configuration is reauthenticated, private and clearable", async () => {

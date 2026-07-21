@@ -22,30 +22,6 @@ function normalizeBusinessMonth(value, { acceptMonthInput = false } = {}) {
   return raw;
 }
 
-function inferredMonthFromPersistedRow(row) {
-  const values = [row.notes].map(text).filter(Boolean).join(" ");
-  const matches = [...values.matchAll(/(20\d{2})\s*年\s*(1[0-2]|0?[1-9])\s*月(?:\.xlsx)?/g)]
-    .map((match) => `${match[1]}-${String(Number(match[2])).padStart(2, "0")}-01`);
-  const unique = [...new Set(matches)];
-  return unique.length === 1 ? { month_key: unique[0], evidence: "原备注中的源Excel文件名" } : null;
-}
-
-function openingBalanceRecord(row) {
-  const suggestion = inferredMonthFromPersistedRow(row);
-  return {
-    record_id: Number(row.id),
-    student_name: text(row.student_name),
-    grade: text(row.grade),
-    actual_balance: money(row.opening_actual_balance),
-    gift_balance: money(row.opening_gift_balance),
-    notes: text(row.notes).slice(0, 500),
-    month_key: text(row.month_key),
-    suggested_month: suggestion?.month_key || "",
-    suggestion_evidence: suggestion?.evidence || "",
-    requires_confirmation: true,
-  };
-}
-
 function runDataPreflight(db, options = {}) {
   const sampleLimit = Math.max(1, Math.min(20, Number(options.sampleLimit || 5)));
   const issues = [];
@@ -118,7 +94,6 @@ module.exports = {
   normalizeBusinessMonth,
   validMonth,
   validDate,
-  inferredMonthFromPersistedRow,
   runDataPreflight,
   assertDataPreflight,
 };

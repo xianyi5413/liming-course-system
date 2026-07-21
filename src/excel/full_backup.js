@@ -253,7 +253,7 @@ function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visible
     ["用途", "人工查看、空系统初始化和完整覆盖恢复"], ["可见工作表", VISIBLE_SHEET_NAMES.join("；")],
     ["内部恢复表", "4张veryHidden工作表，保存最少技术关系、账号哈希和长文本分片"], ["金额单位", "人民币元"], ["日期格式", "日期YYYY-MM-DD；充值月份YYYY年M月；内部月份YYYY-MM-01"],
     ["空值规则", "空白表示空字符串；精确NULL由内部恢复映射保存"], ["安全说明", "不含Session、Cookie、Token、Secret、服务器路径、Docker/SSH信息、IP或User-Agent"],
-    ["期初余额", "每名学生一条全局基础余额；可见表不含月份，兼容技术字段仅在隐藏恢复映射中原样保存"],
+    ["期初余额", "每名学生一条全局基础余额；可见表和隐藏恢复映射均不含月份"],
     ["计算结果", "费用和薪资汇总不导出；单人费用、规则费用、教师薪资和规则薪资仅供查看，不作为重复恢复源"],
     ["排除历史", EXCLUDED_TABLES.map((item) => `${item.table}：${item.reason}`).join("；")], ["排除设置数", excludedSettings],
     ...Object.entries(visibleCounts).map(([name, count]) => [`记录数：${name}`, count]),

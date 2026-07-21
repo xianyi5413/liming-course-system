@@ -360,6 +360,7 @@ let navExpansionMode = localStorage.getItem(NAV_EXPANSION_MODE_KEY) || "initial"
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
 let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
+let rechargeDateFilter = { start: "", end: "" };
 let rechargeModalOpen = false;
 let selectedRechargeIds = new Set();
 let openingBalanceFilter = { student: "", grade: "" };
@@ -377,7 +378,9 @@ let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
 if (view === "profiles") view = profileTab === "students" ? "studentProfiles" : "teacherProfiles";
-let profileSearch = "";
+let profileNameFilter = { teachers: "", students: "" };
+let profileKeywordFilter = { teachers: "", students: "" };
+let profileGradeFilter = { students: "" };
 let profileStatusFilter = (() => {
   try {
     return { teachers: "", students: "", ...JSON.parse(localStorage.getItem("liming:profile-status-filter") || "{}") };
@@ -2253,6 +2256,11 @@ async function applyDateRangeToScope(scope, start, end) {
     render();
     return;
   }
+  if (scope === "recharges") {
+    rechargeDateFilter = { start, end };
+    render();
+    return;
+  }
   if (scope === "matrix") {
     const fallback = currentMatrixRange(state?.settings?.month_key || activeMonth);
     matrixRange = {
@@ -3319,7 +3327,6 @@ function openingBalanceModalMarkup() {
           <button class="btn opening-balance-modal-cancel" type="button">取消</button>
         </div>
         <div class="lesson-create-form opening-balance-form-grid">
-          <label>所属月份<input id="new-opening-month" class="control opening-balance-modal-field" data-field="month_key" type="month" value="" required></label>
           <label>学生姓名${filterComboControl({ id: "new-opening-student", className: "opening-balance-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-opening-grade", className: "opening-balance-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
           <label>期初实际余额<input id="new-opening-actual" class="control money-input opening-balance-modal-field" data-field="opening_actual_balance" type="number" step="0.01" value="0"></label>
@@ -3711,6 +3718,7 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
 function multiSelectSelectionMarkup(field, values = [], placeholder = "全部") {
   const selected = normalizeNameList(values);
   if (!selected.length) return escapeHtml(placeholder);
+  if (field === "teacher" && selected.length === 1 && selected[0] === TEACHER_ALL_VALUE) return "全部教师";
   if (["student", "student_name", "student_names", "students"].includes(field)) {
     return `<span class="entity-badge-list">${selected.map((value) => renderEntityBadge("student", value)).join("")}</span>`;
   }
@@ -3721,6 +3729,7 @@ function multiSelectSelectionMarkup(field, values = [], placeholder = "全部") 
 }
 
 function multiSelectOptionLabel(field, value) {
+  if (field === "teacher" && value === TEACHER_ALL_VALUE) return "<span>全部教师</span>";
   if (field === "student" || field === "student_name" || field === "student_names" || field === "students") return renderEntityBadge("student", value);
   if (["grade", "subject", "status"].includes(field)) return renderEntityBadge(field, value);
   if (field === "classroom") return `<span class="entity-badge classroom-badge">${escapeHtml(value)}</span>`;
@@ -3932,6 +3941,44 @@ function bindMultiSelectControl(select) {
   select._multiSelectSelectedValues = selectedValues;
   select._multiSelectSync = syncUi;
   select._multiSelectCommit = commit;
+  const toggle = select.querySelector(".multi-select-toggle");
+  const activateToggle = (event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const currentMenu = multiSelectMenuFor(select);
+    const search = currentMenu?.querySelector(".multi-select-search");
+    if (event?.target?.closest?.(".multi-select-clear-icon") && selectedValues().length) {
+      closeMultiSelectMenu(select);
+      if (search) search.value = "";
+      commit([]);
+      toggle?.blur();
+      return;
+    }
+    closeOtherMultiSelectMenus(select);
+    const shouldOpen = !select.classList.contains("open");
+    if (!shouldOpen) closeMultiSelectMenu(select);
+    else {
+      select.classList.add("open");
+      mountFloatingMultiSelectMenu(select);
+    }
+    toggle?.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    if (shouldOpen) {
+      multiSelectMenuFor(select)?.querySelector(".multi-select-search")?.focus({ preventScroll: true });
+      positionFloatingMultiSelectMenu(select);
+      requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
+    }
+  };
+  toggle?.addEventListener("click", activateToggle);
+  toggle?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMultiSelectMenu(select);
+      toggle.focus({ preventScroll: true });
+    } else if (event.key === "ArrowDown") {
+      activateToggle(event);
+    }
+  });
   syncUi();
 }
 
@@ -4129,26 +4176,11 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
   return `
     <div class="filter-bar">
       <div class="filter-controls">
-        <label class="filter-field">
-          <span>学生姓名</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-        </label>
-        <label class="filter-field">
-          <span>授课老师</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>状态</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
-        </label>
-        <label class="filter-field">
-          <span>价格状态</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "输入或选择价格状态" })}
-        </label>
+        ${unifiedFilterField({ label: "学生", className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students })}
+        ${unifiedFilterField({ label: "教师", className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers })}
+        ${unifiedFilterField({ label: "年级", className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades })}
+        ${unifiedFilterField({ label: "状态", className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses })}
+        ${unifiedFilterField({ label: "价格状态", className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "全部价格状态" })}
         <label class="filter-field filter-date-range">
           <span>日期</span>
           ${dateRangePickerControl({ scope: "fee-details", start: feeDetailsFilter.start, end: feeDetailsFilter.end, placeholder: "选择费用日期范围" })}
@@ -4187,13 +4219,12 @@ function dynamicSummaryFilterOptions(rows, filter = summaryFilter) {
 function renderSummaryFilterBar(rows, filteredRows) {
   const opts = dynamicSummaryFilterOptions(rows);
   return `
-    <div class="filter-bar compact summary-filter-bar">
-      <label>学生姓名</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-      <label>年级</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-      <label>余额状态</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "输入或选择余额状态" })}
+    <div class="filter-bar compact unified-filter-bar summary-filter-bar">
+      <div class="filter-controls">
+        ${unifiedFilterField({ label: "学生", className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students })}
+        ${unifiedFilterField({ label: "年级", className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: opts.grades })}
+        ${unifiedFilterField({ label: "余额状态", className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "全部余额状态" })}
+      </div>
       <div class="filter-summary">
         <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn reset-summary-filter" type="button">清空筛选</button>
@@ -4454,6 +4485,39 @@ function balanceDetailCards(row) {
 
 function normalizeDataCenterSettings(settings = {}) {
   return { ...DATA_CENTER_DEFAULT_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+}
+
+function unifiedFilterField({ label, className, field, value, values, placeholder = "全部", dataAttr = "filter-field", emptyLabel = "" }) {
+  const defaults = {
+    student: "全部学生",
+    student_name: "全部学生",
+    teacher: "全部教师",
+    teacher_name: "全部教师",
+    grade: "全部年级",
+    subject: "全部科目",
+    status: "全部状态",
+    price: "全部价格状态",
+    salary_status: "全部价格状态",
+  };
+  const resolvedPlaceholder = placeholder === "全部" ? (defaults[field] || placeholder) : placeholder;
+  return `
+    <div class="filter-field unified-filter-field">
+      <span>${escapeHtml(label)}</span>
+      ${multiSelectControl({
+        className: `lesson-filter-select unified-filter-control ${className || ""}`.trim(),
+        field,
+        selected: value ? [value] : [],
+        values,
+        placeholder: resolvedPlaceholder,
+        clearLabel: emptyLabel || resolvedPlaceholder,
+        dataAttr,
+        searchable: true,
+        searchPlaceholder: `搜索${label}`,
+        multiple: false,
+        emptyText: "暂无匹配结果",
+      })}
+    </div>
+  `;
 }
 
 function safeDataCenterLoadError(error) {
@@ -8228,6 +8292,8 @@ function currentRechargeFilter() {
     source: rechargeSourceFilter,
     student: rechargeStudentFilter,
     grade: rechargeGradeFilter,
+    start: rechargeDateFilter.start,
+    end: rechargeDateFilter.end,
   };
 }
 
@@ -8237,6 +8303,8 @@ function rechargeMatchesFilter(row, filter = currentRechargeFilter()) {
   if (filter.source === "manual" && source === "carry_over") return false;
   if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  if (filter.start && (!row.recharge_date || row.recharge_date < filter.start)) return false;
+  if (filter.end && (!row.recharge_date || row.recharge_date > filter.end)) return false;
   return true;
 }
 
@@ -8354,14 +8422,14 @@ function renderRecharges() {
   contentEl.innerHTML = `
     <div class="band recharge-page">
       ${rechargeAnalysisMarkup(visibleRows)}
-      <div class="filter-bar compact recharge-filter-bar">
-        <label>来源</label>
-        ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
-        <label>学生姓名</label>
-        ${filterComboControl({ className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
-        <label>年级</label>
-        ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades, placeholder: "输入或选择年级" })}
-        <button class="btn reset-recharge-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar recharge-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "来源", className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "全部来源" })}
+          ${unifiedFilterField({ label: "学生", className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: opts.students, dataAttr: "field" })}
+          ${unifiedFilterField({ label: "年级", className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades })}
+          <label class="filter-field filter-date-range"><span>日期</span>${dateRangePickerControl({ scope: "recharges", start: rechargeDateFilter.start, end: rechargeDateFilter.end, placeholder: "选择充值日期范围" })}</label>
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-recharge-filter" type="button">清空筛选</button></div>
       </div>
       <div class="transaction-action-row recharge-action-row" role="toolbar" aria-label="充值记录操作">
         <button class="btn danger batch-delete-recharges" type="button" ${bulkActionDisabledAttr(selectedRechargeIds.size)}>${bulkActionText("批量删除", selectedRechargeIds.size)}</button>
@@ -8403,12 +8471,12 @@ function renderOpeningBalances() {
   renderTopbar("期初余额", `已显示 ${visibleRows.length} / 共 ${rows.length} 条期初余额`);
   contentEl.innerHTML = `
     <div class="band opening-balance-page">
-      <div class="filter-bar compact opening-balance-filter-bar">
-        <label>学生姓名</label>
-        ${filterComboControl({ className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
-        <label>年级</label>
-        ${filterComboControl({ className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        <button class="btn reset-opening-balance-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar opening-balance-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "学生", className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, dataAttr: "field" })}
+          ${unifiedFilterField({ label: "年级", className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades })}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-opening-balance-filter" type="button">清空筛选</button></div>
       </div>
       <div class="transaction-action-row opening-balance-actions" role="toolbar" aria-label="期初余额操作">
         <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
@@ -8420,22 +8488,19 @@ function renderOpeningBalances() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>月份</th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}">
                 <td class="select-col"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
-                <td>${/^\d{4}-(0[1-9]|1[0-2])-01$/.test(String(row.month_key || ""))
-                  ? `<input class="cell-input opening-balance-field" data-field="month_key" type="month" value="${escapeHtml(String(row.month_key).slice(0, 7))}">`
-                  : `<div class="opening-balance-month-repair-box"><input class="cell-input opening-balance-month-repair" type="month" value="${escapeHtml(String((backupState.preflight?.issues || []).flatMap((issue) => issue.records || []).find((item) => Number(item.record_id) === Number(row.id))?.suggested_month || "").slice(0, 7))}"><button class="btn primary opening-balance-month-repair-confirm" type="button">确认补充月份</button></div>`}</td>
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
                 <td><input class="cell-input wide opening-balance-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无期初余额</td></tr>`}
+            `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9203,7 +9268,7 @@ function dataPreflightMarkup() {
   const issueRows = (result.issues || []).map((issue) => `
     <div class="data-preflight-issue">
       <div><strong>${escapeHtml(issue.label || issue.code)}</strong><span>${Number(issue.count || 0)} 条</span></div>
-      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.student_name || "")}　${escapeHtml(record.grade || "")}　实际余额 ${escapeHtml(record.actual_balance ?? "-")} 元　赠送余额 ${escapeHtml(record.gift_balance ?? "-")} 元${record.notes ? `　备注：${escapeHtml(record.notes)}` : ""}${record.suggested_month ? `　可核对建议：${escapeHtml(record.suggested_month)}` : ""}</div>`).join("")}
+      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.student_name || "")}　${escapeHtml(record.grade || "")}${record.record_ids ? `　关联记录：${escapeHtml(record.record_ids)}` : ""}</div>`).join("")}
     </div>`).join("");
   return `<section class="band data-preflight-panel danger">
     <div class="section-head"><div><div class="section-title">数据完整性预检未通过</div><div class="section-subtitle preflight-message">${escapeHtml(result.user_message || "请修复问题后重新检查")}</div></div><span class="data-count-chip">共 ${Number(result.issue_count || 0)} 个问题</span></div>
@@ -10164,16 +10229,7 @@ function pricingAuditModalMarkup() {
 function studentPricingMatchesFilter(row) {
   const filter = studentPricingFilter;
   const studentNeedle = filter.student.trim().toLowerCase();
-  if (studentNeedle) {
-    const haystack = [
-      row.student_name,
-      row.grade,
-      row.student_names,
-      row.lookup_key,
-      row.notes,
-    ].map((value) => String(value || "").toLowerCase()).join(" ");
-    if (!haystack.includes(studentNeedle)) return false;
-  }
+  if (studentNeedle && !String(row.student_name || "").toLowerCase().includes(studentNeedle)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.student_names && !textContains(row.student_names, filter.student_names)) return false;
@@ -10195,17 +10251,14 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
   const grades = uniqueSorted(rows.map((row) => row.grade));
   const studentGroups = uniqueSorted(rows.map((row) => row.student_names));
   return `
-    <div class="filter-bar compact student-pricing-filter-bar">
-      <label>学生/备注</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students, placeholder: "输入或选择学生/备注" })}
-      <label>年级</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "grade", value: studentPricingFilter.grade, values: grades, placeholder: "输入或选择年级" })}
-      <label>科目</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects, placeholder: "输入或选择科目" })}
-      <label>学生集合</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "输入或选择学生集合" })}
-      <label>价格状态</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "输入或选择价格状态" })}
+    <div class="filter-bar compact unified-filter-bar student-pricing-filter-bar">
+      <div class="filter-controls">
+        ${unifiedFilterField({ label: "学生", className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students })}
+        ${unifiedFilterField({ label: "年级", className: "student-pricing-filter-input", field: "grade", value: studentPricingFilter.grade, values: grades })}
+        ${unifiedFilterField({ label: "科目", className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects })}
+        ${unifiedFilterField({ label: "学生集合", className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "全部学生集合" })}
+        ${unifiedFilterField({ label: "价格状态", className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "全部价格状态" })}
+      </div>
       <div class="filter-summary">
         <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn reset-student-pricing-filter" type="button">清空筛选</button>
@@ -10260,23 +10313,13 @@ function renderClassGroups() {
   renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
   contentEl.innerHTML = `
     <div class="band">
-      <div class="filter-bar compact class-group-filter-bar">
-        <label class="filter-field">
-          <span>老师</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "grade", value: classGroupFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "subject", value: classGroupFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "student", value: classGroupFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-        </label>
+      <div class="filter-bar compact unified-filter-bar class-group-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "教师", className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers })}
+          ${unifiedFilterField({ label: "年级", className: "class-group-filter-input", field: "grade", value: classGroupFilter.grade, values: opts.grades })}
+          ${unifiedFilterField({ label: "科目", className: "class-group-filter-input", field: "subject", value: classGroupFilter.subject, values: opts.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "class-group-filter-input", field: "student", value: classGroupFilter.student, values: opts.students })}
+        </div>
         <label class="history-toggle compact-toggle">
           <input class="class-group-hide-inactive" type="checkbox" ${classGroupHideInactiveTeachers ? "checked" : ""}>
           <span>隐藏非在职老师</span>
@@ -10311,13 +10354,16 @@ function profileRows(kind = profileTab) {
   const scopedRows = rows;
   const statusFilter = profileStatusFilter[kind] || "";
   const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
-  const query = profileSearch.trim().toLowerCase();
-  const searchFields = kind === "students"
-    ? (row) => [row.name]
-    : (row) => [row.name, row.phone, row.status, row.joined_at, row.left_at, row.notes];
-  const filtered = query
-    ? statusRows.filter((row) => searchFields(row).some((value) => String(value || "").toLowerCase().includes(query)))
-    : statusRows;
+  const gradeFilter = kind === "students" ? (profileGradeFilter.students || "") : "";
+  const gradeRows = gradeFilter ? statusRows.filter((row) => textContains(row.grade || "", gradeFilter)) : statusRows;
+  const nameQuery = String(profileNameFilter[kind] || "").trim().toLowerCase();
+  const nameRows = nameQuery
+    ? gradeRows.filter((row) => String(row.name || "").toLowerCase().includes(nameQuery))
+    : gradeRows;
+  const keyword = String(profileKeywordFilter[kind] || "").trim().toLowerCase();
+  const filtered = keyword
+    ? nameRows.filter((row) => [row.phone, row.status, row.joined_at, row.left_at, row.notes].some((value) => String(value || "").toLowerCase().includes(keyword)))
+    : nameRows;
   if (kind !== "students") return filtered;
   const profileGradeOrder = [...gradeOrder, "已毕业"];
   return [...filtered].sort((a, b) => {
@@ -10561,6 +10607,7 @@ function profileModalMarkup() {
 function renderProfileDirectory(kind = profileTab) {
   profileTab = kind;
   localStorage.setItem("liming:profile-tab", profileTab);
+  const sourceRows = kind === "teachers" ? (state.profile_teachers || []) : (state.profile_students || []);
   const rows = profileRows(kind);
   const isTeacher = kind === "teachers";
   if (isTeacher) {
@@ -10619,9 +10666,16 @@ function renderProfileDirectory(kind = profileTab) {
   `;
   contentEl.innerHTML = `
     <div class="band profile-panel">
+      <div class="filter-bar compact unified-filter-bar profile-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: isTeacher ? "教师" : "学生", className: "profile-name-filter", field: isTeacher ? "teacher" : "student", value: profileNameFilter[kind] || "", values: uniqueSorted(sourceRows.map((row) => row.name)) })}
+          ${isTeacher ? "" : unifiedFilterField({ label: "年级", className: "profile-grade-filter", field: "grade", value: profileGradeFilter.students || "", values: uniqueSorted(sourceRows.map((row) => row.grade)) })}
+          ${unifiedFilterField({ label: "状态", className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues })}
+          ${isTeacher ? `<label class="filter-field"><span>关键字</span>${textFilterControl({ className: "profile-keyword-filter", field: "q", value: profileKeywordFilter[kind] || "", placeholder: "电话、日期或备注" })}</label>` : ""}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${rows.length}</b> / 共 ${sourceRows.length} 条</span><button class="btn reset-profile-filter" type="button">清空筛选</button></div>
+      </div>
       <div class="profile-actions profile-toolbar">
-        ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
-        ${textFilterControl({ className: "profile-search", field: "q", value: profileSearch, placeholder: isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选" })}
         ${isTeacher ? "" : `<button class="btn primary open-student-stage-batch" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量修改界定时间", selectedStudentProfileIds.size)}</button>`}
         ${isTeacher ? "" : `<button class="btn danger batch-delete-student-profiles" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量删除", selectedStudentProfileIds.size)}</button>`}
         ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
@@ -11410,27 +11464,14 @@ function renderTeacherSalaryRules() {
   );
   contentEl.innerHTML = `
     <div class="band">
-      <div class="filter-bar compact">
-        <label class="filter-field">
-          <span>老师</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students, placeholder: "输入学生搜索" })}
-        </label>
-        <label class="filter-field">
-          <span>价格状态</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "输入或选择价格状态" })}
-        </label>
+      <div class="filter-bar compact unified-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
+          ${unifiedFilterField({ label: "年级", className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades })}
+          ${unifiedFilterField({ label: "科目", className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students })}
+          ${unifiedFilterField({ label: "价格状态", className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "全部价格状态" })}
+        </div>
         <label class="history-toggle compact-toggle">
           <input class="teacher-salary-rule-hide-inactive" type="checkbox" ${teacherSalaryRuleHideInactiveTeachers ? "checked" : ""}>
           <span>隐藏非在职老师</span>
@@ -11518,38 +11559,23 @@ function renderTeacherDetail() {
     <div class="query-head">
       <div class="metric">
         <div class="metric-label">教师姓名</div>
-        ${auth.user?.role === "teacher" && teachers.length <= 1 ? `<div class="metric-value small">${escapeHtml(selectedTeacher || "未绑定老师")}</div>` : `<select class="control teacher-select" style="margin-top:8px;width:100%">
-          ${auth.user?.role === "teacher" && teachers.length > 1 ? `<option value="${TEACHER_ALL_VALUE}" ${selectedTeacher === TEACHER_ALL_VALUE ? "selected" : ""}>全部老师</option>` : ""}
-          ${options(teachers, selectedTeacher, "选择教师")}
-        </select>`}
+        <div class="metric-value small">${escapeHtml(teacherAllSelected ? "全部教师" : (selectedTeacher || "未绑定教师"))}</div>
       </div>
       <div class="metric"><div class="metric-label">有效课时</div><div class="metric-value">${count}</div></div>
       ${showSalary ? `<div class="metric"><div class="metric-label">薪资统计</div><div class="metric-value">${formatMoney(salary)}</div></div>` : ""}
       <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${rows.length}</div></div>
     </div>
     <div class="band">
-      <div class="filter-bar compact">
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "grade", value: teacherDetailFilter.grade, values: filterOptions.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "subject", value: teacherDetailFilter.subject, values: filterOptions.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "student", value: teacherDetailFilter.student, values: filterOptions.students, placeholder: "输入或选择学生" })}
-        </label>
-        <label class="filter-field">
-          <span>薪资状态</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "输入或选择薪资状态" })}
-        </label>
-        <label class="filter-field">
-          <span>规则状态</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "rule_status", value: teacherDetailFilter.rule_status, values: filterOptions.ruleStatuses, placeholder: "输入或选择规则状态" })}
-        </label>
-        <button class="btn reset-teacher-detail-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar">
+        <div class="filter-controls">
+          ${auth.user?.role === "teacher" && teachers.length <= 1 ? "" : unifiedFilterField({ label: "教师", className: "teacher-select", field: "teacher", value: selectedTeacher, values: auth.user?.role === "teacher" && teachers.length > 1 ? [TEACHER_ALL_VALUE, ...teachers] : teachers })}
+          ${unifiedFilterField({ label: "年级", className: "teacher-detail-filter-input", field: "grade", value: teacherDetailFilter.grade, values: filterOptions.grades })}
+          ${unifiedFilterField({ label: "科目", className: "teacher-detail-filter-input", field: "subject", value: teacherDetailFilter.subject, values: filterOptions.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "teacher-detail-filter-input", field: "student", value: teacherDetailFilter.student, values: filterOptions.students })}
+          ${unifiedFilterField({ label: "薪资状态", className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "全部薪资状态" })}
+          ${unifiedFilterField({ label: "规则状态", className: "teacher-detail-filter-input", field: "rule_status", value: teacherDetailFilter.rule_status, values: filterOptions.ruleStatuses, placeholder: "全部规则状态" })}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-teacher-detail-filter" type="button">清空筛选</button></div>
       </div>
       ${showSalary ? `
         <div class="teacher-detail-bulkbar">
@@ -13161,10 +13187,7 @@ const TOPBAR_MONTH_INDEPENDENT_VIEWS = new Set([
   "teacherCourseNotice",
   "openingBalances",
   "studentQuery",
-  "studentPricing",
-  "classGroups",
   "studentProfiles",
-  "teacherSalaryRules",
   "teacherProfiles",
   "appearance",
   "baseData",
@@ -13274,9 +13297,15 @@ async function refreshMonthRelatedActiveView() {
   if (view === "recharges") return refreshRechargesForActiveMonth();
   if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
   if (view === "feeDetails") return refreshDerivedForActiveMonth(renderFeeDetails);
+  if (view === "studentPricing") return refreshDerivedForActiveMonth(renderStudentPricing);
+  if (view === "classGroups") return refreshDerivedForActiveMonth(renderClassGroups);
   if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
   if (view === "teacherTravelFees") return refreshDerivedForActiveMonth(renderTeacherTravelFees);
   if (view === "teacherDetail") return refreshTeacherDetailForActiveMonth();
+  if (view === "teacherSalaryRules") {
+    await loadActiveViewData({ refreshGlobal: false, fullBootstrap: false, generation: loadGeneration });
+    return rerenderCurrentView(renderTeacherSalaryRules);
+  }
   if (view === "staffPayroll" || view === "staffAttendance") return refreshStaffMonthForActiveView();
   if (view === "expenses") return refreshExpensesForActiveMonth();
   if (view === "audit") return refreshAuditForActiveMonth();
@@ -13289,6 +13318,16 @@ async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
   closeOpenMultiSelectMenus();
   closeDateRangePicker();
   if (newMonth === oldMonth) return;
+  if (view === "recharges") {
+    rechargeStudentFilter = "";
+    rechargeGradeFilter = "";
+    rechargeDateFilter = { start: "", end: "" };
+  } else if (view === "summary") summaryFilter = { student: "", grade: "", balance: "" };
+  else if (view === "feeDetails") feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
+  else if (view === "studentPricing") studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
+  else if (view === "classGroups") classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
+  else if (view === "teacherDetail") teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
+  else if (view === "teacherSalaryRules") teacherSalaryRuleFilter = { teacher: "", grade: "", subject: "", student: "", salary_status: "" };
   logClientOperation("month_switch", {
     content: `切换月份：${oldMonth || "未设置"} → ${newMonth}`,
     target_type: "months",
@@ -13679,6 +13718,9 @@ function wireEvents() {
       } else if (event.target === search && event.key === "ArrowDown") {
         event.preventDefault();
         visible[0]?.focus();
+      } else if (event.key === "Enter" && visible.includes(document.activeElement)) {
+        event.preventDefault();
+        document.activeElement?.click?.();
       } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
         const index = visible.indexOf(document.activeElement);
         event.preventDefault();
@@ -14303,13 +14345,11 @@ function wireEvents() {
 
   document.querySelectorAll(".add-opening-balance").forEach((button) => {
     button.addEventListener("click", async () => {
-      const monthKey = document.querySelector("#new-opening-month")?.value || "";
       const studentName = document.querySelector("#new-opening-student")?.value.trim() || "";
       const grade = document.querySelector("#new-opening-grade")?.value.trim() || "";
       const actual = document.querySelector("#new-opening-actual")?.value || "0";
       const gift = document.querySelector("#new-opening-gift")?.value || "0";
       const notes = document.querySelector("#new-opening-notes")?.value || "";
-      if (!monthKey) return alert("请选择期初余额所属月份");
       if (!studentName) return alert("请填写学生姓名");
       if (optionalNumberValue(actual) === null) return alert("请填写有效的期初实际余额");
       if (optionalNumberValue(gift) === null) return alert("请填写有效的期初赠送余额");
@@ -14319,7 +14359,6 @@ function wireEvents() {
         await request("/api/opening-balances", {
           method: "POST",
           body: {
-            month_key: monthKey,
             student_name: studentName,
             grade,
             opening_actual_balance: optionalNumberValue(actual) || 0,
@@ -14373,20 +14412,20 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".recharge-source-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-source-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeSourceFilter = canonicalFilterValue(rechargeSourceOptions, value) || "all";
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
     }, () => render());
   });
 
-  document.querySelectorAll(".recharge-student-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-student-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeStudentFilter = value;
     }, () => render());
   });
 
-  document.querySelectorAll(".recharge-grade-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-grade-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeGradeFilter = value;
     }, () => render());
@@ -14397,6 +14436,7 @@ function wireEvents() {
       rechargeSourceFilter = "all";
       rechargeStudentFilter = "";
       rechargeGradeFilter = "";
+      rechargeDateFilter = { start: "", end: "" };
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
       render();
     });
@@ -14442,7 +14482,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".opening-balance-filter").forEach((input) => {
+  document.querySelectorAll("input.opening-balance-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       openingBalanceFilter = { ...openingBalanceFilter, [input.dataset.filterField || input.dataset.field]: value };
     }, () => render());
@@ -14523,17 +14563,40 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".profile-search").forEach((input) => {
+  document.querySelectorAll("input.profile-name-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
-      profileSearch = value;
+      profileNameFilter = { ...profileNameFilter, [profileTab]: value };
     }, () => render());
   });
 
-  document.querySelectorAll(".profile-status-filter").forEach((input) => {
+  document.querySelectorAll("input.profile-grade-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      profileGradeFilter = { ...profileGradeFilter, students: value };
+    }, () => render());
+  });
+
+  document.querySelectorAll("input.profile-keyword-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      profileKeywordFilter = { ...profileKeywordFilter, [profileTab]: value };
+    }, () => render());
+  });
+
+  document.querySelectorAll("input.profile-status-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       profileStatusFilter = { ...profileStatusFilter, [profileTab]: value };
       localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
     }, () => render());
+  });
+
+  document.querySelectorAll(".reset-profile-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      profileNameFilter = { ...profileNameFilter, [profileTab]: "" };
+      profileKeywordFilter = { ...profileKeywordFilter, [profileTab]: "" };
+      if (profileTab === "students") profileGradeFilter = { ...profileGradeFilter, students: "" };
+      profileStatusFilter = { ...profileStatusFilter, [profileTab]: "" };
+      localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
+      render();
+    });
   });
 
   document.querySelectorAll(".backfill-profile-joined-at").forEach((button) => {
@@ -15034,25 +15097,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".opening-balance-month-repair-confirm").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const row = button.closest(".opening-balance-row");
-      const monthKey = row?.querySelector(".opening-balance-month-repair")?.value || "";
-      if (!row || !monthKey) return showToast("请先选择明确的业务月份", "error");
-      if (!confirm(`确认将 ${row.dataset.studentName} 的期初余额月份补充为 ${monthKey}？此操作会记录日志。`)) return;
-      button.disabled = true;
-      try {
-        const result = await request(`/api/data-center/preflight/opening-balances/${encodeURIComponent(row.dataset.id)}/repair`, { method: "POST", body: { month_key: monthKey, confirmation: "确认补充月份" } });
-        backupState.preflight = result.preflight || backupState.preflight;
-        showToast("期初余额月份已补充并重新检查");
-        await load({ refreshGlobal: false });
-      } catch (error) {
-        button.disabled = false;
-        showToast(error.message || "补充月份失败", "error");
-      }
-    });
-  });
-
   document.querySelectorAll(".data-template-download").forEach((button) => {
     button.addEventListener("click", async () => {
       backupState.busy = true;
@@ -15207,7 +15251,7 @@ function wireEvents() {
     catch (error) { showToast(error.message || "下载错误清单失败", "error"); }
   }));
   document.querySelectorAll(".data-preflight-view").forEach((button) => button.addEventListener("click", async () => {
-    const opening = (backupState.preflight?.issues || []).find((issue) => ["OPENING_BALANCE_MONTH_MISSING", "OPENING_BALANCE_MONTH_INVALID", "OPENING_BALANCE_STUDENT_DUPLICATE"].includes(issue.code));
+    const opening = (backupState.preflight?.issues || []).find((issue) => issue.code === "OPENING_BALANCE_STUDENT_DUPLICATE");
     const first = opening?.records?.[0];
     if (!first || !canView("openingBalances")) return showToast("当前账号不能进入期初余额页面", "error");
     openingBalanceFilter = { student: first.student_name || "", grade: first.grade || "" };
@@ -15549,7 +15593,7 @@ function wireEvents() {
     }, 650);
   });
 
-  document.querySelectorAll(".fee-details-filter-input").forEach((input) => {
+  document.querySelectorAll("input.fee-details-filter-input").forEach((input) => {
     const applyFeeDetailsFilter = (value) => {
       feeDetailsFilter = {
         ...feeDetailsFilter,
@@ -15622,7 +15666,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".summary-filter-input").forEach((input) => {
+  document.querySelectorAll("input.summary-filter-input").forEach((input) => {
     const applySummaryFilter = (value) => {
       const field = input.dataset.filterField;
       summaryFilter = {
@@ -15647,7 +15691,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
+  document.querySelectorAll("input.student-pricing-filter-input").forEach((input) => {
     const applyStudentPricingFilter = (value) => {
       const field = input.dataset.filterField;
       const canonical = field === "price"
@@ -15705,7 +15749,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".class-group-filter-input").forEach((input) => {
+  document.querySelectorAll("input.class-group-filter-input").forEach((input) => {
     const applyClassGroupFilter = (value) => {
       classGroupFilter = { ...classGroupFilter, [input.dataset.filterField]: value };
     };
@@ -16286,7 +16330,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-detail-filter-input").forEach((input) => {
+  document.querySelectorAll("input.teacher-detail-filter-input").forEach((input) => {
     const applyTeacherDetailFilter = (value) => {
       teacherDetailFilter = {
         ...teacherDetailFilter,
@@ -16615,7 +16659,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-salary-rule-filter-input").forEach((input) => {
+  document.querySelectorAll("input.teacher-salary-rule-filter-input").forEach((input) => {
     const applyTeacherSalaryRuleFilter = (value) => {
       teacherSalaryRuleFilter = {
         ...teacherSalaryRuleFilter,
@@ -16879,7 +16923,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-select").forEach((select) => {
+  document.querySelectorAll("input.teacher-select").forEach((select) => {
     select.addEventListener("change", () => {
       selectedTeacher = select.value;
       teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };

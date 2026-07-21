@@ -55,10 +55,17 @@ async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prep
   } finally {
     if (chrome) {
       await chrome.session.close();
-      if (chrome.child.exitCode == null) chrome.child.kill("SIGTERM");
+      if (chrome.child.exitCode == null) {
+        const chromeExited = new Promise((resolve) => chrome.child.once("exit", resolve));
+        chrome.child.kill("SIGTERM");
+        await Promise.race([chromeExited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      }
     }
-    if (server.exitCode == null) server.kill("SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (server.exitCode == null) {
+      const serverExited = new Promise((resolve) => server.once("exit", resolve));
+      server.kill("SIGTERM");
+      await Promise.race([serverExited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    }
     fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
@@ -163,8 +170,8 @@ test("owner saves one-time Baidu secrets through the wizard without page reflect
   });
 });
 
-test("manual backup accepts a blank legacy opening-balance month without changing it", async () => {
-  const prepareDatabase = (db) => db.prepare("INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (8801,'','浏览器缺月学生','初一',1000,200,'从源Excel 2026年2月.xlsx 迁移')").run();
+test("manual backup accepts a global opening balance without requiring a month", async () => {
+  const prepareDatabase = (db) => db.prepare("INSERT INTO student_opening_balances(id,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (8801,'浏览器全局期初学生','初一',1000,200,'全局期初余额')").run();
   await withBrowserScenario({ prepareDatabase }, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     await browser.openDataCenter();
@@ -172,7 +179,8 @@ test("manual backup accepts a blank legacy opening-balance month without changin
     await browser.click(".backup-run-now");
     await browser.waitFor("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('成功')");
     const db = new DatabaseSync(database, { readOnly: true });
-    assert.equal(db.prepare("SELECT month_key FROM student_opening_balances WHERE id=8801").get().month_key, "");
+    const row = { ...db.prepare("SELECT student_name,grade,opening_actual_balance,opening_gift_balance,notes FROM student_opening_balances WHERE id=8801").get() };
+    assert.deepEqual(row, { student_name: "浏览器全局期初学生", grade: "初一", opening_actual_balance: 1000, opening_gift_balance: 200, notes: "全局期初余额" });
     db.close();
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.data-preflight-panel.danger'))"), false);
     assert.deepEqual(browser.exceptions, []);

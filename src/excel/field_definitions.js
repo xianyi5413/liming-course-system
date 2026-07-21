@@ -69,7 +69,7 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
   sheet("student_opening_balances", "期初余额", "student_opening_balances", [
     ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
     ["opening_actual_balance", "期初实际余额", M], ["opening_gift_balance", "期初赠送余额", M], ["notes", "备注", T],
-  ], { sort_fields: ["month_key", "student_name", "id"] }),
+  ], { sort_fields: ["student_name", "id"] }),
   sheet("student_pricing", "所有学生单价", "student_pricing", [
     ["student_name", "学生", { ...T, nullable: false }], ["grade", "年级", T], ["subject", "科目", { ...T, nullable: false }],
     ["student_names", "学生集合", T], ["custom_price", "单价", { ...M, nullable: false }],

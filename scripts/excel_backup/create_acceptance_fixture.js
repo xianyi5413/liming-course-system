@@ -31,7 +31,7 @@ function seedSyntheticData(db) {
     INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,teacher_salary_rule_id,month_key,sort_order) VALUES (9701,'合成教师','2026-07-20','上课','09:00-11:00','A教室','初三','数学','合成学生😀','路径 含空格；+保持文本','未上','调课',220,'rule',9501,'2026-07-01',1);
     INSERT INTO fee_overrides(lesson_id,student_name,unit_price) VALUES (9701,'合成学生😀',199.5);
     INSERT INTO recharge_records(id,student_name,grade,cur_recharge,cur_gift,recharge_date,notes,source,month_key) VALUES (9801,'合成学生😀','初三',2000,200,'2026-07-19','合成充值','manual','2026-07-01');
-    INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'2026-07-01','合成学生😀','初三',100,50,'原始期初余额');
+    INSERT INTO student_opening_balances(id,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'合成学生😀','初三',100,50,'全局期初余额');
     INSERT INTO teacher_travel_fees(id,month_key,teacher_name,week_index,week_start,week_end,amount,notes) VALUES (10001,'2026-07-01','合成教师',1,'2026-07-01','2026-07-07',20,'合成车费');
     INSERT INTO staff(id,name,role,base_salary,pay_type,daily_rate,standard_work_days,phone,status,joined_at,left_at,notes) VALUES (10101,'合成员工','教务',5000,'月薪',0,26,'13700000001','在职','2025-01-01','','合成员工');
     INSERT INTO staff_salary_monthly(id,staff_id,month_key,salary_actual,bonus,deduction,notes) VALUES (10201,10101,'2026-07-01',5200,300,100,'合成工资');
