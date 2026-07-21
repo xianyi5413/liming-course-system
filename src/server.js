@@ -11782,7 +11782,7 @@ async function handleApi(req, res, url) {
     if (rule.error) return sendError(res, rule.status || 400, rule.error);
     recordAuditEvent(req, user, { action: "deactivate", entity_type: "teacher_salary_rules", entity_id: String(id), before, after: rule });
     writeOperationLog(user, {
-      operation_type: "停用薪资规则",
+      operation_type: "移除薪资规则匹配",
       operation_content: `${rule.teacher_name} ${rule.grade} ${rule.subject} ${rule.student_names}`,
       target_type: "teacher_salary_rules",
       target_id: String(id),

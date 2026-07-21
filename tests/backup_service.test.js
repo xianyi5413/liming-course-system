@@ -44,6 +44,8 @@ test("manual backup atomically publishes a validated full Excel and checksum", (
   const verified = verifyFullData(filename);
   assert.equal(verified.ok, true); assert.equal(verified.version, FORMAT_VERSION); assert.equal(created.record.format_version, FORMAT_VERSION);
   assert.deepEqual(verified.workbook.sheets.filter((sheet) => sheet.state === "visible").map((sheet) => sheet.name), expectedVisibleSheetNames());
+  assert.deepEqual(verified.workbook.sheetMap.get("所有学生费用明细").rows[0], ["学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用"]);
+  assert.deepEqual(verified.workbook.sheetMap.get("所有教师课时明细").rows[0], ["授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资"]);
   assert.equal(sha256File(filename), created.record.sha256);
 });
 

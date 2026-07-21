@@ -26,7 +26,10 @@ test("AES-256-GCM encryption is authenticated, random and round-trips", async ()
   const first = path.join(tempRoot, "first.enc"); const second = path.join(tempRoot, "second.enc"); const output = path.join(tempRoot, "restored.xlsx");
   await encryptFile({ inputPath: plain, outputPath: first, key }); await encryptFile({ inputPath: plain, outputPath: second, key });
   assert.equal(fs.readFileSync(first).subarray(0, MAGIC.length).equals(MAGIC), true); assert.notDeepEqual(fs.readFileSync(first).subarray(0, 64), fs.readFileSync(second).subarray(0, 64));
-  assert.equal((await verifyEncryptedFile({ inputPath: first, key })).ok, true); await decryptFile({ inputPath: first, outputPath: output, key }); assert.deepEqual(fs.readFileSync(output), fs.readFileSync(plain)); assert.equal(verifyFullData(output).version, FORMAT_VERSION);
+  assert.equal((await verifyEncryptedFile({ inputPath: first, key })).ok, true); await decryptFile({ inputPath: first, outputPath: output, key }); assert.deepEqual(fs.readFileSync(output), fs.readFileSync(plain));
+  const verified = verifyFullData(output); assert.equal(verified.version, FORMAT_VERSION);
+  assert.equal(verified.workbook.sheetMap.get("所有学生费用明细").rows[0].includes("规则费用"), false);
+  assert.equal(verified.workbook.sheetMap.get("所有教师课时明细").rows[0].includes("规则薪资"), false);
 });
 
 test("wrong key and tampering fail without publishing plaintext", async () => {

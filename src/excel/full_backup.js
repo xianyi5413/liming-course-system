@@ -11,7 +11,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 4;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -98,14 +98,6 @@ function priceBucket(grade, studentCount) {
 function priceKey(row) { return [text(row.student_name), text(row.grade), text(row.subject), normalizedStudents(row.student_names)].join("\u0001"); }
 function teacherRuleKey(row) { return [text(row.teacher_name), text(row.grade), text(row.subject), normalizedStudents(row.student_names)].join("\u0001"); }
 function moneyRound(value) { return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100; }
-function parseLessonHours(value) {
-  const normalized = text(value).replace(/[：﹕]/g, ":").replace(/[—–－~～至到]/g, "-").replace(/\s+/g, "");
-  if (!/^[^-]+-[^-]+$/.test(normalized)) return null;
-  const minutes = (token) => { const match = token.match(/^(\d{1,2})(?::?(\d{2}))?$/); if (!match) return null; const hour = Number(match[1]); const minute = Number(match[2] || 0); return hour <= 23 && minute <= 59 ? hour * 60 + minute : null; };
-  const [startToken, endToken] = normalized.split("-"); const start = minutes(startToken); const end = minutes(endToken);
-  if (start == null || end == null) return null;
-  return end > start ? (end - start) / 60 : null;
-}
 function studentRuleSource(rule, lessons, context) {
   const price = Number(rule.custom_price || 0); if (price <= 0) return "pending";
   const matches = lessons.filter((lesson) => splitList(lesson.student_names).includes(text(rule.student_name)) && priceKey({ ...lesson, student_name: rule.student_name }) === priceKey(rule) && deriveStatus(lesson, context.allowedStatuses) === "已上");
@@ -118,18 +110,10 @@ function studentRuleSource(rule, lessons, context) {
   return mismatch ? "manual" : "auto";
 }
 function studentFeeValues(lesson, studentName, context) {
-  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return { unit_price: 0, rule_price: 0 };
+  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return { unit_price: 0 };
   const override = context.feeOverrides.get(`${lesson.id}\u0001${studentName}`);
   const standard = context.priceStandards.get(`${text(lesson.grade)}\u0001${priceBucket(lesson.grade, splitList(lesson.student_names).length)}`);
-  const rule = context.studentRules.get(priceKey({ ...lesson, student_name: studentName }));
-  return { unit_price: moneyRound(override == null ? Number(standard || 0) : Number(override)), rule_price: Number(rule?.custom_price || 0) > 0 ? moneyRound(rule.custom_price) : null };
-}
-function teacherRuleSalary(lesson, context) {
-  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return 0;
-  const rule = context.teacherRules.get(teacherRuleKey(lesson));
-  if (!rule || Number(rule.is_active) === 0 || Number(rule.salary_per_unit || 0) <= 0) return 0;
-  const hours = parseLessonHours(lesson.time_slot); const units = hours == null ? 1 : hours / (Number(rule.unit_hours || 0) > 0 ? Number(rule.unit_hours) : 2);
-  return moneyRound(Number(rule.salary_per_unit) * units);
+  return { unit_price: moneyRound(override == null ? Number(standard || 0) : Number(override)) };
 }
 function gradeStageFields(sourceData, studentName) {
   const stages = new Map((sourceData.student_grade_stages || []).filter((row) => text(row.student_name) === text(studentName)).map((row) => [text(row.stage), row]));
@@ -149,7 +133,7 @@ function sourceDataFromDb(db) {
 function visibleRecords(definition, sourceData, context) {
   const rows = sourceData[definition.source_table] || [];
   if (definition.key === "student_fee_details") return context.lessons.flatMap((lesson) => splitList(lesson.student_names).map((studentName) => ({ visible: { student_name: studentName, teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, notes: lesson.notes, ...studentFeeValues(lesson, studentName, context) } }))).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
-  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: deriveStatus(lesson, context.allowedStatuses) === "已上" ? moneyRound(lesson.teacher_salary) : 0, rule_salary: teacherRuleSalary(lesson, context) } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
+  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: deriveStatus(lesson, context.allowedStatuses) === "已上" ? moneyRound(lesson.teacher_salary) : 0 } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
   if (definition.key === "base_data") {
     const values = [];
     const add = (category, names, status) => [...new Set(names.map(text).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).forEach((name, index) => values.push({ visible: { category, name, status, sort_order: index + 1 } }));
@@ -227,7 +211,6 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
     if (!source) return;
     mappedRows.add(`${definition.source_table}\u0000${key}`);
     const represented = new Set(definition.columns.map((column) => column.source_field).filter(Boolean));
-    if (definition.key === "teacher_salary_rules") represented.add("is_active");
     if (definition.key === "operation_logs") represented.add("result_status");
     if (definition.key === "roles") { represented.add("readonly"); represented.add("is_system"); }
     if (definition.key === "users") represented.add("status");
@@ -254,7 +237,7 @@ function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visible
     ["内部恢复表", "4张veryHidden工作表，保存最少技术关系、账号哈希和长文本分片"], ["金额单位", "人民币元"], ["日期格式", "日期YYYY-MM-DD；充值月份YYYY年M月；内部月份YYYY-MM-01"],
     ["空值规则", "空白表示空字符串；精确NULL由内部恢复映射保存"], ["安全说明", "不含Session、Cookie、Token、Secret、服务器路径、Docker/SSH信息、IP或User-Agent"],
     ["期初余额", "每名学生一条全局基础余额；可见表和隐藏恢复映射均不含月份"],
-    ["计算结果", "费用和薪资汇总不导出；单人费用、规则费用、教师薪资和规则薪资仅供查看，不作为重复恢复源"],
+    ["计算结果", "页面可显示规则费用和规则薪资用于核对；Excel只保存单人费用和教师薪资，规则值恢复后由原始规则重新计算"],
     ["排除历史", EXCLUDED_TABLES.map((item) => `${item.table}：${item.reason}`).join("；")], ["排除设置数", excludedSettings],
     ...Object.entries(visibleCounts).map(([name, count]) => [`记录数：${name}`, count]),
   ] };
@@ -272,7 +255,6 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
     feeOverrides: new Map(sourceData.fee_overrides.map((row) => [`${row.lesson_id}\u0001${text(row.student_name)}`, Number(row.unit_price)])),
     priceStandards: new Map(sourceData.pricing_standards.map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, Number(row.unit_price)])),
     studentRules: new Map(sourceData.student_pricing.map((row) => [priceKey(row), row])),
-    teacherRules: new Map(sourceData.teacher_salary_rules.filter((row) => Number(row.is_active) !== 0).map((row) => [teacherRuleKey(row), row])),
   };
   const mapping = []; const chunks = []; const mappedRows = new Set(); const visibleCounts = {}; const visibleSheets = [];
   for (const definition of VISIBLE_SHEET_DEFINITIONS) {
@@ -374,7 +356,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || Number(meta.get("format_version")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v3 文件");
+  if (meta.get("file_type") !== FILE_TYPE || Number(meta.get("format_version")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v4 文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -394,7 +376,7 @@ function reconstructData(workbook, parsedVisible, mappings) {
       // Hidden recovery mappings carry exact null values and reassembled long text.
       // They must win over the human-readable preview stored in the visible sheet.
       Object.assign(row, technical);
-      if (definition.key === "teacher_salary_rules") row.is_active = teacherActiveFromPriceStatus(item.value.price_status);
+      if (definition.key === "teacher_salary_rules" && !Object.prototype.hasOwnProperty.call(technical, "is_active")) row.is_active = teacherActiveFromPriceStatus(item.value.price_status);
       if (definition.key === "operation_logs") row.result_status = item.value.result_label === "失败" ? "failure" : "success";
       if (definition.key === "roles") { row.readonly = item.value.action_permissions === "只读" ? 1 : 0; row.is_system = item.value.role_status === "系统角色" ? 1 : 0; }
       if (definition.key === "users") row.status = item.value.status_label === "停用" ? "disabled" : item.value.status_label === "已删除" ? "deleted" : "active";
@@ -435,7 +417,7 @@ function validateData(data, parsedVisible) {
 
 function verifyFullData(input) {
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (Number(infoMap.get("格式版本")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v3 文件");
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (Number(infoMap.get("格式版本")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v4 文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);

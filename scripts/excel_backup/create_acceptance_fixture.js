@@ -47,7 +47,7 @@ function seedSyntheticData(db) {
 }
 
 function main() {
-  const output = path.resolve(argument("--output", path.join(projectRoot, "artifacts", "黎明教育_全量数据_合成验收_v3.xlsx")));
+  const output = path.resolve(argument("--output", path.join(projectRoot, "artifacts", "黎明教育_全量数据_合成验收_v4.xlsx")));
   if (fs.existsSync(output)) throw new Error(`验收文件已存在：${path.basename(output)}`);
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-excel-acceptance-"));
   try {
@@ -56,7 +56,7 @@ function main() {
     if (initialized.status !== 0) throw new Error("合成数据库初始化失败");
     const db = new DatabaseSync(dbPath);
     try { seedSyntheticData(db); } finally { db.close(); }
-    exportFullData({ dbPath, outputPath: output, appVersion: "synthetic-acceptance-v3", appGitCommit: "synthetic", createdAt: new Date("2026-07-20T05:22:28.000Z") });
+    exportFullData({ dbPath, outputPath: output, appVersion: "synthetic-acceptance-v4", appGitCommit: "synthetic", createdAt: new Date("2026-07-20T05:22:28.000Z") });
     const verified = verifyFullData(output);
     process.stdout.write(`${JSON.stringify({ ok: true, output, format_version: verified.version, visible_sheets: verified.workbook.sheets.filter((sheet) => sheet.state === "visible").length, hidden_sheets: verified.workbook.sheets.filter((sheet) => sheet.state === "veryHidden").length })}\n`);
   } finally {

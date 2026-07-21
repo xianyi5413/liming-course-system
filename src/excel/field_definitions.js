@@ -60,7 +60,7 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
     ["student_name", "学生姓名", T], ["teacher_name", "授课老师", T], ["date", "日期", D],
     ["weekday", "星期", T], ["time_slot", "时间", T], ["classroom", "教室", T],
     ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }], ["grade", "年级", T], ["subject", "科目", T],
-    ["notes", "备注", T], ["unit_price", "单人费用", M], ["rule_price", "规则费用", M],
+    ["notes", "备注", T], ["unit_price", "单人费用", M],
   ], { restore_source: false, sort_fields: ["date", "teacher_name", "student_name"] }),
   sheet("recharge_records", "所有充值记录", "recharge_records", [
     ["month_label", "月份", { ...T, source_field: null, nullable: false }], ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
@@ -92,7 +92,7 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
   sheet("lesson_hour_details", "所有教师课时明细", "", [
     ["teacher_name", "授课老师", T], ["date", "日期", D], ["weekday", "星期", T], ["time_slot", "时间", T],
     ["classroom", "教室", T], ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }], ["grade", "年级", T],
-    ["subject", "科目", T], ["student_names", "学生", T], ["notes", "备注", T], ["teacher_salary", "教师薪资", M], ["rule_salary", "规则薪资", M],
+    ["subject", "科目", T], ["student_names", "学生", T], ["notes", "备注", T], ["teacher_salary", "教师薪资", M],
   ], { restore_source: false, sort_fields: ["date", "teacher_name", "time_slot"] }),
   sheet("teacher_salary_rules", "所有教师薪资规则", "teacher_salary_rules", [
     ["teacher_name", "老师", { ...T, nullable: false }], ["grade", "年级", { ...T, nullable: false }], ["subject", "科目", { ...T, nullable: false }],

@@ -12,7 +12,7 @@ const { exportFullData, restoreFullData, verifyFullData } = require("../src/exce
 const root = path.resolve(__dirname, "..");
 
 async function withDatabase(action) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-preflight-v3-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-preflight-v4-"));
   const dataDir = path.join(tempRoot, "data");
   const dbPath = path.join(dataDir, "synthetic.sqlite");
   fs.mkdirSync(dataDir, { recursive: true });
@@ -54,7 +54,7 @@ test("global opening balance stays month-free through full Excel round-trip", ()
 
 test("manual and scheduled backups accept a global opening balance", async () => withDatabase(async ({ dataDir, dbPath }) => {
   const db = new DatabaseSync(dbPath); insertOpening(db, 9301, "备份学生"); db.close();
-  const service = new BackupService({ dbPath, dataDir, appVersion: "preflight-v3-test" });
+  const service = new BackupService({ dbPath, dataDir, appVersion: "preflight-v4-test" });
   const manual = await service.create({ trigger: "manual", createdAt: new Date("2026-07-21T01:00:00Z") });
   assert.equal(manual.record.status, "success");
   const scheduled = spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", "run_scheduled_backup.js"), "--scheduled-for", "2026-07-22", "--schedule-key", "full-data:2026-07-22"], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, DB_PATH: dbPath, BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "" }, encoding: "utf8" });

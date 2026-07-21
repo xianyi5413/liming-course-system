@@ -2639,8 +2639,23 @@ function teacherSalaryInputValue(value) {
   return n === null ? "" : n.toFixed(2);
 }
 
+function visiblePriceStatus(amount, isActive = 1) {
+  return Number(isActive) !== 0 && optionalNumberValue(amount) > 0 ? "已设置" : "未设置";
+}
+
+function visiblePriceStatusBadge(status) {
+  const normalized = status === "已设置" ? "已设置" : "未设置";
+  return `<span class="visible-price-status ${normalized === "已设置" ? "is-set" : "is-unset"}">${normalized}</span>`;
+}
+
+function studentPricingVisibleStatus(rule) {
+  return rule.price_status === "已设置" || rule.price_status === "未设置"
+    ? rule.price_status
+    : visiblePriceStatus(rule.custom_price);
+}
+
 function teacherSalaryRuleSalaryStatus(rule) {
-  return rule.price_status || (Number(rule.is_active) === 0 ? "已停用" : optionalNumberValue(rule.salary_per_unit) > 0 ? "已设置" : "未设置");
+  return visiblePriceStatus(rule.salary_per_unit, rule.is_active);
 }
 
 function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) {
@@ -2659,7 +2674,7 @@ function dynamicTeacherSalaryRuleFilterOptions(rules, filter = teacherSalaryRule
     grades: uniqueSorted(rowsForFilterOption(rules, filter, "grade", teacherSalaryRuleMatchesFilter).map((rule) => rule.grade)),
     subjects: uniqueSorted(rowsForFilterOption(rules, filter, "subject", teacherSalaryRuleMatchesFilter).map((rule) => rule.subject)),
     students: uniqueSorted(rowsForFilterOption(rules, filter, "student", teacherSalaryRuleMatchesFilter).flatMap((rule) => splitStudents(rule.student_names))),
-    salaryStatuses: uniqueSorted(rowsForFilterOption(rules, filter, "salary_status", teacherSalaryRuleMatchesFilter).map((rule) => teacherSalaryRuleSalaryStatus(rule))),
+    salaryStatuses: ["已设置", "未设置"],
   };
 }
 
@@ -3686,7 +3701,10 @@ function textFilterControl({ id = "", className = "", field, value = "", placeho
 function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false, searchPlaceholder = "搜索选项", inputAttrs = "", selectionSummary = "", multiple = true, emptyText = "" }) {
   const selectedList = normalizeNameList(selected);
   const selectedSet = new Set(selectedList);
-  const normalized = uniqueSorted([...(values || []), ...(includeSelected ? selectedList : [])]);
+  const rawValues = [...(values || []), ...(includeSelected ? selectedList : [])];
+  const normalized = ["price", "salary_status"].includes(field)
+    ? [...new Set(rawValues.map((value) => String(value || "").trim()).filter(Boolean))]
+    : uniqueSorted(rawValues);
   const dataName = dataAttr === "field" ? "data-field" : "data-filter-field";
   const label = multiSelectSelectionMarkup(field, selectedList, placeholder);
   const emptyLabel = emptyText || (/student/.test(field || "") ? "暂无匹配学生" : "暂无匹配选项");
@@ -4006,7 +4024,7 @@ function filterLabel(entries, value) {
 
 const rechargeSourceOptions = [["all", "全部"], ["manual", "手动/无来源"], ["carry_over", "自动结转"]];
 const balanceFilterOptions = [["actual", "有现金余额"], ["gift", "有赠送余额"], ["zero", "全为零"]];
-const priceFilterOptions = [["auto", "自动"], ["manual", "手动"], ["pending", "未设置"]];
+const priceFilterOptions = [["set", "已设置"], ["unset", "未设置"]];
 const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
 
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
@@ -4997,6 +5015,10 @@ function viewLabel(viewKey = view) {
 
 function renderViewTransitionSkeleton() {
   navigationTransitionStartedAt = performance.now();
+  if (view === "dashboard") {
+    renderDashboard({ currentMessage: "正在加载课程...", currentSubtitle: "正在加载" });
+    return;
+  }
   renderNav();
   renderTopbar(viewLabel());
   contentEl.innerHTML = `
@@ -10233,11 +10255,7 @@ function studentPricingMatchesFilter(row) {
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.student_names && !textContains(row.student_names, filter.student_names)) return false;
-  if (filter.price) {
-    const source = priceSourceFilterValue(row.rule_source);
-    const sourceLabel = priceSourceLabel(source);
-    if (filter.price !== source && !textContains(sourceLabel, filter.price)) return false;
-  }
+  if (filter.price && filter.price !== (studentPricingVisibleStatus(row) === "已设置" ? "set" : "unset")) return false;
   const currentLessons = numberValue(row.current_month_lessons);
   const totalLessons = numberValue(row.total_lessons);
   if (filter.usage === "current" && currentLessons <= 0) return false;
@@ -10294,7 +10312,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.custom_price, { className: `student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}`, attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01"` })}</td>
-                <td class="text-cell">${escapeHtml(row.price_status || priceSourceLabel(row.rule_source))}</td>
+                <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
@@ -11448,8 +11466,8 @@ function renderTeacherSalaryRules() {
     subjects: uniqueSorted([...(state.lookups.subjects || []), ...usedLessonLookupValues("subjects")]),
     students: uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean)),
   };
-  const effectiveCount = rules.filter((rule) => optionalNumberValue(rule.salary_per_unit) > 0).length;
-  const pendingCount = rules.filter((rule) => optionalNumberValue(rule.salary_per_unit) == null || optionalNumberValue(rule.salary_per_unit) <= 0).length;
+  const effectiveCount = rules.filter((rule) => teacherSalaryRuleSalaryStatus(rule) === "已设置").length;
+  const pendingCount = rules.length - effectiveCount;
   const sync = teacherSalaryRuleCandidateSync;
   const syncNotice = sync.busy
     ? `<div class="section-subtitle">正在根据历史课程自动补齐薪资规则候选...</div>`
@@ -11496,7 +11514,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(rule.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: rule.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell">${teacherSalaryRuleSalaryStatus(rule)}</td>
+                <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的薪资规则</td></tr>`}
@@ -12675,25 +12693,28 @@ function dashboardPieSvg(pie = {}, options = {}) {
   `;
 }
 
-function dashboardCurrentLessonsMarkup(rows = []) {
-  if (!rows.length) return `<div class="dashboard-current-empty">当前没有正在上的课程</div>`;
+function dashboardCurrentLessonsMarkup(rows = [], statusMessage = "") {
   return `
-    <div class="dashboard-current-list">
-      ${rows.map((row) => `
-        <div class="dashboard-current-item">
-          <div class="dashboard-current-main">
-            <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
-            <span>${escapeHtml(row.time_slot || "未填时间")}</span>
-          </div>
-          <div class="dashboard-current-meta">
-            <span>${escapeHtml(row.classroom || "未填教室")}</span>
-            ${renderEntityBadge("grade", row.grade)}
-            ${renderEntityBadge("subject", row.subject)}
-            <span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>
-          </div>
-          ${statusBadge(row.status || "待上")}
+    <div class="dashboard-current-viewport">
+      ${!statusMessage && rows.length ? `
+        <div class="dashboard-current-list">
+          ${rows.map((row) => `
+            <div class="dashboard-current-item">
+              <div class="dashboard-current-main">
+                <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
+                <span>${escapeHtml(row.time_slot || "未填时间")}</span>
+              </div>
+              <div class="dashboard-current-meta">
+                <span>${escapeHtml(row.classroom || "未填教室")}</span>
+                ${renderEntityBadge("grade", row.grade)}
+                ${renderEntityBadge("subject", row.subject)}
+                <span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>
+              </div>
+              ${statusBadge(row.status || "待上")}
+            </div>
+          `).join("")}
         </div>
-      `).join("")}
+      ` : `<div class="dashboard-current-empty">${escapeHtml(statusMessage || "当前没有正在上的课程")}</div>`}
     </div>
   `;
 }
@@ -12750,7 +12771,7 @@ function dashboardShortcutModal() {
   `;
 }
 
-function renderDashboard() {
+function renderDashboard({ currentMessage = "", currentSubtitle = "" } = {}) {
   disposeDashboardTrendChart();
   const dashboard = state.dashboard || { todos: [], trend: [], student_pie: { items: [], total: 0 }, teacher_pie: { items: [], total: 0 }, current_lessons: [] };
   const shortcuts = dashboardShortcutCatalog();
@@ -12781,9 +12802,10 @@ function renderDashboard() {
           <div class="section-head">
             <div>
               <div class="section-title">正在上的课程</div>
+              <div class="section-subtitle">${escapeHtml(currentSubtitle || `共 ${(dashboard.current_lessons || []).length} 节`)}</div>
             </div>
           </div>
-          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [])}
+          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [], currentMessage)}
         </section>
 
         <section class="band dashboard-todo-section">
@@ -12929,6 +12951,15 @@ function renderLoadFailure(error) {
   applySidebarState();
   renderNav();
   const permissionError = isPermissionError(error);
+  if (view === "dashboard" && !permissionError) {
+    renderDashboard({
+      currentMessage: `课程加载失败：${error?.message || "请稍后重试"}`,
+      currentSubtitle: "加载失败",
+    });
+    applyReadonlyUi();
+    wireEvents();
+    return;
+  }
   renderTopbar(currentViewTitle(), permissionError ? "权限配置异常" : "加载失败");
   contentEl.innerHTML = `
     <section class="band">
@@ -15102,7 +15133,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v3.xlsx");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v4.xlsx");
       } catch (error) {
         showToast(error.message || "下载模板失败", "error");
       } finally {

@@ -3389,6 +3389,28 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   color: var(--danger);
 }
 
+.visible-price-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.visible-price-status.is-set {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.visible-price-status.is-unset {
+  background: var(--neutral-chip-bg);
+  color: var(--neutral-chip-fg);
+}
+
 .btn {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -12658,6 +12680,51 @@ body {
       "todo"
       "pies"
       "trend";
+  }
+}
+
+/* Keep the live-course card stable while only its lesson viewport scrolls. */
+.dashboard-main-grid > :is(.dashboard-current-section, .dashboard-todo-section, .dashboard-pie-section) {
+  height: 360px;
+  min-height: 360px;
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.dashboard-current-viewport {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-current-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding-right: 3px;
+}
+
+.dashboard-current-empty {
+  width: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .dashboard-main-grid > .dashboard-current-section {
+    height: 320px;
+    min-height: 320px;
+    max-height: 320px;
+  }
+
+  .dashboard-main-grid > :is(.dashboard-todo-section, .dashboard-pie-section) {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
   }
 }
 
