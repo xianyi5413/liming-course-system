@@ -2,17 +2,18 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { assertDataPreflight, normalizeBusinessMonth, validMonth } = require("../backup/data_preflight");
+const { assertDataPreflight } = require("../backup/data_preflight");
+const { studentPriceStatus, teacherPriceStatus, teacherActiveFromPriceStatus } = require("../domain/price_status");
 const { createWorkbook, parseWorkbook, sanitizeCellText, validateWorkbookStructure, MAX_CELL_TEXT_LENGTH } = require("./xlsx_codec");
 const {
-  DEFAULT_COURSE_STATUSES, VISIBLE_SHEET_DEFINITIONS, VISIBLE_SHEET_NAMES, HIDDEN_SHEET_NAMES,
+  DEFAULT_COURSE_STATUSES, STUDENT_GRADE_STAGE_COLUMNS, VISIBLE_SHEET_DEFINITIONS, VISIBLE_SHEET_NAMES, HIDDEN_SHEET_NAMES,
   SOURCE_TABLE_DEFINITIONS, WORKBOOK_SEQUENCE, EXCLUDED_TABLES,
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 2;
-const NULL_MARKER = "__LIMING_NULL_V2__";
-const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V2__";
+const FORMAT_VERSION = 3;
+const NULL_MARKER = "__LIMING_NULL_V3__";
+const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
 const VISIBLE_PREVIEW_LIMIT = 1000;
 const SECRET_SETTING_PATTERN = /(password|passwd|secret|token|cookie|session|credential|oauth|private[_-]?key|baidu.*key|encryption|redirect_uri|remote_directory|server|docker|ssh|path)/i;
@@ -85,7 +86,55 @@ function deriveStatus(row, allowed) {
   return "待上";
 }
 function parseSettingArray(sourceData, key) { try { const value = JSON.parse(sourceData.settings.find((row) => row.key === key)?.value || "[]"); return Array.isArray(value) ? value.map(String) : []; } catch { return []; } }
-function gradeTimeline(stages) { return stages.map((row) => `${text(row.stage)}：${text(row.start_date)}至${text(row.end_date)}`).join("；"); }
+function normalizedStudents(value) { return [...new Set(splitList(value).map((item) => item.replace(/\s+/g, "")))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).join("、"); }
+function monthLabel(value) { const match = text(value).match(/^(\d{4})-(\d{2})(?:-01)?$/); return match ? `${match[1]}年${Number(match[2])}月` : ""; }
+function priceBucket(grade, studentCount) {
+  const count = Number(studentCount || 0);
+  if (!count) return 1;
+  if (text(grade).startsWith("高")) return count >= 4 ? 4 : count;
+  if (text(grade).startsWith("初")) return count >= 3 ? 4 : Math.min(count, 2);
+  return count >= 4 ? 4 : count;
+}
+function priceKey(row) { return [text(row.student_name), text(row.grade), text(row.subject), normalizedStudents(row.student_names)].join("\u0001"); }
+function teacherRuleKey(row) { return [text(row.teacher_name), text(row.grade), text(row.subject), normalizedStudents(row.student_names)].join("\u0001"); }
+function moneyRound(value) { return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100; }
+function parseLessonHours(value) {
+  const normalized = text(value).replace(/[：﹕]/g, ":").replace(/[—–－~～至到]/g, "-").replace(/\s+/g, "");
+  if (!/^[^-]+-[^-]+$/.test(normalized)) return null;
+  const minutes = (token) => { const match = token.match(/^(\d{1,2})(?::?(\d{2}))?$/); if (!match) return null; const hour = Number(match[1]); const minute = Number(match[2] || 0); return hour <= 23 && minute <= 59 ? hour * 60 + minute : null; };
+  const [startToken, endToken] = normalized.split("-"); const start = minutes(startToken); const end = minutes(endToken);
+  if (start == null || end == null) return null;
+  return end > start ? (end - start) / 60 : null;
+}
+function studentRuleSource(rule, lessons, context) {
+  const price = Number(rule.custom_price || 0); if (price <= 0) return "pending";
+  const matches = lessons.filter((lesson) => splitList(lesson.student_names).includes(text(rule.student_name)) && priceKey({ ...lesson, student_name: rule.student_name }) === priceKey(rule) && deriveStatus(lesson, context.allowedStatuses) === "已上");
+  const mismatch = matches.some((lesson) => {
+    const override = context.feeOverrides.get(`${lesson.id}\u0001${text(rule.student_name)}`);
+    const standard = context.priceStandards.get(`${text(lesson.grade)}\u0001${priceBucket(lesson.grade, splitList(lesson.student_names).length)}`);
+    const actual = override == null ? Number(standard || 0) : Number(override);
+    return Math.abs(actual - price) >= 0.0001;
+  });
+  return mismatch ? "manual" : "auto";
+}
+function studentFeeValues(lesson, studentName, context) {
+  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return { unit_price: 0, rule_price: 0 };
+  const override = context.feeOverrides.get(`${lesson.id}\u0001${studentName}`);
+  const standard = context.priceStandards.get(`${text(lesson.grade)}\u0001${priceBucket(lesson.grade, splitList(lesson.student_names).length)}`);
+  const rule = context.studentRules.get(priceKey({ ...lesson, student_name: studentName }));
+  return { unit_price: moneyRound(override == null ? Number(standard || 0) : Number(override)), rule_price: Number(rule?.custom_price || 0) > 0 ? moneyRound(rule.custom_price) : null };
+}
+function teacherRuleSalary(lesson, context) {
+  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return 0;
+  const rule = context.teacherRules.get(teacherRuleKey(lesson));
+  if (!rule || Number(rule.is_active) === 0 || Number(rule.salary_per_unit || 0) <= 0) return 0;
+  const hours = parseLessonHours(lesson.time_slot); const units = hours == null ? 1 : hours / (Number(rule.unit_hours || 0) > 0 ? Number(rule.unit_hours) : 2);
+  return moneyRound(Number(rule.salary_per_unit) * units);
+}
+function gradeStageFields(sourceData, studentName) {
+  const stages = new Map((sourceData.student_grade_stages || []).filter((row) => text(row.student_name) === text(studentName)).map((row) => [text(row.stage), row]));
+  return Object.fromEntries(STUDENT_GRADE_STAGE_COLUMNS.map(([fieldKey, , stage, sourceField]) => [fieldKey, text(stages.get(stage)?.[sourceField])]));
+}
 
 function sourceDataFromDb(db) {
   const result = {};
@@ -99,8 +148,8 @@ function sourceDataFromDb(db) {
 
 function visibleRecords(definition, sourceData, context) {
   const rows = sourceData[definition.source_table] || [];
-  if (definition.key === "student_fee_details") return context.lessons.flatMap((lesson) => splitList(lesson.student_names).map((studentName) => ({ visible: { student_name: studentName, teacher_name: lesson.teacher_name, date: lesson.date, display_status: deriveStatus(lesson, context.allowedStatuses), weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, grade: lesson.grade, subject: lesson.subject, notes: lesson.notes } }))).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
-  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, display_status: deriveStatus(lesson, context.allowedStatuses), weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
+  if (definition.key === "student_fee_details") return context.lessons.flatMap((lesson) => splitList(lesson.student_names).map((studentName) => ({ visible: { student_name: studentName, teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, notes: lesson.notes, ...studentFeeValues(lesson, studentName, context) } }))).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
+  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: deriveStatus(lesson, context.allowedStatuses) === "已上" ? moneyRound(lesson.teacher_salary) : 0, rule_salary: teacherRuleSalary(lesson, context) } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
   if (definition.key === "base_data") {
     const values = [];
     const add = (category, names, status) => [...new Set(names.map(text).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).forEach((name, index) => values.push({ visible: { category, name, status, sort_order: index + 1 } }));
@@ -114,12 +163,11 @@ function visibleRecords(definition, sourceData, context) {
   }
   const sorted = [...rows].sort(compareRows(definition.sort_fields));
   if (definition.key === "lessons") return sorted.map((source) => ({ source, visible: { ...source, weekday: weekdayCn(source.date), display_status: deriveStatus(source, context.allowedStatuses) } }));
-  if (definition.key === "student_opening_balances") return sorted.map((original) => {
-    const source = { ...original, month_key: normalizeBusinessMonth(original.month_key) };
-    return { source, visible: { ...source } };
-  });
-  if (definition.key === "students") return sorted.map((source) => ({ source, visible: { ...source, grade_timeline: gradeTimeline((sourceData.student_grade_stages || []).filter((row) => text(row.student_name) === text(source.name)).sort(compareRows(["start_date", "id"]))) } }));
-  if (definition.key === "teacher_salary_rules") return sorted.map((source) => ({ source, visible: { ...source, active_label: Number(source.is_active) ? "启用" : "停用" } }));
+  if (definition.key === "recharge_records") return sorted.map((source) => ({ source, visible: { ...source, month_label: monthLabel(source.month_key) } }));
+  if (definition.key === "student_opening_balances") return sorted.map((source) => ({ source, visible: { ...source } }));
+  if (definition.key === "student_pricing") return sorted.map((source) => ({ source, visible: { ...source, price_status: studentPriceStatus(studentRuleSource(source, context.lessons, context)) } }));
+  if (definition.key === "students") return sorted.map((source) => ({ source, visible: { ...source, ...gradeStageFields(sourceData, source.name) } }));
+  if (definition.key === "teacher_salary_rules") return sorted.map((source) => ({ source, visible: { ...source, price_status: teacherPriceStatus(source) } }));
   if (definition.key === "staff_salary_monthly" || definition.key === "staff_attendance") return sorted.map((source) => ({ source, visible: { ...source, staff_name: context.staffNames.get(Number(source.staff_id)) || "" } }));
   if (definition.key === "settings") return sorted.map((source) => ({ source, visible: { value: source.value, setting_label: SETTING_LABELS[source.key] } }));
   if (definition.key === "pricing_standards") return sorted.map((source) => ({ source, visible: { ...source, lookup_key: `${source.grade}-${source.student_count}` } }));
@@ -179,9 +227,6 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
     if (!source) return;
     mappedRows.add(`${definition.source_table}\u0000${key}`);
     const represented = new Set(definition.columns.map((column) => column.source_field).filter(Boolean));
-    if (definition.key === "student_opening_balances") {
-      addMapping(mapping, chunks, definition.sheet_name, rowNumber, definition.source_table, key, "month_key", source.month_key);
-    }
     if (definition.key === "teacher_salary_rules") represented.add("is_active");
     if (definition.key === "operation_logs") represented.add("result_status");
     if (definition.key === "roles") { represented.add("readonly"); represented.add("is_system"); }
@@ -192,7 +237,12 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
       if (!represented.has(field)) addMapping(mapping, chunks, definition.sheet_name, rowNumber, definition.source_table, key, field, value);
     }
   });
-  return { name: definition.sheet_name, rows, columnWidths: definition.columns.map((column) => Math.min(38, Math.max(12, column.display_name.length * 2 + 4))) };
+  return {
+    name: definition.sheet_name,
+    rows,
+    columnWidths: definition.columns.map((column) => Math.min(38, Math.max(12, column.display_name.length * 2 + 4))),
+    numberFormatColumns: definition.columns.map((column, index) => column.data_type === "amount" ? index : -1).filter((index) => index >= 0),
+  };
 }
 
 function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visibleCounts, excludedSettings }) {
@@ -201,9 +251,10 @@ function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visible
     ["导出时间（北京时间）", `${safeTimestamp(createdAt).replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, "$1-$2-$3 $4:$5:$6")} Asia/Shanghai`],
     ["应用版本", appVersion || "unknown"], ["Git提交", String(appGitCommit || "").slice(0, 40) || "unknown"], ["数据库Schema", `PRAGMA user_version=${schemaVersion}`],
     ["用途", "人工查看、空系统初始化和完整覆盖恢复"], ["可见工作表", VISIBLE_SHEET_NAMES.join("；")],
-    ["内部恢复表", "4张veryHidden工作表，保存最少技术关系、账号哈希和长文本分片"], ["金额单位", "人民币元"], ["日期格式", "YYYY-MM-DD；月份YYYY-MM-01"],
+    ["内部恢复表", "4张veryHidden工作表，保存最少技术关系、账号哈希和长文本分片"], ["金额单位", "人民币元"], ["日期格式", "日期YYYY-MM-DD；充值月份YYYY年M月；内部月份YYYY-MM-01"],
     ["空值规则", "空白表示空字符串；精确NULL由内部恢复映射保存"], ["安全说明", "不含Session、Cookie、Token、Secret、服务器路径、Docker/SSH信息、IP或User-Agent"],
-    ["计算结果", "费用和薪资汇总不导出；学生费用明细、教师课时明细仅供查看，不作为重复恢复源"],
+    ["期初余额", "每名学生一条全局基础余额；可见表不含月份，兼容技术字段仅在隐藏恢复映射中原样保存"],
+    ["计算结果", "费用和薪资汇总不导出；单人费用、规则费用、教师薪资和规则薪资仅供查看，不作为重复恢复源"],
     ["排除历史", EXCLUDED_TABLES.map((item) => `${item.table}：${item.reason}`).join("；")], ["排除设置数", excludedSettings],
     ...Object.entries(visibleCounts).map(([name, count]) => [`记录数：${name}`, count]),
   ] };
@@ -214,7 +265,15 @@ function expectedVisibleSheetNames() { return [...VISIBLE_SHEET_NAMES]; }
 function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   for (const definition of SOURCE_TABLE_DEFINITIONS) if (!Array.isArray(sourceData[definition.source_table])) sourceData[definition.source_table] = [];
   const createdAt = options.createdAt || new Date(); const allowedStatuses = new Set([...DEFAULT_COURSE_STATUSES, ...customStatuses(sourceData)]);
-  const context = { lessons: sourceData.lessons, allowedStatuses, staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])) };
+  const context = {
+    lessons: sourceData.lessons,
+    allowedStatuses,
+    staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])),
+    feeOverrides: new Map(sourceData.fee_overrides.map((row) => [`${row.lesson_id}\u0001${text(row.student_name)}`, Number(row.unit_price)])),
+    priceStandards: new Map(sourceData.pricing_standards.map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, Number(row.unit_price)])),
+    studentRules: new Map(sourceData.student_pricing.map((row) => [priceKey(row), row])),
+    teacherRules: new Map(sourceData.teacher_salary_rules.filter((row) => Number(row.is_active) !== 0).map((row) => [teacherRuleKey(row), row])),
+  };
   const mapping = []; const chunks = []; const mappedRows = new Set(); const visibleCounts = {}; const visibleSheets = [];
   for (const definition of VISIBLE_SHEET_DEFINITIONS) {
     const records = visibleRecords(definition, sourceData, context); visibleCounts[definition.sheet_name] = records.length;
@@ -315,7 +374,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || Number(meta.get("format_version")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件类型或版本不支持");
+  if (meta.get("file_type") !== FILE_TYPE || Number(meta.get("format_version")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v3 文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -332,15 +391,10 @@ function reconstructData(workbook, parsedVisible, mappings) {
       for (const column of definition.columns) {
         if (column.source_field) row[column.source_field] = item.value[column.field_key];
       }
-      if (definition.key === "student_opening_balances" && Object.prototype.hasOwnProperty.call(technical, "month_key")) {
-        const visibleMonth = normalizeBusinessMonth(row.month_key);
-        const hiddenMonth = normalizeBusinessMonth(technical.month_key);
-        if (visibleMonth !== hiddenMonth) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_MONTH_MISMATCH", "期初余额可见月份与内部恢复月份不一致");
-      }
       // Hidden recovery mappings carry exact null values and reassembled long text.
       // They must win over the human-readable preview stored in the visible sheet.
       Object.assign(row, technical);
-      if (definition.key === "teacher_salary_rules") row.is_active = item.value.active_label === "停用" ? 0 : 1;
+      if (definition.key === "teacher_salary_rules") row.is_active = teacherActiveFromPriceStatus(item.value.price_status);
       if (definition.key === "operation_logs") row.result_status = item.value.result_label === "失败" ? "failure" : "success";
       if (definition.key === "roles") { row.readonly = item.value.action_permissions === "只读" ? 1 : 0; row.is_system = item.value.role_status === "系统角色" ? 1 : 0; }
       if (definition.key === "users") row.status = item.value.status_label === "停用" ? "disabled" : item.value.status_label === "已删除" ? "deleted" : "active";
@@ -357,27 +411,33 @@ function reconstructData(workbook, parsedVisible, mappings) {
   return data;
 }
 
-function validateGradeTimeline(value, label) {
-  const raw = text(value); if (!raw) return;
-  const stages = raw.split("；").map(text).filter(Boolean); const ranges = [];
-  for (const stage of stages) { const match = stage.match(/^([^：]+)：(\d{4}-\d{2}-\d{2})至(\d{4}-\d{2}-\d{2})?$/); if (!match) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_INVALID", `${label}年级时间界定格式无效`); const start = match[2]; const end = match[3] || "9999-12-31"; if (end < start) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_INVALID", `${label}年级阶段结束日期早于开始日期`); ranges.push([start, end]); }
-  ranges.sort((a, b) => a[0].localeCompare(b[0])); for (let index = 1; index < ranges.length; index += 1) if (ranges[index][0] <= ranges[index - 1][1]) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_OVERLAP", `${label}年级阶段日期重叠`);
+function validateGradeStages(row) {
+  const ranges = [];
+  for (let index = 0; index < STUDENT_GRADE_STAGE_COLUMNS.length; index += 2) {
+    const [startKey, , stage] = STUDENT_GRADE_STAGE_COLUMNS[index];
+    const endKey = stage === "已毕业" ? "" : STUDENT_GRADE_STAGE_COLUMNS[index + 1]?.[0];
+    const start = text(row[startKey]); const end = endKey ? text(row[endKey]) : "";
+    if (!start && !end) continue;
+    if (!start && end) throw new FullExcelError("FULL_EXCEL_GRADE_STAGE_INCOMPLETE", `${row.name}的${stage}缺少起始日期`);
+    if (end && end < start) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_INVALID", `${row.name}的${stage}截止日期早于起始日期`);
+    ranges.push([start, end || "9999-12-31", stage]);
+  }
+  ranges.sort((a, b) => a[0].localeCompare(b[0]));
+  for (let index = 1; index < ranges.length; index += 1) if (ranges[index][0] <= ranges[index - 1][1]) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_OVERLAP", `${row.name}年级阶段日期重叠`);
 }
 function validateData(data, parsedVisible) {
   const ids = (table, field = "id") => new Set((data[table] || []).map((row) => row[field])); const requireRef = (rows, field, valid, label, nullable = false) => rows.forEach((row) => { if (nullable && (row[field] === null || row[field] === "" || row[field] === undefined)) return; if (!valid.has(row[field])) throw new FullExcelError("FULL_EXCEL_RELATION_INVALID", `${label}关联不存在`); });
   requireRef(data.fee_overrides, "lesson_id", ids("lessons"), "单节费用课程"); requireRef([...data.staff_salary_monthly, ...data.staff_attendance], "staff_id", ids("staff"), "员工"); requireRef([...data.user_teacher_bindings, ...data.user_page_permissions, ...data.user_filter_presets], "user_id", ids("users"), "账号"); requireRef(data.users, "role", ids("roles", "code"), "账号角色"); requireRef(data.lessons, "teacher_salary_rule_id", ids("teacher_salary_rules"), "课程薪资规则", true);
-  for (const row of data.student_opening_balances || []) {
-    row.month_key = normalizeBusinessMonth(row.month_key);
-    if (!validMonth(row.month_key)) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_MONTH_INVALID", "期初余额月份必须为YYYY-MM-01");
-  }
-  for (const row of parsedVisible.students) validateGradeTimeline(row.value.grade_timeline, row.value.name);
+  const openingStudents = new Set();
+  for (const row of data.student_opening_balances || []) { const name = text(row.student_name); if (openingStudents.has(name)) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_DUPLICATE", `期初余额存在重复学生：${name}`); openingStudents.add(name); }
+  for (const row of parsedVisible.students) validateGradeStages(row.value);
 }
 
 function verifyFullData(input) {
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (Number(infoMap.get("格式版本")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v3 文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (Number(infoMap.get("格式版本")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "旧版或损坏的全量Excel不受支持");
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
   verifyMetadata(workbook); const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); validateData(data, parsedVisible);
   const counts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
@@ -404,5 +464,5 @@ module.exports = {
   FullExcelError, fullDataFilename, fullBackupFilename: fullDataFilename, expectedSheetNames, expectedVisibleSheetNames,
   buildFullDataBuffer, buildFullDataBufferFromSourceData, buildFullBackupBuffer: buildFullDataBuffer, exportFullData, exportFullBackup: exportFullData,
   verifyFullData, verifyFullBackup: verifyFullData, restoreFullData, restoreFullBackup: restoreFullData,
-  splitUtf16, validateGradeTimeline, SETTING_LABELS,
+  splitUtf16, validateGradeStages, SETTING_LABELS,
 };

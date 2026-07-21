@@ -447,6 +447,7 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   missing_items: ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"],
   last_test_at: "",
   last_test_result: "not_tested",
+  test_passed: false,
 });
 let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
 let dashboardRange = readDashboardRange();
@@ -1521,6 +1522,10 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
   return next;
 }
 
+function fullBootstrapCacheKey(monthKey = activeMonth) {
+  return `${String(monthKey || "")}\u0001${includeInactive ? "all" : "active"}`;
+}
+
 function viewNeedsFullBootstrap(viewKey = view) {
   return ["feeDetails", "summary", "teacherSalary", "teacherTravelFees", "studentPricing"].includes(viewKey)
     || (viewKey === "pricing" && Boolean(pricingAuditModal));
@@ -1725,7 +1730,9 @@ async function load(options = {}) {
   const fullBootstrap = viewNeedsFullBootstrap();
   // Navigation retains the session bootstrap. View-specific endpoints below
   // own fresh data; login, refresh and explicit callers still reload it.
-  const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true;
+  const requestedFullKey = fullBootstrapCacheKey(activeMonth || previousState.active_month_key || previousState.settings?.month_key);
+  const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true
+    || (fullBootstrap && previousState.full_bootstrap_key !== requestedFullKey);
   if (refreshBootstrap) {
     state = normalizeBootstrapState(
       await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`),
@@ -1733,6 +1740,7 @@ async function load(options = {}) {
       !fullBootstrap,
     );
     if (loadGeneration !== thisGeneration) return;
+    if (fullBootstrap) state.full_bootstrap_key = fullBootstrapCacheKey(state.active_month_key || state.settings?.month_key || activeMonth);
   } else {
     state = previousState;
   }
@@ -2624,7 +2632,7 @@ function teacherSalaryInputValue(value) {
 }
 
 function teacherSalaryRuleSalaryStatus(rule) {
-  return optionalNumberValue(rule.salary_per_unit) > 0 ? "已设置" : "待设置";
+  return rule.price_status || (Number(rule.is_active) === 0 ? "已停用" : optionalNumberValue(rule.salary_per_unit) > 0 ? "已设置" : "未设置");
 }
 
 function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) {
@@ -4993,7 +5001,7 @@ function pruneSelectedLessons(rows = visibleLessonRows()) {
 }
 
 /* ── C 档 dirty 标记 ────────────────────────────────────────────── */
-function markDirty(key) { dirtyFlags[key] = true; }     /* [约束6] 设置脏标记 */
+function markDirty(key) { dirtyFlags[key] = true; if (state) state.full_bootstrap_key = ""; }     /* [约束6] 设置脏标记 */
 function consumeDirty(key) { const was = dirtyFlags[key] || false; dirtyFlags[key] = false; return was; } /* [约束6] 消费并清除脏标记 */
 
 /* ── 状态层辅助 ──────────────────────────────────────────────────── */
@@ -7582,7 +7590,7 @@ function renderFeeDetails() {
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
+              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
@@ -7595,10 +7603,10 @@ function renderFeeDetails() {
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell">${escapeHtml(row.date)}</td>
-                <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${escapeHtml(row.weekday)}</td>
                 <td class="text-cell">${escapeHtml(row.time_slot)}</td>
                 <td class="text-cell">${escapeHtml(row.classroom)}</td>
+                <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
                 <td class="text-cell">${escapeHtml(row.notes)}</td>
@@ -8873,17 +8881,19 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
   ], 48, 142, contentWidth);
   let y = 246;
   drawShotTable(ctx, colors, [
+    { label: "授课老师", value: (row) => row.teacher_name },
     { label: "日期", value: (row) => row.date, align: "left" },
-    { label: "状态", value: (row) => rowStatus(row) },
     { label: "星期", value: (row) => weekdayCn(row.date) },
     { label: "时间", value: (row) => row.time_slot, align: "left" },
     { label: "教室", value: (row) => row.classroom },
+    { label: "状态", value: (row) => rowStatus(row) },
     { label: "年级", value: (row) => row.grade },
     { label: "科目", value: (row) => row.subject },
     { label: "学生", value: (row) => row.student_names, align: "left" },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "教师薪资", value: (row) => formatMoney(displayTeacherSalaryForLesson(row)), align: "right" },
-  ], rows, 48, y, [106, 64, 58, 110, 60, 66, 72, 200, 298, 100], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
+    { label: "规则薪资", value: (row) => { const amount = displayTeacherRuleSalaryForLesson(row); return amount == null ? "" : formatMoney(amount); }, align: "right" },
+  ], rows, 48, y, [90, 95, 50, 85, 50, 55, 50, 55, 180, 235, 85, 85], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
   y += detailTableHeight + 42;
   drawShotSectionTitle(ctx, colors, "车票/交通补贴明细", 48, y, contentWidth);
   y += 18;
@@ -9202,55 +9212,48 @@ function dataPreflightMarkup() {
   </section>`;
 }
 
-function baiduConfiguredLabel(value) { return value ? "已配置" : "未配置"; }
-function baiduAuthorizationLabel(value) { return ({ authorized: "已授权", expired: "已过期", not_authorized: "未授权" })[value] || "未授权"; }
-function baiduTokenLabel(value) { return ({ valid: "有效", refresh_required: "需要刷新", expired: "已过期", not_found: "不存在", not_configured: "未配置" })[value] || "未知"; }
-function baiduMissingLabel(items = []) {
-  const labels = { BAIDU_APP_KEY: "App Key", BAIDU_APP_SECRET: "App Secret", BAIDU_REDIRECT_URI: "回调地址", BACKUP_ENCRYPTION_KEY: "备份加密密钥" };
-  return items.map((item) => labels[item] || item).join("、");
-}
-
-function baiduGuideMarkup() {
+function baiduSimpleGuideMarkup() {
   if (!backupState.showBaiduGuide) return "";
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
-  const callbackRoute = baidu.callback_route || "/api/data-center/baidu/callback";
-  const localCallback = `${window.location.origin}${callbackRoute}`;
-  const configuredCallback = baidu.redirect_uri || "";
-  const envTemplate = "BAIDU_APP_KEY=\nBAIDU_APP_SECRET=\nBAIDU_REDIRECT_URI=\nBACKUP_ENCRYPTION_KEY=";
+  const owner = isOwnerRoleValue(auth.user?.role);
+  const callback = baidu.redirect_uri || `${window.location.origin}/api/data-center/baidu/callback`;
+  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.encryption_key_configured;
   return `<div class="modal-backdrop baidu-guide-modal"><div class="modal-panel baidu-guide-panel">
-    <div class="modal-head"><div><div class="modal-title">百度网盘配置步骤</div><div class="modal-subtitle">秘密信息只在服务器配置，页面不会保存或显示真实值。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
+    <div class="modal-head"><div><div class="modal-title">百度网盘备份三步配置</div><div class="modal-subtitle">本地备份不依赖百度配置；远端只上传AES-256-GCM加密文件。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
     <div class="baidu-guide-steps">
-      <section><h3>第1步：创建百度开放平台应用</h3><p>在百度开放平台创建应用，准备 App Key、App Secret、OAuth 回调地址，并申请网盘所需权限。页面名称可能变化，请以 README 中的官方文档为准。</p></section>
-      <section><h3>第2步：填写回调地址</h3><p>后端真实回调路由：<code>${escapeHtml(callbackRoute)}</code></p><div class="copy-row"><code>${escapeHtml(configuredCallback || "BAIDU_REDIRECT_URI 尚未配置")}</code><button class="btn baidu-copy-callback" type="button" ${configuredCallback ? "" : "disabled"}>复制地址</button></div><p>本地开发参考：<code>${escapeHtml(localCallback)}</code>。正式域名必须由管理员明确配置 <code>BAIDU_REDIRECT_URI</code>，系统不会根据浏览器地址猜测。</p></section>
-      <section><h3>第3步：配置服务器秘密</h3><p>以下四项不能在普通网页保存。当前状态：App Key ${baiduConfiguredLabel(baidu.app_key_configured)}、App Secret ${baiduConfiguredLabel(baidu.app_secret_configured)}、回调地址 ${baiduConfiguredLabel(baidu.redirect_uri_configured)}、加密密钥 ${baiduConfiguredLabel(baidu.encryption_key_configured)}。</p><div class="copy-row"><pre class="baidu-env-template">${escapeHtml(envTemplate)}</pre><button class="btn baidu-copy-env" type="button">复制空白模板</button></div></section>
-      <section><h3>第4步：生成加密密钥</h3><p>在可信终端运行 <code>npm run backup:key:generate</code>，离线保存一次性输出。密钥丢失后，百度网盘中的加密备份无法恢复。</p></section>
-      <section><h3>第5步：重启后检查</h3><p>保存服务器配置 → 重启应用容器 → 返回数据中心 → 确认4项配置状态 → 连接/重新授权 → 完成百度授权 → 测试连接 → 再启用百度网盘备份。</p></section>
+      <section><h3>第一步：准备百度应用</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准确回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label></section>
+      <section><h3>第二步：保存安全配置</h3>${owner ? `<p>Secret保存后不再回显。重新配置时请重新填写全部三项。</p><div class="data-backup-settings-grid baidu-secret-form">
+        <label class="filter-field"><span>App Key</span><input class="control baidu-config-app-key" autocomplete="off"></label>
+        <label class="filter-field"><span>App Secret</span><input class="control baidu-config-app-secret" type="password" autocomplete="new-password"></label>
+        <label class="filter-field wide"><span>备份加密密钥</span><input class="control baidu-config-encryption-key" type="password" autocomplete="new-password"></label>
+        <div class="audit-toolbar"><button class="btn baidu-generate-key" type="button">自动生成加密密钥</button><button class="btn baidu-key-guide" type="button">下载密钥保管说明</button></div>
+        <label class="filter-field"><span>当前老板密码</span><input class="control baidu-config-password" type="password" autocomplete="current-password"></label>
+        <label class="filter-field"><span>确认文字：保存百度配置</span><input class="control baidu-config-confirmation" autocomplete="off"></label>
+      </div><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn danger baidu-config-clear" type="button">清除并重新配置</button>` : ""}</div>` : `<div class="audit-inline-notice neutral">只有老板账号可以查看和提交Secret配置表单。</div>`}</section>
+      <section><h3>第三步：授权并测试</h3><p>保存配置后连接百度网盘；授权完成后执行连接、测试目录、加密上传和删除测试。只有全部通过后才能启用自动上传。</p><div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${configured && owner ? "" : "disabled"}>连接百度网盘</button><button class="btn baidu-test" type="button" ${configured && baidu.authorized && owner ? "" : "disabled"}>测试连接</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized && owner ? "" : "disabled"}>解除授权</button></div></section>
     </div>
   </div></div>`;
 }
 
-function baiduSettingsCardMarkup() {
+function baiduSimpleSettingsCardMarkup() {
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
-  const missing = Array.isArray(baidu.missing_items) ? baidu.missing_items : [];
-  const ready = missing.length === 0;
-  const callback = baidu.redirect_uri || "未配置（请设置 BAIDU_REDIRECT_URI）";
+  const configured = baidu.app_key_configured && baidu.app_secret_configured;
+  const encrypted = baidu.encryption_key_configured;
+  const tested = baidu.test_passed || baidu.last_test_result === "success";
+  const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
   return `<div class="data-backup-subcard baidu-backup-card">
-    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">只上传 AES-256-GCM 加密后的 .enc 文件；服务器本地备份不依赖百度配置。</div></div><button class="btn baidu-guide-open" type="button">查看配置步骤</button></div>
-    <div class="audit-toolbar-note">百度网盘：${escapeHtml(dataCenterRemoteLabel(baidu.status))}；备份加密密钥：${baidu.encryption_key_configured ? "已配置" : "未配置"}</div>
-    <div class="baidu-status-grid">
-      <div><span>百度应用 App Key</span><strong>${baiduConfiguredLabel(baidu.app_key_configured)}</strong></div>
-      <div><span>百度应用 App Secret</span><strong>${baiduConfiguredLabel(baidu.app_secret_configured)}</strong></div>
-      <div><span>备份加密密钥</span><strong>${baiduConfiguredLabel(baidu.encryption_key_configured)}</strong></div>
-      <div><span>百度授权</span><strong>${baiduAuthorizationLabel(baidu.authorization_status)}</strong></div>
-      <div><span>Token 状态</span><strong>${baiduTokenLabel(baidu.token_status)}</strong></div>
-      <div><span>最近测试时间</span><strong>${escapeHtml(baidu.last_test_at ? formatBeijingTime(baidu.last_test_at) : "尚未测试")}</strong></div>
-      <div><span>最近测试结果</span><strong>${escapeHtml(baidu.last_test_result === "success" ? "成功" : baidu.last_test_result === "not_tested" ? "尚未测试" : baidu.last_test_result || "尚未测试")}</strong></div>
+    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "重新配置" : "配置百度网盘"}</button>` : ""}</div>
+    <div class="baidu-status-grid simple">
+      <div><span>① 百度应用</span><strong>${configured ? "已配置" : "未配置"}</strong></div>
+      <div><span>② 加密保护</span><strong>${encrypted ? "已配置" : "未配置"}</strong></div>
+      <div><span>③ 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
+      <div><span>④ 连接测试</span><strong>${testLabel}</strong></div>
+      <div><span>⑤ 自动上传</span><strong>${backupState.settings?.remote_enabled ? "已启用" : "未启用"}</strong></div>
     </div>
-    <label class="filter-field wide"><span>OAuth 回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>
-    <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}"></label>
-    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && ready && baidu.authorized ? "checked" : ""} ${ready && baidu.authorized ? "" : "disabled"}><span>启用百度网盘备份</span></label>
-    ${ready ? "" : `<div class="audit-inline-notice neutral baidu-missing-notice">尚缺少：${escapeHtml(baiduMissingLabel(missing))}。请先按配置步骤在服务器设置环境变量。</div>`}
-    <div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${ready ? "" : "disabled"}>连接/重新授权</button><button class="btn baidu-test" type="button" ${ready && baidu.authorized ? "" : "disabled"}>测试连接</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized ? "" : "disabled"}>解除授权</button></div>
+    ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
+    <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
+    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
+    <div class="audit-toolbar">${configured && isOwnerRoleValue(auth.user?.role) ? `<button class="btn baidu-connect" type="button" ${baidu.authorized ? "disabled" : ""}>连接百度网盘</button><button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}</div>
   </div>`;
 }
 
@@ -9289,7 +9292,7 @@ function renderAudit() {
           </div>
           <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
         </div>
-        ${baiduSettingsCardMarkup()}
+        ${baiduSimpleSettingsCardMarkup()}
       </div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
@@ -9299,7 +9302,7 @@ function renderAudit() {
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
-    ${baiduGuideMarkup()}`;
+    ${baiduSimpleGuideMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -10238,7 +10241,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.custom_price, { className: `student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}`, attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01"` })}</td>
-                <td class="text-cell">${priceSourceLabel(row.rule_source)}</td>
+                <td class="text-cell">${escapeHtml(row.price_status || priceSourceLabel(row.rule_source))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
@@ -11556,7 +11559,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table uniform-table nowrap-table">
-          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
+          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row) => {
               const calculated = showSalary ? teacherSalaryRuleCalculation(row) : null;
@@ -11570,7 +11573,7 @@ function renderTeacherDetail() {
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${calculated ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : disabledReason)}"></td>` : ""}
-                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
+                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
@@ -13213,6 +13216,7 @@ async function refreshDerivedForActiveMonth(renderAction) {
   const data = await request(`/api/bootstrap${bootstrapQuery(false)}`);
   state = normalizeBootstrapState(data, state, true);
   syncActiveMonthState(state.active_month_key || state.settings?.month_key || activeMonth);
+  state.full_bootstrap_key = fullBootstrapCacheKey(activeMonth);
   rerenderCurrentView(renderAction);
 }
 
@@ -15054,7 +15058,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v2.xlsx");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v3.xlsx");
       } catch (error) {
         showToast(error.message || "下载模板失败", "error");
       } finally {
@@ -15203,7 +15207,7 @@ function wireEvents() {
     catch (error) { showToast(error.message || "下载错误清单失败", "error"); }
   }));
   document.querySelectorAll(".data-preflight-view").forEach((button) => button.addEventListener("click", async () => {
-    const opening = (backupState.preflight?.issues || []).find((issue) => ["OPENING_BALANCE_MONTH_MISSING", "OPENING_BALANCE_MONTH_INVALID"].includes(issue.code));
+    const opening = (backupState.preflight?.issues || []).find((issue) => ["OPENING_BALANCE_MONTH_MISSING", "OPENING_BALANCE_MONTH_INVALID", "OPENING_BALANCE_STUDENT_DUPLICATE"].includes(issue.code));
     const first = opening?.records?.[0];
     if (!first || !canView("openingBalances")) return showToast("当前账号不能进入期初余额页面", "error");
     openingBalanceFilter = { student: first.student_name || "", grade: first.grade || "" };
@@ -15229,8 +15233,9 @@ function wireEvents() {
     catch (error) { showToast(error.message || "无法发起百度授权", "error"); }
   }));
   document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
-    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); showToast("百度网盘连接正常"); }
+    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); await refreshBackupData(); showToast("授权、连接、测试目录、加密上传和删除测试均已通过"); }
     catch (error) { showToast(error.message || "百度网盘连接失败", "error"); }
+    finally { render(); }
   }));
   document.querySelectorAll(".baidu-disconnect").forEach((button) => button.addEventListener("click", async () => {
     if (!confirm("确认解除百度网盘授权？服务器本地备份不会删除。")) return;
@@ -15245,9 +15250,36 @@ function wireEvents() {
     if (!value) return;
     try { await navigator.clipboard.writeText(value); showToast("回调地址已复制"); } catch { showToast("复制失败，请手动选择地址", "error"); }
   }));
-  document.querySelectorAll(".baidu-copy-env").forEach((button) => button.addEventListener("click", async () => {
-    const value = "BAIDU_APP_KEY=\nBAIDU_APP_SECRET=\nBAIDU_REDIRECT_URI=\nBACKUP_ENCRYPTION_KEY=";
-    try { await navigator.clipboard.writeText(value); showToast("空白配置模板已复制"); } catch { showToast("复制失败，请手动选择模板", "error"); }
+  document.querySelectorAll(".baidu-generate-key").forEach((button) => button.addEventListener("click", () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const value = btoa(String.fromCharCode(...bytes));
+    const input = document.querySelector(".baidu-config-encryption-key");
+    if (input) input.value = value;
+    showToast("已生成32字节加密密钥，请立即离线保管");
+  }));
+  document.querySelectorAll(".baidu-key-guide").forEach((button) => button.addEventListener("click", async () => {
+    try { await downloadBlob("/api/data-center/baidu/key-custody.txt", "百度备份密钥保管说明.txt"); }
+    catch (error) { showToast(error.message || "下载说明失败", "error"); }
+  }));
+  document.querySelectorAll(".baidu-config-save").forEach((button) => button.addEventListener("click", async () => {
+    const body = {
+      app_key: document.querySelector(".baidu-config-app-key")?.value || "",
+      app_secret: document.querySelector(".baidu-config-app-secret")?.value || "",
+      encryption_key: document.querySelector(".baidu-config-encryption-key")?.value || "",
+      password: document.querySelector(".baidu-config-password")?.value || "",
+      confirmation: document.querySelector(".baidu-config-confirmation")?.value || "",
+    };
+    button.disabled = true;
+    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; showToast("百度安全配置已保存，请继续授权"); }
+    catch (error) { showToast(error.message || "百度配置保存失败", "error"); }
+    finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-config-clear").forEach((button) => button.addEventListener("click", async () => {
+    const password = prompt("请输入当前老板密码"); if (password == null) return;
+    const confirmation = prompt("请输入确认文字：清除百度配置"); if (confirmation == null) return;
+    try { await request("/api/data-center/baidu/config", { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); backupState.showBaiduGuide = true; showToast("百度配置和授权已清除"); }
+    catch (error) { showToast(error.message || "清除配置失败", "error"); }
+    finally { render(); }
   }));
 
   document.querySelectorAll(".user-admin-tab").forEach((button) => {

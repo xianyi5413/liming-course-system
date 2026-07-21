@@ -43,7 +43,16 @@ test("token store is private and never returns tokens in status", () => {
 
 function mockFetch(calls, uploaded) {
   return async (input, options = {}) => {
-    const url = new URL(String(input)); calls.push({ host: url.host, method: url.searchParams.get("method"), grant: url.searchParams.get("grant_type") });
+    const url = new URL(String(input));
+    const requestBody = options.body instanceof URLSearchParams ? options.body : new URLSearchParams();
+    calls.push({
+      host: url.host,
+      method: url.searchParams.get("method"),
+      http_method: options.method || "GET",
+      grant: requestBody.get("grant_type") || url.searchParams.get("grant_type"),
+      has_client_secret_in_url: url.searchParams.has("client_secret"),
+      has_client_secret_in_body: requestBody.has("client_secret"),
+    });
     if (url.pathname.includes("oauth/2.0/token")) return Response.json({ access_token: "MOCK-ACCESS", refresh_token: "MOCK-REFRESH", expires_in: 3600, scope: "netdisk" });
     if (url.searchParams.get("method") === "uinfo") return Response.json({ errno: 0, baidu_name: "mock" });
     if (url.searchParams.get("method") === "precreate") return Response.json({ errno: 0, uploadid: "upload-1", return_type: 1 });
@@ -55,10 +64,38 @@ function mockFetch(calls, uploaded) {
 }
 
 test("OAuth state, token exchange, refresh and connection test use official endpoint shapes", async () => {
-  const calls = []; const manager = new BaiduBackupManager({ dataDir: tempRoot, appKey: "APP-KEY", appSecret: "APP-SECRET", redirectUri: "https://example.test/callback", encryptionKey: key, fetchImpl: mockFetch(calls, []) });
-  const started = manager.beginAuthorization(); const auth = new URL(started.authorization_url); assert.equal(auth.host, "openapi.baidu.com"); assert.equal(auth.searchParams.get("response_type"), "code"); assert.ok(auth.searchParams.get("state"));
-  await manager.finishAuthorization("one-time-code", auth.searchParams.get("state")); assert.equal(manager.status(), "authorized"); await manager.testConnection();
+  const calls = []; const uploaded = []; const manager = new BaiduBackupManager({ dataDir: tempRoot, appKey: "APP-KEY", appSecret: "APP-SECRET", redirectUri: "https://example.test/callback", encryptionKey: key, fetchImpl: mockFetch(calls, uploaded) });
+  const started = manager.beginAuthorization(); const auth = new URL(started.authorization_url); assert.equal(auth.host, "openapi.baidu.com"); assert.equal(auth.searchParams.get("response_type"), "code"); assert.ok(auth.searchParams.get("state")); assert.equal(auth.searchParams.has("client_secret"), false);
+  await manager.finishAuthorization("one-time-code", auth.searchParams.get("state")); assert.equal(manager.status(), "authorized"); const tested = await manager.testConnection();
+  assert.deepEqual(tested.steps, { authorization: true, connection: true, test_directory: true, encrypted_upload: true, test_delete: true });
+  assert.equal(calls.some((call) => call.method === "filemanager"), true); assert.equal(uploaded.length > 0, true); assert.equal(Buffer.concat(uploaded).includes(Buffer.from("liming-baidu-connection-test")), false);
   const token = manager.tokenStore.read(); token.expires_at = 0; manager.tokenStore.write(token); await manager.testConnection(); assert.equal(calls.some((call) => call.grant === "refresh_token"), true);
+  const tokenCalls = calls.filter((call) => call.host === "openapi.baidu.com" && call.grant);
+  assert.equal(tokenCalls.length >= 2, true);
+  assert.equal(tokenCalls.every((call) => call.http_method === "POST" && !call.has_client_secret_in_url && call.has_client_secret_in_body), true);
+});
+
+test("one-time configuration is private, reloadable, non-reflecting and clearable", () => {
+  const dataDir = path.join(tempRoot, "config-store"); const manager = new BaiduBackupManager({ dataDir });
+  const saved = manager.saveConfiguration({ appKey: "CONFIG-APP-KEY", appSecret: "CONFIG-APP-SECRET", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: key });
+  assert.equal(saved.oauth_configured, true); assert.equal(saved.encryption_configured, true); assert.equal(JSON.stringify(saved).includes("CONFIG-APP-KEY"), false); assert.equal(JSON.stringify(saved).includes("CONFIG-APP-SECRET"), false); assert.equal(JSON.stringify(saved).includes(key), false);
+  const filename = path.join(dataDir, "backups", "full-excel", ".secrets", "baidu-config.json");
+  assert.equal(fs.existsSync(filename), true); if (process.platform !== "win32") assert.equal(fs.statSync(filename).mode & 0o777, 0o600);
+  const reloaded = new BaiduBackupManager({ dataDir }).configurationStatus(); assert.equal(reloaded.oauth_configured, true); assert.doesNotMatch(JSON.stringify(reloaded), /CONFIG-APP-KEY|CONFIG-APP-SECRET/);
+  manager.clearConfiguration(); assert.equal(fs.existsSync(filename), false); assert.equal(manager.configurationStatus().oauth_configured, false);
+});
+
+test("successful encrypted connection test persists the gate for automatic upload", async () => {
+  const dataDir = path.join(tempRoot, "test-gate"); const manager = new BaiduBackupManager({ dataDir });
+  manager.saveConfiguration({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/api/data-center/baidu/callback", encryptionKey: key });
+  manager.tokenStore.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 });
+  const uploaded = [];
+  manager.client.testConnection = async () => ({ ok: true }); manager.client.createDirectory = async () => ({ ok: true });
+  manager.client.uploadFile = async (filename, remotePath) => { uploaded.push({ remotePath, bytes: fs.readFileSync(filename) }); return { file_id: "1", path: remotePath }; };
+  manager.client.deleteFile = async () => ({ ok: true });
+  const result = await manager.testConnection(); assert.equal(result.ok, true); assert.equal(uploaded.length, 1); assert.match(uploaded[0].remotePath, /\.enc$/); assert.equal(uploaded[0].bytes.subarray(0, MAGIC.length).equals(MAGIC), true);
+  const reloaded = new BaiduBackupManager({ dataDir }).configurationStatus(); assert.equal(reloaded.test_passed, true); assert.equal(reloaded.last_test_result, "success");
+  assert.deepEqual(fs.readdirSync(path.join(dataDir, "backups", "full-excel", ".secrets")).filter((name) => name.startsWith(".connection-")), []);
 });
 
 test("Baidu upload receives only encrypted chunks and remote delete is separate", async () => {
@@ -66,6 +103,8 @@ test("Baidu upload receives only encrypted chunks and remote delete is separate"
   manager.tokenStore.write({ access_token: "MOCK-ACCESS", refresh_token: "MOCK-REFRESH", expires_at: Date.now() + 3600000 });
   const remote = await manager.upload({ record: { id: 99 }, localPath: plain, remoteDirectory: "/apps/liming-course-system" }); assert.equal(remote.file_id, "123456"); assert.equal(remote.path.endsWith(".xlsx.enc"), true); assert.equal(uploaded.length > 1, true);
   assert.equal(Buffer.concat(uploaded).includes(Buffer.from("PRIVATE-EXCEL-CONTENT")), false); assert.equal(uploaded[0].subarray(0, MAGIC.length).equals(MAGIC), true);
+  assert.equal(calls.some((call) => call.has_client_secret_in_url), false);
+  assert.equal(calls.filter((call) => call.host !== "openapi.baidu.com").some((call) => call.has_client_secret_in_body), false);
   assert.deepEqual(fs.readdirSync(path.dirname(plain)).filter((name) => name.startsWith(".remote-")), []); await manager.client.deleteFile(remote.path); assert.equal(calls.some((call) => call.method === "filemanager"), true);
 });
 

@@ -26,6 +26,7 @@ after(async () => {
 });
 
 test("anonymous requests cannot access the data center", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`); assert.equal(response.status, 401); });
+test("cross-site OAuth callback reaches one-time state validation without a session cookie", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/callback?code=synthetic&state=invalid`, { redirect: "manual" }); const result = await response.json(); assert.equal(response.status, 400); assert.match(result.error, /state/); assert.notEqual(response.status, 401); });
 test("ordinary teacher cannot access full-data management", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie: teacherCookie } }); assert.equal(response.status, 403); });
 test("owner can read the neutral initial data-center state", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie: ownerCookie } }); const data = await response.json(); assert.equal(response.status, 200); assert.equal(data.settings.remote_status, "not_configured"); assert.equal(data.settings.encryption_status, "not_configured"); assert.equal(data.settings.local_storage_status, "not_created"); assert.equal(data.settings.enabled, false); });
 test("all historical owner role values can read the data center", async () => { const db = new DatabaseSync(databasePath); try { for (const role of ["owner", "boss", "admin", "老板", "管理员"]) { db.prepare("UPDATE users SET role=? WHERE username='boss'").run(role); const cookie = await login("boss"); const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie } }); assert.equal(response.status, 200, role); } } finally { db.prepare("UPDATE users SET role='owner' WHERE username='boss'").run(); db.close(); } });
@@ -49,32 +50,18 @@ test("remote backup cannot be enabled until all four server secrets are configur
   assert.equal(data.code, "BAIDU_CONFIGURATION_INCOMPLETE");
   assert.equal(data.baidu.app_secret_configured, false);
 });
-test("owner explicitly repairs one legacy opening-balance month and the operation is audited", async () => {
+test("blank legacy opening-balance month passes preflight without inference or mutation", async () => {
   const db = new DatabaseSync(databasePath);
   db.prepare("INSERT INTO student_opening_balances(id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes) VALUES (9901,'','接口缺月学生','初一',100,20,'来源 2026年2月.xlsx')").run();
   db.close();
 
-  const failed = await fetch(`http://127.0.0.1:${port}/api/data-center/backups`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" });
-  const failure = await failed.json();
-  assert.equal(failed.status, 422);
-  assert.equal(failure.code, "BACKUP_DATA_PREFLIGHT_FAILED");
-  assert.equal(failure.preflight.issues.find((item) => item.code === "OPENING_BALANCE_MONTH_MISSING").records[0].student_name, "接口缺月学生");
-
-  const auditCookie = await login("audit-user");
-  const forbidden = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: auditCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02", confirmation: "确认补充月份" }) });
-  assert.equal(forbidden.status, 403);
-
-  const unconfirmed = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02" }) });
-  assert.equal(unconfirmed.status, 400);
-
-  const repaired = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/opening-balances/9901/repair`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ month_key: "2026-02", confirmation: "确认补充月份" }) });
-  const result = await repaired.json();
-  assert.equal(repaired.status, 200);
-  assert.equal(result.row.month_key, "2026-02-01");
-  assert.equal(result.preflight.ok, true);
+  const response = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight`, { headers: { cookie: ownerCookie } });
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.issues.some((item) => /OPENING_BALANCE_MONTH/.test(item.code)), false);
   const checked = new DatabaseSync(databasePath, { readOnly: true });
-  assert.equal(checked.prepare("SELECT month_key FROM student_opening_balances WHERE id=9901").get().month_key, "2026-02-01");
-  assert.equal(checked.prepare("SELECT COUNT(*) AS count FROM operation_logs WHERE operation_type='补充期初余额月份' AND target_id='9901'").get().count, 1);
+  assert.equal(checked.prepare("SELECT month_key FROM student_opening_balances WHERE id=9901").get().month_key, "");
   checked.close();
 });
 test("new opening balances require an explicit month and normalize only user-entered YYYY-MM", async () => {
@@ -84,4 +71,23 @@ test("new opening balances require an explicit month and normalize only user-ent
   const result = await created.json();
   assert.equal(created.status, 201);
   assert.equal(result.row.month_key, "2026-06-01");
+});
+
+test("owner-only one-time Baidu configuration is reauthenticated, private and clearable", async () => {
+  const secret = "NEVER-REFLECT-APP-SECRET"; const encryptionKey = Buffer.alloc(32, 9).toString("base64");
+  const ordinary = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: teacherCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, encryption_key: encryptionKey, password: "123456", confirmation: "保存百度配置" }) });
+  assert.equal(ordinary.status, 403);
+  const wrongPassword = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, encryption_key: encryptionKey, password: "wrong", confirmation: "保存百度配置" }) });
+  assert.equal(wrongPassword.status, 401);
+  const saved = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, encryption_key: encryptionKey, password: "123456", confirmation: "保存百度配置" }) });
+  const result = await saved.json(); assert.equal(saved.status, 200); assert.equal(result.status.oauth_configured, true); assert.equal(result.status.encryption_configured, true); assert.equal(result.status.redirect_uri, `http://127.0.0.1:${port}/api/data-center/baidu/callback`);
+  assert.equal(JSON.stringify(result).includes("NEVER-REFLECT"), false); assert.equal(JSON.stringify(result).includes(encryptionKey), false);
+  const filename = path.join(tempRoot, "backups", "full-excel", ".secrets", "baidu-config.json"); assert.equal(fs.existsSync(filename), true); if (process.platform !== "win32") assert.equal(fs.statSync(filename).mode & 0o777, 0o600);
+  const beforeAuthorization = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeAuthorizationResult = await beforeAuthorization.json(); assert.equal(beforeAuthorization.status, 400); assert.equal(beforeAuthorizationResult.code, "BAIDU_AUTHORIZATION_REQUIRED");
+  fs.writeFileSync(path.join(path.dirname(filename), "baidu-token.json"), JSON.stringify({ access_token: "SYNTHETIC-ONLY", refresh_token: "SYNTHETIC-ONLY", expires_at: Date.now() + 3600000 }), { mode: 0o600 });
+  const beforeTest = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeTestResult = await beforeTest.json(); assert.equal(beforeTest.status, 400); assert.equal(beforeTestResult.code, "BAIDU_CONNECTION_TEST_REQUIRED");
+  const db = new DatabaseSync(databasePath, { readOnly: true }); const logs = JSON.stringify(db.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE operation_type='保存百度网盘配置'").all()); db.close(); assert.equal(logs.includes("NEVER-REFLECT"), false); assert.equal(logs.includes(encryptionKey), false);
+  const guide = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/key-custody.txt`, { headers: { cookie: ownerCookie } }); const guideText = await guide.text(); assert.equal(guide.status, 200); assert.equal(guideText.includes("NEVER-REFLECT"), false); assert.equal(guideText.includes(encryptionKey), false);
+  const badClear = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "123456", confirmation: "wrong" }) }); assert.equal(badClear.status, 400);
+  const cleared = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "123456", confirmation: "清除百度配置" }) }); const clearedResult = await cleared.json(); assert.equal(cleared.status, 200); assert.equal(clearedResult.status.oauth_configured, false); assert.equal(fs.existsSync(filename), false);
 });

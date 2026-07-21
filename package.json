@@ -29,6 +29,7 @@
     "test:data-center-contract": "node --test --test-concurrency=1 tests/data_center_contract.test.js",
     "test:data-center-api": "node --test --test-concurrency=1 tests/data_center_api.test.js",
     "test:data-center-page": "node --test --test-concurrency=1 tests/data_center_page.test.js",
+    "test:page-first-load": "node --test --test-concurrency=1 tests/page_first_load.test.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",
     "trace:student-balance": "node src/server.js --trace-student-balance=秦小沫",

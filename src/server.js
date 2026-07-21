@@ -10,6 +10,7 @@ const { BackupService, ensureBackupColumns } = require("./backup/backup_service"
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, startBackupScheduler } = require("./backup/scheduler");
 const { BaiduBackupManager } = require("./backup/baidu_provider");
 const { DataPreflightError, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
+const { studentPriceStatus, teacherPriceStatus } = require("./domain/price_status");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -1000,6 +1001,14 @@ function backupService() {
   return backupServiceInstance;
 }
 function baiduBackupManager() { if (!baiduBackupManagerInstance) baiduBackupManagerInstance = new BaiduBackupManager({ dataDir }); return baiduBackupManagerInstance; }
+function baiduCallbackUrl(req) {
+  const forwardedProto = text(String(req.headers["x-forwarded-proto"] || "").split(",")[0]).toLowerCase();
+  const protocol = ["http", "https"].includes(forwardedProto) ? forwardedProto : (req.socket?.encrypted ? "https" : "http");
+  const forwardedHost = text(String(req.headers["x-forwarded-host"] || "").split(",")[0]);
+  const host = forwardedHost || text(req.headers.host) || `127.0.0.1:${port}`;
+  if (!/^[a-z0-9.:[\]-]+$/i.test(host)) return `http://127.0.0.1:${port}/api/data-center/baidu/callback`;
+  return `${protocol}://${host}/api/data-center/baidu/callback`;
+}
 function cleanupPendingDataImports() {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, item] of pendingDataImports) if (item.created_at < cutoff) { try { fs.rmSync(item.path, { force: true }); } catch {} pendingDataImports.delete(id); }
@@ -2622,6 +2631,12 @@ function upsertStudentGradeStageSet(body = {}) {
   }
   const student = get("SELECT * FROM students WHERE name = ?", [studentName]);
   if (!student) return { error: "学生档案不存在", status: 404 };
+  const populated = normalized.filter((row) => row.start_date || row.end_date).sort((a, b) => text(a.start_date).localeCompare(text(b.start_date)));
+  for (const row of populated) if (!row.start_date && row.end_date) return { error: `${row.stage}缺少起始日期`, status: 400 };
+  for (let index = 1; index < populated.length; index += 1) {
+    if (text(populated[index].start_date) <= (text(populated[index - 1].end_date) || "9999-12-31")) return { error: `${populated[index - 1].stage}与${populated[index].stage}的时间范围重叠`, status: 400 };
+  }
+  if (populated.length && GRADE_ORDER.includes(text(student.grade)) && !populated.some((row) => row.stage === text(student.grade))) return { error: `当前年级${student.grade}缺少对应时间字段`, status: 400 };
   return withTransaction(() => {
     const before = [];
     const after = [];
@@ -6471,6 +6486,7 @@ function studentPricingRows(monthKey) {
       current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length,
       total_lessons: matches.length,
       rule_source: rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto"),
+      price_status: studentPriceStatus(rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto")),
       mismatch_lessons: mismatchCount,
     };
   });
@@ -6867,7 +6883,7 @@ function teacherSalaryRules() {
         ELSE 99
       END,
       grade, subject, student_names, id
-  `);
+  `).map((row) => ({ ...row, price_status: teacherPriceStatus(row) }));
 }
 
 function activeTeacherSalaryRuleForLesson(lesson) {
@@ -6880,6 +6896,7 @@ function activeTeacherSalaryRuleForLesson(lesson) {
     SELECT *
     FROM teacher_salary_rules
     WHERE salary_per_unit > 0
+      AND is_active <> 0
       AND teacher_name = ?
       AND grade = ?
       AND subject = ?
@@ -11575,6 +11592,13 @@ async function handleApi(req, res, url) {
     }, req);
     return sendJson(res, { ok: true });
   }
+  // The OAuth redirect comes from another site, while the login cookie is
+  // deliberately SameSite=Strict. The short-lived, one-use state is the
+  // callback capability; starting authorization remains owner-only below.
+  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/callback") {
+    try { await baiduBackupManager().finishAuthorization(url.searchParams.get("code"), url.searchParams.get("state")); res.writeHead(302, { location: "/?baidu=connected", "cache-control": "no-store" }); return res.end(); }
+    catch (error) { return sendError(res, 400, error.message || "百度授权失败"); }
+  }
   const user = currentUser(req);
   if (!user) return sendError(res, 401, "请先登录");
   if (req.method === "POST" && url.pathname === "/api/operation-logs/client") {
@@ -12457,7 +12481,8 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center/baidu/status") {
     const settings = loadFullBackupSettings(dbPath);
-    return sendJson(res, { ...baiduBackupManager().configurationStatus(), remote_directory: settings.remote_directory });
+    const remote = baiduBackupManager().configurationStatus();
+    return sendJson(res, { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory });
   }
 
   if (req.method === "GET" && url.pathname === "/api/data-center") {
@@ -12468,7 +12493,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, {
       records: service.list(),
       settings: { ...settings, managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status, encryption_status: remote.encryption_configured ? "configured" : "not_configured" },
-      baidu: { ...remote, remote_directory: settings.remote_directory },
+      baidu: { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory },
       preflight: safeDataPreflight(),
       maintenance: dataImportMaintenance,
     });
@@ -12477,8 +12502,10 @@ async function handleApi(req, res, url) {
   if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {
     const body = await readBody(req);
     const remote = baiduBackupManager().configurationStatus();
+    if (body.remote_enabled && !isSuperRole(user.role)) return sendError(res, 403, "只有老板可以启用百度网盘自动备份");
     if (body.remote_enabled && remote.missing_items.length) return sendJson(res, { error: `尚缺少：${remote.missing_items.join("、")}`, code: "BAIDU_CONFIGURATION_INCOMPLETE", baidu: remote }, 400);
     if (body.remote_enabled && !remote.authorized) return sendJson(res, { error: "请先完成百度网盘授权并测试连接", code: "BAIDU_AUTHORIZATION_REQUIRED", baidu: remote }, 400);
+    if (body.remote_enabled && !remote.test_passed) return sendJson(res, { error: "请先完成百度网盘加密上传测试", code: "BAIDU_CONNECTION_TEST_REQUIRED", baidu: remote }, 400);
     const settings = saveFullBackupSettings(dbPath, body);
     writeOperationLog(user, { operation_type: "修改全量备份设置", operation_content: `自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, remote_enabled: settings.remote_enabled } }, req);
     return sendJson(res, { ok: true, settings });
@@ -12526,17 +12553,44 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/authorize") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以连接百度网盘");
     try { return sendJson(res, baiduBackupManager().beginAuthorization()); } catch (error) { return sendError(res, 400, error.message || "百度网盘未配置"); }
   }
-  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/callback") {
-    try { await baiduBackupManager().finishAuthorization(url.searchParams.get("code"), url.searchParams.get("state")); res.writeHead(302, { location: "/?baidu=connected", "cache-control": "no-store" }); return res.end(); }
-    catch (error) { return sendError(res, 400, error.message || "百度授权失败"); }
-  }
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/test") {
-    try { return sendJson(res, await baiduBackupManager().testConnection()); } catch (error) { return sendError(res, 400, error.message || "百度连接测试失败"); }
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以测试百度网盘");
+    try { return sendJson(res, await baiduBackupManager().testConnection(loadFullBackupSettings(dbPath).remote_directory)); } catch (error) { return sendError(res, 400, error.message || "百度连接测试失败"); }
   }
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/disconnect") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以解除百度授权");
     const result = baiduBackupManager().disconnect(); writeOperationLog(user, { operation_type: "解除百度网盘授权", operation_content: "已删除本地受保护的百度授权凭据", target_type: "data_center", target_id: "baidu" }, req); return sendJson(res, result);
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/data-center/baidu/config") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以保存百度配置");
+    const body = await readBody(req); const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
+    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "当前密码不正确");
+    if (text(body.confirmation) !== "保存百度配置") return sendError(res, 400, "请输入确认文字：保存百度配置");
+    try {
+      const status = baiduBackupManager().saveConfiguration({ appKey: body.app_key, appSecret: body.app_secret, encryptionKey: body.encryption_key, redirectUri: baiduCallbackUrl(req) });
+      writeOperationLog(user, { operation_type: "保存百度网盘配置", operation_content: "百度应用和加密保护已配置，需继续授权和测试", target_type: "data_center", target_id: "baidu" }, req);
+      return sendJson(res, { ok: true, status: { ...status, redirect_uri: baiduCallbackUrl(req) } });
+    } catch (error) { return sendError(res, 400, error.message || "百度配置保存失败"); }
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/api/data-center/baidu/config") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以清除百度配置");
+    const body = await readBody(req); const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
+    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "当前密码不正确");
+    if (text(body.confirmation) !== "清除百度配置") return sendError(res, 400, "请输入确认文字：清除百度配置");
+    const status = baiduBackupManager().clearConfiguration();
+    saveFullBackupSettings(dbPath, { ...loadFullBackupSettings(dbPath), remote_enabled: false });
+    writeOperationLog(user, { operation_type: "清除百度网盘配置", operation_content: "百度配置和本地授权已清除", target_type: "data_center", target_id: "baidu" }, req);
+    return sendJson(res, { ok: true, status: { ...status, redirect_uri: baiduCallbackUrl(req) } });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/key-custody.txt") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以下载密钥保管说明");
+    return sendBuffer(res, Buffer.from("黎明教育百度备份密钥保管说明\n\n1. 本文件不包含真实App Secret、Token或加密密钥。\n2. 请将您保存时使用的32字节加密密钥离线保管两份。\n3. 密钥丢失后，百度网盘中的AES-256-GCM加密备份无法恢复。\n4. 不要通过聊天、邮件或公开网盘传递密钥。\n", "utf8"), "text/plain; charset=utf-8", "百度备份密钥保管说明.txt");
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/import/preview") {

@@ -1,5 +1,22 @@
 const DEFAULT_COURSE_STATUSES = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
 const ATTENDANCE_STATUSES = ["上班", "休息", "请假", "病假", "事假", "半天", "加班", "调休", "旷工"];
+const { STUDENT_PRICE_STATUS_VALUES, TEACHER_PRICE_STATUS_VALUES } = require("../domain/price_status");
+
+const STUDENT_GRADE_STAGE_COLUMNS = Object.freeze([
+  ["junior_one_start", "初一起始日期", "初一", "start_date"],
+  ["junior_one_end", "初一截止日期", "初一", "end_date"],
+  ["junior_two_start", "初二起始日期", "初二", "start_date"],
+  ["junior_two_end", "初二截止日期", "初二", "end_date"],
+  ["junior_three_start", "初三起始日期", "初三", "start_date"],
+  ["junior_three_end", "初三截止日期", "初三", "end_date"],
+  ["senior_one_start", "高一起始日期", "高一", "start_date"],
+  ["senior_one_end", "高一截止日期", "高一", "end_date"],
+  ["senior_two_start", "高二起始日期", "高二", "start_date"],
+  ["senior_two_end", "高二截止日期", "高二", "end_date"],
+  ["senior_three_start", "高三起始日期", "高三", "start_date"],
+  ["senior_three_end", "高三截止日期", "高三", "end_date"],
+  ["graduated_at", "已毕业日期", "已毕业", "start_date"],
+]);
 
 const T = { data_type: "text" };
 const I = { data_type: "integer" };
@@ -41,27 +58,30 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
   ], { sort_fields: ["date", "sort_order", "time_slot", "teacher_name", "id"] }),
   sheet("student_fee_details", "所有学生费用明细", "", [
     ["student_name", "学生姓名", T], ["teacher_name", "授课老师", T], ["date", "日期", D],
-    ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }], ["weekday", "星期", T], ["time_slot", "时间", T],
-    ["classroom", "教室", T], ["grade", "年级", T], ["subject", "科目", T], ["notes", "备注", T],
+    ["weekday", "星期", T], ["time_slot", "时间", T], ["classroom", "教室", T],
+    ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }], ["grade", "年级", T], ["subject", "科目", T],
+    ["notes", "备注", T], ["unit_price", "单人费用", M], ["rule_price", "规则费用", M],
   ], { restore_source: false, sort_fields: ["date", "teacher_name", "student_name"] }),
   sheet("recharge_records", "所有充值记录", "recharge_records", [
-    ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
+    ["month_label", "月份", { ...T, source_field: null, nullable: false }], ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
     ["cur_recharge", "本月实际充值", M], ["cur_gift", "本月赠送充值", M], ["recharge_date", "充值日期", D], ["notes", "备注", T],
   ], { sort_fields: ["month_key", "recharge_date", "id"] }),
   sheet("student_opening_balances", "期初余额", "student_opening_balances", [
-    ["month_key", "月份", { ...D, nullable: false }], ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
+    ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
     ["opening_actual_balance", "期初实际余额", M], ["opening_gift_balance", "期初赠送余额", M], ["notes", "备注", T],
   ], { sort_fields: ["month_key", "student_name", "id"] }),
   sheet("student_pricing", "所有学生单价", "student_pricing", [
     ["student_name", "学生", { ...T, nullable: false }], ["grade", "年级", T], ["subject", "科目", { ...T, nullable: false }],
-    ["student_names", "学生集合", T], ["custom_price", "单价", { ...M, nullable: false }], ["notes", "备注", T],
+    ["student_names", "学生集合", T], ["custom_price", "单价", { ...M, nullable: false }],
+    ["price_status", "价格状态", { ...T, source_field: null, enum_values: STUDENT_PRICE_STATUS_VALUES }], ["notes", "备注", T],
   ], { sort_fields: ["student_name", "grade", "subject", "id"] }),
   sheet("class_groups", "所有班级管理", "class_groups", [
     ["teacher", "老师", { ...T, nullable: false }], ["grade", "年级", { ...T, nullable: false }], ["subject", "科目", { ...T, nullable: false }],
     ["students_display", "学生集合", T], ["class_name", "班级名", T],
   ], { sort_fields: ["teacher", "grade", "subject", "id"] }),
   sheet("students", "学生档案", "students", [
-    ["name", "姓名", { ...T, nullable: false }], ["grade", "当前年级", T], ["grade_timeline", "年级时间界定", { ...T, source_field: null }],
+    ["name", "姓名", { ...T, nullable: false }], ["grade", "当前年级", T],
+    ...STUDENT_GRADE_STAGE_COLUMNS.map(([fieldKey, displayName]) => [fieldKey, displayName, { ...D, source_field: null }]),
     ["guardian", "监护人", T], ["phone", "电话", T], ["status", "状态", { ...T, enum_values: ["在读", "暂停", "离校", "已流出", "已毕业"] }],
     ["joined_at", "入学日期", D], ["left_at", "离校日期", D], ["notes", "备注", T],
   ], { sort_fields: ["name", "id"] }),
@@ -70,14 +90,14 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
     ["week_start", "开始日期", D], ["week_end", "结束日期", D], ["amount", "金额", M], ["notes", "备注", T],
   ], { sort_fields: ["month_key", "week_start", "teacher_name", "id"] }),
   sheet("lesson_hour_details", "所有教师课时明细", "", [
-    ["teacher_name", "授课老师", T], ["date", "日期", D], ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }],
-    ["weekday", "星期", T], ["time_slot", "时间", T], ["classroom", "教室", T], ["grade", "年级", T],
-    ["subject", "科目", T], ["student_names", "学生", T], ["notes", "备注", T],
+    ["teacher_name", "授课老师", T], ["date", "日期", D], ["weekday", "星期", T], ["time_slot", "时间", T],
+    ["classroom", "教室", T], ["display_status", "状态", { ...T, enum_values: DEFAULT_COURSE_STATUSES }], ["grade", "年级", T],
+    ["subject", "科目", T], ["student_names", "学生", T], ["notes", "备注", T], ["teacher_salary", "教师薪资", M], ["rule_salary", "规则薪资", M],
   ], { restore_source: false, sort_fields: ["date", "teacher_name", "time_slot"] }),
   sheet("teacher_salary_rules", "所有教师薪资规则", "teacher_salary_rules", [
     ["teacher_name", "老师", { ...T, nullable: false }], ["grade", "年级", { ...T, nullable: false }], ["subject", "科目", { ...T, nullable: false }],
     ["student_names", "学生集合", { ...T, nullable: false }], ["salary_per_unit", "每2小时薪资", { ...M, nullable: false }],
-    ["active_label", "是否启用", { ...T, source_field: null, enum_values: ["启用", "停用"] }], ["notes", "备注", T],
+    ["price_status", "价格状态", { ...T, source_field: null, enum_values: TEACHER_PRICE_STATUS_VALUES }], ["notes", "备注", T],
   ], { sort_fields: ["teacher_name", "is_active", "id"] }),
   sheet("teachers", "教师档案", "teachers", [
     ["name", "姓名", { ...T, nullable: false }], ["phone", "电话", T], ["status", "状态", { ...T, enum_values: ["在职", "暂停", "离职"] }],
@@ -154,6 +174,7 @@ const EXCLUDED_TABLES = Object.freeze([
 module.exports = {
   DEFAULT_COURSE_STATUSES,
   ATTENDANCE_STATUSES,
+  STUDENT_GRADE_STAGE_COLUMNS,
   VISIBLE_SHEET_DEFINITIONS,
   VISIBLE_SHEET_NAMES,
   HIDDEN_SHEET_NAMES,

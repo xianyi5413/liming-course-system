@@ -55,11 +55,14 @@ function runDataPreflight(db, options = {}) {
   };
   const all = (sql, ...params) => db.prepare(sql).all(...params);
 
-  const openingRows = all(`SELECT id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes
-    FROM student_opening_balances WHERE month_key IS NULL OR TRIM(month_key)='' ORDER BY id`);
-  addIssue("OPENING_BALANCE_MONTH_MISSING", "期初余额缺少月份", openingRows, openingBalanceRecord);
-  addIssue("OPENING_BALANCE_MONTH_INVALID", "期初余额月份格式无效", all(`SELECT id,month_key,student_name,grade,opening_actual_balance,opening_gift_balance,notes
-    FROM student_opening_balances WHERE month_key IS NOT NULL AND TRIM(month_key)<>'' ORDER BY id`).filter((row) => !validMonth(row.month_key)), openingBalanceRecord);
+  addIssue("OPENING_BALANCE_STUDENT_DUPLICATE", "同一学生存在多条期初余额", all(`
+    SELECT MIN(id) AS id,student_name,COUNT(*) AS duplicate_count,GROUP_CONCAT(id) AS record_ids
+    FROM student_opening_balances
+    WHERE TRIM(COALESCE(student_name,''))<>''
+    GROUP BY TRIM(student_name)
+    HAVING COUNT(*)>1
+    ORDER BY student_name
+  `), (row) => ({ record_id: Number(row.id), student_name: text(row.student_name), duplicate_count: Number(row.duplicate_count), record_ids: text(row.record_ids), requires_confirmation: true }));
 
   addIssue("LESSON_DATE_INVALID", "课程日期缺失或格式无效", all("SELECT id,date,teacher_name,grade,subject FROM lessons ORDER BY id").filter((row) => !validDate(row.date)), (row) => ({ record_id: Number(row.id), date: text(row.date), teacher_name: text(row.teacher_name), grade: text(row.grade), subject: text(row.subject) }));
   addIssue("LESSON_TEACHER_MISSING", "课程缺少教师姓名", all("SELECT id,date,grade,subject FROM lessons WHERE teacher_name IS NULL OR TRIM(teacher_name)='' ORDER BY id"), (row) => ({ record_id: Number(row.id), date: text(row.date), grade: text(row.grade), subject: text(row.subject) }));
@@ -93,10 +96,9 @@ function runDataPreflight(db, options = {}) {
 
   const issueCount = issues.reduce((total, issue) => total + issue.count, 0);
   let userMessage = "完整备份数据预检通过";
-  const missingMonths = issues.find((issue) => issue.code === "OPENING_BALANCE_MONTH_MISSING");
-  if (missingMonths) {
-    const previews = missingMonths.records.slice(0, 3).map((row) => `学生：${row.student_name || "（空）"}\n年级：${row.grade || "（空）"}\n实际余额：${row.actual_balance}元\n赠送余额：${row.gift_balance}元`).join("\n\n");
-    userMessage = `无法创建完整备份：发现${missingMonths.count}条期初余额缺少月份。\n\n${previews}\n\n请先补充记录所属月份。`;
+  const duplicateOpenings = issues.find((issue) => issue.code === "OPENING_BALANCE_STUDENT_DUPLICATE");
+  if (duplicateOpenings) {
+    userMessage = `无法创建完整备份：发现${duplicateOpenings.count}名学生存在多条期初余额，请人工确认每名学生唯一的权威记录。`;
   } else if (issueCount) {
     userMessage = `无法创建完整备份：数据完整性预检发现${issueCount}个问题。请查看问题记录并修复后重新检查。`;
   }

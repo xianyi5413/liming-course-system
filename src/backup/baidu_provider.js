@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { encryptFile } = require("./encryption");
+const { encryptFile, encryptionKey } = require("./encryption");
 
 const DEFAULT_ENDPOINTS = Object.freeze({
   authorize: "https://openapi.baidu.com/oauth/2.0/authorize",
@@ -24,16 +24,47 @@ class TokenStore {
   tokenStatus() { const token = this.read(); if (!token) return "not_found"; return Number(token.expires_at || 0) > Date.now() + 60_000 ? "valid" : token.refresh_token ? "refresh_required" : "expired"; }
 }
 
+class BaiduConfigStore {
+  constructor(filename) { this.filename = path.resolve(filename); }
+  read() { try { const value = JSON.parse(fs.readFileSync(this.filename, "utf8")); return value && typeof value === "object" ? value : {}; } catch { return {}; } }
+  write(config) {
+    const directory = path.dirname(this.filename); fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(directory, 0o700); } catch {}
+    const temporary = `${this.filename}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    fs.writeFileSync(temporary, JSON.stringify(config), { flag: "wx", mode: 0o600 });
+    try { fs.chmodSync(temporary, 0o600); } catch {}
+    fs.renameSync(temporary, this.filename);
+    try { fs.chmodSync(this.filename, 0o600); } catch {}
+  }
+  clear() { try { fs.rmSync(this.filename, { force: true }); } catch {} }
+}
+
 class BaiduClient {
   constructor({ appKey, appSecret, redirectUri, tokenStore, fetchImpl = fetch, endpoints = DEFAULT_ENDPOINTS }) { this.appKey = appKey; this.appSecret = appSecret; this.redirectUri = redirectUri; this.tokenStore = tokenStore; this.fetch = fetchImpl; this.endpoints = { ...DEFAULT_ENDPOINTS, ...endpoints }; }
   assertConfigured() { if (!this.appKey || !this.appSecret || !this.redirectUri) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘应用尚未配置"); }
   authorizationUrl(state) { this.assertConfigured(); const url = new URL(this.endpoints.authorize); url.search = new URLSearchParams({ response_type: "code", client_id: this.appKey, redirect_uri: this.redirectUri, state, scope: "basic,netdisk" }); return url.toString(); }
-  async tokenRequest(parameters) { this.assertConfigured(); const url = new URL(this.endpoints.token); url.search = new URLSearchParams({ ...parameters, client_id: this.appKey, client_secret: this.appSecret }); const response = await this.fetch(url, { method: "GET", cache: "no-store" }); const data = await response.json().catch(() => ({})); if (!response.ok || data.error) throw new BaiduError("BAIDU_OAUTH_FAILED", "百度网盘授权失败", { provider_code: String(data.error || response.status) }); const token = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + Number(data.expires_in || 0) * 1000, scope: data.scope || "" }; this.tokenStore.write(token); return token; }
+  async tokenRequest(parameters) {
+    this.assertConfigured();
+    const url = new URL(this.endpoints.token);
+    const body = formBody({ ...parameters, client_id: this.appKey, client_secret: this.appSecret });
+    const response = await this.fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) throw new BaiduError("BAIDU_OAUTH_FAILED", "百度网盘授权失败", { provider_code: String(data.error || response.status) });
+    const token = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + Number(data.expires_in || 0) * 1000, scope: data.scope || "" };
+    this.tokenStore.write(token);
+    return token;
+  }
   exchangeCode(code) { return this.tokenRequest({ grant_type: "authorization_code", code, redirect_uri: this.redirectUri }); }
   refresh(refreshToken) { return this.tokenRequest({ grant_type: "refresh_token", refresh_token: refreshToken }); }
   async accessToken() { let token = this.tokenStore.read(); if (!token) throw new BaiduError("BAIDU_AUTHORIZATION_REQUIRED", "百度网盘需要授权"); if (Number(token.expires_at || 0) <= Date.now() + 60_000) { if (!token.refresh_token) throw new BaiduError("BAIDU_AUTHORIZATION_EXPIRED", "百度网盘授权已过期"); token = await this.refresh(token.refresh_token); } return token.access_token; }
   async apiJson(url, options = {}) { const response = await this.fetch(url, options); const data = await response.json().catch(() => ({})); if (!response.ok || Number(data.errno || 0) !== 0) throw new BaiduError("BAIDU_API_FAILED", "百度网盘接口调用失败", { provider_code: String(data.errno ?? response.status) }); return data; }
   async testConnection() { const accessToken = await this.accessToken(); const url = new URL(`${this.endpoints.xpan}/nas`); url.search = new URLSearchParams({ method: "uinfo", access_token: accessToken }); await this.apiJson(url); return { ok: true }; }
+  async createDirectory(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/file`); url.search = new URLSearchParams({ method: "create", access_token: accessToken }); await this.apiJson(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size: 0, isdir: 1, rtype: 3, block_list: [] }) }); return { ok: true, path: target }; }
   async uploadFile(localPath, remotePath) {
     const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const size = fs.statSync(localPath).size; const blocks = fileBlocks(localPath);
     const preUrl = new URL(`${this.endpoints.xpan}/file`); preUrl.search = new URLSearchParams({ method: "precreate", access_token: accessToken });
@@ -49,8 +80,42 @@ class BaiduClient {
 }
 
 class BaiduBackupManager {
-  constructor({ dataDir, appKey = process.env.BAIDU_APP_KEY, appSecret = process.env.BAIDU_APP_SECRET, redirectUri = process.env.BAIDU_REDIRECT_URI, encryptionKey = process.env.BACKUP_ENCRYPTION_KEY, fetchImpl, endpoints } = {}) {
-    this.dataDir = path.resolve(dataDir); this.encryptionKey = encryptionKey; this.states = new Map(); this.lastTestAt = ""; this.lastTestResult = "not_tested"; this.tokenStore = new TokenStore(path.join(this.dataDir, "backups", "full-excel", ".secrets", "baidu-token.json")); this.client = new BaiduClient({ appKey, appSecret, redirectUri, tokenStore: this.tokenStore, fetchImpl, endpoints });
+  constructor({ dataDir, appKey, appSecret, redirectUri, encryptionKey: encryptionKeyValue, fetchImpl, endpoints } = {}) {
+    this.dataDir = path.resolve(dataDir); this.states = new Map(); this.fetchImpl = fetchImpl; this.endpoints = endpoints;
+    const secretDirectory = path.join(this.dataDir, "backups", "full-excel", ".secrets");
+    this.configStore = new BaiduConfigStore(path.join(secretDirectory, "baidu-config.json"));
+    this.tokenStore = new TokenStore(path.join(secretDirectory, "baidu-token.json"));
+    this.explicitConfig = [appKey, appSecret, redirectUri, encryptionKeyValue].some((value) => value !== undefined)
+      ? { app_key: appKey || "", app_secret: appSecret || "", redirect_uri: redirectUri || "", encryption_key: encryptionKeyValue || "", last_test_at: "", last_test_result: "not_tested" }
+      : null;
+    this.reload();
+  }
+  reload() {
+    const stored = this.explicitConfig || this.configStore.read();
+    const config = {
+      app_key: stored.app_key || process.env.BAIDU_APP_KEY || "",
+      app_secret: stored.app_secret || process.env.BAIDU_APP_SECRET || "",
+      redirect_uri: stored.redirect_uri || process.env.BAIDU_REDIRECT_URI || "",
+      encryption_key: stored.encryption_key || process.env.BACKUP_ENCRYPTION_KEY || "",
+      last_test_at: stored.last_test_at || "",
+      last_test_result: stored.last_test_result || "not_tested",
+    };
+    this.encryptionKey = config.encryption_key; this.lastTestAt = config.last_test_at; this.lastTestResult = config.last_test_result;
+    this.client = new BaiduClient({ appKey: config.app_key, appSecret: config.app_secret, redirectUri: config.redirect_uri, tokenStore: this.tokenStore, fetchImpl: this.fetchImpl, endpoints: this.endpoints });
+    return config;
+  }
+  saveConfiguration({ appKey, appSecret, redirectUri, encryptionKey: encryptionKeyValue }) {
+    const clean = { app_key: String(appKey || "").trim(), app_secret: String(appSecret || "").trim(), redirect_uri: String(redirectUri || "").trim(), encryption_key: String(encryptionKeyValue || "").trim(), last_test_at: "", last_test_result: "not_tested" };
+    if (!clean.app_key || !clean.app_secret || !/^https?:\/\//i.test(clean.redirect_uri)) throw new BaiduError("BAIDU_CONFIGURATION_INVALID", "App Key、App Secret或回调地址不完整");
+    try { encryptionKey(clean.encryption_key); } catch { throw new BaiduError("BAIDU_ENCRYPTION_KEY_INVALID", "备份加密密钥格式不正确"); }
+    this.explicitConfig = null; this.configStore.write(clean); this.tokenStore.clear(); this.reload();
+    return this.configurationStatus();
+  }
+  clearConfiguration() { this.explicitConfig = null; this.tokenStore.clear(); this.configStore.clear(); this.reload(); return this.configurationStatus(); }
+  persistTestStatus(result) {
+    if (this.explicitConfig) return;
+    const stored = this.configStore.read(); if (!stored.app_key) return;
+    this.configStore.write({ ...stored, last_test_at: this.lastTestAt, last_test_result: result });
   }
   configurationStatus() {
     const fields = {
@@ -79,6 +144,7 @@ class BaiduBackupManager {
       missing_items: missingItems,
       last_test_at: this.lastTestAt,
       last_test_result: this.lastTestResult,
+      test_passed: this.lastTestResult === "success",
       status,
     };
   }
@@ -87,13 +153,27 @@ class BaiduBackupManager {
   beginAuthorization() { if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用、回调地址和备份加密密钥配置"); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
   async finishAuthorization(code, state) { const expiry = this.states.get(String(state)); this.states.delete(String(state)); if (!expiry || expiry < Date.now()) throw new BaiduError("BAIDU_OAUTH_STATE_INVALID", "百度授权state无效或已过期"); await this.client.exchangeCode(String(code)); return { ok: true, status: this.status() }; }
   disconnect() { this.tokenStore.clear(); return { ok: true, status: this.status() }; }
-  async testConnection() {
+  async testConnection(remoteDirectory = "/apps/liming-course-system") {
     if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用、回调地址和备份加密密钥配置");
     this.lastTestAt = new Date().toISOString();
-    try { const result = await this.client.testConnection(); this.lastTestResult = "success"; return result; }
-    catch (error) { this.lastTestResult = String(error?.code || "failed").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); throw error; }
+    const safeDirectory = `${safeRemotePath(remoteDirectory)}/.liming-connection-test`;
+    const localPlain = path.join(path.dirname(this.configStore.filename), `.connection-${crypto.randomUUID()}.txt`);
+    const localEncrypted = `${localPlain}.enc`; const remoteFile = `${safeDirectory}/encrypted-test-${crypto.randomUUID()}.enc`;
+    const steps = { authorization: false, connection: false, test_directory: false, encrypted_upload: false, test_delete: false };
+    try {
+      await this.client.testConnection(); steps.authorization = true; steps.connection = true;
+      await this.client.createDirectory(safeDirectory); steps.test_directory = true;
+      fs.mkdirSync(path.dirname(this.configStore.filename), { recursive: true, mode: 0o700 });
+      try { fs.chmodSync(path.dirname(this.configStore.filename), 0o700); } catch {}
+      fs.writeFileSync(localPlain, `liming-baidu-connection-test ${this.lastTestAt}`, { flag: "wx", mode: 0o600 });
+      await encryptFile({ inputPath: localPlain, outputPath: localEncrypted, key: this.encryptionKey });
+      await this.client.uploadFile(localEncrypted, remoteFile); steps.encrypted_upload = true;
+      await this.client.deleteFile(remoteFile); steps.test_delete = true;
+      this.lastTestResult = "success"; this.persistTestStatus("success"); return { ok: true, steps };
+    } catch (error) { this.lastTestResult = String(error?.code || "failed").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); this.persistTestStatus(this.lastTestResult); throw error; }
+    finally { try { fs.rmSync(localPlain, { force: true }); } catch {} try { fs.rmSync(localEncrypted, { force: true }); } catch {} }
   }
   async upload({ record, localPath, remoteDirectory }) { if (!this.configured()) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘或加密密钥尚未配置"); const temporary = path.join(path.dirname(localPath), `.remote-${record.id}-${crypto.randomUUID()}.xlsx.enc`); try { await encryptFile({ inputPath: localPath, outputPath: temporary, key: this.encryptionKey }); const remotePath = `${safeRemotePath(remoteDirectory)}/${path.basename(localPath)}.enc`; return await this.client.uploadFile(temporary, remotePath); } finally { try { fs.rmSync(temporary, { force: true }); } catch {} } }
 }
 
-module.exports = { DEFAULT_ENDPOINTS, BLOCK_SIZE, BaiduError, TokenStore, BaiduClient, BaiduBackupManager, safeRemotePath, fileBlocks };
+module.exports = { DEFAULT_ENDPOINTS, BLOCK_SIZE, BaiduError, BaiduConfigStore, TokenStore, BaiduClient, BaiduBackupManager, safeRemotePath, fileBlocks };
