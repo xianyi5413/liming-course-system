@@ -433,21 +433,20 @@ const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
   remote_enabled: false,
   remote_directory: "/apps/liming-course-system",
   remote_status: "not_configured",
-  encryption_status: "not_configured",
+  remote_plaintext_acknowledged: false,
   local_storage_status: "not_created",
 });
 const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   app_key_configured: false,
   app_secret_configured: false,
   redirect_uri_configured: false,
-  encryption_key_configured: false,
   authorized: false,
   authorization_status: "not_authorized",
   token_status: "not_configured",
   redirect_uri: "",
   callback_route: "/api/data-center/baidu/callback",
   remote_directory: "/apps/liming-course-system",
-  missing_items: ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"],
+  missing_items: ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI"],
   last_test_at: "",
   last_test_result: "not_tested",
   test_passed: false,
@@ -9221,8 +9220,27 @@ function renderStudentQuery() {
 }
 
 function dataCenterRemoteLabel(value) {
-  const labels = { not_configured: "未配置", not_authorized: "等待授权", authorized: "已授权", refresh_required: "等待刷新", pending: "等待上传", uploading: "上传中", success: "上传成功", failed: "上传失败", authorization_expired: "授权过期", delete_failed: "远端删除失败", deleted: "已删除", legacy: "旧版" };
+  const labels = { not_configured: "未配置", not_authorized: "等待授权", authorized: "已授权", refresh_required: "等待刷新", pending: "等待上传", uploading: "上传中", success: "上传成功", partial_failed: "部分上传失败", failed: "上传失败", authorization_expired: "授权过期", delete_partial: "部分删除失败", delete_failed: "远端删除失败", deleted: "已删除", legacy: "旧版" };
   return labels[value] || value || "未配置";
+}
+
+function dataCenterRemotePartLabel(value) {
+  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", not_present: "无记录" };
+  return labels[value] || "未上传";
+}
+
+function dataCenterRemoteIntegrityLabel(value) {
+  const labels = { verified: "已验证", not_verified: "未验证", failed: "验证失败" };
+  return labels[value] || "未验证";
+}
+
+function dataCenterRemoteSummary(row) {
+  if (/\.enc$/i.test(row.remote_path || "")) return `<span class="remote-legacy-encrypted">旧版加密远端备份</span>`;
+  return `<div class="remote-pair-status">
+    <span>远端 Excel：${escapeHtml(dataCenterRemotePartLabel(row.remote_file_status))}</span>
+    <span>远端校验文件：${escapeHtml(dataCenterRemotePartLabel(row.remote_checksum_status))}</span>
+    <span>远端完整性：${escapeHtml(dataCenterRemoteIntegrityLabel(row.remote_integrity_status))}</span>
+  </div>`;
 }
 
 function backupStatusLabel(value) {
@@ -9253,7 +9271,7 @@ function dataCenterBackupRows() {
       <td>${escapeHtml(legacy ? "旧版业务归档" : (row.retention_class || "全量数据"))}</td>
       <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
       <td>${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
-      <td>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</td>
+      <td><div>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</div>${legacy ? "" : dataCenterRemoteSummary(row)}</td>
       <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
       <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
       <td>${escapeHtml(row.created_by_user_id || "-")}</td>
@@ -9261,7 +9279,7 @@ function dataCenterBackupRows() {
       <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
       <td class="data-center-actions">
         <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
-        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button><button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button><button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
       </td>
     </tr>`;
   }).join("") || `<tr><td colspan="11" class="empty">暂无备份记录</td></tr>`;
@@ -9304,42 +9322,40 @@ function baiduSimpleGuideMarkup() {
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
   const owner = isOwnerRoleValue(auth.user?.role);
   const callback = baidu.redirect_uri || `${window.location.origin}/api/data-center/baidu/callback`;
-  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.encryption_key_configured;
+  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
   return `<div class="modal-backdrop baidu-guide-modal"><div class="modal-panel baidu-guide-panel">
-    <div class="modal-head"><div><div class="modal-title">百度网盘备份三步配置</div><div class="modal-subtitle">本地备份不依赖百度配置；远端只上传AES-256-GCM加密文件。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
+    <div class="modal-head"><div><div class="modal-title">百度网盘备份三步配置</div><div class="modal-subtitle">本地备份不依赖百度配置；远端保存未加密 Excel 及其 SHA-256 校验文件。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
     <div class="baidu-guide-steps">
-      <section><h3>第一步：准备百度应用</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准确回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label></section>
-      <section><h3>第二步：保存安全配置</h3>${owner ? `<p>Secret保存后不再回显。重新配置时请重新填写全部三项。</p><div class="data-backup-settings-grid baidu-secret-form">
+      <section><h3>第一步：填写百度应用信息</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准确回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>${owner ? `<p>App Secret 保存后不再回显；重新配置时请重新填写 App Key 和 App Secret。</p><div class="data-backup-settings-grid baidu-secret-form">
         <label class="filter-field"><span>App Key</span><input class="control baidu-config-app-key" autocomplete="off"></label>
         <label class="filter-field"><span>App Secret</span><input class="control baidu-config-app-secret" type="password" autocomplete="new-password"></label>
-        <label class="filter-field wide"><span>备份加密密钥</span><input class="control baidu-config-encryption-key" type="password" autocomplete="new-password"></label>
-        <div class="audit-toolbar"><button class="btn baidu-generate-key" type="button">自动生成加密密钥</button><button class="btn baidu-key-guide" type="button">下载密钥保管说明</button></div>
         <label class="filter-field"><span>当前老板密码</span><input class="control baidu-config-password" type="password" autocomplete="current-password"></label>
         <label class="filter-field"><span>确认文字：保存百度配置</span><input class="control baidu-config-confirmation" autocomplete="off"></label>
-      </div><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn danger baidu-config-clear" type="button">清除并重新配置</button>` : ""}</div>` : `<div class="audit-inline-notice neutral">只有老板账号可以查看和提交Secret配置表单。</div>`}</section>
-      <section><h3>第三步：授权并测试</h3><p>保存配置后连接百度网盘；授权完成后执行连接、测试目录、加密上传和删除测试。只有全部通过后才能启用自动上传。</p><div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${configured && owner ? "" : "disabled"}>连接百度网盘</button><button class="btn baidu-test" type="button" ${configured && baidu.authorized && owner ? "" : "disabled"}>测试连接</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized && owner ? "" : "disabled"}>解除授权</button></div></section>
+      </div><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn danger baidu-config-clear" type="button">清除并重新配置</button>` : ""}</div>` : `<div class="audit-inline-notice neutral">只有老板账号可以查看和提交 Secret 配置表单。</div>`}</section>
+      <section><h3>第二步：连接百度网盘</h3><p>保存配置后完成 OAuth 授权。Token 仅保存在服务器受限文件中，不会回显到页面。</p><div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${configured && owner ? "" : "disabled"}>连接百度网盘</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized && owner ? "" : "disabled"}>解除授权</button></div></section>
+      <section><h3>第三步：测试并启用</h3><p>测试会上传无业务数据的普通文本及 SHA-256 文件，再下载校验并分别删除。全部通过后才可启用自动上传。</p><div class="audit-toolbar"><button class="btn baidu-test" type="button" ${configured && baidu.authorized && owner ? "" : "disabled"}>测试连接</button></div></section>
     </div>
   </div></div>`;
 }
 
 function baiduSimpleSettingsCardMarkup() {
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
-  const configured = baidu.app_key_configured && baidu.app_secret_configured;
-  const encrypted = baidu.encryption_key_configured;
+  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
   const tested = baidu.test_passed || baidu.last_test_result === "success";
   const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
   return `<div class="data-backup-subcard baidu-backup-card">
     <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "重新配置" : "配置百度网盘"}</button>` : ""}</div>
     <div class="baidu-status-grid simple">
       <div><span>① 百度应用</span><strong>${configured ? "已配置" : "未配置"}</strong></div>
-      <div><span>② 加密保护</span><strong>${encrypted ? "已配置" : "未配置"}</strong></div>
-      <div><span>③ 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
-      <div><span>④ 连接测试</span><strong>${testLabel}</strong></div>
-      <div><span>⑤ 自动上传</span><strong>${backupState.settings?.remote_enabled ? "已启用" : "未启用"}</strong></div>
+      <div><span>② 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
+      <div><span>③ 连接测试</span><strong>${testLabel}</strong></div>
+      <div><span>④ 自动上传</span><strong>${backupState.settings?.remote_enabled ? "已启用" : "未启用"}</strong></div>
     </div>
     ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
+    <div class="audit-inline-notice danger baidu-plaintext-warning"><strong>百度网盘将保存未加密的完整 Excel 备份。</strong><span>文件包含学生、课程、充值、账号权限及账号认证哈希等敏感数据。请确保百度账号已启用可靠密码和安全验证，不要公开分享备份文件。</span></div>
     <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
-    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
+    <label class="history-toggle baidu-plaintext-ack"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${backupState.settings?.remote_plaintext_acknowledged ? "checked" : ""} ${isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label>
+    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && backupState.settings?.remote_plaintext_acknowledged && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
     <div class="audit-toolbar">${configured && isOwnerRoleValue(auth.user?.role) ? `<button class="btn baidu-connect" type="button" ${baidu.authorized ? "disabled" : ""}>连接百度网盘</button><button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}</div>
   </div>`;
 }
@@ -15236,10 +15252,21 @@ function wireEvents() {
           monthly_retention: Number(document.querySelector(".data-backup-monthly")?.value), manual_retention: Number(document.querySelector(".data-backup-manual")?.value),
           retry_count: Number(document.querySelector(".data-backup-retries")?.value),
           remote_enabled: Boolean(document.querySelector(".data-backup-remote-enabled")?.checked), remote_directory: document.querySelector(".data-backup-remote-directory")?.value,
+          remote_plaintext_acknowledged: Boolean(document.querySelector(".data-backup-remote-plaintext-ack")?.checked),
         } });
         backupState.settings = { ...backupState.settings, ...result.settings }; showToast("备份设置已保存");
       } catch (error) { backupState.error = error.message || "保存备份设置失败"; }
       finally { backupState.busy = false; render(); }
+    });
+  });
+
+  document.querySelectorAll(".data-backup-remote-plaintext-ack").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const enabled = document.querySelector(".data-backup-remote-enabled");
+      const tested = backupState.baidu?.test_passed || backupState.baidu?.last_test_result === "success";
+      if (!enabled) return;
+      enabled.disabled = !(checkbox.checked && tested && isOwnerRoleValue(auth.user?.role));
+      if (!checkbox.checked) enabled.checked = false;
     });
   });
 
@@ -15297,6 +15324,12 @@ function wireEvents() {
     catch (error) { showToast(error.message || "百度网盘上传失败", "error"); } finally { render(); }
   }));
 
+  document.querySelectorAll(".backup-remote-download").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("该文件是未加密 Excel，包含敏感业务和账号认证数据。确认下载并妥善保管吗？")) return;
+    try { await downloadBlob(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-download`, button.dataset.name || "backup.xlsx"); }
+    catch (error) { showToast(error.message || "远端备份下载或 SHA-256 校验失败", "error"); }
+  }));
+
   document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", async () => {
     const password = prompt("请输入老板密码"); if (password == null) return; const confirmation = prompt("请输入确认文字：删除备份"); if (confirmation == null) return;
     try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}`, { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); showToast("备份删除流程已完成"); }
@@ -15308,7 +15341,7 @@ function wireEvents() {
     catch (error) { showToast(error.message || "无法发起百度授权", "error"); }
   }));
   document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
-    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); await refreshBackupData(); showToast("授权、连接、测试目录、加密上传和删除测试均已通过"); }
+    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); await refreshBackupData(); showToast("授权、普通测试文件、SHA-256 下载校验和成对删除均已通过"); }
     catch (error) { showToast(error.message || "百度网盘连接失败", "error"); }
     finally { render(); }
   }));
@@ -15325,27 +15358,15 @@ function wireEvents() {
     if (!value) return;
     try { await navigator.clipboard.writeText(value); showToast("回调地址已复制"); } catch { showToast("复制失败，请手动选择地址", "error"); }
   }));
-  document.querySelectorAll(".baidu-generate-key").forEach((button) => button.addEventListener("click", () => {
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
-    const value = btoa(String.fromCharCode(...bytes));
-    const input = document.querySelector(".baidu-config-encryption-key");
-    if (input) input.value = value;
-    showToast("已生成32字节加密密钥，请立即离线保管");
-  }));
-  document.querySelectorAll(".baidu-key-guide").forEach((button) => button.addEventListener("click", async () => {
-    try { await downloadBlob("/api/data-center/baidu/key-custody.txt", "百度备份密钥保管说明.txt"); }
-    catch (error) { showToast(error.message || "下载说明失败", "error"); }
-  }));
   document.querySelectorAll(".baidu-config-save").forEach((button) => button.addEventListener("click", async () => {
     const body = {
       app_key: document.querySelector(".baidu-config-app-key")?.value || "",
       app_secret: document.querySelector(".baidu-config-app-secret")?.value || "",
-      encryption_key: document.querySelector(".baidu-config-encryption-key")?.value || "",
       password: document.querySelector(".baidu-config-password")?.value || "",
       confirmation: document.querySelector(".baidu-config-confirmation")?.value || "",
     };
     button.disabled = true;
-    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; showToast("百度安全配置已保存，请继续授权"); }
+    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; showToast("百度应用配置已保存，请继续授权"); }
     catch (error) { showToast(error.message || "百度配置保存失败", "error"); }
     finally { render(); }
   }));

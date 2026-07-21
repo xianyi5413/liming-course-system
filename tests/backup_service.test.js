@@ -35,7 +35,7 @@ after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-data-ce
 
 test("backup_records receives only the incremental data-center columns", () => {
   const db = new DatabaseSync(dbPath, { readOnly: true }); const columns = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((row) => row.name)); db.close();
-  for (const name of ["backup_format", "format_version", "trigger", "managed_relative_path", "sha256", "remote_status", "deleted_at"]) assert.equal(columns.has(name), true, name);
+  for (const name of ["backup_format", "format_version", "trigger", "managed_relative_path", "sha256", "remote_status", "remote_checksum_file_id", "remote_checksum_path", "remote_file_status", "remote_checksum_status", "remote_integrity_status", "deleted_at"]) assert.equal(columns.has(name), true, name);
 });
 
 test("manual backup atomically publishes a validated full Excel and checksum", () => {
@@ -92,4 +92,37 @@ test("failed publication leaves no staging directory or extra formal file", asyn
 
 test("metadata updates preserve the backup and support note and pin", () => {
   const updated = service.updateMetadata(created.record.id, { note: "人工核验", pinned: true }); assert.equal(updated.note, "人工核验"); assert.equal(updated.pinned, 1); assert.equal(service.verify(created.record.id).status, "success");
+});
+
+test("manual and automatic backups record successful remote Excel and checksum pairs", async () => {
+  const directory = path.join(tempRoot, "remote-success"); const database = path.join(directory, "data.sqlite"); initDatabase(database); const calls = [];
+  const uploader = async ({ localPath }) => { calls.push(localPath); assert.equal(fs.existsSync(localPath), true); assert.equal(fs.existsSync(`${localPath}.sha256`), true); return { file_id: "excel-id", path: `/apps/liming/${path.basename(localPath)}`, checksum_file_id: "sha-id", checksum_path: `/apps/liming/${path.basename(localPath)}.sha256`, file_status: "success", checksum_status: "success", integrity_status: "verified" }; };
+  const remoteService = new BackupService({ dbPath: database, dataDir: directory, remoteUploader: uploader });
+  const manual = await remoteService.create({ trigger: "manual", remoteEnabled: true, createdAt: new Date("2026-07-22T01:00:00Z") });
+  const automatic = await remoteService.create({ trigger: "automatic", remoteEnabled: true, scheduledDate: "2026-07-22", scheduleKey: "remote:2026-07-22", createdAt: new Date("2026-07-22T02:00:00Z") });
+  for (const record of [manual.record, automatic.record]) assert.deepEqual({ overall: record.remote_status, excel: record.remote_file_status, checksum: record.remote_checksum_status, integrity: record.remote_integrity_status, checksumId: record.remote_checksum_file_id }, { overall: "success", excel: "success", checksum: "success", integrity: "verified", checksumId: "sha-id" });
+  assert.equal(calls.length, 2);
+});
+
+test("remote download verification updates the persisted integrity fact", async () => {
+  const directory = path.join(tempRoot, "remote-integrity"); const database = path.join(directory, "data.sqlite"); initDatabase(database);
+  const remoteService = new BackupService({ dbPath: database, dataDir: directory });
+  const record = (await remoteService.create({ trigger: "manual", createdAt: new Date("2026-07-22T02:30:00Z") })).record;
+  const failed = remoteService.markRemoteIntegrity(record.id, "failed", "BAIDU_REMOTE_SHA256_MISMATCH");
+  assert.deepEqual({ overall: failed.remote_status, integrity: failed.remote_integrity_status, error: failed.remote_error_safe }, { overall: "failed", integrity: "failed", error: "BAIDU_REMOTE_SHA256_MISMATCH" });
+  const verified = remoteService.markRemoteIntegrity(record.id, "verified");
+  assert.deepEqual({ overall: verified.remote_status, integrity: verified.remote_integrity_status, error: verified.remote_error_safe }, { overall: "failed", integrity: "verified", error: "" });
+});
+
+test("partial remote upload and partial pair deletion remain explicit", async () => {
+  const directory = path.join(tempRoot, "remote-partial"); const database = path.join(directory, "data.sqlite"); initDatabase(database);
+  const error = Object.assign(new Error("sidecar failed"), { code: "BAIDU_API_FAILED", details: { remote: { file_id: "excel-id", path: "/apps/liming/partial.xlsx", checksum_path: "/apps/liming/partial.xlsx.sha256", file_status: "success", checksum_status: "failed", integrity_status: "not_verified" } } });
+  const remoteService = new BackupService({ dbPath: database, dataDir: directory, remoteUploader: async () => { throw error; } });
+  const first = await remoteService.create({ trigger: "manual", remoteEnabled: true, createdAt: new Date("2026-07-22T03:00:00Z") });
+  assert.deepEqual({ overall: first.record.remote_status, excel: first.record.remote_file_status, checksum: first.record.remote_checksum_status, integrity: first.record.remote_integrity_status }, { overall: "partial_failed", excel: "success", checksum: "failed", integrity: "not_verified" });
+  assert.equal(fs.existsSync(path.join(directory, first.record.managed_relative_path)), true);
+  await remoteService.create({ trigger: "manual", remoteEnabled: false, createdAt: new Date("2026-07-22T04:00:00Z") });
+  const deleted = await remoteService.deleteBackup(first.record.id, { remoteDeleter: async () => ({ excel: "deleted", checksum: "delete_failed" }) });
+  assert.deepEqual({ remote: deleted.result.remote, excel: deleted.result.remote_excel, checksum: deleted.result.remote_checksum }, { remote: "delete_partial", excel: "deleted", checksum: "delete_failed" });
+  assert.equal(deleted.record.remote_status, "delete_partial");
 });

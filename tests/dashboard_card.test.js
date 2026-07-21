@@ -61,7 +61,7 @@ function addCurrentLessons(dbPath, from, to) {
 async function withBrowser(action) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-dashboard-card-"));
   const database = path.join(tempRoot, "data.sqlite");
-  const environment = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "" };
+  const environment = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "" };
   const initialized = spawnSync(process.execPath, [serverScript, "--init-db"], { cwd: root, env: environment, encoding: "utf8" });
   assert.equal(initialized.status, 0, initialized.stderr);
   seedBase(database);

@@ -57,7 +57,7 @@ test("manual and scheduled backups accept a global opening balance", async () =>
   const service = new BackupService({ dbPath, dataDir, appVersion: "preflight-v4-test" });
   const manual = await service.create({ trigger: "manual", createdAt: new Date("2026-07-21T01:00:00Z") });
   assert.equal(manual.record.status, "success");
-  const scheduled = spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", "run_scheduled_backup.js"), "--scheduled-for", "2026-07-22", "--schedule-key", "full-data:2026-07-22"], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, DB_PATH: dbPath, BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "" }, encoding: "utf8" });
+  const scheduled = spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", "run_scheduled_backup.js"), "--scheduled-for", "2026-07-22", "--schedule-key", "full-data:2026-07-22"], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, DB_PATH: dbPath, BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "" }, encoding: "utf8" });
   assert.equal(scheduled.status, 0, scheduled.stderr);
 }));
 

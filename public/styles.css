@@ -4480,6 +4480,33 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   color: var(--muted);
 }
 
+.baidu-plaintext-warning {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.baidu-plaintext-ack {
+  align-items: flex-start;
+}
+
+.remote-pair-status {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.remote-legacy-encrypted {
+  display: inline-flex;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: var(--text-caption);
+  font-weight: 700;
+}
+
 .data-preflight-panel {
   margin-bottom: 18px;
 }

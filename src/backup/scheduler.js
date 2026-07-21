@@ -6,13 +6,14 @@ const { ensureBackupColumns } = require("./backup_service");
 const DEFAULT_BACKUP_SETTINGS = Object.freeze({
   enabled: false, time: "02:30", timezone: "Asia/Shanghai", daily_retention: 14,
   monthly_retention: 12, manual_retention: 20, retry_count: 3,
-  remote_enabled: false, remote_directory: "/apps/liming-course-system",
+  remote_enabled: false, remote_directory: "/apps/liming-course-system", remote_plaintext_acknowledged: false,
 });
 const SETTING_KEYS = Object.freeze({
   enabled: "full_backup_auto_enabled", time: "full_backup_time", timezone: "full_backup_timezone",
   daily_retention: "full_backup_daily_retention", monthly_retention: "full_backup_monthly_retention",
   manual_retention: "full_backup_manual_retention", retry_count: "full_backup_retry_count",
   remote_enabled: "full_backup_remote_enabled", remote_directory: "full_backup_remote_directory",
+  remote_plaintext_acknowledged: "full_backup_remote_plaintext_acknowledged",
 });
 
 function normalizeSettings(values = {}) {
@@ -27,6 +28,7 @@ function normalizeSettings(values = {}) {
     retry_count: bounded(values.retry_count, DEFAULT_BACKUP_SETTINGS.retry_count, 0, 10),
     remote_enabled: values.remote_enabled === true || values.remote_enabled === 1 || values.remote_enabled === "1" || values.remote_enabled === "true",
     remote_directory: String(values.remote_directory || DEFAULT_BACKUP_SETTINGS.remote_directory).trim().slice(0, 500),
+    remote_plaintext_acknowledged: values.remote_plaintext_acknowledged === true || values.remote_plaintext_acknowledged === 1 || values.remote_plaintext_acknowledged === "1" || values.remote_plaintext_acknowledged === "true",
   };
 }
 
@@ -40,7 +42,7 @@ function loadBackupSettings(dbPath) {
 
 function saveBackupSettings(dbPath, values = {}) {
   const merged = normalizeSettings({ ...loadBackupSettings(dbPath), ...values }); const db = new DatabaseSync(path.resolve(dbPath));
-  try { const put = db.prepare("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"); db.exec("BEGIN"); try { for (const [field, key] of Object.entries(SETTING_KEYS)) put.run(key, ["enabled", "remote_enabled"].includes(field) ? (merged[field] ? "1" : "0") : String(merged[field])); db.exec("COMMIT"); } catch (error) { db.exec("ROLLBACK"); throw error; } }
+  try { const put = db.prepare("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"); db.exec("BEGIN"); try { for (const [field, key] of Object.entries(SETTING_KEYS)) put.run(key, ["enabled", "remote_enabled", "remote_plaintext_acknowledged"].includes(field) ? (merged[field] ? "1" : "0") : String(merged[field])); db.exec("COMMIT"); } catch (error) { db.exec("ROLLBACK"); throw error; } }
   finally { db.close(); }
   return merged;
 }

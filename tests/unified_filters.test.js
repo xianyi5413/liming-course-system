@@ -39,7 +39,7 @@ function seed(db) {
 async function withBrowser(action) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-unified-filter-"));
   const database = path.join(tempRoot, "synthetic.sqlite");
-  const environment = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "" };
+  const environment = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "" };
   const initialized = spawnSync(process.execPath, [path.join(root, "src/server.js"), "--init-db"], { cwd: root, env: environment, encoding: "utf8" });
   assert.equal(initialized.status, 0, initialized.stderr);
   const db = new DatabaseSync(database); seed(db); db.close();

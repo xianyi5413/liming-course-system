@@ -32,12 +32,13 @@ test("full backup downloads explicitly disable browser caching", () => {
   assert.match(server, /cache-control": "no-store, no-cache, must-revalidate, private"/); assert.match(server, /"pragma": "no-cache"/);
 });
 
-test("the browser uses one-time secret inputs without embedding values or legacy environment templates", () => {
+test("the browser uses one-time App Secret input without embedding values", () => {
   assert.doesNotMatch(app, /password_hash|access_token|refresh_token/);
   assert.match(app, /baidu-config-app-secret[^>]*type="password"/);
-  assert.match(app, /baidu-config-encryption-key[^>]*type="password"/);
   assert.doesNotMatch(app, /BAIDU_APP_KEY=\\nBAIDU_APP_SECRET=/);
-  assert.doesNotMatch(app, /localStorage\.setItem\([^)]*(app_secret|encryption_key)/i);
+  assert.doesNotMatch(app, /localStorage\.setItem\([^)]*app_secret/i);
+  assert.match(app, /百度网盘将保存未加密的完整 Excel 备份/);
+  assert.match(app, /data-backup-remote-plaintext-ack/);
 });
 
 test("Compose persists app data while nginx cannot mount the data volume", () => {
@@ -45,7 +46,8 @@ test("Compose persists app data while nginx cannot mount the data volume", () =>
 });
 
 test("environment example names required secrets but contains no values", () => {
-  for (const key of ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI", "BACKUP_ENCRYPTION_KEY"]) assert.match(envExample, new RegExp(`^${key}=$`, "m"));
+  for (const key of ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI"]) assert.match(envExample, new RegExp(`^${key}=$`, "m"));
+  assert.equal(envExample.match(/^BAIDU_/gm)?.length, 3);
 });
 
 test("server-side permission mapping protects every data center route", () => {
@@ -60,8 +62,15 @@ test("overwrite import holds the shared backup lock and always removes the uploa
   assert.match(server, /importLock = service\.acquireLock\(\)/); assert.match(server, /releaseLock\(importLock\)/); assert.match(server, /fs\.rmSync\(pending\.path/);
 });
 
-test("README documents the sensitive format, restore, scheduling, Baidu encryption and rollback", () => {
-  for (const value of ["liming_full_data_excel", "完整覆盖恢复", "schedule_key", "AES-256-GCM", "密钥遗失", "backup_records", "回滚代码", "当前正式服务器没有因本分支发生任何变化"]) assert.equal(readme.includes(value), true, value);
+test("README documents the sensitive format, restore, scheduling, Baidu plaintext pair and rollback", () => {
+  for (const value of ["liming_full_data_excel", "完整覆盖恢复", "schedule_key", "明文 Excel", ".xlsx.sha256", "backup_records", "回滚代码", "当前正式服务器没有因本分支发生任何变化"]) assert.equal(readme.includes(value), true, value);
+});
+
+test("remote download is owner-only and verifies the paired checksum before delivery", () => {
+  assert.match(server, /remote-download/);
+  assert.match(server, /downloadVerified/);
+  assert.match(server, /只有老板可以下载远端完整备份/);
+  assert.match(server, /BAIDU_PLAINTEXT_RISK_ACK_REQUIRED/);
 });
 
 test("legacy backup compatibility remains read-only and outside new retention", () => {

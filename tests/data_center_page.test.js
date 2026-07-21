@@ -22,7 +22,7 @@ async function waitForServer(processHandle, port, stderr) {
 async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prepareFilesystem, environment = {} } = {}, action) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-data-center-page-"));
   const database = path.join(tempRoot, "data.sqlite");
-  const baseEnv = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", BACKUP_ENCRYPTION_KEY: "", ...environment };
+  const baseEnv = { ...process.env, DATA_DIR: tempRoot, DB_PATH: database, SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "", ...environment };
   const initialized = spawnSync(process.execPath, [path.join(root, "src/server.js"), "--init-db"], { cwd: root, env: baseEnv, encoding: "utf8" });
   assert.equal(initialized.status, 0, initialized.stderr);
   const db = new DatabaseSync(database);
@@ -85,7 +85,7 @@ test("owner opens the real data-center page with an upgraded legacy backup recor
     assert.deepEqual(browser.dataCenterResponses().map((response) => response.status), [200]);
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('旧版业务归档')"), true);
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-settings\"]')?.textContent.includes('① 百度应用未配置')"), true);
-    assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-settings\"]')?.textContent.includes('② 加密保护未配置')"), true);
+    assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-settings\"]')?.textContent.includes('② 百度授权未连接')"), true);
     const db = new DatabaseSync(database, { readOnly: true });
     const columns = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((column) => column.name));
     const count = db.prepare("SELECT COUNT(*) AS count FROM backup_records").get().count;
@@ -106,7 +106,8 @@ test("fresh database opens with no backup directory, optional secrets or records
     const settingsText = await browser.evaluate("document.querySelector('[data-region=\"backup-settings\"]')?.textContent");
     assert.match(settingsText, /自动备份：未启用/);
     assert.match(settingsText, /① 百度应用未配置/);
-    assert.match(settingsText, /② 加密保护未配置/);
+    assert.match(settingsText, /② 百度授权未连接/);
+    assert.match(settingsText, /百度网盘将保存未加密的完整 Excel 备份/);
     assert.match(settingsText, /尚未创建/);
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('暂无备份记录')"), true);
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-connect'))"), false);
@@ -119,7 +120,7 @@ test("fresh database opens with no backup directory, optional secrets or records
 });
 
 test("Baidu configuration guide opens without exposing secret values", async () => {
-  await withBrowserScenario({ environment: { BAIDU_APP_KEY: "PAGE-APP-KEY-SECRET", BAIDU_APP_SECRET: "PAGE-APP-SECRET", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback", BACKUP_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64") } }, async ({ browser }) => {
+  await withBrowserScenario({ environment: { BAIDU_APP_KEY: "PAGE-APP-KEY-SECRET", BAIDU_APP_SECRET: "PAGE-APP-SECRET", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback" } }, async ({ browser }) => {
     await browser.login("boss", "123456");
     await browser.openDataCenter();
     await assertThreeRegions(browser);
@@ -131,7 +132,9 @@ test("Baidu configuration guide opens without exposing secret values", async () 
     await browser.click(".baidu-guide-open");
     await browser.waitFor("Boolean(document.querySelector('.baidu-guide-modal'))");
     const guide = await browser.evaluate("document.querySelector('.baidu-guide-modal')?.textContent");
-    for (const step of ["第一步", "第二步", "第三步", "自动生成加密密钥"]) assert.match(guide, new RegExp(step));
+    for (const step of ["第一步：填写百度应用信息", "第二步：连接百度网盘", "第三步：测试并启用", "SHA-256"]) assert.match(guide, new RegExp(step));
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-config-app-secret'))"), true);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.baidu-secret-form input').length"), 4);
     assert.equal(await browser.evaluate("document.querySelector('.baidu-guide-steps input[readonly]')?.value"), "http://127.0.0.1:5177/api/data-center/baidu/callback");
     assert.doesNotMatch(guide, /PAGE-APP-KEY-SECRET|PAGE-APP-SECRET/);
     assert.deepEqual(browser.exceptions, []);
@@ -140,7 +143,7 @@ test("Baidu configuration guide opens without exposing secret values", async () 
 });
 
 test("authorized Baidu state enables testing but keeps automatic upload disabled until testing passes", async () => {
-  const environment = { BAIDU_APP_KEY: "K", BAIDU_APP_SECRET: "S", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback", BACKUP_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString("base64") };
+  const environment = { BAIDU_APP_KEY: "K", BAIDU_APP_SECRET: "S", BAIDU_REDIRECT_URI: "http://127.0.0.1:5177/api/data-center/baidu/callback" };
   const prepareFilesystem = ({ tempRoot }) => {
     const directory = path.join(tempRoot, "backups", "full-excel", ".secrets");
     fs.mkdirSync(directory, { recursive: true });
@@ -158,13 +161,42 @@ test("authorized Baidu state enables testing but keeps automatic upload disabled
   });
 });
 
+test("automatic upload remains disabled until the owner acknowledges plaintext risk", async () => {
+  const prepareFilesystem = ({ tempRoot }) => {
+    const directory = path.join(tempRoot, "backups", "full-excel", ".secrets");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "baidu-config.json"), JSON.stringify({ app_key: "K", app_secret: "S", redirect_uri: "http://127.0.0.1/callback", last_test_at: new Date().toISOString(), last_test_result: "success" }));
+    fs.writeFileSync(path.join(directory, "baidu-token.json"), JSON.stringify({ access_token: "SYNTHETIC-TOKEN", refresh_token: "SYNTHETIC-REFRESH", expires_at: Date.now() + 3600000 }));
+  };
+  await withBrowserScenario({ prepareFilesystem }, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-plaintext-ack')?.checked"), false);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    await browser.click(".data-backup-remote-plaintext-ack");
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("legacy remote records are labeled and cannot be downloaded as ordinary Excel", async () => {
+  const prepareDatabase = (db) => db.prepare(`INSERT INTO backup_records(
+    backup_type,filename,status,backup_format,format_version,trigger,retention_class,managed_relative_path,sha256,remote_status,remote_path
+  ) VALUES ('manual','legacy.xlsx','success','full_data_excel',1,'manual','manual','backups/full-excel/legacy.xlsx','x','success',?)`).run(`/apps/liming-course-system/legacy.xlsx${".enc"}`);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('旧版加密远端备份')"), true);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.backup-remote-download'))"), false);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
 test("owner saves one-time Baidu secrets through the wizard without page reflection", async () => {
   await withBrowserScenario({}, async ({ browser, database }) => {
-    const appKey = "BROWSER-APP-KEY-NEVER-REFLECT"; const appSecret = "BROWSER-APP-SECRET-NEVER-REFLECT"; const encryptionKey = Buffer.alloc(32, 11).toString("base64");
+    const appKey = "BROWSER-APP-KEY-NEVER-REFLECT"; const appSecret = "BROWSER-APP-SECRET-NEVER-REFLECT";
     await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser); await browser.click(".baidu-guide-open"); await browser.waitFor("Boolean(document.querySelector('.baidu-secret-form'))");
-    await browser.evaluate(`(() => { const values=${JSON.stringify({ appKey, appSecret, encryptionKey })}; document.querySelector('.baidu-config-app-key').value=values.appKey; document.querySelector('.baidu-config-app-secret').value=values.appSecret; document.querySelector('.baidu-config-encryption-key').value=values.encryptionKey; document.querySelector('.baidu-config-password').value='123456'; document.querySelector('.baidu-config-confirmation').value='保存百度配置'; document.querySelector('.baidu-config-save').click(); })()`);
-    await browser.waitFor("!document.querySelector('.baidu-guide-modal') && document.querySelector('.baidu-backup-card')?.textContent.includes('① 百度应用已配置') && document.querySelector('.baidu-backup-card')?.textContent.includes('② 加密保护已配置')");
-    const body = await browser.evaluate("document.body.textContent"); assert.doesNotMatch(body, /BROWSER-APP-KEY-NEVER-REFLECT|BROWSER-APP-SECRET-NEVER-REFLECT/); assert.equal(body.includes(encryptionKey), false);
+    await browser.evaluate(`(() => { const values=${JSON.stringify({ appKey, appSecret })}; document.querySelector('.baidu-config-app-key').value=values.appKey; document.querySelector('.baidu-config-app-secret').value=values.appSecret; document.querySelector('.baidu-config-password').value='123456'; document.querySelector('.baidu-config-confirmation').value='保存百度配置'; document.querySelector('.baidu-config-save').click(); })()`);
+    await browser.waitFor("!document.querySelector('.baidu-guide-modal') && document.querySelector('.baidu-backup-card')?.textContent.includes('① 百度应用已配置') && document.querySelector('.baidu-backup-card')?.textContent.includes('② 百度授权未连接')");
+    const body = await browser.evaluate("document.body.textContent"); assert.doesNotMatch(body, /BROWSER-APP-KEY-NEVER-REFLECT|BROWSER-APP-SECRET-NEVER-REFLECT/);
     const configFile = path.join(path.dirname(database), "backups", "full-excel", ".secrets", "baidu-config.json"); assert.equal(fs.existsSync(configFile), true); if (process.platform !== "win32") assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
     assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });

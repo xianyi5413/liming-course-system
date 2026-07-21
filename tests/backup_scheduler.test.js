@@ -14,9 +14,9 @@ function init() { tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-sched
 before(init); after(() => { if (tempRoot) fs.rmSync(tempRoot, { recursive: true, force: true }); });
 
 test("backup settings use safe defaults and persist validated values", () => {
-  assert.equal(loadBackupSettings(dbPath).enabled, false);
-  const saved = saveBackupSettings(dbPath, { enabled: true, time: "03:15", daily_retention: 7, retry_count: 2, timezone: "UTC" });
-  assert.deepEqual({ enabled: saved.enabled, time: saved.time, daily: saved.daily_retention, retry: saved.retry_count, timezone: saved.timezone }, { enabled: true, time: "03:15", daily: 7, retry: 2, timezone: "Asia/Shanghai" });
+  assert.equal(loadBackupSettings(dbPath).enabled, false); assert.equal(loadBackupSettings(dbPath).remote_plaintext_acknowledged, false);
+  const saved = saveBackupSettings(dbPath, { enabled: true, time: "03:15", daily_retention: 7, retry_count: 2, timezone: "UTC", remote_plaintext_acknowledged: true });
+  assert.deepEqual({ enabled: saved.enabled, time: saved.time, daily: saved.daily_retention, retry: saved.retry_count, timezone: saved.timezone, risk_acknowledged: saved.remote_plaintext_acknowledged }, { enabled: true, time: "03:15", daily: 7, retry: 2, timezone: "Asia/Shanghai", risk_acknowledged: true });
 });
 
 test("schedule dates are calculated explicitly in Asia/Shanghai", () => {
