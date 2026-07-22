@@ -113,7 +113,7 @@ test("fresh database opens with no backup directory, optional secrets or records
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('暂无备份记录')"), true);
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-connect'))"), false);
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-test'))"), false);
-    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-disconnect'))"), false);
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
@@ -125,17 +125,19 @@ test("Baidu configuration guide opens without exposing secret values", async () 
     await browser.login("boss", "123456");
     await browser.openDataCenter();
     await assertThreeRegions(browser);
-    assert.equal(await browser.evaluate("document.querySelector('.baidu-connect')?.disabled"), false);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-connect'))"), false);
     assert.equal(await browser.evaluate("document.querySelector('.baidu-test')?.disabled"), true);
-    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
     const pageText = await browser.evaluate("document.body.textContent");
     assert.doesNotMatch(pageText, /PAGE-APP-KEY-SECRET|PAGE-APP-SECRET/);
     await browser.click(".baidu-guide-open");
     await browser.waitFor("Boolean(document.querySelector('.baidu-guide-modal'))");
+    assert.equal(await browser.evaluate("document.querySelector('.baidu-guide-modal .baidu-connect')?.disabled"), false);
     const guide = await browser.evaluate("document.querySelector('.baidu-guide-modal')?.textContent");
     for (const step of ["第一步：填写百度应用信息", "第二步：连接百度网盘", "第三步：测试并启用", "SHA-256"]) assert.match(guide, new RegExp(step));
-    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-config-app-secret'))"), true);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.baidu-secret-form input').length"), 4);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-config-app-secret'))"), false);
+    await browser.click(".baidu-config-edit");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.baidu-secret-form input').length"), 2);
     assert.equal(await browser.evaluate("document.querySelector('.baidu-guide-steps input[readonly]')?.value"), "http://127.0.0.1:5177/api/data-center/baidu/callback");
     assert.doesNotMatch(guide, /PAGE-APP-KEY-SECRET|PAGE-APP-SECRET/);
     assert.deepEqual(browser.exceptions, []);
@@ -156,7 +158,7 @@ test("authorized Baidu state enables testing but keeps automatic upload disabled
     await assertThreeRegions(browser);
     assert.equal(await browser.evaluate("document.querySelector('.baidu-test')?.disabled"), false);
     assert.equal(await browser.evaluate("document.querySelector('.baidu-disconnect')?.disabled"), false);
-    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
     assert.doesNotMatch(await browser.evaluate("document.body.textContent"), /SYNTHETIC-TOKEN|SYNTHETIC-REFRESH/);
     assert.deepEqual(browser.exceptions, []);
   });
@@ -172,9 +174,9 @@ test("automatic upload remains disabled until the owner acknowledges plaintext r
   await withBrowserScenario({ prepareFilesystem }, async ({ browser }) => {
     await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
     assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-plaintext-ack')?.checked"), false);
-    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), true);
-    await browser.click(".data-backup-remote-plaintext-ack");
     assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-enabled')?.disabled"), false);
+    await browser.click(".data-backup-remote-plaintext-ack");
+    assert.equal(await browser.evaluate("document.querySelector('.data-backup-remote-plaintext-ack')?.checked"), true);
     assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });
@@ -195,7 +197,7 @@ test("owner saves one-time Baidu secrets through the wizard without page reflect
   await withBrowserScenario({}, async ({ browser, database }) => {
     const appKey = "BROWSER-APP-KEY-NEVER-REFLECT"; const appSecret = "BROWSER-APP-SECRET-NEVER-REFLECT";
     await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser); await browser.click(".baidu-guide-open"); await browser.waitFor("Boolean(document.querySelector('.baidu-secret-form'))");
-    await browser.evaluate(`(() => { const values=${JSON.stringify({ appKey, appSecret })}; document.querySelector('.baidu-config-app-key').value=values.appKey; document.querySelector('.baidu-config-app-secret').value=values.appSecret; document.querySelector('.baidu-config-password').value='123456'; document.querySelector('.baidu-config-confirmation').value='保存百度配置'; document.querySelector('.baidu-config-save').click(); })()`);
+    await browser.evaluate(`(() => { const values=${JSON.stringify({ appKey, appSecret })}; document.querySelector('.baidu-config-app-key').value=values.appKey; document.querySelector('.baidu-config-app-secret').value=values.appSecret; document.querySelector('.baidu-config-save').click(); })()`);
     await browser.waitFor("!document.querySelector('.baidu-guide-modal') && document.querySelector('.baidu-backup-card')?.textContent.includes('① 百度应用已配置') && document.querySelector('.baidu-backup-card')?.textContent.includes('② 百度授权未连接')");
     const body = await browser.evaluate("document.body.textContent"); assert.doesNotMatch(body, /BROWSER-APP-KEY-NEVER-REFLECT|BROWSER-APP-SECRET-NEVER-REFLECT/);
     const configFile = path.join(path.dirname(database), "backups", "full-excel", ".secrets", "baidu-config.json"); assert.equal(fs.existsSync(configFile), true); if (process.platform !== "win32") assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
@@ -264,7 +266,7 @@ test("explicit audit permission opens the page while an ordinary account has no 
     await browser.login("audit-user", "123456");
     await browser.openDataCenter();
     await assertThreeRegions(browser);
-    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-guide-open, .baidu-secret-form'))"), false);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-guide-open'))"), true);
     assert.deepEqual(browser.exceptions, []);
   });
   await withBrowserScenario({}, async ({ browser }) => {
@@ -273,6 +275,49 @@ test("explicit audit permission opens the page while an ordinary account has no 
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"audit\"]'))"), false);
     assert.equal(browser.dataCenterResponses().length, 0);
     assert.deepEqual(browser.exceptions, []);
+  });
+});
+
+test("Qing login identity and browser form heuristics never populate App Key", async () => {
+  await withBrowserScenario({}, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser); await browser.click(".baidu-guide-open"); await browser.waitFor("Boolean(document.querySelector('.baidu-config-app-key'))");
+    const result = await browser.evaluate(`(() => { const key=document.querySelector('.baidu-config-app-key'); const secret=document.querySelector('.baidu-config-app-secret'); return { key:key.value, secret:secret.value, autocomplete:key.getAttribute('autocomplete'), name:key.name, type:key.type, login:document.body.textContent.includes('Qing') }; })()`);
+    assert.equal(result.login, true); assert.equal(result.key, ""); assert.equal(result.secret, ""); assert.equal(result.autocomplete, "off"); assert.equal(result.type, "search"); assert.notEqual(result.name, "username");
+    await browser.click(".baidu-guide-close"); await browser.click(".baidu-guide-open"); assert.equal(await browser.evaluate("document.querySelector('.baidu-config-app-key')?.value"), ""); assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("OAuth result markers are handled once and removed without losing other query or hash", async () => {
+  await withBrowserScenario({}, async ({ browser, port }) => {
+    await browser.login("boss", "123456");
+    await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}/?keep=1&baidu=connected&code=SECRET-CODE&state=SECRET-STATE#backup` });
+    await browser.waitFor("document.querySelector('.toast')?.textContent.includes('百度网盘连接成功')");
+    const clean = await browser.evaluate("({search:location.search,hash:location.hash,view:document.querySelector('#topbar')?.textContent})"); assert.equal(clean.search, "?keep=1"); assert.equal(clean.hash, "#backup"); assert.match(clean.view, /数据中心/);
+    await browser.send("Page.reload"); await browser.waitFor("Boolean(document.querySelector('.nav-btn[data-nav-group=\"settings\"]'))"); assert.equal(await browser.evaluate("Boolean(document.querySelector('.toast'))"), false);
+    for (const marker of ["failed", "denied"]) { await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}/?keep=1&baidu=${marker}&code=X&state=Y#backup` }); await browser.waitFor("location.search === '?keep=1'"); assert.equal(await browser.evaluate("location.href.includes('code=') || location.href.includes('state=') || location.href.includes('baidu=')"), false); }
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("Baidu test refresh preserves dirty directory risk frequency and log options on success and failure", async () => {
+  const prepareFilesystem = ({ tempRoot }) => { const directory = path.join(tempRoot, "backups", "full-excel", ".secrets"); fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, "baidu-config.json"), JSON.stringify({ app_key: "K", app_secret: "S", redirect_uri: "http://127.0.0.1/callback", last_test_at: new Date().toISOString(), last_test_result: "success" })); fs.writeFileSync(path.join(directory, "baidu-token.json"), JSON.stringify({ access_token: "SYNTHETIC", refresh_token: "SYNTHETIC-R", expires_at: Date.now() + 3600000 })); };
+  await withBrowserScenario({ prepareFilesystem }, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    await browser.evaluate(`(() => { const frequency=document.querySelector('.data-backup-remote-frequency'); frequency.value='manual'; frequency.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+    assert.deepEqual(await browser.evaluate(`({time:document.querySelector('.remote-schedule-time').hidden,weekday:document.querySelector('.remote-weekday').hidden,monthday:document.querySelector('.remote-monthday').hidden})`), { time: true, weekday: true, monthday: true });
+    const edit = async (directory) => browser.evaluate(`(() => { const set=(selector,value,checked=false)=>{const element=document.querySelector(selector); if(checked) element.checked=value; else element.value=value; element.dispatchEvent(new Event('input',{bubbles:true}));}; set('.data-backup-remote-directory',${JSON.stringify(directory)}); set('.data-backup-remote-plaintext-ack',true,true); set('.data-backup-remote-logs',false,true); set('.data-backup-remote-frequency','monthly'); set('.data-backup-remote-monthday','17'); return true; })()`);
+    const assertDraft = async (directory) => assert.deepEqual(await browser.evaluate(`({directory:document.querySelector('.data-backup-remote-directory').value,ack:document.querySelector('.data-backup-remote-plaintext-ack').checked,logs:document.querySelector('.data-backup-remote-logs').checked,frequency:document.querySelector('.data-backup-remote-frequency').value,monthday:document.querySelector('.data-backup-remote-monthday').value,weekdayHidden:document.querySelector('.remote-weekday').hidden,monthdayHidden:document.querySelector('.remote-monthday').hidden})`), { directory, ack: true, logs: false, frequency: "monthly", monthday: "17", weekdayHidden: true, monthdayHidden: false });
+    await edit("/apps/liming/custom-success"); browser.baiduTestResult = { status: 200, body: { ok: true, core_ok: true, cleanup_ok: true, cleanup: { complete: true }, steps: { authorization: true, connection: true, test_directory: true, file_upload: true, checksum_upload: true, file_download: true, checksum_download: true, integrity_check: true, test_delete_file: true, test_delete_checksum: true } } }; await browser.click(".baidu-test"); await browser.waitFor("document.querySelector('.toast')?.textContent.includes('均已通过')"); await assertDraft("/apps/liming/custom-success");
+    await edit("/apps/liming/custom-failure"); browser.baiduTestResult = { status: 400, body: { error: "下载远端校验文件失败", code: "BAIDU_DOWNLOAD_FAILED", stage: "checksum_download", provider_code: "31326", http_status: 200, cleanup: { complete: true }, steps: { authorization: true, connection: true, file_upload: true, checksum_upload: true, file_download: true } } }; await browser.click(".baidu-test"); await browser.waitFor("document.querySelector('.toast')?.textContent.includes('checksum_download')"); await assertDraft("/apps/liming/custom-failure"); browser.consoleErrors = browser.consoleErrors.filter((message) => !/status of 400/.test(message)); assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("desktop sidebar is 208px with untruncated labels and 390px data center has no page overflow", async () => {
+  await withBrowserScenario({}, async ({ browser }) => {
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }); await browser.login("boss", "123456");
+    const desktop = await browser.evaluate(`(() => { const sidebar=document.querySelector('.sidebar'); const labels=[...document.querySelectorAll('.nav-label')]; return {width:Math.round(sidebar.getBoundingClientRect().width), clipped:labels.some((item)=>item.scrollWidth>item.clientWidth+1)}; })()`); assert.deepEqual(desktop, { width: 208, clipped: false });
+    await browser.click(".sidebar-toggle"); await browser.waitFor("Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 72"); await browser.click(".sidebar-toggle"); await browser.waitFor("Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 208");
+    await browser.openDataCenter(); await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await browser.waitFor("window.innerWidth === 390"); assert.equal(await browser.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true); await browser.send("Emulation.clearDeviceMetricsOverride"); assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });
 

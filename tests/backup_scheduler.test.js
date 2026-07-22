@@ -7,7 +7,7 @@ const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 const { BackupService } = require("../src/backup/backup_service");
 const { FORMAT_VERSION, verifyFullData } = require("../src/excel/full_backup");
-const { loadBackupSettings, saveBackupSettings, shanghaiParts, dueState } = require("../src/backup/scheduler");
+const { loadBackupSettings, saveBackupSettings, shanghaiParts, dueState, remoteDueState } = require("../src/backup/scheduler");
 
 const root = path.resolve(__dirname, ".."); let tempRoot; let dataDir; let dbPath;
 function init() { tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-scheduler-")); dataDir = path.join(tempRoot, "data"); dbPath = path.join(dataDir, "test.sqlite"); fs.mkdirSync(dataDir); const result = spawnSync(process.execPath, [path.join(root, "src/server.js"), "--init-db"], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, DB_PATH: dbPath }, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); }
@@ -20,13 +20,30 @@ test("backup settings use safe defaults and persist validated values", () => {
 });
 
 test("schedule dates are calculated explicitly in Asia/Shanghai", () => {
-  assert.deepEqual(shanghaiParts(new Date("2026-07-20T18:31:00Z")), { date: "2026-07-21", time: "02:31" });
+  assert.deepEqual(shanghaiParts(new Date("2026-07-20T18:31:00Z")), { date: "2026-07-21", time: "02:31", weekday: 2, monthday: 21, month: "2026-07" });
 });
 
 test("scheduler waits before the configured time and becomes due afterward", () => {
   saveBackupSettings(dbPath, { enabled: true, time: "02:30", retry_count: 3 });
   assert.equal(dueState(dbPath, loadBackupSettings(dbPath), new Date("2026-07-20T18:29:00Z")).reason, "before_time");
   const due = dueState(dbPath, loadBackupSettings(dbPath), new Date("2026-07-20T18:31:00Z")); assert.equal(due.due, true); assert.equal(due.key, "full-data:2026-07-21");
+});
+
+test("remote schedules are independent and respect manual daily weekly and monthly periods", () => {
+  const base = { ...loadBackupSettings(dbPath), enabled: false, remote_enabled: true, remote_time: "03:30", remote_retry_count: 3 };
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "manual" }, new Date("2026-08-05T00:00:00Z")).reason, "manual");
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "daily" }, new Date("2026-08-05T00:00:00Z")).due, true);
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "weekly", remote_weekday: 3 }, new Date("2026-08-05T00:00:00Z")).due, true);
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "weekly", remote_weekday: 4 }, new Date("2026-08-05T00:00:00Z")).reason, "wrong_weekday");
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "monthly", remote_monthday: 5 }, new Date("2026-08-05T00:00:00Z")).due, true);
+  assert.equal(remoteDueState(dbPath, { ...base, remote_frequency: "monthly", remote_monthday: 6 }, new Date("2026-08-05T00:00:00Z")).reason, "wrong_monthday");
+});
+
+test("remote schedule reuses a failed local record for bounded retry and prevents restart duplicates", () => {
+  const settings = { ...loadBackupSettings(dbPath), enabled: false, remote_enabled: true, remote_frequency: "daily", remote_time: "03:30", remote_retry_count: 3 };
+  const key = "full-data-remote:daily:2026-08-06"; const db = new DatabaseSync(dbPath); db.prepare("INSERT INTO backup_records(backup_type,filename,status,backup_format,format_version,trigger,retention_class,schedule_key,remote_status,remote_attempt_count,remote_updated_at) VALUES ('auto','remote.xlsx','success','full_data_excel',4,'remote_automatic','remote',?,'failed',1,'2026-08-05 18:00:00')").run(key); const id = Number(db.prepare("SELECT id FROM backup_records WHERE schedule_key=?").get(key).id); db.close();
+  const retry = remoteDueState(dbPath, settings, new Date("2026-08-06T00:00:00Z")); assert.equal(retry.reason, "retry"); assert.equal(retry.retry_backup_id, id); assert.equal(retry.attempt, 2);
+  const successDb = new DatabaseSync(dbPath); successDb.prepare("UPDATE backup_records SET remote_status='success' WHERE id=?").run(id); successDb.close(); assert.equal(remoteDueState(dbPath, settings, new Date("2026-08-06T00:01:00Z")).reason, "already_successful");
 });
 
 test("isolated scheduled child creates one backup and restart check does not duplicate it", async () => {

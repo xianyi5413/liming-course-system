@@ -32,7 +32,17 @@ const SETTING_LABELS = Object.freeze({
   full_backup_monthly_retention: "每月保留份数",
   full_backup_manual_retention: "手动保留份数",
   full_backup_retry_count: "失败重试次数",
+  full_backup_local_include_operation_logs: "服务器备份包含操作日志",
   full_backup_remote_enabled: "百度网盘备份",
+  full_backup_remote_frequency: "百度备份频率",
+  full_backup_remote_time: "百度备份时间",
+  full_backup_remote_weekday: "百度每周执行日",
+  full_backup_remote_monthday: "百度每月执行日",
+  full_backup_remote_timezone: "百度备份时区",
+  full_backup_remote_retention: "百度远端保留数量",
+  full_backup_remote_retry_count: "百度失败重试次数",
+  full_backup_remote_include_operation_logs: "百度备份包含操作日志",
+  full_backup_remote_plaintext_acknowledged: "百度明文风险确认",
   custom_classrooms: "自定义教室",
   custom_subjects: "自定义科目",
   custom_time_slots: "常用时间",
@@ -120,10 +130,13 @@ function gradeStageFields(sourceData, studentName) {
   return Object.fromEntries(STUDENT_GRADE_STAGE_COLUMNS.map(([fieldKey, , stage, sourceField]) => [fieldKey, text(stages.get(stage)?.[sourceField])]));
 }
 
-function sourceDataFromDb(db) {
+function sourceDataFromDb(db, options = {}) {
+  const includeOperationLogs = options.includeOperationLogs !== false;
   const result = {};
   for (const definition of SOURCE_TABLE_DEFINITIONS) {
-    let rows = db.prepare(`SELECT * FROM ${definition.source_table}`).all();
+    let rows = definition.source_table === "operation_logs" && !includeOperationLogs
+      ? []
+      : db.prepare(`SELECT * FROM ${definition.source_table}`).all();
     if (definition.source_table === "settings") rows = safeSettingRows(rows);
     result[definition.source_table] = rows;
   }
@@ -228,7 +241,7 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
   };
 }
 
-function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visibleCounts, excludedSettings }) {
+function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visibleCounts, excludedSettings, operationLogsIncluded }) {
   return { name: "导出说明", autoFilter: false, columnWidths: [24, 90], rows: [
     ["项目", "内容"], ["导出类型", "系统全量数据Excel"], ["格式版本", FORMAT_VERSION], ["导出时间（UTC）", createdAt.toISOString()],
     ["导出时间（北京时间）", `${safeTimestamp(createdAt).replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, "$1-$2-$3 $4:$5:$6")} Asia/Shanghai`],
@@ -236,6 +249,7 @@ function infoSheet({ appVersion, appGitCommit, createdAt, schemaVersion, visible
     ["用途", "人工查看、空系统初始化和完整覆盖恢复"], ["可见工作表", VISIBLE_SHEET_NAMES.join("；")],
     ["内部恢复表", "4张veryHidden工作表，保存最少技术关系、账号哈希和长文本分片"], ["金额单位", "人民币元"], ["日期格式", "日期YYYY-MM-DD；充值月份YYYY年M月；内部月份YYYY-MM-01"],
     ["空值规则", "空白表示空字符串；精确NULL由内部恢复映射保存"], ["安全说明", "不含Session、Cookie、Token、Secret、服务器路径、Docker/SSH信息、IP或User-Agent"],
+    ["是否包含操作日志", operationLogsIncluded ? "是（完整导出）" : "否（仅保留表头，恢复时保留目标系统已有日志）"],
     ["期初余额", "每名学生一条全局基础余额；可见表和隐藏恢复映射均不含月份"],
     ["计算结果", "页面可显示规则费用和规则薪资用于核对；Excel只保存单人费用和教师薪资，规则值恢复后由原始规则重新计算"],
     ["排除历史", EXCLUDED_TABLES.map((item) => `${item.table}：${item.reason}`).join("；")], ["排除设置数", excludedSettings],
@@ -246,7 +260,10 @@ function expectedSheetNames() { return [...WORKBOOK_SEQUENCE]; }
 function expectedVisibleSheetNames() { return [...VISIBLE_SHEET_NAMES]; }
 
 function buildFullDataBufferFromSourceData(sourceData, options = {}) {
+  const operationLogsIncluded = options.includeOperationLogs !== false;
+  sourceData = { ...sourceData };
   for (const definition of SOURCE_TABLE_DEFINITIONS) if (!Array.isArray(sourceData[definition.source_table])) sourceData[definition.source_table] = [];
+  if (!operationLogsIncluded) sourceData.operation_logs = [];
   const createdAt = options.createdAt || new Date(); const allowedStatuses = new Set([...DEFAULT_COURSE_STATUSES, ...customStatuses(sourceData)]);
   const context = {
     lessons: sourceData.lessons,
@@ -274,9 +291,9 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const authSheet = { name: "__账号认证数据", state: "veryHidden", rows: authRows };
   const chunkSheet = { name: "__长文本分片", state: "veryHidden", rows: [["来源表", "来源记录标识", "字段", "分片序号", "总分片数", "文本内容", "SHA-256"], ...chunks] };
   const schemaVersion = Number(options.schemaVersion || 0); const excludedSettings = Number(options.excludedSettings || 0);
-  const info = infoSheet({ appVersion: options.appVersion, appGitCommit: options.appGitCommit, createdAt, schemaVersion, visibleCounts, excludedSettings });
+  const info = infoSheet({ appVersion: options.appVersion, appGitCommit: options.appGitCommit, createdAt, schemaVersion, visibleCounts, excludedSettings, operationLogsIncluded });
   const digestSheets = [info, ...visibleSheets, mappingSheet, authSheet, chunkSheet];
-  const metadataRows = [["类型", "名称", "值", "SHA-256"], ["元数据", "file_type", FILE_TYPE, ""], ["元数据", "format_version", FORMAT_VERSION, ""], ["元数据", "created_at_utc", createdAt.toISOString(), ""], ["元数据", "schema_version_source", "pragma_user_version", ""], ["元数据", "schema_version", schemaVersion, ""], ...digestSheets.map((sheet) => ["工作表", sheet.name, sheet.rows.length - 1, sha256(canonical(sheet.rows))])];
+  const metadataRows = [["类型", "名称", "值", "SHA-256"], ["元数据", "file_type", FILE_TYPE, ""], ["元数据", "format_version", FORMAT_VERSION, ""], ["元数据", "created_at_utc", createdAt.toISOString(), ""], ["元数据", "schema_version_source", "pragma_user_version", ""], ["元数据", "schema_version", schemaVersion, ""], ["元数据", "operation_logs_included", operationLogsIncluded ? "true" : "false", ""], ...digestSheets.map((sheet) => ["工作表", sheet.name, sheet.rows.length - 1, sha256(canonical(sheet.rows))])];
   const metadataSheet = { name: "__恢复元数据", state: "veryHidden", rows: metadataRows };
   const sheets = [info, ...visibleSheets, metadataSheet, mappingSheet, authSheet, chunkSheet];
   const buffer = createWorkbook(sheets); const structure = validateWorkbookStructure(buffer);
@@ -289,18 +306,18 @@ function buildFullDataBuffer(db, options = {}) {
   const integrity = db.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]); const foreignKeys = db.prepare("PRAGMA foreign_key_check").all();
   if (integrity.length !== 1 || integrity[0] !== "ok") throw new FullExcelError("FULL_EXCEL_SOURCE_INTEGRITY_FAILED", "源数据库完整性检查失败");
   if (foreignKeys.length) throw new FullExcelError("FULL_EXCEL_SOURCE_FOREIGN_KEY_FAILED", "源数据库存在外键错误");
-  const sourceData = sourceDataFromDb(db); const allSettingCount = Number(db.prepare("SELECT COUNT(*) AS count FROM settings").get().count);
+  const sourceData = sourceDataFromDb(db, options); const allSettingCount = Number(db.prepare("SELECT COUNT(*) AS count FROM settings").get().count);
   return { ...buildFullDataBufferFromSourceData(sourceData, { ...options, schemaVersion: Number(db.prepare("PRAGMA user_version").get().user_version || 0), excludedSettings: allSettingCount - sourceData.settings.length }), preflight };
 }
 
-function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date() }) {
+function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date(), includeOperationLogs = true }) {
   if (!dbPath || !outputPath) throw new FullExcelError("FULL_EXCEL_ARGUMENT_REQUIRED", "必须提供数据库和输出路径");
   const source = path.resolve(dbPath); const target = path.resolve(outputPath);
   if (!fs.existsSync(source)) throw new FullExcelError("FULL_EXCEL_SOURCE_NOT_FOUND", "源数据库不存在");
   if (fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_EXISTS", "目标文件已存在");
   fs.mkdirSync(path.dirname(target), { recursive: true }); const temporary = `${target}.partial-${process.pid}`; const db = new DatabaseSync(source, { readOnly: true });
   try {
-    db.exec("BEGIN"); let result; try { result = buildFullDataBuffer(db, { appVersion, appGitCommit, createdAt }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+    db.exec("BEGIN"); let result; try { result = buildFullDataBuffer(db, { appVersion, appGitCommit, createdAt, includeOperationLogs }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
     fs.writeFileSync(temporary, result.buffer, { flag: "wx", mode: 0o600 }); fs.renameSync(temporary, target); return { ...result, outputPath: target, filename: path.basename(target) };
   } catch (error) { try { fs.rmSync(temporary, { force: true }); } catch {} throw error; } finally { db.close(); }
 }
@@ -421,9 +438,13 @@ function verifyFullData(input) {
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
-  verifyMetadata(workbook); const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); validateData(data, parsedVisible);
+  const metadata = verifyMetadata(workbook);
+  // v4 files created before this optional flag existed contained operation logs.
+  const operationLogsIncluded = metadata.has("operation_logs_included") ? metadata.get("operation_logs_included") === "true" : true;
+  if (!operationLogsIncluded && parsedVisible.operation_logs.length) throw new FullExcelError("FULL_EXCEL_OPERATION_LOGS_UNEXPECTED", "未包含操作日志的文件中存在操作日志数据");
+  const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); validateData(data, parsedVisible);
   const counts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
-  return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: FORMAT_VERSION, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
+  return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: FORMAT_VERSION, operation_logs_included: operationLogsIncluded, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
 }
 
 function restoreFullData({ dbPath, inputPath }) {
@@ -431,8 +452,12 @@ function restoreFullData({ dbPath, inputPath }) {
   try {
     ensureSchemaCompatible(db); db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
-      for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) db.exec(`DELETE FROM ${definition.source_table}`);
+      for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) {
+        if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
+        db.exec(`DELETE FROM ${definition.source_table}`);
+      }
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => a.restore_order - b.restore_order)) {
+        if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         const available = new Set(tableColumns(db, definition.source_table));
         for (const row of verified.data[definition.source_table]) { const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
       }

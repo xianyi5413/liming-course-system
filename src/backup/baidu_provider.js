@@ -15,8 +15,17 @@ class BaiduError extends Error {
   constructor(code, message, details = {}) { super(message); this.name = "BaiduError"; this.code = code; this.details = details; }
 }
 
+function safeProviderDetails(response, data = {}) {
+  return {
+    provider_code: String(data.errno ?? data.error_code ?? data.error ?? response?.status ?? "unknown").slice(0, 80),
+    http_status: Number(response?.status || 0),
+  };
+}
+
 function safeRemotePath(value) {
-  const normalized = path.posix.normalize(`/${String(value || "").replaceAll("\\", "/")}`).replace(/\0/g, "");
+  const raw = String(value || "").replaceAll("\\", "/").replace(/\0/g, "");
+  if (raw.split("/").includes("..")) throw new BaiduError("BAIDU_REMOTE_PATH_INVALID", "百度网盘目录必须位于 /apps/ 下");
+  const normalized = path.posix.normalize(`/${raw}`);
   if (!normalized.startsWith("/apps/") || normalized.includes("..")) throw new BaiduError("BAIDU_REMOTE_PATH_INVALID", "百度网盘目录必须位于 /apps/ 下");
   return normalized;
 }
@@ -73,13 +82,40 @@ class BaiduClient {
   exchangeCode(code) { return this.tokenRequest({ grant_type: "authorization_code", code, redirect_uri: this.redirectUri }); }
   refresh(refreshToken) { return this.tokenRequest({ grant_type: "refresh_token", refresh_token: refreshToken }); }
   async accessToken() { let token = this.tokenStore.read(); if (!token) throw new BaiduError("BAIDU_AUTHORIZATION_REQUIRED", "百度网盘需要授权"); if (Number(token.expires_at || 0) <= Date.now() + 60_000) { if (!token.refresh_token) throw new BaiduError("BAIDU_AUTHORIZATION_EXPIRED", "百度网盘授权已过期"); token = await this.refresh(token.refresh_token); } return token.access_token; }
-  async apiJson(url, options = {}) { const response = await this.fetch(url, options); const data = await response.json().catch(() => ({})); if (!response.ok || Number(data.errno || 0) !== 0) throw new BaiduError("BAIDU_API_FAILED", "百度网盘接口调用失败", { provider_code: String(data.errno ?? response.status) }); return data; }
+  async apiJson(url, options = {}) { const response = await this.fetch(url, options); const data = await response.json().catch(() => ({})); if (!response.ok || (data.errno !== undefined && Number(data.errno) !== 0)) throw new BaiduError("BAIDU_API_FAILED", "百度网盘接口调用失败", safeProviderDetails(response, data)); return data; }
   async uploadRequest(operation) { let lastError; for (let attempt = 1; attempt <= 3; attempt += 1) { try { return await operation(); } catch (error) { lastError = error; if (attempt === 3) throw error; await this.sleep(attempt * 250); } } throw lastError; }
   async testConnection() { const accessToken = await this.accessToken(); const url = new URL(`${this.endpoints.xpan}/nas`); url.search = new URLSearchParams({ method: "uinfo", access_token: accessToken }); await this.apiJson(url); return { ok: true }; }
   async createDirectory(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/file`); url.search = new URLSearchParams({ method: "create", access_token: accessToken }); await this.apiJson(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size: 0, isdir: 1, rtype: 3, block_list: [] }) }); return { ok: true, path: target }; }
   async uploadFile(localPath, remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const size = fs.statSync(localPath).size; const blocks = fileBlocks(localPath); const preUrl = new URL(`${this.endpoints.xpan}/file`); preUrl.search = new URLSearchParams({ method: "precreate", access_token: accessToken }); const pre = await this.uploadRequest(() => this.apiJson(preUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size, isdir: 0, autoinit: 1, rtype: 3, block_list: blocks }) })); const uploadId = pre.uploadid; if (!uploadId) throw new BaiduError("BAIDU_UPLOAD_PRECREATE_FAILED", "百度网盘上传预创建失败"); const fd = fs.openSync(localPath, "r"); const buffer = Buffer.allocUnsafe(BLOCK_SIZE); try { for (let index = 0; index < blocks.length; index += 1) { const length = fs.readSync(fd, buffer, 0, buffer.length, index * BLOCK_SIZE); const form = new FormData(); form.append("file", new Blob([buffer.subarray(0, length)]), path.posix.basename(target)); const uploadUrl = new URL(this.endpoints.upload); uploadUrl.search = new URLSearchParams({ method: "upload", access_token: accessToken, type: "tmpfile", path: target, uploadid: uploadId, partseq: String(index) }); await this.uploadRequest(() => this.apiJson(uploadUrl, { method: "POST", body: form })); } } finally { fs.closeSync(fd); } const createUrl = new URL(`${this.endpoints.xpan}/file`); createUrl.search = new URLSearchParams({ method: "create", access_token: accessToken }); const result = await this.uploadRequest(() => this.apiJson(createUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size, isdir: 0, rtype: 3, uploadid: uploadId, block_list: blocks }) })); return { file_id: String(result.fs_id || ""), path: target }; }
-  async downloadFile(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const metaUrl = new URL(`${this.endpoints.xpan}/multimedia`); metaUrl.search = new URLSearchParams({ method: "filemetas", access_token: accessToken, path_list: JSON.stringify([target]), dlink: "1" }); const metadata = await this.apiJson(metaUrl); const dlink = metadata.list?.[0]?.dlink; if (!dlink) throw new BaiduError("BAIDU_DOWNLOAD_LINK_MISSING", "百度网盘未返回下载地址"); const downloadUrl = new URL(dlink); downloadUrl.searchParams.set("access_token", accessToken); const response = await this.fetch(downloadUrl, { cache: "no-store" }); if (!response.ok) throw new BaiduError("BAIDU_DOWNLOAD_FAILED", "百度网盘文件下载失败", { provider_code: String(response.status) }); return Buffer.from(await response.arrayBuffer()); }
-  async deleteFile(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/file`); url.search = new URLSearchParams({ method: "filemanager", opera: "delete", async: "0", access_token: accessToken }); await this.apiJson(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ filelist: [target] }) }); return { ok: true }; }
+  async metadata(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/multimedia`); url.search = new URLSearchParams({ method: "filemetas", access_token: accessToken, path_list: JSON.stringify([target]), dlink: "1" }); const data = await this.apiJson(url); return data.list?.[0] || null; }
+  async downloadFile(remotePath) {
+    const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const metadata = await this.metadata(target); const dlink = metadata?.dlink;
+    if (!dlink) throw new BaiduError("BAIDU_DOWNLOAD_LINK_MISSING", "百度网盘未返回下载地址", { provider_code: "DLINK_MISSING", http_status: 200 });
+    const downloadUrl = new URL(dlink); downloadUrl.searchParams.set("access_token", accessToken);
+    const response = await this.fetch(downloadUrl, { cache: "no-store", redirect: "follow", headers: { accept: "application/octet-stream,*/*" } });
+    const bytes = Buffer.from(await response.arrayBuffer()); const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+    let providerError = null;
+    if (contentType.includes("json") || (bytes.length < 64 * 1024 && /^\s*\{/.test(bytes.toString("utf8", 0, Math.min(bytes.length, 64))))) {
+      try { const parsed = JSON.parse(bytes.toString("utf8")); if (parsed.errno !== undefined || parsed.error_code !== undefined || parsed.error) providerError = parsed; } catch {}
+    }
+    if (!response.ok || providerError) throw new BaiduError("BAIDU_DOWNLOAD_FAILED", "百度网盘文件下载失败", safeProviderDetails(response, providerError || {}));
+    return bytes;
+  }
+  async fileExists(remotePath) {
+    try { return Boolean(await this.metadata(remotePath)); }
+    catch (error) { if (["-9", "31066", "12"].includes(String(error?.details?.provider_code || ""))) return false; throw error; }
+  }
+  async deleteFile(remotePath) {
+    const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/file`); url.search = new URLSearchParams({ method: "filemanager", opera: "delete", async: "0", access_token: accessToken });
+    const response = await this.fetch(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ filelist: [target] }), cache: "no-store" });
+    const data = await response.json().catch(() => ({})); const explicitSuccess = response.ok && (Number(data.errno) === 0 || (data.errno === undefined && (data.taskid !== undefined || data.task_id !== undefined || data.info !== undefined)));
+    if (explicitSuccess) return { ok: true, task_id: String(data.taskid ?? data.task_id ?? "") };
+    // Some delete variants return an unusual/empty body after completing the operation.
+    if (response.ok) {
+      try { if (!(await this.fileExists(target))) return { ok: true, verified_absent: true }; } catch {}
+    }
+    throw new BaiduError("BAIDU_DELETE_FAILED", "百度网盘测试文件删除失败", safeProviderDetails(response, data));
+  }
 }
 
 class BaiduBackupManager {
@@ -88,7 +124,7 @@ class BaiduBackupManager {
   saveConfiguration({ appKey, appSecret, redirectUri }) { const clean = { app_key: String(appKey || "").trim(), app_secret: String(appSecret || "").trim(), redirect_uri: String(redirectUri || "").trim(), last_test_at: "", last_test_result: "not_tested" }; if (!clean.app_key || !clean.app_secret || !/^https?:\/\//i.test(clean.redirect_uri)) throw new BaiduError("BAIDU_CONFIGURATION_INVALID", "App Key、App Secret 或回调地址不完整"); this.explicitConfig = null; this.configStore.write(clean); this.tokenStore.clear(); this.reload(); return this.configurationStatus(); }
   clearConfiguration() { this.explicitConfig = null; this.tokenStore.clear(); this.configStore.clear(); this.reload(); return this.configurationStatus(); }
   persistTestStatus(result) { if (this.explicitConfig) return; const stored = this.configStore.read(); if (!stored.app_key) return; const clean = { app_key: stored.app_key || "", app_secret: stored.app_secret || "", redirect_uri: stored.redirect_uri || "", last_test_at: this.lastTestAt, last_test_result: result }; this.configStore.write(clean); }
-  configurationStatus() { const fields = { BAIDU_APP_KEY: Boolean(this.client.appKey), BAIDU_APP_SECRET: Boolean(this.client.appSecret), BAIDU_REDIRECT_URI: Boolean(this.client.redirectUri) }; const missingItems = Object.entries(fields).filter(([, configured]) => !configured).map(([name]) => name); const oauthConfigured = missingItems.length === 0; const tokenStatus = oauthConfigured ? this.tokenStore.tokenStatus() : "not_configured"; const authorizationStatus = tokenStatus === "valid" || tokenStatus === "refresh_required" ? "authorized" : tokenStatus === "expired" ? "expired" : "not_authorized"; return { app_key_configured: fields.BAIDU_APP_KEY, app_secret_configured: fields.BAIDU_APP_SECRET, redirect_uri_configured: fields.BAIDU_REDIRECT_URI, oauth_configured: oauthConfigured, authorized: authorizationStatus === "authorized", authorization_status: authorizationStatus, token_status: tokenStatus, redirect_uri: fields.BAIDU_REDIRECT_URI ? String(this.client.redirectUri) : "", callback_route: "/api/data-center/baidu/callback", missing_items: missingItems, last_test_at: this.lastTestAt, last_test_result: this.lastTestResult, test_passed: this.lastTestResult === "success", status: missingItems.length ? "not_configured" : this.tokenStore.status() }; }
+  configurationStatus() { const fields = { BAIDU_APP_KEY: Boolean(this.client.appKey), BAIDU_APP_SECRET: Boolean(this.client.appSecret), BAIDU_REDIRECT_URI: Boolean(this.client.redirectUri) }; const missingItems = Object.entries(fields).filter(([, configured]) => !configured).map(([name]) => name); const oauthConfigured = missingItems.length === 0; const tokenStatus = oauthConfigured ? this.tokenStore.tokenStatus() : "not_configured"; const authorizationStatus = tokenStatus === "valid" || tokenStatus === "refresh_required" ? "authorized" : tokenStatus === "expired" ? "expired" : "not_authorized"; return { app_key_configured: fields.BAIDU_APP_KEY, app_secret_configured: fields.BAIDU_APP_SECRET, redirect_uri_configured: fields.BAIDU_REDIRECT_URI, oauth_configured: oauthConfigured, authorized: authorizationStatus === "authorized", authorization_status: authorizationStatus, token_status: tokenStatus, redirect_uri: fields.BAIDU_REDIRECT_URI ? String(this.client.redirectUri) : "", callback_route: "/api/data-center/baidu/callback", missing_items: missingItems, last_test_at: this.lastTestAt, last_test_result: this.lastTestResult, test_passed: String(this.lastTestResult).startsWith("success"), status: missingItems.length ? "not_configured" : this.tokenStore.status() }; }
   configured() { return this.configurationStatus().oauth_configured; }
   status() { return this.configurationStatus().status; }
   beginAuthorization() { if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用和回调地址配置"); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
@@ -102,30 +138,44 @@ class BaiduBackupManager {
     const basename = `plaintext-test-${crypto.randomUUID()}.txt`;
     const localFile = path.join(path.dirname(this.configStore.filename), basename); const localChecksum = `${localFile}.sha256`;
     const remoteFile = `${safeDirectory}/${basename}`; const remoteChecksum = `${remoteFile}.sha256`;
-    const steps = { authorization: false, connection: false, test_directory: false, file_upload: false, checksum_upload: false, download: false, integrity_check: false, test_delete_file: false, test_delete_checksum: false };
+    const steps = { authorization: false, connection: false, test_directory: false, file_upload: false, checksum_upload: false, file_download: false, checksum_download: false, integrity_check: false, test_delete_file: false, test_delete_checksum: false };
+    const cleanup = { complete: false, file: "not_uploaded", checksum: "not_uploaded", remaining_paths: [] };
+    let stage = "authorization"; let corePassed = false; let coreError = null;
     try {
-      await this.client.testConnection(); steps.authorization = true; steps.connection = true;
+      await this.client.accessToken(); steps.authorization = true; stage = "connection";
+      await this.client.testConnection(); steps.connection = true;
+      stage = "test_directory";
       await this.client.createDirectory(safeDirectory); steps.test_directory = true;
       fs.mkdirSync(path.dirname(localFile), { recursive: true, mode: 0o700 });
       const content = Buffer.from(`liming-baidu-connection-test ${this.lastTestAt}\n`, "utf8");
       fs.writeFileSync(localFile, content, { flag: "wx", mode: 0o600 });
       const digest = sha256File(localFile); fs.writeFileSync(localChecksum, checksumText(digest, basename), { flag: "wx", mode: 0o600 });
-      await this.client.uploadFile(localFile, remoteFile); steps.file_upload = true;
-      await this.client.uploadFile(localChecksum, remoteChecksum); steps.checksum_upload = true;
-      const downloaded = await this.client.downloadFile(remoteFile); const downloadedChecksum = await this.client.downloadFile(remoteChecksum); steps.download = true;
+      stage = "file_upload"; cleanup.file = "pending"; await this.client.uploadFile(localFile, remoteFile); steps.file_upload = true;
+      stage = "checksum_upload"; cleanup.checksum = "pending"; await this.client.uploadFile(localChecksum, remoteChecksum); steps.checksum_upload = true;
+      stage = "file_download"; const downloaded = await this.client.downloadFile(remoteFile); steps.file_download = true;
+      stage = "checksum_download"; const downloadedChecksum = await this.client.downloadFile(remoteChecksum); steps.checksum_download = true;
+      stage = "integrity_check";
       const remoteDigest = parseChecksum(downloadedChecksum.toString("utf8"), basename);
       if (crypto.createHash("sha256").update(downloaded).digest("hex") !== remoteDigest || !downloaded.equals(content)) throw new BaiduError("BAIDU_REMOTE_SHA256_MISMATCH", "连接测试的远端文件校验失败");
-      steps.integrity_check = true;
-      await this.client.deleteFile(remoteFile); steps.test_delete_file = true;
-      await this.client.deleteFile(remoteChecksum); steps.test_delete_checksum = true;
-      this.lastTestResult = "success"; this.persistTestStatus("success"); return { ok: true, steps };
+      steps.integrity_check = true; corePassed = true;
     } catch (error) {
-      this.lastTestResult = String(error?.code || "failed").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); this.persistTestStatus(this.lastTestResult); throw error;
+      coreError = error;
     } finally {
-      if (steps.file_upload && !steps.test_delete_file) try { await this.client.deleteFile(remoteFile); steps.test_delete_file = true; } catch {}
-      if (steps.file_upload && !steps.test_delete_checksum) try { await this.client.deleteFile(remoteChecksum); steps.test_delete_checksum = true; } catch {}
+      if (cleanup.file === "pending") try { await this.client.deleteFile(remoteFile); steps.test_delete_file = true; cleanup.file = "deleted"; } catch { cleanup.file = "failed"; cleanup.remaining_paths.push(remoteFile); }
+      if (cleanup.checksum === "pending") try { await this.client.deleteFile(remoteChecksum); steps.test_delete_checksum = true; cleanup.checksum = "deleted"; } catch { cleanup.checksum = "failed"; cleanup.remaining_paths.push(remoteChecksum); }
+      cleanup.complete = cleanup.remaining_paths.length === 0;
       try { fs.rmSync(localFile, { force: true }); } catch {}
       try { fs.rmSync(localChecksum, { force: true }); } catch {}
+    }
+    if (coreError) {
+      this.lastTestResult = String(coreError?.code || "failed").replace(/[^A-Z0-9_-]/gi, "_").slice(0, 100); this.persistTestStatus(this.lastTestResult);
+      throw new BaiduError(coreError?.code || "BAIDU_CONNECTION_TEST_FAILED", coreError?.message || "百度连接测试失败", {
+        stage, provider_code: String(coreError?.details?.provider_code || ""), http_status: Number(coreError?.details?.http_status || 0), cleanup, steps,
+      });
+    }
+    if (corePassed) {
+      this.lastTestResult = cleanup.complete ? "success" : "success_cleanup_warning"; this.persistTestStatus(this.lastTestResult);
+      return { ok: true, core_ok: true, cleanup_ok: cleanup.complete, cleanup, steps, warning_code: cleanup.complete ? "" : "BAIDU_TEST_CLEANUP_PARTIAL" };
     }
   }
   async upload({ record, localPath, remoteDirectory }) { if (!this.configured()) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置"); const local = this.assertManagedBackup(localPath); const remoteBase = `${safeRemotePath(remoteDirectory)}/${path.basename(local.localPath)}`; const result = { file_id: "", path: remoteBase, checksum_file_id: "", checksum_path: `${remoteBase}.sha256`, file_status: "pending", checksum_status: "pending", integrity_status: "not_verified" }; try { const excel = await this.client.uploadFile(local.localPath, result.path); result.file_id = excel.file_id || ""; result.path = excel.path || result.path; result.file_status = "success"; const checksum = await this.client.uploadFile(local.sidecarPath, result.checksum_path); result.checksum_file_id = checksum.file_id || ""; result.checksum_path = checksum.path || result.checksum_path; result.checksum_status = "success"; const downloaded = await this.client.downloadFile(result.path); const downloadedChecksum = await this.client.downloadFile(result.checksum_path); verifyPayloadPair(downloaded, downloadedChecksum, path.basename(local.localPath)); result.integrity_status = "verified"; return result; } catch (error) { if (result.file_status === "pending") result.file_status = "failed"; else if (result.checksum_status === "pending") result.checksum_status = "failed"; if (result.file_status === "success" && result.checksum_status === "success") result.integrity_status = "failed"; throw new BaiduError(error.code || "BAIDU_PAIR_UPLOAD_FAILED", error.message || "百度网盘成对上传失败", { remote: result, cause_code: error.code || "BAIDU_PAIR_UPLOAD_FAILED" }); } }

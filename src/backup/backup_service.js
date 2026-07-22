@@ -15,7 +15,7 @@ const BACKUP_COLUMNS = {
   remote_file_id: "TEXT DEFAULT ''", remote_path: "TEXT DEFAULT ''", remote_error_safe: "TEXT DEFAULT ''",
   remote_checksum_file_id: "TEXT DEFAULT ''", remote_checksum_path: "TEXT DEFAULT ''",
   remote_file_status: "TEXT DEFAULT ''", remote_checksum_status: "TEXT DEFAULT ''", remote_integrity_status: "TEXT DEFAULT ''",
-  remote_updated_at: "TEXT DEFAULT ''", deleted_at: "TEXT DEFAULT ''",
+  remote_updated_at: "TEXT DEFAULT ''", remote_attempt_count: "INTEGER NOT NULL DEFAULT 0", deleted_at: "TEXT DEFAULT ''", operation_logs_included: "INTEGER NOT NULL DEFAULT 1",
 };
 
 class BackupError extends Error { constructor(code, message, details = {}) { super(message); this.name = "BackupError"; this.code = code; this.details = details; } }
@@ -65,11 +65,11 @@ class BackupService {
   }
   releaseLock(lock) { try { fs.rmSync(lock, { force: true }); } catch {} }
   insertRecord(db, options) {
-    const result = db.prepare(`INSERT INTO backup_records(backup_type,included_months,filename,file_path,file_size,status,message,scheduled_date,backup_format,format_version,trigger,retention_class,managed_relative_path,sha256,verified_at,schedule_key,created_by_user_id,note,pinned,remote_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.trigger === "automatic" ? "auto" : "manual", 0, options.filename, "", 0, "creating", "", options.scheduledDate || "", BACKUP_FORMAT, FORMAT_VERSION, options.trigger, options.retentionClass, "", "", "", options.scheduleKey || "", options.createdByUserId || null, options.note || "", options.pinned ? 1 : 0, options.remoteEnabled ? "pending" : "not_configured");
+    const result = db.prepare(`INSERT INTO backup_records(backup_type,included_months,filename,file_path,file_size,status,message,scheduled_date,backup_format,format_version,trigger,retention_class,managed_relative_path,sha256,verified_at,schedule_key,created_by_user_id,note,pinned,remote_status,operation_logs_included) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.trigger === "automatic" ? "auto" : "manual", 0, options.filename, "", 0, "creating", "", options.scheduledDate || "", BACKUP_FORMAT, FORMAT_VERSION, options.trigger, options.retentionClass, "", "", "", options.scheduleKey || "", options.createdByUserId || null, options.note || "", options.pinned ? 1 : 0, options.remoteEnabled ? "pending" : "not_configured", options.includeOperationLogs === false ? 0 : 1);
     return Number(result.lastInsertRowid);
   }
   record(db, id) { return db.prepare("SELECT * FROM backup_records WHERE id=?").get(Number(id)); }
-  dto(row) { return { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; }
+  dto(row) { return { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; }
   updateRemoteResult(db, id, remote = {}, error = null) {
     const fileStatus = remote.file_status || (error ? "failed" : "success");
     const checksumStatus = remote.checksum_status || (error ? "failed" : "success");
@@ -101,7 +101,7 @@ class BackupService {
       id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
       assertDataPreflight(db);
       staging = path.join(this.root, `.staging-${id}-${crypto.randomUUID()}`); fs.mkdirSync(staging, { mode: 0o700 });
-      const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, appGitCommit: this.appGitCommit, createdAt: options.createdAt || new Date() }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
+      const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, appGitCommit: this.appGitCommit, createdAt: options.createdAt || new Date(), includeOperationLogs: options.includeOperationLogs !== false }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
       published = path.join(this.root, filename); checksumFile = `${published}.sha256`; if (fs.existsSync(published) || fs.existsSync(checksumFile)) throw new BackupError("BACKUP_TARGET_EXISTS", "备份目标已存在");
       fs.renameSync(staged, published); publishedByThisRun = true;
       try { fs.renameSync(stagedHash, checksumFile); checksumPublishedByThisRun = true; }
@@ -109,7 +109,7 @@ class BackupService {
       const relative = path.relative(this.dataDir, published); const size = fs.statSync(published).size; db.prepare("UPDATE backup_records SET managed_relative_path=?,file_size=?,sha256=?,status='success',verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(relative, size, digest, id);
       let row = this.record(db, id);
       if (options.remoteEnabled && this.remoteUploader) {
-        db.prepare("UPDATE backup_records SET remote_status='uploading',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+        db.prepare("UPDATE backup_records SET remote_status='uploading',remote_attempt_count=remote_attempt_count+1,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
         try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published }); this.updateRemoteResult(db, id, remote); }
         catch (error) { this.updateRemoteResult(db, id, error?.details?.remote || {}, error); }
       } else if (options.remoteEnabled) db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe='BAIDU_NOT_CONFIGURED',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
@@ -157,10 +157,33 @@ class BackupService {
     if (!this.remoteUploader) throw new BackupError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置"); const db = this.database();
     try {
       const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const localPath = this.managedPath(row);
-      db.prepare("UPDATE backup_records SET remote_status='uploading',remote_file_status='pending',remote_checksum_status='pending',remote_integrity_status='not_verified',remote_error_safe='',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      db.prepare("UPDATE backup_records SET remote_status='uploading',remote_file_status='pending',remote_checksum_status='pending',remote_integrity_status='not_verified',remote_error_safe='',remote_attempt_count=remote_attempt_count+1,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
       try { const remote = await this.remoteUploader({ record: this.dto(row), localPath, remoteDirectory }); this.updateRemoteResult(db, id, remote); }
       catch (error) { this.updateRemoteResult(db, id, error?.details?.remote || {}, error); throw error; }
       return this.dto(this.record(db, id));
+    } finally { db.close(); }
+  }
+  async applyRemoteRetention(limit = 20, remoteDeleter = null) {
+    const keep = Math.max(1, Math.min(200, Number(limit) || 20));
+    if (typeof remoteDeleter !== "function") throw new BackupError("BAIDU_REMOTE_DELETE_UNAVAILABLE", "百度网盘删除能力不可用");
+    const db = this.database(); const removed = []; const skipped = [];
+    try {
+      const allRows = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND remote_status='success' AND COALESCE(remote_path,'')<>'' ORDER BY remote_updated_at DESC,id DESC").all(BACKUP_FORMAT);
+      const rows = allRows.filter((row) => !/\.enc$/i.test(row.remote_path || ""));
+      for (const row of allRows.filter((item) => /\.enc$/i.test(item.remote_path || ""))) skipped.push({ id: row.id, reason: "legacy_encrypted" });
+      for (const row of rows.filter((item) => Number(item.pinned || 0))) skipped.push({ id: row.id, reason: "pinned" });
+      const candidates = rows.filter((row) => !Number(row.pinned || 0)).reverse();
+      let remaining = rows.length;
+      for (const row of candidates) {
+        if (remaining <= keep) break;
+        if (remaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_remote_backup" }); continue; }
+        const result = await remoteDeleter(this.dto(row));
+        const complete = [result.excel, result.checksum].every((value) => ["deleted", "not_present"].includes(value));
+        db.prepare("UPDATE backup_records SET remote_status=?,remote_file_status=?,remote_checksum_status=?,remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?")
+          .run(complete ? "deleted" : "delete_partial", result.excel, result.checksum, complete ? "" : "BAIDU_REMOTE_DELETE_PARTIAL", row.id);
+        if (complete) { remaining -= 1; removed.push({ id: row.id }); } else skipped.push({ id: row.id, reason: "BAIDU_REMOTE_DELETE_PARTIAL" });
+      }
+      return { removed, skipped, retention: keep };
     } finally { db.close(); }
   }
   async deleteBackup(id, { remoteDeleter = null } = {}) {
