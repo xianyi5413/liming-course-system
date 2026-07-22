@@ -66,8 +66,8 @@ test("overwrite import holds the shared backup lock and always removes the uploa
   assert.match(server, /importLock = service\.acquireLock\(\)/); assert.match(server, /releaseLock\(importLock\)/); assert.match(server, /fs\.rmSync\(pending\.path/);
 });
 
-test("README documents the sensitive format, restore, scheduling, Baidu plaintext pair and rollback", () => {
-  for (const value of ["liming_full_data_excel", "完整覆盖恢复", "schedule_key", "明文 Excel", ".xlsx.sha256", "backup_records", "回滚代码", "当前正式服务器没有因本分支发生任何变化"]) assert.equal(readme.includes(value), true, value);
+test("README documents the current format, restore, scheduling, Baidu fs_id download and rollback", () => {
+  for (const value of ["format_version=4", "完整覆盖恢复", "schedule_key", "明文 Excel", ".xlsx.sha256", "backup_records", "回滚代码", "fsids=[fs_id]", "User-Agent: pan.baidu.com"]) assert.equal(readme.includes(value), true, value);
 });
 
 test("remote download is owner-only and verifies the paired checksum before delivery", () => {
@@ -78,5 +78,11 @@ test("remote download is owner-only and verifies the paired checksum before deli
 });
 
 test("legacy backup compatibility remains read-only and outside new retention", () => {
-  assert.match(server, /req\.method === "GET" && url\.pathname === "\/api\/backups"/); assert.match(server, /backupRecordForDownload/); assert.match(readme, /旧备份永不参与/);
+  assert.match(server, /req\.method === "GET" && url\.pathname === "\/api\/backups"/); assert.match(server, /backupRecordForDownload/); assert.match(readme, /旧业务归档记录仍保留，不自动迁移、登记或清理/);
+});
+
+test("Baidu diagnostics and operation logs use only safe error fields", () => {
+  assert.match(server, /function safeBaiduTestFailure/);
+  assert.match(server, /details: \{ code: safe\.code, stage: safe\.stage, provider_code: safe\.provider_code, http_status: safe\.http_status, cleanup_complete:/);
+  assert.doesNotMatch(server, /operation_content:.*(?:access_token|refresh_token|dlink|app_secret)/i);
 });
