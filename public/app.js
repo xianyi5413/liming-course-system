@@ -10,7 +10,7 @@ const navGroups = [
   { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "教师档案"]] },
   { key: "operations", label: "运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "经营概览", views: [["finance", "期间概览"]] },
-  { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据对账"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
+  { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据中心"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
 ];
 
 /**
@@ -360,6 +360,7 @@ let navExpansionMode = localStorage.getItem(NAV_EXPANSION_MODE_KEY) || "initial"
 let rechargeSourceFilter = localStorage.getItem(RECHARGE_SOURCE_FILTER_KEY) || "all";
 let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
+let rechargeDateFilter = { start: "", end: "" };
 let rechargeModalOpen = false;
 let selectedRechargeIds = new Set();
 let openingBalanceFilter = { student: "", grade: "" };
@@ -377,7 +378,9 @@ let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
 if (view === "profiles") view = profileTab === "students" ? "studentProfiles" : "teacherProfiles";
-let profileSearch = "";
+let profileNameFilter = { teachers: "", students: "" };
+let profileKeywordFilter = { teachers: "", students: "" };
+let profileGradeFilter = { students: "" };
 let profileStatusFilter = (() => {
   try {
     return { teachers: "", students: "", ...JSON.parse(localStorage.getItem("liming:profile-status-filter") || "{}") };
@@ -419,9 +422,36 @@ let expenseFilter = (() => {
     return { month_key: "", start: "", end: "", category: "", q: "" };
   }
 })();
-let auditState = { xlsxReport: null, internalReport: null, logs: [], events: [], busy: false, notice: "" };
-let auditSourceWorkbook = localStorage.getItem("liming:audit-source-workbook") || "";
-let backupState = { settings: null, records: [], busy: false, error: "", settingsOpen: false, recordsOpen: false };
+const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
+  enabled: false,
+  time: "02:30",
+  timezone: "Asia/Shanghai",
+  daily_retention: 14,
+  monthly_retention: 12,
+  manual_retention: 20,
+  retry_count: 3,
+  remote_enabled: false,
+  remote_directory: "/apps/liming-course-system",
+  remote_status: "not_configured",
+  remote_plaintext_acknowledged: false,
+  local_storage_status: "not_created",
+});
+const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
+  app_key_configured: false,
+  app_secret_configured: false,
+  redirect_uri_configured: false,
+  authorized: false,
+  authorization_status: "not_authorized",
+  token_status: "not_configured",
+  redirect_uri: "",
+  callback_route: "/api/data-center/baidu/callback",
+  remote_directory: "/apps/liming-course-system",
+  missing_items: ["BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI"],
+  last_test_at: "",
+  last_test_result: "not_tested",
+  test_passed: false,
+});
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -671,7 +701,11 @@ async function downloadBlob(path, fallbackFilename) {
       auth.user = null;
       renderLogin(data.error || "请先登录");
     }
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const error = new Error(data.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    error.path = path;
+    error.data = data;
+    throw error;
   }
   const blob = await res.blob();
   const filename = downloadFilenameFromDisposition(res.headers.get("content-disposition"), fallbackFilename);
@@ -1473,7 +1507,6 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
     finance: keepPreviousPageData ? previousState.finance || null : null,
     profile_teachers: keepPreviousPageData ? previousState.profile_teachers || [] : [],
     profile_students: keepPreviousPageData ? previousState.profile_students || [] : [],
-    source_workbooks: keepPreviousPageData ? previousState.source_workbooks || [] : [],
     users: keepPreviousPageData ? previousState.users || [] : [],
     roles: keepPreviousPageData ? previousState.roles || [] : [],
     permission_tree: keepPreviousPageData ? previousState.permission_tree || [] : [],
@@ -1489,6 +1522,10 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
     student_statement: keepPreviousPageData ? previousState.student_statement || null : null,
   };
   return next;
+}
+
+function fullBootstrapCacheKey(monthKey = activeMonth) {
+  return `${String(monthKey || "")}\u0001${includeInactive ? "all" : "active"}`;
 }
 
 function viewNeedsFullBootstrap(viewKey = view) {
@@ -1603,20 +1640,11 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   }
 
   if (view === "audit") {
-    state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
-    if (!stillCurrent()) return false;
     if (canArea("audit")) {
-      await refreshAuditEvents();
-      if (!stillCurrent()) return false;
-      await refreshBackupData();
+      await refreshBackupData({ tolerateFailure: true });
       if (!stillCurrent()) return false;
     } else {
-      auditState.events = [];
-      backupState = { ...backupState, settings: null, records: [], error: "" };
-    }
-    if (!auditSourceWorkbook && state.source_workbooks.length) {
-      auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
-        || state.source_workbooks[0].filename;
+      backupState = { ...backupState, settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, records: [], error: "", loadError: "" };
     }
   }
 
@@ -1704,7 +1732,9 @@ async function load(options = {}) {
   const fullBootstrap = viewNeedsFullBootstrap();
   // Navigation retains the session bootstrap. View-specific endpoints below
   // own fresh data; login, refresh and explicit callers still reload it.
-  const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true;
+  const requestedFullKey = fullBootstrapCacheKey(activeMonth || previousState.active_month_key || previousState.settings?.month_key);
+  const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true
+    || (fullBootstrap && previousState.full_bootstrap_key !== requestedFullKey);
   if (refreshBootstrap) {
     state = normalizeBootstrapState(
       await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`),
@@ -1712,6 +1742,7 @@ async function load(options = {}) {
       !fullBootstrap,
     );
     if (loadGeneration !== thisGeneration) return;
+    if (fullBootstrap) state.full_bootstrap_key = fullBootstrapCacheKey(state.active_month_key || state.settings?.month_key || activeMonth);
   } else {
     state = previousState;
   }
@@ -2224,6 +2255,11 @@ async function applyDateRangeToScope(scope, start, end) {
     render();
     return;
   }
+  if (scope === "recharges") {
+    rechargeDateFilter = { start, end };
+    render();
+    return;
+  }
   if (scope === "matrix") {
     const fallback = currentMatrixRange(state?.settings?.month_key || activeMonth);
     matrixRange = {
@@ -2602,8 +2638,23 @@ function teacherSalaryInputValue(value) {
   return n === null ? "" : n.toFixed(2);
 }
 
+function visiblePriceStatus(amount, isActive = 1) {
+  return Number(isActive) !== 0 && optionalNumberValue(amount) > 0 ? "已设置" : "未设置";
+}
+
+function visiblePriceStatusBadge(status) {
+  const normalized = status === "已设置" ? "已设置" : "未设置";
+  return `<span class="visible-price-status ${normalized === "已设置" ? "is-set" : "is-unset"}">${normalized}</span>`;
+}
+
+function studentPricingVisibleStatus(rule) {
+  return rule.price_status === "已设置" || rule.price_status === "未设置"
+    ? rule.price_status
+    : visiblePriceStatus(rule.custom_price);
+}
+
 function teacherSalaryRuleSalaryStatus(rule) {
-  return optionalNumberValue(rule.salary_per_unit) > 0 ? "已设置" : "待设置";
+  return visiblePriceStatus(rule.salary_per_unit, rule.is_active);
 }
 
 function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) {
@@ -2622,7 +2673,7 @@ function dynamicTeacherSalaryRuleFilterOptions(rules, filter = teacherSalaryRule
     grades: uniqueSorted(rowsForFilterOption(rules, filter, "grade", teacherSalaryRuleMatchesFilter).map((rule) => rule.grade)),
     subjects: uniqueSorted(rowsForFilterOption(rules, filter, "subject", teacherSalaryRuleMatchesFilter).map((rule) => rule.subject)),
     students: uniqueSorted(rowsForFilterOption(rules, filter, "student", teacherSalaryRuleMatchesFilter).flatMap((rule) => splitStudents(rule.student_names))),
-    salaryStatuses: uniqueSorted(rowsForFilterOption(rules, filter, "salary_status", teacherSalaryRuleMatchesFilter).map((rule) => teacherSalaryRuleSalaryStatus(rule))),
+    salaryStatuses: ["已设置", "未设置"],
   };
 }
 
@@ -3247,7 +3298,6 @@ function rechargeModalMarkup() {
 
 function openingBalanceRows() {
   return [...(state.opening_balances || [])]
-    .filter((row) => numberValue(row.opening_actual_balance) !== 0 || numberValue(row.opening_gift_balance) !== 0)
     .map((row) => {
       const profile = studentProfileByName(row.student_name);
       return {
@@ -3650,7 +3700,10 @@ function textFilterControl({ id = "", className = "", field, value = "", placeho
 function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false, searchPlaceholder = "搜索选项", inputAttrs = "", selectionSummary = "", multiple = true, emptyText = "" }) {
   const selectedList = normalizeNameList(selected);
   const selectedSet = new Set(selectedList);
-  const normalized = uniqueSorted([...(values || []), ...(includeSelected ? selectedList : [])]);
+  const rawValues = [...(values || []), ...(includeSelected ? selectedList : [])];
+  const normalized = ["price", "salary_status"].includes(field)
+    ? [...new Set(rawValues.map((value) => String(value || "").trim()).filter(Boolean))]
+    : uniqueSorted(rawValues);
   const dataName = dataAttr === "field" ? "data-field" : "data-filter-field";
   const label = multiSelectSelectionMarkup(field, selectedList, placeholder);
   const emptyLabel = emptyText || (/student/.test(field || "") ? "暂无匹配学生" : "暂无匹配选项");
@@ -3682,6 +3735,7 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
 function multiSelectSelectionMarkup(field, values = [], placeholder = "全部") {
   const selected = normalizeNameList(values);
   if (!selected.length) return escapeHtml(placeholder);
+  if (field === "teacher" && selected.length === 1 && selected[0] === TEACHER_ALL_VALUE) return "全部教师";
   if (["student", "student_name", "student_names", "students"].includes(field)) {
     return `<span class="entity-badge-list">${selected.map((value) => renderEntityBadge("student", value)).join("")}</span>`;
   }
@@ -3692,6 +3746,7 @@ function multiSelectSelectionMarkup(field, values = [], placeholder = "全部") 
 }
 
 function multiSelectOptionLabel(field, value) {
+  if (field === "teacher" && value === TEACHER_ALL_VALUE) return "<span>全部教师</span>";
   if (field === "student" || field === "student_name" || field === "student_names" || field === "students") return renderEntityBadge("student", value);
   if (["grade", "subject", "status"].includes(field)) return renderEntityBadge(field, value);
   if (field === "classroom") return `<span class="entity-badge classroom-badge">${escapeHtml(value)}</span>`;
@@ -3903,6 +3958,44 @@ function bindMultiSelectControl(select) {
   select._multiSelectSelectedValues = selectedValues;
   select._multiSelectSync = syncUi;
   select._multiSelectCommit = commit;
+  const toggle = select.querySelector(".multi-select-toggle");
+  const activateToggle = (event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const currentMenu = multiSelectMenuFor(select);
+    const search = currentMenu?.querySelector(".multi-select-search");
+    if (event?.target?.closest?.(".multi-select-clear-icon") && selectedValues().length) {
+      closeMultiSelectMenu(select);
+      if (search) search.value = "";
+      commit([]);
+      toggle?.blur();
+      return;
+    }
+    closeOtherMultiSelectMenus(select);
+    const shouldOpen = !select.classList.contains("open");
+    if (!shouldOpen) closeMultiSelectMenu(select);
+    else {
+      select.classList.add("open");
+      mountFloatingMultiSelectMenu(select);
+    }
+    toggle?.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    if (shouldOpen) {
+      multiSelectMenuFor(select)?.querySelector(".multi-select-search")?.focus({ preventScroll: true });
+      positionFloatingMultiSelectMenu(select);
+      requestAnimationFrame(() => positionFloatingMultiSelectMenu(select));
+    }
+  };
+  toggle?.addEventListener("click", activateToggle);
+  toggle?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMultiSelectMenu(select);
+      toggle.focus({ preventScroll: true });
+    } else if (event.key === "ArrowDown") {
+      activateToggle(event);
+    }
+  });
   syncUi();
 }
 
@@ -3930,7 +4023,7 @@ function filterLabel(entries, value) {
 
 const rechargeSourceOptions = [["all", "全部"], ["manual", "手动/无来源"], ["carry_over", "自动结转"]];
 const balanceFilterOptions = [["actual", "有现金余额"], ["gift", "有赠送余额"], ["zero", "全为零"]];
-const priceFilterOptions = [["auto", "自动"], ["manual", "手动"], ["pending", "未设置"]];
+const priceFilterOptions = [["set", "已设置"], ["unset", "未设置"]];
 const usageFilterOptions = [["current", "本月有课"], ["historical", "历史有课"], ["unused", "未使用"]];
 
 function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
@@ -4100,26 +4193,11 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
   return `
     <div class="filter-bar">
       <div class="filter-controls">
-        <label class="filter-field">
-          <span>学生姓名</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-        </label>
-        <label class="filter-field">
-          <span>授课老师</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>状态</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses, placeholder: "输入或选择状态" })}
-        </label>
-        <label class="filter-field">
-          <span>价格状态</span>
-          ${filterComboControl({ className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "输入或选择价格状态" })}
-        </label>
+        ${unifiedFilterField({ label: "学生", className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students })}
+        ${unifiedFilterField({ label: "教师", className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers })}
+        ${unifiedFilterField({ label: "年级", className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades })}
+        ${unifiedFilterField({ label: "状态", className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses })}
+        ${unifiedFilterField({ label: "价格状态", className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "全部价格状态" })}
         <label class="filter-field filter-date-range">
           <span>日期</span>
           ${dateRangePickerControl({ scope: "fee-details", start: feeDetailsFilter.start, end: feeDetailsFilter.end, placeholder: "选择费用日期范围" })}
@@ -4158,13 +4236,12 @@ function dynamicSummaryFilterOptions(rows, filter = summaryFilter) {
 function renderSummaryFilterBar(rows, filteredRows) {
   const opts = dynamicSummaryFilterOptions(rows);
   return `
-    <div class="filter-bar compact summary-filter-bar">
-      <label>学生姓名</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-      <label>年级</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-      <label>余额状态</label>
-      ${filterComboControl({ className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "输入或选择余额状态" })}
+    <div class="filter-bar compact unified-filter-bar summary-filter-bar">
+      <div class="filter-controls">
+        ${unifiedFilterField({ label: "学生", className: "summary-filter-input", field: "student", value: summaryFilter.student, values: opts.students })}
+        ${unifiedFilterField({ label: "年级", className: "summary-filter-input", field: "grade", value: summaryFilter.grade, values: opts.grades })}
+        ${unifiedFilterField({ label: "余额状态", className: "summary-filter-input", field: "balance", value: filterLabel(balanceFilterOptions, summaryFilter.balance), values: balanceFilterOptions.map((item) => item[1]), placeholder: "全部余额状态" })}
+      </div>
       <div class="filter-summary">
         <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn reset-summary-filter" type="button">清空筛选</button>
@@ -4423,268 +4500,75 @@ function balanceDetailCards(row) {
   `;
 }
 
-function severityRank(severity) {
-  return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, WARN: 4 }[severity] ?? 9;
+function normalizeDataCenterSettings(settings = {}) {
+  return { ...DATA_CENTER_DEFAULT_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
 }
 
-function issueValue(issue, key) {
-  return issue[key] ?? "";
-}
-
-function hasApplicablePatch(issue) {
-  const patch = issue?.patch || null;
-  if (!patch) return false;
-  if (patch.type === "lesson" && patch.id) return true;
-  if (patch.type === "student" && patch.name) return true;
-  if (patch.type === "insert_lesson" && patch.lesson) return true;
-  return false;
-}
-
-function issueRows(issues, sourceKey) {
-  return [...issues].sort((a, b) => severityRank(a.severity) - severityRank(b.severity)).map((issue, index) => `
-    <tr>
-      <td class="text-cell"><span class="severity-pill ${escapeHtml(issue.severity)}">${escapeHtml(issue.severity)}</span></td>
-      <td class="text-cell">${escapeHtml(issue.type || issue.source || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.entity || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.field || "")}</td>
-      <td class="text-cell">${escapeHtml(issue.xlsx_value ?? issue.after_value ?? "")}</td>
-      <td class="text-cell">${escapeHtml(issue.db_value ?? issue.before_value ?? "")}</td>
-      <td class="text-cell">${escapeHtml(issue.message || issue.notes || "")}</td>
-      <td class="text-cell audit-actions">
-        ${hasApplicablePatch(issue) ? `<button class="btn audit-apply-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id || ""}">${issue.patch?.type === "insert_lesson" ? "从 xlsx 补录" : "以 xlsx 为准"}</button>` : ""}
-        ${issue.audit_log_id ? `<button class="btn audit-ignore-one" type="button" data-source="${sourceKey}" data-log-id="${issue.audit_log_id}" data-issue-key="${escapeHtml(issue.issue_key || "")}">忽略此项</button>` : ""}
-      </td>
-    </tr>
-  `).join("");
-}
-
-function auditSourceMeta(report) {
-  if (!report) return "";
-  const fileName = String(report.source_file || "").split(/[\\/]/).pop();
-  const reconcile = report.reconcile || {};
-  const internalOnly = auditInternalOnlyCount(report);
-  return `
-    <div class="audit-source-meta">
-      <span>月份：${escapeHtml(report.month_key || state?.settings?.month_key || "")}</span>
-      <span>工作表：${escapeHtml(report.sheet_name || "-")}</span>
-      <span>扫描课程：${Number(report.scanned_lessons || 0)}</span>
-      ${report.reconcile ? `<span>导入前课程：${Number(reconcile.dbCourseCountBefore || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>导入后课程：${Number(reconcile.dbCourseCountAfter || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>系统多余：${Number(reconcile.internalOnly || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>源文件新增：${Number(reconcile.sourceOnly || 0)}</span>` : ""}
-      ${report.reconcile ? `<span>字段变更：${Number(reconcile.changed || 0)}</span>` : ""}
-      ${fileName ? `<span>文件：${escapeHtml(fileName)}</span>` : ""}
-      ${internalOnly ? `<span>系统中存在 ${internalOnly} 条源文件不存在的课程记录。</span><button class="btn danger audit-clean-internal-only" type="button">处理系统多余课程</button>` : ""}
-    </div>
-  `;
-}
-
-function groupedIssueTable(report, sourceKey) {
-  if (!report) return `<div class="empty audit-empty">尚未运行对账</div>`;
-  const issues = report.issues || [];
-  if (!issues.length) return `<div class="empty audit-empty">未发现差异</div>`;
-  const bySeverity = {};
-  for (const issue of issues) {
-    if (!bySeverity[issue.severity]) bySeverity[issue.severity] = [];
-    bySeverity[issue.severity].push(issue);
-  }
-  return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "WARN"].filter((severity) => bySeverity[severity]?.length).map((severity) => `
-    <details class="audit-group" ${["CRITICAL", "HIGH"].includes(severity) ? "open" : ""}>
-      <summary><span class="severity-pill ${severity}">${severity}</span><strong>${bySeverity[severity].length}</strong></summary>
-      <div class="table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>级别</th><th>类型</th><th>实体</th><th>字段</th><th>xlsx/建议值</th><th>数据库值</th><th>说明</th><th>操作</th></tr></thead>
-          <tbody>${issueRows(bySeverity[severity], sourceKey)}</tbody>
-        </table>
-      </div>
-    </details>
-  `).join("");
-}
-
-function auditCounts(report) {
-  const counts = report?.counts || {};
-  return ["CRITICAL", "HIGH", "MEDIUM", "LOW", "WARN"].map((key) => `
-    <span class="audit-count"><span class="severity-pill ${key}">${key}</span>${counts[key] || 0}</span>
-  `).join("");
-}
-
-function combinedAuditCounts() {
-  const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const report of [auditState.xlsxReport, auditState.internalReport]) {
-    for (const key of Object.keys(counts)) counts[key] += Number(report?.counts?.[key] || 0);
-  }
-  return counts;
-}
-
-function auditRiskOverview() {
-  const counts = combinedAuditCounts();
-  const hasReport = !!(auditState.xlsxReport || auditState.internalReport);
-  const critical = counts.CRITICAL || 0;
-  const high = counts.HIGH || 0;
-  const warn = counts.WARN || 0;
-  const status = !hasReport
-    ? "尚未运行对账"
-    : critical
-      ? `需要先处理 ${critical} 条 CRITICAL`
-      : high
-        ? `还有 ${high} 条 HIGH 需要复核`
-        : "未发现高风险差异";
-  return `
-    <div class="audit-risk-overview ${critical ? "has-critical" : ""}">
-      <div>
-        <div class="audit-risk-kicker">对账优先级</div>
-        <div class="audit-risk-title">${escapeHtml(status)}</div>
-        <div class="audit-risk-note">先处理影响定价、学生名单、老师、日期和时段的差异；低风险备注类问题可以后置。</div>
-      </div>
-      <div class="audit-risk-counts">
-        ${["CRITICAL", "HIGH", "MEDIUM", "WARN"].map((key) => `
-          <div class="audit-risk-card ${key}">
-            <span>${key}</span>
-            <strong>${counts[key] || 0}</strong>
-          </div>
-        `).join("")}
-      </div>
-    </div>
-  `;
-}
-
-function auditIssueByLogId(sourceKey, logId) {
-  const report = auditState[sourceKey];
-  return (report?.issues || []).find((issue) => String(issue.audit_log_id || "") === String(logId || ""));
-}
-
-function auditInternalOnlyIssues(report) {
-  return (report?.issues || []).filter((issue) => issue.type === "internal-only");
-}
-
-function auditInternalOnlyCount(report) {
-  return Number(report?.reconcile?.internalOnly || auditInternalOnlyIssues(report).length || 0);
-}
-
-function basenameFromPath(value) {
-  return String(value || "").split(/[\\/]/).pop();
-}
-
-function auditSourceFilename(report) {
-  const reportFile = basenameFromPath(report?.source_file);
-  const monthKey = report?.month_key || state?.settings?.month_key || activeMonth;
-  const workbooks = state.source_workbooks || [];
-  const reportWorkbook = workbooks.find((item) => item.filename === reportFile && item.month_key === monthKey);
-  if (reportWorkbook) return reportWorkbook.filename;
-  const selectedWorkbook = workbooks.find((item) => item.filename === auditSourceWorkbook && item.month_key === monthKey);
-  if (selectedWorkbook) return selectedWorkbook.filename;
-  const matched = workbooks.find((item) => item.month_key === monthKey);
-  return matched?.filename || "";
-}
-
-function removeAuditIssueByLogId(sourceKey, logId) {
-  const report = auditState[sourceKey];
-  if (!report?.issues) return;
-  report.issues = report.issues.filter((issue) => String(issue.audit_log_id || "") !== String(logId || ""));
-  report.counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const issue of report.issues) report.counts[issue.severity] = (report.counts[issue.severity] || 0) + 1;
-  report.issue_count = report.issues.length;
-}
-
-function removeAuditIssueByIdentity(sourceKey, logId, issueKey) {
-  const report = auditState[sourceKey];
-  if (!report?.issues) return;
-  report.issues = report.issues.filter((issue) => {
-    const sameLog = logId && String(issue.audit_log_id || "") === String(logId);
-    const sameIssue = issueKey && String(issue.issue_key || "") === String(issueKey);
-    return !(sameLog || sameIssue);
-  });
-  report.counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, WARN: 0 };
-  for (const issue of report.issues) report.counts[issue.severity] = (report.counts[issue.severity] || 0) + 1;
-  report.issue_count = report.issues.length;
-}
-
-async function refreshAuditLogs() {
-  const data = await request("/api/audit/logs?limit=200");
-  auditState.logs = data.logs || [];
-}
-
-async function refreshAuditEvents() {
-  const data = await request("/api/audit/events?limit=200");
-  auditState.events = data.events || [];
-}
-
-async function refreshBackupData({ logView = false } = {}) {
-  const data = await request(`/api/backups${logView ? "?log=1" : ""}`);
-  backupState = {
-    ...backupState,
-    settings: data.settings || backupState.settings || { enabled: true, weekday: 3, last_date: "" },
-    records: data.records || [],
-    error: "",
+function unifiedFilterField({ label, className, field, value, values, placeholder = "全部", dataAttr = "filter-field", emptyLabel = "" }) {
+  const defaults = {
+    student: "全部学生",
+    student_name: "全部学生",
+    teacher: "全部教师",
+    teacher_name: "全部教师",
+    grade: "全部年级",
+    subject: "全部科目",
+    status: "全部状态",
+    price: "全部价格状态",
+    salary_status: "全部价格状态",
   };
+  const resolvedPlaceholder = placeholder === "全部" ? (defaults[field] || placeholder) : placeholder;
+  return `
+    <div class="filter-field unified-filter-field">
+      <span>${escapeHtml(label)}</span>
+      ${multiSelectControl({
+        className: `lesson-filter-select unified-filter-control ${className || ""}`.trim(),
+        field,
+        selected: value ? [value] : [],
+        values,
+        placeholder: resolvedPlaceholder,
+        clearLabel: emptyLabel || resolvedPlaceholder,
+        dataAttr,
+        searchable: true,
+        searchPlaceholder: `搜索${label}`,
+        multiple: false,
+        emptyText: "暂无匹配结果",
+      })}
+    </div>
+  `;
 }
 
-async function applyAuditIssue(issue) {
-  const confirmCritical = issue.severity === "CRITICAL";
-  if (confirmCritical && !confirm(`确认以 xlsx/建议值修复 CRITICAL：${issue.entity} ${issue.field}？`)) return;
-  const result = await request("/api/audit/apply", {
-    method: "POST",
-    body: { issues: [issue], confirm_critical: confirmCritical },
-  });
-  if (issue.audit_log_id) removeAuditIssueByLogId("xlsxReport", issue.audit_log_id);
-  if (issue.audit_log_id) removeAuditIssueByLogId("internalReport", issue.audit_log_id);
-  await refreshAuditLogs();
-  alert(`修复完成：${result.fixed} 条，跳过 ${result.skipped} 条。已备份：${result.backup}`);
-  await load();
+function safeDataCenterLoadError(error) {
+  const status = Number(error?.status || 0);
+  if (status === 401) return "登录状态已失效";
+  if (status === 403) return "当前账号没有数据中心权限";
+  if (status >= 500) return "服务器暂时无法读取数据中心信息";
+  const message = String(error?.message || "").trim();
+  return /^[A-Z0-9_-]{3,100}$/.test(message) ? message : "数据中心信息暂时不可用";
 }
 
-function internalOnlyLessonLine(row) {
-  return [
-    `#${row.id || row.lessonId || ""}`,
-    row.date || "",
-    row.student || row.student_names || "",
-    row.teacher || row.teacher_name || "",
-    row.time_slot || "",
-    row.subject || "",
-    row.classroom || "",
-    `金额:${row.amount ?? row.teacher_salary ?? ""}`,
-    `创建:${row.created_at || ""}`,
-    `更新:${row.updated_at || ""}`,
-  ].filter(Boolean).join(" | ");
-}
-
-async function handleInternalOnlyCleanup() {
-  const report = auditState.xlsxReport;
-  if (!report) return alert("请先运行源头对账");
-  const monthKey = report.month_key || state.settings.month_key;
-  const filename = auditSourceFilename(report);
-  const preview = await request("/api/reconcile/internal-only-lessons/preview", {
-    method: "POST",
-    body: { month: monthKey, filename },
-  });
-  if (!preview.canApply || !preview.lessons?.length) {
-    auditState.xlsxReport = { ...report, reconcile: { ...(report.reconcile || {}), internalOnly: 0 } };
-    render();
-    return alert(preview.warning || "当前没有系统多余课程。");
+async function refreshBackupData({ logView = false, tolerateFailure = false } = {}) {
+  try {
+    const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
+    backupState = {
+      ...backupState,
+      settings: normalizeDataCenterSettings(data.settings),
+      baidu: { ...DATA_CENTER_DEFAULT_BAIDU, ...(data.baidu || {}) },
+      preflight: data.preflight || null,
+      records: Array.isArray(data.records) ? data.records : [],
+      error: "",
+      loadError: "",
+    };
+    return true;
+  } catch (error) {
+    backupState = {
+      ...backupState,
+      settings: normalizeDataCenterSettings(backupState.settings),
+      records: Array.isArray(backupState.records) ? backupState.records : [],
+      loadError: safeDataCenterLoadError(error),
+    };
+    if (!tolerateFailure) throw error;
+    return false;
   }
-  const shown = preview.lessons.map(internalOnlyLessonLine).join("\n");
-  const message = [
-    `这些课程存在于系统数据库中，但不在当前月份源文件中。`,
-    `确认后将从系统课程记录中删除，仅限当前月份，共 ${preview.internalOnlyCount} 条。此操作不可撤销。是否继续？`,
-    "",
-    shown,
-  ].join("\n");
-  if (!confirm(message)) return;
-  const result = await request("/api/reconcile/internal-only-lessons/apply", {
-    method: "POST",
-    body: {
-      month: monthKey,
-      filename: preview.source_file || filename,
-      confirm: true,
-      expectedCount: preview.internalOnlyCount,
-      lessonIds: preview.lessons.map((row) => row.id || row.lessonId).filter(Boolean),
-    },
-  });
-  auditState.xlsxReport = result.audit || auditState.xlsxReport;
-  await refreshAuditLogs();
-  await refreshAuditEvents();
-  alert(`已清理 ${result.deletedCount || 0} 条系统多余课程。已备份：${result.backup || "已生成"}`);
-  await load();
 }
 
 function options(values, current, emptyText = "") {
@@ -5130,6 +5014,10 @@ function viewLabel(viewKey = view) {
 
 function renderViewTransitionSkeleton() {
   navigationTransitionStartedAt = performance.now();
+  if (view === "dashboard") {
+    renderDashboard({ currentMessage: "正在加载课程...", currentSubtitle: "正在加载" });
+    return;
+  }
   renderNav();
   renderTopbar(viewLabel());
   contentEl.innerHTML = `
@@ -5172,7 +5060,8 @@ function bindNavigationEvents() {
     event.preventDefault();
     setActiveView(nextView);
     renderViewTransitionSkeleton();
-    await load({ refreshGlobal: false });
+    try { await load({ refreshGlobal: false }); }
+    catch (error) { renderLoadFailure(error); }
   });
 }
 
@@ -5197,7 +5086,7 @@ function pruneSelectedLessons(rows = visibleLessonRows()) {
 }
 
 /* ── C 档 dirty 标记 ────────────────────────────────────────────── */
-function markDirty(key) { dirtyFlags[key] = true; }     /* [约束6] 设置脏标记 */
+function markDirty(key) { dirtyFlags[key] = true; if (state) state.full_bootstrap_key = ""; }     /* [约束6] 设置脏标记 */
 function consumeDirty(key) { const was = dirtyFlags[key] || false; dirtyFlags[key] = false; return was; } /* [约束6] 消费并清除脏标记 */
 
 /* ── 状态层辅助 ──────────────────────────────────────────────────── */
@@ -7786,7 +7675,7 @@ function renderFeeDetails() {
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
+              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
@@ -7799,10 +7688,10 @@ function renderFeeDetails() {
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell">${escapeHtml(row.date)}</td>
-                <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${escapeHtml(row.weekday)}</td>
                 <td class="text-cell">${escapeHtml(row.time_slot)}</td>
                 <td class="text-cell">${escapeHtml(row.classroom)}</td>
+                <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
                 <td class="text-cell">${escapeHtml(row.notes)}</td>
@@ -8424,6 +8313,8 @@ function currentRechargeFilter() {
     source: rechargeSourceFilter,
     student: rechargeStudentFilter,
     grade: rechargeGradeFilter,
+    start: rechargeDateFilter.start,
+    end: rechargeDateFilter.end,
   };
 }
 
@@ -8433,6 +8324,8 @@ function rechargeMatchesFilter(row, filter = currentRechargeFilter()) {
   if (filter.source === "manual" && source === "carry_over") return false;
   if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
+  if (filter.start && (!row.recharge_date || row.recharge_date < filter.start)) return false;
+  if (filter.end && (!row.recharge_date || row.recharge_date > filter.end)) return false;
   return true;
 }
 
@@ -8550,14 +8443,14 @@ function renderRecharges() {
   contentEl.innerHTML = `
     <div class="band recharge-page">
       ${rechargeAnalysisMarkup(visibleRows)}
-      <div class="filter-bar compact recharge-filter-bar">
-        <label>来源</label>
-        ${filterComboControl({ className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "输入或选择来源" })}
-        <label>学生姓名</label>
-        ${filterComboControl({ className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
-        <label>年级</label>
-        ${filterComboControl({ className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades, placeholder: "输入或选择年级" })}
-        <button class="btn reset-recharge-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar recharge-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "来源", className: "recharge-source-filter", field: "source", value: filterLabel(rechargeSourceOptions, rechargeSourceFilter), values: rechargeSourceOptions.map((item) => item[1]), placeholder: "全部来源" })}
+          ${unifiedFilterField({ label: "学生", className: "recharge-student-filter", field: "student", value: rechargeStudentFilter, values: opts.students, dataAttr: "field" })}
+          ${unifiedFilterField({ label: "年级", className: "recharge-grade-filter", field: "grade", value: rechargeGradeFilter, values: opts.grades })}
+          <label class="filter-field filter-date-range"><span>日期</span>${dateRangePickerControl({ scope: "recharges", start: rechargeDateFilter.start, end: rechargeDateFilter.end, placeholder: "选择充值日期范围" })}</label>
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-recharge-filter" type="button">清空筛选</button></div>
       </div>
       <div class="transaction-action-row recharge-action-row" role="toolbar" aria-label="充值记录操作">
         <button class="btn danger batch-delete-recharges" type="button" ${bulkActionDisabledAttr(selectedRechargeIds.size)}>${bulkActionText("批量删除", selectedRechargeIds.size)}</button>
@@ -8599,12 +8492,12 @@ function renderOpeningBalances() {
   renderTopbar("期初余额", `已显示 ${visibleRows.length} / 共 ${rows.length} 条期初余额`);
   contentEl.innerHTML = `
     <div class="band opening-balance-page">
-      <div class="filter-bar compact opening-balance-filter-bar">
-        <label>学生姓名</label>
-        ${filterComboControl({ className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, placeholder: "输入或选择学生", dataAttr: "field" })}
-        <label>年级</label>
-        ${filterComboControl({ className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        <button class="btn reset-opening-balance-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar opening-balance-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "学生", className: "opening-balance-filter", field: "student", value: openingBalanceFilter.student, values: opts.students, dataAttr: "field" })}
+          ${unifiedFilterField({ label: "年级", className: "opening-balance-filter", field: "grade", value: openingBalanceFilter.grade, values: opts.grades })}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-opening-balance-filter" type="button">清空筛选</button></div>
       </div>
       <div class="transaction-action-row opening-balance-actions" role="toolbar" aria-label="期初余额操作">
         <button class="btn primary open-opening-balance-modal" type="button">+ 新增期初余额</button>
@@ -9074,17 +8967,19 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
   ], 48, 142, contentWidth);
   let y = 246;
   drawShotTable(ctx, colors, [
+    { label: "授课老师", value: (row) => row.teacher_name },
     { label: "日期", value: (row) => row.date, align: "left" },
-    { label: "状态", value: (row) => rowStatus(row) },
     { label: "星期", value: (row) => weekdayCn(row.date) },
     { label: "时间", value: (row) => row.time_slot, align: "left" },
     { label: "教室", value: (row) => row.classroom },
+    { label: "状态", value: (row) => rowStatus(row) },
     { label: "年级", value: (row) => row.grade },
     { label: "科目", value: (row) => row.subject },
     { label: "学生", value: (row) => row.student_names, align: "left" },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "教师薪资", value: (row) => formatMoney(displayTeacherSalaryForLesson(row)), align: "right" },
-  ], rows, 48, y, [106, 64, 58, 110, 60, 66, 72, 200, 298, 100], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
+    { label: "规则薪资", value: (row) => { const amount = displayTeacherRuleSalaryForLesson(row); return amount == null ? "" : formatMoney(amount); }, align: "right" },
+  ], rows, 48, y, [90, 95, 50, 85, 50, 55, 50, 55, 180, 235, 85, 85], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
   y += detailTableHeight + 42;
   drawShotSectionTitle(ctx, colors, "车票/交通补贴明细", 48, y, contentWidth);
   y += 18;
@@ -9324,230 +9219,193 @@ function renderStudentQuery() {
   `;
 }
 
-const BACKUP_WEEKDAYS = [
-  ["0", "周日"],
-  ["1", "周一"],
-  ["2", "周二"],
-  ["3", "周三"],
-  ["4", "周四"],
-  ["5", "周五"],
-  ["6", "周六"],
-];
-
-function backupWeekdayLabel(value) {
-  return BACKUP_WEEKDAYS.find(([key]) => String(key) === String(value))?.[1] || "周三";
+function dataCenterRemoteLabel(value) {
+  const labels = { not_configured: "未配置", not_authorized: "等待授权", authorized: "已授权", refresh_required: "等待刷新", pending: "等待上传", uploading: "上传中", success: "上传成功", partial_failed: "部分上传失败", failed: "上传失败", authorization_expired: "授权过期", delete_partial: "部分删除失败", delete_failed: "远端删除失败", deleted: "已删除", legacy: "旧版" };
+  return labels[value] || value || "未配置";
 }
 
-function backupTypeLabel(value) {
-  return value === "auto" ? "自动" : "手动";
+function dataCenterRemotePartLabel(value) {
+  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", not_present: "无记录" };
+  return labels[value] || "未上传";
+}
+
+function dataCenterRemoteIntegrityLabel(value) {
+  const labels = { verified: "已验证", not_verified: "未验证", failed: "验证失败" };
+  return labels[value] || "未验证";
+}
+
+function dataCenterRemoteSummary(row) {
+  if (/\.enc$/i.test(row.remote_path || "")) return `<span class="remote-legacy-encrypted">旧版加密远端备份</span>`;
+  return `<div class="remote-pair-status">
+    <span>远端 Excel：${escapeHtml(dataCenterRemotePartLabel(row.remote_file_status))}</span>
+    <span>远端校验文件：${escapeHtml(dataCenterRemotePartLabel(row.remote_checksum_status))}</span>
+    <span>远端完整性：${escapeHtml(dataCenterRemoteIntegrityLabel(row.remote_integrity_status))}</span>
+  </div>`;
 }
 
 function backupStatusLabel(value) {
-  if (value === "success") return "成功";
-  if (value === "failed") return "失败";
-  return value || "-";
+  const labels = { creating: "创建中", success: "成功", failed: "失败", verifying: "验证中", restoring: "恢复中", deleted: "已删除", missing: "文件缺失" };
+  return labels[value] || value || "未知";
 }
 
-function formatFileSize(bytes) {
-  const size = Number(bytes || 0);
-  if (!Number.isFinite(size) || size <= 0) return "0 KB";
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  return `${Math.max(1, Math.round(size / 1024))} KB`;
+function formatFileSize(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const amount = bytes / (1024 ** index);
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
 }
 
-function backupSummaryText() {
-  const settings = backupState.settings || { enabled: true, weekday: 3 };
-  const prefix = settings.enabled ? `自动备份：每${backupWeekdayLabel(settings.weekday)}` : "自动备份：已关闭";
-  return `${prefix}；已保存 ${(backupState.records || []).length} 条记录，最多保留最近 5 次成功备份`;
+function dataCenterStorageLabel(value) {
+  const labels = { available: "可用", not_created: "尚未创建（首次备份时创建）", unwritable: "暂不可写", invalid: "路径无效" };
+  return labels[value] || "状态未知";
 }
 
-function backupSettingsModalMarkup() {
-  if (!backupState.settingsOpen) return "";
-  const settings = backupState.settings || { enabled: true, weekday: 3, last_date: "" };
-  return `
-    <div class="modal-backdrop backup-settings-modal">
-      <div class="modal-panel backup-modal-panel">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">自动备份</div>
-            <div class="modal-subtitle">备份内容为所有月份核心 Excel zip，默认每周三检查一次。</div>
-          </div>
-          <button class="btn backup-settings-close" type="button">关闭</button>
-        </div>
-        <div class="backup-settings-grid">
-          <label class="history-toggle backup-enable-toggle">
-            <input class="backup-enabled-field" type="checkbox" ${settings.enabled ? "checked" : ""}>
-            <span>启用自动备份</span>
-          </label>
-          <label class="filter-field">
-            <span>每周几</span>
-            <select class="control backup-weekday-field">
-              ${BACKUP_WEEKDAYS.map(([key, label]) => `<option value="${key}" ${String(settings.weekday) === key ? "selected" : ""}>${label}</option>`).join("")}
-            </select>
-          </label>
-          <div class="backup-last-run">上次计划检查：${escapeHtml(settings.last_date || "暂无")}</div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn backup-settings-close" type="button">取消</button>
-          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
-          <button class="btn primary backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button>
-        </div>
-      </div>
+function dataCenterBackupRows() {
+  return (backupState.records || []).map((row) => {
+    const legacy = row.backup_format !== "full_data_excel";
+    const downloadPath = legacy ? `/api/backups/${encodeURIComponent(row.id)}/download` : `/api/data-center/backups/${encodeURIComponent(row.id)}/download`;
+    return `<tr>
+      <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
+      <td>${escapeHtml(legacy ? "旧版业务归档" : (row.retention_class || "全量数据"))}</td>
+      <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
+      <td>${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
+      <td><div>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</div>${legacy ? "" : dataCenterRemoteSummary(row)}</td>
+      <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
+      <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
+      <td>${escapeHtml(row.created_by_user_id || "-")}</td>
+      <td><input class="control backup-note-field" data-id="${escapeHtml(row.id)}" value="${escapeHtml(row.note || "")}" maxlength="500" ${legacy ? "disabled" : ""}></td>
+      <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
+      <td class="data-center-actions">
+        <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="11" class="empty">暂无备份记录</td></tr>`;
+}
+
+function importPreviewMarkup() {
+  const preview = backupState.importPreview;
+  if (!preview) return `<div class="section-subtitle">上传后先执行只读校验；确认前不会修改数据库。</div>`;
+  const counts = Object.entries(preview.preview_counts || {}).map(([sheet, count]) => `<span class="data-count-chip">${escapeHtml(sheet)}：${Number(count || 0)}</span>`).join("");
+  const confirmation = backupState.importMode === "overwrite" ? "覆盖导入" : "初始化导入";
+  return `<div class="data-import-preview">
+    <div class="audit-inline-notice">文件校验通过，请核对各表记录数后再执行。</div>
+    <div class="data-count-list">${counts}</div>
+    <div class="data-confirm-grid">
+      <label class="filter-field"><span>老板密码</span><input class="control data-import-password" type="password" autocomplete="current-password"></label>
+      <label class="filter-field"><span>确认文字：${confirmation}</span><input class="control data-import-confirmation" autocomplete="off"></label>
+      <button class="btn danger data-import-execute" type="button" ${backupState.busy ? "disabled" : ""}>确认执行</button>
     </div>
-  `;
+  </div>`;
 }
 
-function backupRecordsModalMarkup() {
-  if (!backupState.recordsOpen) return "";
-  const rows = backupState.records || [];
-  return `
-    <div class="modal-backdrop backup-records-modal">
-      <div class="modal-panel backup-records-panel">
-        <div class="modal-head">
-          <div>
-            <div class="modal-title">备份记录</div>
-            <div class="modal-subtitle">仅保留最近 5 次成功备份；失败记录用于排查。</div>
-          </div>
-          <button class="btn backup-records-close" type="button">关闭</button>
-        </div>
-        <div class="table-wrap smooth-table-wrap">
-          <table class="audit-table backup-record-table uniform-table nowrap-table">
-            <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>月份数</th><th>大小</th><th class="wide">文件名</th><th>下载</th></tr></thead>
-            <tbody>
-              ${rows.map((row) => `
-                <tr>
-                  <td class="text-cell">${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "")}</td>
-                  <td class="text-cell">${escapeHtml(backupTypeLabel(row.backup_type))}</td>
-                  <td class="text-cell">${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
-                  <td class="text-cell right">${Number(row.included_months || 0)}</td>
-                  <td class="text-cell right">${escapeHtml(formatFileSize(row.file_size))}</td>
-                  <td class="text-cell" title="${escapeHtml(row.message || row.filename || "")}">${escapeHtml(row.filename || row.message || "-")}</td>
-                  <td><button class="btn backup-download" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>下载</button></td>
-                </tr>
-              `).join("") || `<tr><td colspan="7" class="empty">暂无备份记录</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-        <div class="modal-actions">
-          <button class="btn backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即手动备份</button>
-          <button class="btn primary backup-records-close" type="button">关闭</button>
-        </div>
-      </div>
+function dataPreflightMarkup() {
+  const result = backupState.preflight;
+  if (!result || result.ok) return "";
+  if (result.check_failed) return `<div class="audit-inline-notice danger data-preflight-panel"><div><strong>数据完整性预检暂时不可用</strong><div>${escapeHtml(result.user_message || "请稍后重新检查")}</div></div><button class="btn data-preflight-recheck" type="button">重新检查</button></div>`;
+  const issueRows = (result.issues || []).map((issue) => `
+    <div class="data-preflight-issue">
+      <div><strong>${escapeHtml(issue.label || issue.code)}</strong><span>${Number(issue.count || 0)} 条</span></div>
+      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.student_name || "")}　${escapeHtml(record.grade || "")}${record.record_ids ? `　关联记录：${escapeHtml(record.record_ids)}` : ""}</div>`).join("")}
+    </div>`).join("");
+  return `<section class="band data-preflight-panel danger">
+    <div class="section-head"><div><div class="section-title">数据完整性预检未通过</div><div class="section-subtitle preflight-message">${escapeHtml(result.user_message || "请修复问题后重新检查")}</div></div><span class="data-count-chip">共 ${Number(result.issue_count || 0)} 个问题</span></div>
+    <div class="data-preflight-list">${issueRows}</div>
+    <div class="audit-toolbar"><button class="btn primary data-preflight-view" type="button">查看问题记录</button><button class="btn data-preflight-recheck" type="button">重新检查</button><button class="btn data-preflight-download" type="button">下载错误清单</button></div>
+  </section>`;
+}
+
+function baiduSimpleGuideMarkup() {
+  if (!backupState.showBaiduGuide) return "";
+  const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
+  const owner = isOwnerRoleValue(auth.user?.role);
+  const callback = baidu.redirect_uri || `${window.location.origin}/api/data-center/baidu/callback`;
+  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
+  return `<div class="modal-backdrop baidu-guide-modal"><div class="modal-panel baidu-guide-panel">
+    <div class="modal-head"><div><div class="modal-title">百度网盘备份三步配置</div><div class="modal-subtitle">本地备份不依赖百度配置；远端保存未加密 Excel 及其 SHA-256 校验文件。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
+    <div class="baidu-guide-steps">
+      <section><h3>第一步：填写百度应用信息</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准确回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>${owner ? `<p>App Secret 保存后不再回显；重新配置时请重新填写 App Key 和 App Secret。</p><div class="data-backup-settings-grid baidu-secret-form">
+        <label class="filter-field"><span>App Key</span><input class="control baidu-config-app-key" autocomplete="off"></label>
+        <label class="filter-field"><span>App Secret</span><input class="control baidu-config-app-secret" type="password" autocomplete="new-password"></label>
+        <label class="filter-field"><span>当前老板密码</span><input class="control baidu-config-password" type="password" autocomplete="current-password"></label>
+        <label class="filter-field"><span>确认文字：保存百度配置</span><input class="control baidu-config-confirmation" autocomplete="off"></label>
+      </div><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn danger baidu-config-clear" type="button">清除并重新配置</button>` : ""}</div>` : `<div class="audit-inline-notice neutral">只有老板账号可以查看和提交 Secret 配置表单。</div>`}</section>
+      <section><h3>第二步：连接百度网盘</h3><p>保存配置后完成 OAuth 授权。Token 仅保存在服务器受限文件中，不会回显到页面。</p><div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${configured && owner ? "" : "disabled"}>连接百度网盘</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized && owner ? "" : "disabled"}>解除授权</button></div></section>
+      <section><h3>第三步：测试并启用</h3><p>测试会上传无业务数据的普通文本及 SHA-256 文件，再下载校验并分别删除。全部通过后才可启用自动上传。</p><div class="audit-toolbar"><button class="btn baidu-test" type="button" ${configured && baidu.authorized && owner ? "" : "disabled"}>测试连接</button></div></section>
     </div>
-  `;
+  </div></div>`;
+}
+
+function baiduSimpleSettingsCardMarkup() {
+  const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
+  const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
+  const tested = baidu.test_passed || baidu.last_test_result === "success";
+  const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
+  return `<div class="data-backup-subcard baidu-backup-card">
+    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "重新配置" : "配置百度网盘"}</button>` : ""}</div>
+    <div class="baidu-status-grid simple">
+      <div><span>① 百度应用</span><strong>${configured ? "已配置" : "未配置"}</strong></div>
+      <div><span>② 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
+      <div><span>③ 连接测试</span><strong>${testLabel}</strong></div>
+      <div><span>④ 自动上传</span><strong>${backupState.settings?.remote_enabled ? "已启用" : "未启用"}</strong></div>
+    </div>
+    ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
+    <div class="audit-inline-notice danger baidu-plaintext-warning"><strong>百度网盘将保存未加密的完整 Excel 备份。</strong><span>文件包含学生、课程、充值、账号权限及账号认证哈希等敏感数据。请确保百度账号已启用可靠密码和安全验证，不要公开分享备份文件。</span></div>
+    <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
+    <label class="history-toggle baidu-plaintext-ack"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${backupState.settings?.remote_plaintext_acknowledged ? "checked" : ""} ${isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label>
+    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && backupState.settings?.remote_plaintext_acknowledged && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
+    <div class="audit-toolbar">${configured && isOwnerRoleValue(auth.user?.role) ? `<button class="btn baidu-connect" type="button" ${baidu.authorized ? "disabled" : ""}>连接百度网盘</button><button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}</div>
+  </div>`;
 }
 
 function renderAudit() {
-  const workbookOptions = (state.source_workbooks || []).map((item) => (
-    `<option value="${escapeHtml(item.filename)}" ${item.filename === auditSourceWorkbook ? "selected" : ""}>${escapeHtml(item.filename)}${item.month_key ? `（${escapeHtml(item.month_key.slice(0, 7))}）` : ""}</option>`
-  )).join("");
-  renderTopbar(
-    `${monthLabel()} 数据对账`,
-    "xlsx 源头比对 + 内部规则校验",
-    `<button class="btn audit-refresh-logs" type="button">历史审计</button>`,
-  );
+  renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
-    ${auditRiskOverview()}
-    ${auditState.notice ? `<div class="audit-inline-notice">${escapeHtml(auditState.notice)}</div>` : ""}
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div>
-          <div class="section-title">数据导出</div>
-          <div class="section-subtitle">${escapeHtml(backupSummaryText())}</div>
+    ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
+    ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
+    ${dataPreflightMarkup()}
+    <section class="band audit-panel data-center-section" data-region="import-export">
+      <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">完整备份含 22 张可见业务表和 4 张 veryHidden 恢复表；空白模板不含内部恢复数据。覆盖导入会先创建服务器备份。</div></div></div>
+      <div class="audit-toolbar">
+        <button class="btn primary data-full-export" type="button" ${backupState.busy ? "disabled" : ""}>导出全部数据</button>
+        <button class="btn data-template-download" type="button" ${backupState.busy ? "disabled" : ""}>下载空白模板</button>
+      </div>
+      <div class="data-import-grid">
+        <label class="filter-field"><span>Excel 文件</span><input class="control data-import-file" type="file" accept=".xlsx"></label>
+        <label class="filter-field"><span>导入模式</span><select class="control data-import-mode"><option value="initialize" ${backupState.importMode === "initialize" ? "selected" : ""}>空系统初始化导入</option><option value="overwrite" ${backupState.importMode === "overwrite" ? "selected" : ""}>完整覆盖恢复</option></select></label>
+        <button class="btn primary data-import-preview-button" type="button" ${backupState.busy ? "disabled" : ""}>上传并预检</button>
+      </div>
+      ${importPreviewMarkup()}
+    </section>
+    <section class="band audit-panel data-center-section" data-region="backup-settings">
+      <div class="section-head"><div><div class="section-title">备份设置</div><div class="section-subtitle">服务器目录：${escapeHtml(backupState.settings?.managed_directory || "backups/full-excel")}（${escapeHtml(dataCenterStorageLabel(backupState.settings?.local_storage_status))}）；时间按 Asia/Shanghai 解释。</div></div></div>
+      <div class="data-backup-card-grid">
+        <div class="data-backup-subcard local-backup-card">
+          <div class="section-head"><div><div class="section-title">服务器本地备份</div><div class="section-subtitle">独立生成并验证全量 Excel，本功能不依赖百度配置。</div></div></div>
+          <div class="data-backup-settings-grid">
+            <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
+            <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
+            <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
+            <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
+            <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
+            <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
+            <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
+          </div>
+          <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
         </div>
+        ${baiduSimpleSettingsCardMarkup()}
       </div>
-      <div class="audit-toolbar">
-        <button class="btn primary export-core-workbook" type="button" ${auditState.busy ? "disabled" : ""}>导出核心 Excel</button>
-        <button class="btn export-all-core-workbooks" type="button" ${auditState.busy ? "disabled" : ""}>批量导出全部月份</button>
-        <button class="btn backup-settings-open" type="button">自动备份</button>
-        <button class="btn backup-records-open" type="button">查看备份记录</button>
-      </div>
-      ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
-    </div>
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div class="section-title">源头对账</div>
-      </div>
-      <div class="audit-toolbar">
-        <input class="control audit-file" type="file" accept=".xlsx">
-        <button class="btn primary audit-run-xlsx" type="button" ${auditState.busy ? "disabled" : ""}>上传并对账</button>
-        <button class="btn audit-fix-critical" type="button" ${auditState.xlsxReport?.counts?.CRITICAL ? "" : "disabled"}>一键以 xlsx 为准修复所有 CRITICAL</button>
-      </div>
-      <div class="audit-toolbar audit-source-import">
-        <select class="control audit-source-workbook" ${workbookOptions ? "" : "disabled"}>
-          ${workbookOptions || `<option value="">未找到 source-workbooks/*.xlsx</option>`}
-        </select>
-        <button class="btn primary audit-import-source" type="button" ${auditState.busy || !workbookOptions ? "disabled" : ""}>导入源文件并对账</button>
-        <span class="audit-toolbar-note">会先备份数据库，再导入课程、充值、学生单价、费用标准和教师交通费。</span>
-      </div>
-      ${auditSourceMeta(auditState.xlsxReport)}
-      <div class="audit-counts">${auditCounts(auditState.xlsxReport)}</div>
-      ${groupedIssueTable(auditState.xlsxReport, "xlsxReport")}
-    </div>
-
-    <div class="band audit-panel">
-      <div class="section-head">
-        <div class="section-title">内部规则校验</div>
-      </div>
-      <div class="audit-toolbar">
-        <button class="btn primary audit-run-internal" type="button" ${auditState.busy ? "disabled" : ""}>运行内部校验</button>
-      </div>
-      <div class="audit-counts">${auditCounts(auditState.internalReport)}</div>
-      ${groupedIssueTable(auditState.internalReport, "internalReport")}
-    </div>
-
-    <details class="band audit-history" ${auditState.logs.length ? "open" : ""}>
-      <summary class="section-head">
-        <div class="section-title">历史审计</div>
-      </summary>
-      <div class="table-wrap smooth-table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>ID</th><th>时间</th><th>来源</th><th>级别</th><th>实体</th><th>字段</th><th>状态</th><th>说明</th></tr></thead>
-          <tbody>
-            ${auditState.logs.map((log) => `
-              <tr>
-                <td class="text-cell">${log.id}</td>
-                <td class="text-cell">${escapeHtml(log.run_at)}</td>
-                <td class="text-cell">${escapeHtml(log.source)}</td>
-                <td class="text-cell"><span class="severity-pill ${escapeHtml(log.severity)}">${escapeHtml(log.severity)}</span></td>
-                <td class="text-cell">${escapeHtml(log.entity)}</td>
-                <td class="text-cell">${escapeHtml(log.field)}</td>
-                <td class="text-cell">${renderEntityBadge("status", log.status)}</td>
-                <td class="text-cell">${escapeHtml(log.notes)}</td>
-              </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无审计历史</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </details>
-    <details class="band audit-history" ${auditState.events.length ? "open" : ""}>
-      <summary class="section-head">
-        <div class="section-title">操作审计日志</div>
-      </summary>
-      <div class="table-wrap smooth-table-wrap">
-        <table class="audit-table uniform-table nowrap-table">
-          <thead><tr><th>时间</th><th>操作者</th><th>角色</th><th>动作</th><th>对象</th><th>对象 ID</th><th>IP</th></tr></thead>
-          <tbody>
-            ${auditState.events.map((event) => `
-              <tr>
-                <td class="text-cell">${escapeHtml(formatBeijingTime(event.created_at))}</td>
-                <td class="text-cell">${escapeHtml(event.actor_username)}</td>
-                <td class="text-cell">${escapeHtml(ROLE_LABELS[event.actor_role] || event.actor_role)}</td>
-                <td class="text-cell">${escapeHtml(event.action)}</td>
-                <td class="text-cell">${escapeHtml(event.entity_type)}</td>
-                <td class="text-cell">${escapeHtml(event.entity_id)}</td>
-                <td class="text-cell">${escapeHtml(event.ip || "")}</td>
-              </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无操作审计日志</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </details>
-    ${backupSettingsModalMarkup()}
-    ${backupRecordsModalMarkup()}
-  `;
+    </section>
+    <section class="band audit-panel data-center-section" data-region="backup-records">
+      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
+      <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
+        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>服务器</th><th>百度网盘</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
+        <tbody>${dataCenterBackupRows()}</tbody>
+      </table></div>
+    </section>
+    ${baiduSimpleGuideMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -10409,24 +10267,11 @@ function pricingAuditModalMarkup() {
 function studentPricingMatchesFilter(row) {
   const filter = studentPricingFilter;
   const studentNeedle = filter.student.trim().toLowerCase();
-  if (studentNeedle) {
-    const haystack = [
-      row.student_name,
-      row.grade,
-      row.student_names,
-      row.lookup_key,
-      row.notes,
-    ].map((value) => String(value || "").toLowerCase()).join(" ");
-    if (!haystack.includes(studentNeedle)) return false;
-  }
+  if (studentNeedle && !String(row.student_name || "").toLowerCase().includes(studentNeedle)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.student_names && !textContains(row.student_names, filter.student_names)) return false;
-  if (filter.price) {
-    const source = priceSourceFilterValue(row.rule_source);
-    const sourceLabel = priceSourceLabel(source);
-    if (filter.price !== source && !textContains(sourceLabel, filter.price)) return false;
-  }
+  if (filter.price && filter.price !== (studentPricingVisibleStatus(row) === "已设置" ? "set" : "unset")) return false;
   const currentLessons = numberValue(row.current_month_lessons);
   const totalLessons = numberValue(row.total_lessons);
   if (filter.usage === "current" && currentLessons <= 0) return false;
@@ -10440,17 +10285,14 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
   const grades = uniqueSorted(rows.map((row) => row.grade));
   const studentGroups = uniqueSorted(rows.map((row) => row.student_names));
   return `
-    <div class="filter-bar compact student-pricing-filter-bar">
-      <label>学生/备注</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students, placeholder: "输入或选择学生/备注" })}
-      <label>年级</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "grade", value: studentPricingFilter.grade, values: grades, placeholder: "输入或选择年级" })}
-      <label>科目</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects, placeholder: "输入或选择科目" })}
-      <label>学生集合</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "输入或选择学生集合" })}
-      <label>价格状态</label>
-      ${filterComboControl({ className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "输入或选择价格状态" })}
+    <div class="filter-bar compact unified-filter-bar student-pricing-filter-bar">
+      <div class="filter-controls">
+        ${unifiedFilterField({ label: "学生", className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students })}
+        ${unifiedFilterField({ label: "年级", className: "student-pricing-filter-input", field: "grade", value: studentPricingFilter.grade, values: grades })}
+        ${unifiedFilterField({ label: "科目", className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects })}
+        ${unifiedFilterField({ label: "学生集合", className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "全部学生集合" })}
+        ${unifiedFilterField({ label: "价格状态", className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "全部价格状态" })}
+      </div>
       <div class="filter-summary">
         <span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span>
         <button class="btn reset-student-pricing-filter" type="button">清空筛选</button>
@@ -10486,7 +10328,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.custom_price, { className: `student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}`, attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01"` })}</td>
-                <td class="text-cell">${priceSourceLabel(row.rule_source)}</td>
+                <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
@@ -10505,23 +10347,13 @@ function renderClassGroups() {
   renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
   contentEl.innerHTML = `
     <div class="band">
-      <div class="filter-bar compact class-group-filter-bar">
-        <label class="filter-field">
-          <span>老师</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "grade", value: classGroupFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "subject", value: classGroupFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "class-group-filter-input", field: "student", value: classGroupFilter.student, values: opts.students, placeholder: "输入或选择学生" })}
-        </label>
+      <div class="filter-bar compact unified-filter-bar class-group-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "教师", className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers })}
+          ${unifiedFilterField({ label: "年级", className: "class-group-filter-input", field: "grade", value: classGroupFilter.grade, values: opts.grades })}
+          ${unifiedFilterField({ label: "科目", className: "class-group-filter-input", field: "subject", value: classGroupFilter.subject, values: opts.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "class-group-filter-input", field: "student", value: classGroupFilter.student, values: opts.students })}
+        </div>
         <label class="history-toggle compact-toggle">
           <input class="class-group-hide-inactive" type="checkbox" ${classGroupHideInactiveTeachers ? "checked" : ""}>
           <span>隐藏非在职老师</span>
@@ -10556,13 +10388,16 @@ function profileRows(kind = profileTab) {
   const scopedRows = rows;
   const statusFilter = profileStatusFilter[kind] || "";
   const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
-  const query = profileSearch.trim().toLowerCase();
-  const searchFields = kind === "students"
-    ? (row) => [row.name]
-    : (row) => [row.name, row.phone, row.status, row.joined_at, row.left_at, row.notes];
-  const filtered = query
-    ? statusRows.filter((row) => searchFields(row).some((value) => String(value || "").toLowerCase().includes(query)))
-    : statusRows;
+  const gradeFilter = kind === "students" ? (profileGradeFilter.students || "") : "";
+  const gradeRows = gradeFilter ? statusRows.filter((row) => textContains(row.grade || "", gradeFilter)) : statusRows;
+  const nameQuery = String(profileNameFilter[kind] || "").trim().toLowerCase();
+  const nameRows = nameQuery
+    ? gradeRows.filter((row) => String(row.name || "").toLowerCase().includes(nameQuery))
+    : gradeRows;
+  const keyword = String(profileKeywordFilter[kind] || "").trim().toLowerCase();
+  const filtered = keyword
+    ? nameRows.filter((row) => [row.phone, row.status, row.joined_at, row.left_at, row.notes].some((value) => String(value || "").toLowerCase().includes(keyword)))
+    : nameRows;
   if (kind !== "students") return filtered;
   const profileGradeOrder = [...gradeOrder, "已毕业"];
   return [...filtered].sort((a, b) => {
@@ -10806,6 +10641,7 @@ function profileModalMarkup() {
 function renderProfileDirectory(kind = profileTab) {
   profileTab = kind;
   localStorage.setItem("liming:profile-tab", profileTab);
+  const sourceRows = kind === "teachers" ? (state.profile_teachers || []) : (state.profile_students || []);
   const rows = profileRows(kind);
   const isTeacher = kind === "teachers";
   if (isTeacher) {
@@ -10864,9 +10700,16 @@ function renderProfileDirectory(kind = profileTab) {
   `;
   contentEl.innerHTML = `
     <div class="band profile-panel">
+      <div class="filter-bar compact unified-filter-bar profile-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: isTeacher ? "教师" : "学生", className: "profile-name-filter", field: isTeacher ? "teacher" : "student", value: profileNameFilter[kind] || "", values: uniqueSorted(sourceRows.map((row) => row.name)) })}
+          ${isTeacher ? "" : unifiedFilterField({ label: "年级", className: "profile-grade-filter", field: "grade", value: profileGradeFilter.students || "", values: uniqueSorted(sourceRows.map((row) => row.grade)) })}
+          ${unifiedFilterField({ label: "状态", className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues })}
+          ${isTeacher ? `<label class="filter-field"><span>关键字</span>${textFilterControl({ className: "profile-keyword-filter", field: "q", value: profileKeywordFilter[kind] || "", placeholder: "电话、日期或备注" })}</label>` : ""}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${rows.length}</b> / 共 ${sourceRows.length} 条</span><button class="btn reset-profile-filter" type="button">清空筛选</button></div>
+      </div>
       <div class="profile-actions profile-toolbar">
-        ${filterComboControl({ className: "profile-status-filter", field: "status", value: profileStatusFilter[kind] || "", values: statusValues, placeholder: "输入或选择状态" })}
-        ${textFilterControl({ className: "profile-search", field: "q", value: profileSearch, placeholder: isTeacher ? "搜索老师姓名、电话、备注" : "按学生姓名筛选" })}
         ${isTeacher ? "" : `<button class="btn primary open-student-stage-batch" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量修改界定时间", selectedStudentProfileIds.size)}</button>`}
         ${isTeacher ? "" : `<button class="btn danger batch-delete-student-profiles" type="button" ${bulkActionDisabledAttr(selectedStudentProfileIds.size)}>${bulkActionText("批量删除", selectedStudentProfileIds.size)}</button>`}
         ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
@@ -11639,8 +11482,8 @@ function renderTeacherSalaryRules() {
     subjects: uniqueSorted([...(state.lookups.subjects || []), ...usedLessonLookupValues("subjects")]),
     students: uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean)),
   };
-  const effectiveCount = rules.filter((rule) => optionalNumberValue(rule.salary_per_unit) > 0).length;
-  const pendingCount = rules.filter((rule) => optionalNumberValue(rule.salary_per_unit) == null || optionalNumberValue(rule.salary_per_unit) <= 0).length;
+  const effectiveCount = rules.filter((rule) => teacherSalaryRuleSalaryStatus(rule) === "已设置").length;
+  const pendingCount = rules.length - effectiveCount;
   const sync = teacherSalaryRuleCandidateSync;
   const syncNotice = sync.busy
     ? `<div class="section-subtitle">正在根据历史课程自动补齐薪资规则候选...</div>`
@@ -11655,27 +11498,14 @@ function renderTeacherSalaryRules() {
   );
   contentEl.innerHTML = `
     <div class="band">
-      <div class="filter-bar compact">
-        <label class="filter-field">
-          <span>老师</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers, placeholder: "输入或选择老师" })}
-        </label>
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students, placeholder: "输入学生搜索" })}
-        </label>
-        <label class="filter-field">
-          <span>价格状态</span>
-          ${filterComboControl({ className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "输入或选择价格状态" })}
-        </label>
+      <div class="filter-bar compact unified-filter-bar">
+        <div class="filter-controls">
+          ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
+          ${unifiedFilterField({ label: "年级", className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades })}
+          ${unifiedFilterField({ label: "科目", className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students })}
+          ${unifiedFilterField({ label: "价格状态", className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "全部价格状态" })}
+        </div>
         <label class="history-toggle compact-toggle">
           <input class="teacher-salary-rule-hide-inactive" type="checkbox" ${teacherSalaryRuleHideInactiveTeachers ? "checked" : ""}>
           <span>隐藏非在职老师</span>
@@ -11700,7 +11530,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(rule.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: rule.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell">${teacherSalaryRuleSalaryStatus(rule)}</td>
+                <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的薪资规则</td></tr>`}
@@ -11763,38 +11593,23 @@ function renderTeacherDetail() {
     <div class="query-head">
       <div class="metric">
         <div class="metric-label">教师姓名</div>
-        ${auth.user?.role === "teacher" && teachers.length <= 1 ? `<div class="metric-value small">${escapeHtml(selectedTeacher || "未绑定老师")}</div>` : `<select class="control teacher-select" style="margin-top:8px;width:100%">
-          ${auth.user?.role === "teacher" && teachers.length > 1 ? `<option value="${TEACHER_ALL_VALUE}" ${selectedTeacher === TEACHER_ALL_VALUE ? "selected" : ""}>全部老师</option>` : ""}
-          ${options(teachers, selectedTeacher, "选择教师")}
-        </select>`}
+        <div class="metric-value small">${escapeHtml(teacherAllSelected ? "全部教师" : (selectedTeacher || "未绑定教师"))}</div>
       </div>
       <div class="metric"><div class="metric-label">有效课时</div><div class="metric-value">${count}</div></div>
       ${showSalary ? `<div class="metric"><div class="metric-label">薪资统计</div><div class="metric-value">${formatMoney(salary)}</div></div>` : ""}
       <div class="metric"><div class="metric-label">课程记录</div><div class="metric-value">${rows.length}</div></div>
     </div>
     <div class="band">
-      <div class="filter-bar compact">
-        <label class="filter-field">
-          <span>年级</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "grade", value: teacherDetailFilter.grade, values: filterOptions.grades, placeholder: "输入或选择年级" })}
-        </label>
-        <label class="filter-field">
-          <span>科目</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "subject", value: teacherDetailFilter.subject, values: filterOptions.subjects, placeholder: "输入或选择科目" })}
-        </label>
-        <label class="filter-field">
-          <span>学生</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "student", value: teacherDetailFilter.student, values: filterOptions.students, placeholder: "输入或选择学生" })}
-        </label>
-        <label class="filter-field">
-          <span>薪资状态</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "输入或选择薪资状态" })}
-        </label>
-        <label class="filter-field">
-          <span>规则状态</span>
-          ${filterComboControl({ className: "teacher-detail-filter-input", field: "rule_status", value: teacherDetailFilter.rule_status, values: filterOptions.ruleStatuses, placeholder: "输入或选择规则状态" })}
-        </label>
-        <button class="btn reset-teacher-detail-filter" type="button">清空筛选</button>
+      <div class="filter-bar compact unified-filter-bar">
+        <div class="filter-controls">
+          ${auth.user?.role === "teacher" && teachers.length <= 1 ? "" : unifiedFilterField({ label: "教师", className: "teacher-select", field: "teacher", value: selectedTeacher, values: auth.user?.role === "teacher" && teachers.length > 1 ? [TEACHER_ALL_VALUE, ...teachers] : teachers })}
+          ${unifiedFilterField({ label: "年级", className: "teacher-detail-filter-input", field: "grade", value: teacherDetailFilter.grade, values: filterOptions.grades })}
+          ${unifiedFilterField({ label: "科目", className: "teacher-detail-filter-input", field: "subject", value: teacherDetailFilter.subject, values: filterOptions.subjects })}
+          ${unifiedFilterField({ label: "学生", className: "teacher-detail-filter-input", field: "student", value: teacherDetailFilter.student, values: filterOptions.students })}
+          ${unifiedFilterField({ label: "薪资状态", className: "teacher-detail-filter-input", field: "source", value: teacherDetailFilter.source, values: filterOptions.sources, placeholder: "全部薪资状态" })}
+          ${unifiedFilterField({ label: "规则状态", className: "teacher-detail-filter-input", field: "rule_status", value: teacherDetailFilter.rule_status, values: filterOptions.ruleStatuses, placeholder: "全部规则状态" })}
+        </div>
+        <div class="filter-summary"><span>已筛选 <b>${visibleRows.length}</b> / 共 ${rows.length} 条</span><button class="btn reset-teacher-detail-filter" type="button">清空筛选</button></div>
       </div>
       ${showSalary ? `
         <div class="teacher-detail-bulkbar">
@@ -11804,7 +11619,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table uniform-table nowrap-table">
-          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
+          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${eligibleRows.length ? "" : "disabled"} title="全选当前可见且可匹配规则的课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row) => {
               const calculated = showSalary ? teacherSalaryRuleCalculation(row) : null;
@@ -11818,7 +11633,7 @@ function renderTeacherDetail() {
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${calculated ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : disabledReason)}"></td>` : ""}
-                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
+                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
@@ -12894,25 +12709,28 @@ function dashboardPieSvg(pie = {}, options = {}) {
   `;
 }
 
-function dashboardCurrentLessonsMarkup(rows = []) {
-  if (!rows.length) return `<div class="dashboard-current-empty">当前没有正在上的课程</div>`;
+function dashboardCurrentLessonsMarkup(rows = [], statusMessage = "") {
   return `
-    <div class="dashboard-current-list">
-      ${rows.map((row) => `
-        <div class="dashboard-current-item">
-          <div class="dashboard-current-main">
-            <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
-            <span>${escapeHtml(row.time_slot || "未填时间")}</span>
-          </div>
-          <div class="dashboard-current-meta">
-            <span>${escapeHtml(row.classroom || "未填教室")}</span>
-            ${renderEntityBadge("grade", row.grade)}
-            ${renderEntityBadge("subject", row.subject)}
-            <span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>
-          </div>
-          ${statusBadge(row.status || "待上")}
+    <div class="dashboard-current-viewport">
+      ${!statusMessage && rows.length ? `
+        <div class="dashboard-current-list">
+          ${rows.map((row) => `
+            <div class="dashboard-current-item">
+              <div class="dashboard-current-main">
+                <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
+                <span>${escapeHtml(row.time_slot || "未填时间")}</span>
+              </div>
+              <div class="dashboard-current-meta">
+                <span>${escapeHtml(row.classroom || "未填教室")}</span>
+                ${renderEntityBadge("grade", row.grade)}
+                ${renderEntityBadge("subject", row.subject)}
+                <span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>
+              </div>
+              ${statusBadge(row.status || "待上")}
+            </div>
+          `).join("")}
         </div>
-      `).join("")}
+      ` : `<div class="dashboard-current-empty">${escapeHtml(statusMessage || "当前没有正在上的课程")}</div>`}
     </div>
   `;
 }
@@ -12969,7 +12787,7 @@ function dashboardShortcutModal() {
   `;
 }
 
-function renderDashboard() {
+function renderDashboard({ currentMessage = "", currentSubtitle = "" } = {}) {
   disposeDashboardTrendChart();
   const dashboard = state.dashboard || { todos: [], trend: [], student_pie: { items: [], total: 0 }, teacher_pie: { items: [], total: 0 }, current_lessons: [] };
   const shortcuts = dashboardShortcutCatalog();
@@ -13000,9 +12818,10 @@ function renderDashboard() {
           <div class="section-head">
             <div>
               <div class="section-title">正在上的课程</div>
+              <div class="section-subtitle">${escapeHtml(currentSubtitle || `共 ${(dashboard.current_lessons || []).length} 节`)}</div>
             </div>
           </div>
-          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [])}
+          ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [], currentMessage)}
         </section>
 
         <section class="band dashboard-todo-section">
@@ -13148,6 +12967,15 @@ function renderLoadFailure(error) {
   applySidebarState();
   renderNav();
   const permissionError = isPermissionError(error);
+  if (view === "dashboard" && !permissionError) {
+    renderDashboard({
+      currentMessage: `课程加载失败：${error?.message || "请稍后重试"}`,
+      currentSubtitle: "加载失败",
+    });
+    applyReadonlyUi();
+    wireEvents();
+    return;
+  }
   renderTopbar(currentViewTitle(), permissionError ? "权限配置异常" : "加载失败");
   contentEl.innerHTML = `
     <section class="band">
@@ -13406,10 +13234,7 @@ const TOPBAR_MONTH_INDEPENDENT_VIEWS = new Set([
   "teacherCourseNotice",
   "openingBalances",
   "studentQuery",
-  "studentPricing",
-  "classGroups",
   "studentProfiles",
-  "teacherSalaryRules",
   "teacherProfiles",
   "appearance",
   "baseData",
@@ -13461,6 +13286,7 @@ async function refreshDerivedForActiveMonth(renderAction) {
   const data = await request(`/api/bootstrap${bootstrapQuery(false)}`);
   state = normalizeBootstrapState(data, state, true);
   syncActiveMonthState(state.active_month_key || state.settings?.month_key || activeMonth);
+  state.full_bootstrap_key = fullBootstrapCacheKey(activeMonth);
   rerenderCurrentView(renderAction);
 }
 
@@ -13503,15 +13329,7 @@ async function refreshExpensesForActiveMonth({ keepRange = false } = {}) {
 }
 
 async function refreshAuditForActiveMonth() {
-  state.source_workbooks = canArea("audit") ? ((await request("/api/source-workbooks")).workbooks || []) : [];
-  if (canArea("audit")) {
-    await refreshAuditEvents();
-    await refreshBackupData();
-  }
-  auditSourceWorkbook = state.source_workbooks.find((item) => item.month_key === activeMonth)?.filename
-    || auditSourceWorkbook
-    || state.source_workbooks[0]?.filename
-    || "";
+  if (canArea("audit")) await refreshBackupData();
   rerenderCurrentView(renderAudit);
 }
 
@@ -13526,9 +13344,15 @@ async function refreshMonthRelatedActiveView() {
   if (view === "recharges") return refreshRechargesForActiveMonth();
   if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
   if (view === "feeDetails") return refreshDerivedForActiveMonth(renderFeeDetails);
+  if (view === "studentPricing") return refreshDerivedForActiveMonth(renderStudentPricing);
+  if (view === "classGroups") return refreshDerivedForActiveMonth(renderClassGroups);
   if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
   if (view === "teacherTravelFees") return refreshDerivedForActiveMonth(renderTeacherTravelFees);
   if (view === "teacherDetail") return refreshTeacherDetailForActiveMonth();
+  if (view === "teacherSalaryRules") {
+    await loadActiveViewData({ refreshGlobal: false, fullBootstrap: false, generation: loadGeneration });
+    return rerenderCurrentView(renderTeacherSalaryRules);
+  }
   if (view === "staffPayroll" || view === "staffAttendance") return refreshStaffMonthForActiveView();
   if (view === "expenses") return refreshExpensesForActiveMonth();
   if (view === "audit") return refreshAuditForActiveMonth();
@@ -13541,6 +13365,16 @@ async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
   closeOpenMultiSelectMenus();
   closeDateRangePicker();
   if (newMonth === oldMonth) return;
+  if (view === "recharges") {
+    rechargeStudentFilter = "";
+    rechargeGradeFilter = "";
+    rechargeDateFilter = { start: "", end: "" };
+  } else if (view === "summary") summaryFilter = { student: "", grade: "", balance: "" };
+  else if (view === "feeDetails") feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
+  else if (view === "studentPricing") studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
+  else if (view === "classGroups") classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
+  else if (view === "teacherDetail") teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
+  else if (view === "teacherSalaryRules") teacherSalaryRuleFilter = { teacher: "", grade: "", subject: "", student: "", salary_status: "" };
   logClientOperation("month_switch", {
     content: `切换月份：${oldMonth || "未设置"} → ${newMonth}`,
     target_type: "months",
@@ -13931,6 +13765,9 @@ function wireEvents() {
       } else if (event.target === search && event.key === "ArrowDown") {
         event.preventDefault();
         visible[0]?.focus();
+      } else if (event.key === "Enter" && visible.includes(document.activeElement)) {
+        event.preventDefault();
+        document.activeElement?.click?.();
       } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
         const index = visible.indexOf(document.activeElement);
         event.preventDefault();
@@ -14622,20 +14459,20 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".recharge-source-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-source-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeSourceFilter = canonicalFilterValue(rechargeSourceOptions, value) || "all";
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
     }, () => render());
   });
 
-  document.querySelectorAll(".recharge-student-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-student-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeStudentFilter = value;
     }, () => render());
   });
 
-  document.querySelectorAll(".recharge-grade-filter").forEach((input) => {
+  document.querySelectorAll("input.recharge-grade-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       rechargeGradeFilter = value;
     }, () => render());
@@ -14646,6 +14483,7 @@ function wireEvents() {
       rechargeSourceFilter = "all";
       rechargeStudentFilter = "";
       rechargeGradeFilter = "";
+      rechargeDateFilter = { start: "", end: "" };
       localStorage.setItem(RECHARGE_SOURCE_FILTER_KEY, rechargeSourceFilter);
       render();
     });
@@ -14691,7 +14529,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".opening-balance-filter").forEach((input) => {
+  document.querySelectorAll("input.opening-balance-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       openingBalanceFilter = { ...openingBalanceFilter, [input.dataset.filterField || input.dataset.field]: value };
     }, () => render());
@@ -14772,17 +14610,40 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".profile-search").forEach((input) => {
+  document.querySelectorAll("input.profile-name-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
-      profileSearch = value;
+      profileNameFilter = { ...profileNameFilter, [profileTab]: value };
     }, () => render());
   });
 
-  document.querySelectorAll(".profile-status-filter").forEach((input) => {
+  document.querySelectorAll("input.profile-grade-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      profileGradeFilter = { ...profileGradeFilter, students: value };
+    }, () => render());
+  });
+
+  document.querySelectorAll("input.profile-keyword-filter").forEach((input) => {
+    bindSafeTextInput(input, (value) => {
+      profileKeywordFilter = { ...profileKeywordFilter, [profileTab]: value };
+    }, () => render());
+  });
+
+  document.querySelectorAll("input.profile-status-filter").forEach((input) => {
     bindSafeTextInput(input, (value) => {
       profileStatusFilter = { ...profileStatusFilter, [profileTab]: value };
       localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
     }, () => render());
+  });
+
+  document.querySelectorAll(".reset-profile-filter").forEach((button) => {
+    button.addEventListener("click", () => {
+      profileNameFilter = { ...profileNameFilter, [profileTab]: "" };
+      profileKeywordFilter = { ...profileKeywordFilter, [profileTab]: "" };
+      if (profileTab === "students") profileGradeFilter = { ...profileGradeFilter, students: "" };
+      profileStatusFilter = { ...profileStatusFilter, [profileTab]: "" };
+      localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
+      render();
+    });
   });
 
   document.querySelectorAll(".backfill-profile-joined-at").forEach((button) => {
@@ -15267,122 +15128,15 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".audit-run-xlsx").forEach((button) => {
+  document.querySelectorAll(".data-full-export").forEach((button) => {
     button.addEventListener("click", async () => {
-      const file = document.querySelector(".audit-file")?.files?.[0];
-      if (!file) return alert("请先选择 xlsx 文件");
-      auditState.busy = true;
-      render();
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch(`/api/audit/xlsx-diff?month=${encodeURIComponent(state.settings.month_key)}`, {
-          method: "POST",
-          body: form,
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        auditState.xlsxReport = data;
-        await refreshAuditLogs();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".audit-source-workbook").forEach((select) => {
-    select.addEventListener("change", () => {
-      auditSourceWorkbook = select.value;
-      localStorage.setItem("liming:audit-source-workbook", auditSourceWorkbook);
-    });
-  });
-
-  document.querySelectorAll(".audit-import-source").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const filename = document.querySelector(".audit-source-workbook")?.value || auditSourceWorkbook;
-      if (!filename) return alert("请选择 source-workbooks 里的 xlsx 文件");
-      const workbook = (state.source_workbooks || []).find((item) => item.filename === filename) || {};
-      const monthKey = workbook.month_key || state.settings.month_key;
-      if (!confirm(`导入 ${filename} 到 ${monthKey.slice(0, 7)}？系统会先备份数据库。`)) return;
-      auditState.busy = true;
-      auditState.notice = "";
-      render();
-      try {
-        const result = await request("/api/import/source-workbook", {
-          method: "POST",
-          body: { filename, month_key: monthKey },
-        });
-        activeMonth = result.month_key || monthKey;
-        localStorage.setItem("liming:month", activeMonth);
-        auditState.xlsxReport = result.audit || null;
-        auditState.notice = `已导入 ${filename}：课程 ${result.lessons || 0} 条，充值 ${result.recharges || 0} 条，学生单价 ${result.student_prices || 0} 条，费用标准 ${result.pricing_standards || 0} 条，教师交通费 ${result.teacher_adjustments || 0} 条。`;
-        await refreshAuditLogs();
-        await load();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".export-core-workbook").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const monthKey = state.settings.month_key;
-      auditState.busy = true;
-      render();
-      try {
-        await downloadBlob(
-          `/api/export/core-workbook.xlsx?month=${encodeURIComponent(monthKey)}`,
-          `黎明教育_${monthLabel()}_核心数据.xlsx`,
-        );
-      } catch (error) {
-        alert(error.message || "导出核心 Excel 失败");
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".export-all-core-workbooks").forEach((button) => {
-    button.addEventListener("click", async () => {
-      auditState.busy = true;
-      render();
-      try {
-        await downloadBlob(
-          "/api/export/core-workbooks-all.zip",
-          `黎明教育_全部月份_核心数据_${Date.now()}.zip`,
-        );
-      } catch (error) {
-        alert(error.message || "批量导出全部月份失败");
-      } finally {
-        auditState.busy = false;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll(".backup-settings-open").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.settingsOpen = true;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-records-open").forEach((button) => {
-    button.addEventListener("click", async () => {
-      backupState.recordsOpen = true;
       backupState.busy = true;
       render();
       try {
-        await refreshBackupData({ logView: true });
+        await downloadBlob("/api/data-center/export.xlsx", `黎明教育_全量数据_${Date.now()}.xlsx`);
       } catch (error) {
-        backupState.error = error.message || "读取备份记录失败";
+        if (error.data?.preflight) backupState.preflight = error.data.preflight;
+        showToast(error.message || "导出全部数据失败", "error");
       } finally {
         backupState.busy = false;
         render();
@@ -15390,37 +15144,63 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".backup-settings-close").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.settingsOpen = false;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-records-close").forEach((button) => {
-    button.addEventListener("click", () => {
-      backupState.recordsOpen = false;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".backup-settings-save").forEach((button) => {
+  document.querySelectorAll(".data-template-download").forEach((button) => {
     button.addEventListener("click", async () => {
-      const enabled = document.querySelector(".backup-enabled-field")?.checked !== false;
-      const weekday = Number(document.querySelector(".backup-weekday-field")?.value || 3);
       backupState.busy = true;
       render();
       try {
-        const result = await request("/api/backups/settings", {
-          method: "PUT",
-          body: { enabled, weekday },
-        });
-        backupState.settings = result.settings || backupState.settings;
-        backupState.settingsOpen = false;
-        await refreshBackupData();
-        showToast("自动备份设置已保存");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v4.xlsx");
       } catch (error) {
-        backupState.error = error.message || "保存自动备份设置失败";
+        showToast(error.message || "下载模板失败", "error");
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".data-import-file").forEach((input) => {
+    input.addEventListener("change", () => { backupState.importFile = input.files?.[0] || null; backupState.importPreview = null; });
+  });
+
+  document.querySelectorAll(".data-import-mode").forEach((select) => {
+    select.addEventListener("change", () => { backupState.importMode = select.value; backupState.importPreview = null; render(); });
+  });
+
+  document.querySelectorAll(".data-import-preview-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const file = backupState.importFile || document.querySelector(".data-import-file")?.files?.[0];
+      if (!file) return showToast("请选择 xlsx 文件", "error");
+      backupState.busy = true;
+      render();
+      try {
+        const form = new FormData(); form.append("file", file, file.name);
+        const response = await fetch("/api/data-center/import/preview", { method: "POST", body: form, cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        backupState.importPreview = data; backupState.error = "";
+      } catch (error) {
+        backupState.importPreview = null; backupState.error = error.message || "Excel 预检失败";
+      } finally {
+        backupState.busy = false;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll(".data-import-execute").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const password = document.querySelector(".data-import-password")?.value || "";
+      const confirmation = document.querySelector(".data-import-confirmation")?.value || "";
+      backupState.busy = true;
+      render();
+      try {
+        await request("/api/data-center/import/execute", { method: "POST", body: { upload_id: backupState.importPreview?.upload_id, mode: backupState.importMode, password, confirmation } });
+        backupState.importPreview = null; backupState.importFile = null;
+        alert("导入成功。所有登录会话已清除，请重新登录。");
+        window.location.reload();
+      } catch (error) {
+        backupState.error = error.message || "数据导入失败";
       } finally {
         backupState.busy = false;
         render();
@@ -15433,13 +15213,16 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        const result = await request("/api/backups/run", { method: "POST", body: { type: "manual" } });
+        const result = await request("/api/data-center/backups", { method: "POST", body: {} });
         backupState.records = result.records || backupState.records;
         backupState.error = "";
         showToast(`已生成备份：${result.record?.filename || ""}`);
       } catch (error) {
-        backupState.error = error.message || "手动备份失败";
-        showToast(backupState.error, "error");
+        if (error.data?.preflight) backupState.preflight = error.data.preflight;
+        const message = error.message || "手动备份失败";
+        await refreshBackupData({ tolerateFailure: true });
+        backupState.error = message;
+        showToast(message, "error");
       } finally {
         backupState.busy = false;
         render();
@@ -15449,104 +15232,151 @@ function wireEvents() {
 
   document.querySelectorAll(".backup-download").forEach((button) => {
     button.addEventListener("click", async () => {
-      const id = button.dataset.id;
-      if (!id) return;
+      const downloadPath = button.dataset.path;
+      if (!downloadPath) return;
       try {
-        await downloadBlob(`/api/backups/${encodeURIComponent(id)}/download`, "黎明教育_核心数据备份.zip");
+        await downloadBlob(downloadPath, button.dataset.name || "backup.xlsx");
       } catch (error) {
         showToast(error.message || "下载备份失败", "error");
       }
     });
   });
 
-  document.querySelectorAll(".audit-run-internal").forEach((button) => {
+  document.querySelectorAll(".backup-settings-save").forEach((button) => {
     button.addEventListener("click", async () => {
-      auditState.busy = true;
-      render();
+      backupState.busy = true;
       try {
-        auditState.internalReport = await request(`/api/audit/internal-checks?month=${encodeURIComponent(state.settings.month_key)}`);
-        await refreshAuditLogs();
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        auditState.busy = false;
-        render();
-      }
+        const result = await request("/api/data-center/settings", { method: "PUT", body: {
+          enabled: Boolean(document.querySelector(".data-backup-enabled")?.checked), time: document.querySelector(".data-backup-time")?.value,
+          timezone: document.querySelector(".data-backup-timezone")?.value, daily_retention: Number(document.querySelector(".data-backup-daily")?.value),
+          monthly_retention: Number(document.querySelector(".data-backup-monthly")?.value), manual_retention: Number(document.querySelector(".data-backup-manual")?.value),
+          retry_count: Number(document.querySelector(".data-backup-retries")?.value),
+          remote_enabled: Boolean(document.querySelector(".data-backup-remote-enabled")?.checked), remote_directory: document.querySelector(".data-backup-remote-directory")?.value,
+          remote_plaintext_acknowledged: Boolean(document.querySelector(".data-backup-remote-plaintext-ack")?.checked),
+        } });
+        backupState.settings = { ...backupState.settings, ...result.settings }; showToast("备份设置已保存");
+      } catch (error) { backupState.error = error.message || "保存备份设置失败"; }
+      finally { backupState.busy = false; render(); }
     });
   });
 
-  document.querySelectorAll(".audit-refresh-logs").forEach((button) => {
+  document.querySelectorAll(".data-backup-remote-plaintext-ack").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const enabled = document.querySelector(".data-backup-remote-enabled");
+      const tested = backupState.baidu?.test_passed || backupState.baidu?.last_test_result === "success";
+      if (!enabled) return;
+      enabled.disabled = !(checkbox.checked && tested && isOwnerRoleValue(auth.user?.role));
+      if (!checkbox.checked) enabled.checked = false;
+    });
+  });
+
+  document.querySelectorAll(".backup-verify").forEach((button) => {
     button.addEventListener("click", async () => {
-      await refreshAuditLogs();
-      await refreshAuditEvents();
-      render();
+      try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/verify`, { method: "POST", body: {} }); await refreshBackupData(); showToast("备份验证通过"); }
+      catch (error) { showToast(error.message || "备份验证失败", "error"); }
+      finally { render(); }
     });
   });
 
-  document.querySelectorAll(".audit-clean-internal-only").forEach((button) => {
+  document.querySelectorAll(".backup-metadata-save").forEach((button) => {
     button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        await handleInternalOnlyCleanup();
-      } catch (error) {
-        alert(error.message || "处理系统多余课程失败");
-      } finally {
-        button.disabled = false;
-      }
+      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || ""; const pinned = Boolean(document.querySelector(`.backup-pinned-field[data-id="${id}"]`)?.checked);
+      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note, pinned } }); await refreshBackupData(); showToast("备份信息已保存"); }
+      catch (error) { showToast(error.message || "保存失败", "error"); }
+      finally { render(); }
     });
   });
 
-  document.querySelectorAll(".audit-apply-one").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const issue = auditIssueByLogId(button.dataset.source, button.dataset.logId);
-      if (!issue) return;
-      await applyAuditIssue(issue);
-    });
-  });
+  document.querySelectorAll(".backup-refresh").forEach((button) => button.addEventListener("click", async () => {
+    await refreshBackupData({ logView: true, tolerateFailure: true });
+    render();
+  }));
 
-  document.querySelectorAll(".audit-ignore-one").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!button.dataset.logId) return;
-      const sourceKey = button.dataset.source;
-      const logId = button.dataset.logId;
-      const issueKey = button.dataset.issueKey || "";
-      const scrollTop = window.scrollY;
-      button.disabled = true;
-      button.textContent = "忽略中";
-      try {
-        const result = await request("/api/audit/ignore", {
-          method: "POST",
-          body: {
-            ids: [Number(logId)],
-            issue_keys: issueKey ? [issueKey] : [],
-          },
-        });
-        removeAuditIssueByIdentity(sourceKey, logId, issueKey);
-        await refreshAuditLogs();
-        auditState.notice = `已忽略 ${result.ignored_keys || result.ignored} 类问题，之后相同问题不会再提示。`;
-        render();
-        requestAnimationFrame(() => window.scrollTo(0, scrollTop));
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = "忽略此项";
-        alert(error.message);
-      }
-    });
-  });
+  document.querySelectorAll(".data-center-reload").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    await refreshBackupData({ tolerateFailure: true });
+    render();
+  }));
 
-  document.querySelectorAll(".audit-fix-critical").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const issues = (auditState.xlsxReport?.issues || []).filter((issue) => issue.severity === "CRITICAL" && hasApplicablePatch(issue));
-      if (!issues.length) return;
-      if (!confirm(`确认以 xlsx 为准修复 ${issues.length} 条 CRITICAL？此操作会先备份数据库。`)) return;
-      const result = await request("/api/audit/apply", { method: "POST", body: { issues, confirm_critical: true } });
-      await refreshAuditLogs();
-      alert(`修复完成：${result.fixed} 条，跳过 ${result.skipped} 条。已备份：${result.backup}`);
-      await load();
-    });
-  });
+  document.querySelectorAll(".data-preflight-recheck").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try { backupState.preflight = await request("/api/data-center/preflight"); backupState.error = ""; }
+    catch (error) { backupState.error = error.message || "重新检查失败"; }
+    finally { render(); }
+  }));
+  document.querySelectorAll(".data-preflight-download").forEach((button) => button.addEventListener("click", async () => {
+    try { await downloadBlob("/api/data-center/preflight.csv", "数据完整性问题.csv"); }
+    catch (error) { showToast(error.message || "下载错误清单失败", "error"); }
+  }));
+  document.querySelectorAll(".data-preflight-view").forEach((button) => button.addEventListener("click", async () => {
+    const opening = (backupState.preflight?.issues || []).find((issue) => issue.code === "OPENING_BALANCE_STUDENT_DUPLICATE");
+    const first = opening?.records?.[0];
+    if (!first || !canView("openingBalances")) return showToast("当前账号不能进入期初余额页面", "error");
+    openingBalanceFilter = { student: first.student_name || "", grade: first.grade || "" };
+    setActiveView("openingBalances");
+    renderViewTransitionSkeleton();
+    try { await load({ refreshGlobal: false }); }
+    catch (error) { renderLoadFailure(error); }
+  }));
+
+  document.querySelectorAll(".backup-remote-retry").forEach((button) => button.addEventListener("click", async () => {
+    try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-retry`, { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘上传成功"); }
+    catch (error) { showToast(error.message || "百度网盘上传失败", "error"); } finally { render(); }
+  }));
+
+  document.querySelectorAll(".backup-remote-download").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("该文件是未加密 Excel，包含敏感业务和账号认证数据。确认下载并妥善保管吗？")) return;
+    try { await downloadBlob(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-download`, button.dataset.name || "backup.xlsx"); }
+    catch (error) { showToast(error.message || "远端备份下载或 SHA-256 校验失败", "error"); }
+  }));
+
+  document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", async () => {
+    const password = prompt("请输入老板密码"); if (password == null) return; const confirmation = prompt("请输入确认文字：删除备份"); if (confirmation == null) return;
+    try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}`, { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); showToast("备份删除流程已完成"); }
+    catch (error) { showToast(error.message || "删除备份失败", "error"); } finally { render(); }
+  }));
+
+  document.querySelectorAll(".baidu-connect").forEach((button) => button.addEventListener("click", async () => {
+    try { const result = await request("/api/data-center/baidu/authorize", { method: "POST", body: {} }); window.location.assign(result.authorization_url); }
+    catch (error) { showToast(error.message || "无法发起百度授权", "error"); }
+  }));
+  document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
+    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); await refreshBackupData(); showToast("授权、普通测试文件、SHA-256 下载校验和成对删除均已通过"); }
+    catch (error) { showToast(error.message || "百度网盘连接失败", "error"); }
+    finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-disconnect").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确认解除百度网盘授权？服务器本地备份不会删除。")) return;
+    try { await request("/api/data-center/baidu/disconnect", { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘授权已解除"); }
+    catch (error) { showToast(error.message || "解除授权失败", "error"); } finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-guide-open").forEach((button) => button.addEventListener("click", () => { backupState.showBaiduGuide = true; render(); }));
+  document.querySelectorAll(".baidu-guide-close").forEach((button) => button.addEventListener("click", () => { backupState.showBaiduGuide = false; render(); }));
+  document.querySelectorAll(".baidu-guide-modal").forEach((modal) => modal.addEventListener("click", (event) => { if (event.target === modal) { backupState.showBaiduGuide = false; render(); } }));
+  document.querySelectorAll(".baidu-copy-callback").forEach((button) => button.addEventListener("click", async () => {
+    const value = backupState.baidu?.redirect_uri || "";
+    if (!value) return;
+    try { await navigator.clipboard.writeText(value); showToast("回调地址已复制"); } catch { showToast("复制失败，请手动选择地址", "error"); }
+  }));
+  document.querySelectorAll(".baidu-config-save").forEach((button) => button.addEventListener("click", async () => {
+    const body = {
+      app_key: document.querySelector(".baidu-config-app-key")?.value || "",
+      app_secret: document.querySelector(".baidu-config-app-secret")?.value || "",
+      password: document.querySelector(".baidu-config-password")?.value || "",
+      confirmation: document.querySelector(".baidu-config-confirmation")?.value || "",
+    };
+    button.disabled = true;
+    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; showToast("百度应用配置已保存，请继续授权"); }
+    catch (error) { showToast(error.message || "百度配置保存失败", "error"); }
+    finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-config-clear").forEach((button) => button.addEventListener("click", async () => {
+    const password = prompt("请输入当前老板密码"); if (password == null) return;
+    const confirmation = prompt("请输入确认文字：清除百度配置"); if (confirmation == null) return;
+    try { await request("/api/data-center/baidu/config", { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); backupState.showBaiduGuide = true; showToast("百度配置和授权已清除"); }
+    catch (error) { showToast(error.message || "清除配置失败", "error"); }
+    finally { render(); }
+  }));
 
   document.querySelectorAll(".user-admin-tab").forEach((button) => {
     button.addEventListener("click", () => {
@@ -15815,7 +15645,7 @@ function wireEvents() {
     }, 650);
   });
 
-  document.querySelectorAll(".fee-details-filter-input").forEach((input) => {
+  document.querySelectorAll("input.fee-details-filter-input").forEach((input) => {
     const applyFeeDetailsFilter = (value) => {
       feeDetailsFilter = {
         ...feeDetailsFilter,
@@ -15888,7 +15718,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".summary-filter-input").forEach((input) => {
+  document.querySelectorAll("input.summary-filter-input").forEach((input) => {
     const applySummaryFilter = (value) => {
       const field = input.dataset.filterField;
       summaryFilter = {
@@ -15913,7 +15743,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".student-pricing-filter-input").forEach((input) => {
+  document.querySelectorAll("input.student-pricing-filter-input").forEach((input) => {
     const applyStudentPricingFilter = (value) => {
       const field = input.dataset.filterField;
       const canonical = field === "price"
@@ -15971,7 +15801,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".class-group-filter-input").forEach((input) => {
+  document.querySelectorAll("input.class-group-filter-input").forEach((input) => {
     const applyClassGroupFilter = (value) => {
       classGroupFilter = { ...classGroupFilter, [input.dataset.filterField]: value };
     };
@@ -16552,7 +16382,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-detail-filter-input").forEach((input) => {
+  document.querySelectorAll("input.teacher-detail-filter-input").forEach((input) => {
     const applyTeacherDetailFilter = (value) => {
       teacherDetailFilter = {
         ...teacherDetailFilter,
@@ -16881,7 +16711,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-salary-rule-filter-input").forEach((input) => {
+  document.querySelectorAll("input.teacher-salary-rule-filter-input").forEach((input) => {
     const applyTeacherSalaryRuleFilter = (value) => {
       teacherSalaryRuleFilter = {
         ...teacherSalaryRuleFilter,
@@ -17145,7 +16975,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".teacher-select").forEach((select) => {
+  document.querySelectorAll("input.teacher-select").forEach((select) => {
     select.addEventListener("change", () => {
       selectedTeacher = select.value;
       teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };

@@ -4,6 +4,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Local test and tooling output
+/tmp/
+/temp/
+/coverage/
+/test-results/
+/playwright-report/
+*.xlsx.sha256
+*.repair.log
+.tmp-*
+.staging-*
+.connection-*
+.remote-*
+.verify-*
+
 # 本地环境变量
 .env
 .env.*
@@ -24,6 +38,11 @@ data/audit_source_vs_summary.md
 data/audit_source_sync_simulation.md
 data/audit_extended.md
 data/.audit-temp/
+data/debug/
+
+# Keep only the current synthetic acceptance workbook in Git.
+/artifacts/*
+!/artifacts/黎明教育_全量数据_合成验收_v4.xlsx
 
 # 服务器日志
 data/server.*.log

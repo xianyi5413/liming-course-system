@@ -3389,6 +3389,28 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   color: var(--danger);
 }
 
+.visible-price-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.visible-price-status.is-set {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.visible-price-status.is-unset {
+  background: var(--neutral-chip-bg);
+  color: var(--neutral-chip-fg);
+}
+
 .btn {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -4399,6 +4421,211 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 @media (max-width: 640px) {
   .recharge-analysis-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.data-center-section {
+  margin-bottom: 18px;
+}
+
+.data-import-grid,
+.data-confirm-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.data-backup-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.data-backup-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.data-backup-subcard {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-hover);
+}
+
+.baidu-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.baidu-status-grid > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.baidu-status-grid span,
+.data-preflight-record {
+  color: var(--muted);
+}
+
+.baidu-plaintext-warning {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.baidu-plaintext-ack {
+  align-items: flex-start;
+}
+
+.remote-pair-status {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.remote-legacy-encrypted {
+  display: inline-flex;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: var(--text-caption);
+  font-weight: 700;
+}
+
+.data-preflight-panel {
+  margin-bottom: 18px;
+}
+
+.data-preflight-list,
+.data-preflight-issue,
+.baidu-guide-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.data-preflight-issue {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.data-preflight-issue > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preflight-message {
+  white-space: pre-line;
+}
+
+.baidu-guide-panel {
+  width: min(920px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+.baidu-guide-steps section {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-hover);
+}
+
+.baidu-guide-steps h3 {
+  margin: 0 0 8px;
+}
+
+.copy-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy-row :is(code, pre) {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.baidu-env-template {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  white-space: pre-wrap;
+}
+
+.data-import-preview {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.data-count-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.data-count-chip {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.data-center-backup-table .backup-note-field {
+  min-width: 150px;
+}
+
+.data-center-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.mono-cell {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+@media (max-width: 760px) {
+  .data-import-grid,
+  .data-confirm-grid,
+  .data-backup-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .data-backup-card-grid,
+  .baidu-status-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .copy-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .data-import-grid .btn,
+  .data-confirm-grid .btn {
+    width: 100%;
   }
 }
 
@@ -7026,7 +7253,7 @@ td.empty {
 .fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(11),
 .student-query-detail-table :is(td, th):nth-child(10),
 .recharge-table:not(.opening-balance-table) :is(td, th):nth-child(7),
-.opening-balance-table :is(td, th):nth-child(6),
+.opening-balance-table :is(td, th):nth-child(7),
 .student-pricing-table :is(td, th):nth-child(4),
 .student-pricing-table :is(td, th):nth-child(7),
 .teacher-salary-rule-table :is(td, th):nth-child(4),
@@ -7058,7 +7285,7 @@ td.empty {
 .fee-detail-table.uniform-table:not(.student-query-detail-table) :is(td, th):not(:nth-child(11)),
 .student-query-detail-table.uniform-table :is(td, th):not(:nth-child(10)),
 .recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(7)),
-.opening-balance-table.uniform-table :is(td, th):not(:nth-child(6)),
+.opening-balance-table.uniform-table :is(td, th):not(:nth-child(7)),
 .student-pricing-table.uniform-table :is(td, th):not(:nth-child(4)):not(:nth-child(7)),
 .pricing-table.uniform-table :is(td, th):not(:nth-child(5)),
 .teacher-salary-table.uniform-table :is(td, th):nth-child(1),
@@ -7099,7 +7326,7 @@ table th,
 .fee-detail-table:not(.student-query-detail-table) td:nth-child(11),
 .student-query-detail-table td:nth-child(10),
 .recharge-table:not(.opening-balance-table) td:nth-child(7),
-.opening-balance-table td:nth-child(6),
+.opening-balance-table td:nth-child(7),
 .student-pricing-table td:nth-child(4),
 .student-pricing-table td:nth-child(7),
 .teacher-salary-rule-table td:nth-child(4),
@@ -7135,8 +7362,8 @@ table th,
 .student-history-table td:nth-child(n + 3),
 .recharge-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table td:nth-child(4),
 .opening-balance-table td:nth-child(5),
+.opening-balance-table td:nth-child(6),
 .student-pricing-table td:nth-child(5),
 .teacher-salary-rule-table td:nth-child(5),
 .teacher-detail-table td:nth-child(12),
@@ -7181,7 +7408,7 @@ table th,
 .fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11),
 .student-query-detail-table :is(th, td):nth-child(10),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(7),
-.opening-balance-table :is(th, td):nth-child(6),
+.opening-balance-table :is(th, td):nth-child(7),
 .student-pricing-table :is(th, td):nth-child(7),
 .teacher-salary-rule-table :is(th, td):nth-child(7),
 .teacher-profile-table :is(th, td).profile-notes-col,
@@ -7213,8 +7440,8 @@ table th,
 
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(4),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(5),
-.opening-balance-table :is(th, td):nth-child(4),
 .opening-balance-table :is(th, td):nth-child(5),
+.opening-balance-table :is(th, td):nth-child(6),
 .student-pricing-table :is(th, td):nth-child(5),
 .teacher-salary-rule-table :is(th, td):nth-child(5),
 .fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
@@ -7259,8 +7486,8 @@ table th,
 .student-query-detail-table.uniform-table td:nth-child(11),
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table.uniform-table td:nth-child(4),
 .opening-balance-table.uniform-table td:nth-child(5),
+.opening-balance-table.uniform-table td:nth-child(6),
 .student-pricing-table.uniform-table td:nth-child(5),
 .teacher-salary-rule-table.uniform-table td:nth-child(5),
 .teacher-detail-table.uniform-table td:nth-child(12),
@@ -7431,7 +7658,7 @@ table th,
 
 .teacher-profile-table td.profile-notes-col .cell-input,
 .recharge-table:not(.opening-balance-table) td:nth-child(7) .cell-input,
-.opening-balance-table td:nth-child(6) .cell-input,
+.opening-balance-table td:nth-child(7) .cell-input,
 .student-pricing-table td:nth-child(7) .cell-input,
 .teacher-salary-rule-table td:nth-child(7) .cell-input {
   text-align: left;
@@ -8157,6 +8384,27 @@ table th,
 
 .filter-field .control {
   min-width: 136px;
+}
+
+.unified-filter-bar {
+  align-items: flex-end;
+}
+
+.unified-filter-field {
+  flex: 1 1 156px;
+  min-width: 136px;
+  max-width: 240px;
+}
+
+.unified-filter-field .multi-select,
+.unified-filter-field .multi-select-toggle,
+.unified-filter-field .unified-filter-control {
+  width: 100%;
+  min-width: 0;
+}
+
+.unified-filter-field .multi-select-toggle {
+  min-height: 36px;
 }
 
 .filter-combo {
@@ -9790,6 +10038,19 @@ table th,
   .date-range-inputs .control {
     width: 100%;
     min-width: 0;
+  }
+
+  .unified-filter-field {
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .unified-filter-bar .filter-summary {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    margin-left: 0;
+    white-space: normal;
   }
 
   .date-range-inputs {
@@ -12446,6 +12707,51 @@ body {
       "todo"
       "pies"
       "trend";
+  }
+}
+
+/* Keep the live-course card stable while only its lesson viewport scrolls. */
+.dashboard-main-grid > :is(.dashboard-current-section, .dashboard-todo-section, .dashboard-pie-section) {
+  height: 360px;
+  min-height: 360px;
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.dashboard-current-viewport {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-current-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding-right: 3px;
+}
+
+.dashboard-current-empty {
+  width: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .dashboard-main-grid > .dashboard-current-section {
+    height: 320px;
+    min-height: 320px;
+    max-height: 320px;
+  }
+
+  .dashboard-main-grid > :is(.dashboard-todo-section, .dashboard-pie-section) {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
   }
 }
 
