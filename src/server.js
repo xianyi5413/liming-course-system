@@ -1612,6 +1612,14 @@ function userHasAnyPermission(user, keys = []) {
   return keys.some((key) => granted.has(key));
 }
 
+function canManageDataCenter(user) {
+  return Boolean(user) && (isSuperRole(user.role) || userHasAnyPermission(user, ["audit"]));
+}
+
+function canViewDataPreflight(user) {
+  return canManageDataCenter(user);
+}
+
 function userCanAreaByPermissions(user, area) {
   return userHasAnyPermission(user, AREA_PERMISSION_KEYS[area] || []);
 }
@@ -7613,8 +7621,8 @@ function sendError(res, status, message) {
   sendJson(res, { error: message }, status);
 }
 
-function safeDataPreflight() {
-  try { return runDataPreflight(db); }
+function safeDataPreflight(options = {}) {
+  try { return runDataPreflight(db, options); }
   catch (error) {
     return {
       ok: false,
@@ -7638,11 +7646,18 @@ function sendDataPreflightFailure(res, error, fallbackMessage, fallbackStatus = 
 }
 
 function dataPreflightCsvRows(result) {
-  const rows = [["问题代码", "问题类型", "记录ID", "学生姓名", "年级", "关联记录", "说明"]];
+  const rows = [["问题代码", "问题类型", "记录ID", "账号", "姓名", "当前角色ID", "当前角色代码", "当前角色名称", "错误原因", "处理建议", "学生姓名", "年级", "关联记录", "说明"]];
   for (const issue of result.issues || []) for (const record of issue.records || []) rows.push([
     issue.code,
     issue.label,
     record.record_id ?? "",
+    record.username ?? "",
+    record.display_name ?? "",
+    record.current_role_id ?? "",
+    record.current_role_code ?? "",
+    record.current_role_name ?? "",
+    record.invalid_reason ?? "",
+    record.suggestion ?? "",
     record.student_name ?? "",
     record.grade ?? "",
     record.record_ids ?? "",
@@ -9346,7 +9361,8 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
-  if (url.pathname.startsWith("/api/data-center")) return userHasAnyPermission(user, ["audit"]);
+  if (url.pathname.startsWith("/api/data-center/preflight")) return canViewDataPreflight(user);
+  if (url.pathname.startsWith("/api/data-center")) return canManageDataCenter(user);
   const pageKeys = apiPagePermissionKeys(req, url);
   if (pageKeys.length && !userHasAnyPermission(user, pageKeys)) return false;
   if (pageKeys.length && accessAction === "read") return true;
@@ -12453,8 +12469,25 @@ async function handleApi(req, res, url) {
     return sendJson(res, safeDataPreflight());
   }
 
+  if (req.method === "GET" && url.pathname === "/api/data-center/preflight/details") {
+    return sendJson(res, safeDataPreflight({ sampleLimit: 1000 }));
+  }
+
+  const preflightRecordMatch = url.pathname.match(/^\/api\/data-center\/preflight\/issues\/([A-Z0-9_-]+)\/records\/(\d+)$/i);
+  if (preflightRecordMatch && req.method === "GET") {
+    const result = safeDataPreflight({ sampleLimit: 1000 });
+    const issue = (result.issues || []).find((item) => item.code === preflightRecordMatch[1].toUpperCase());
+    const record = issue?.records?.find((item) => Number(item.record_id) === Number(preflightRecordMatch[2]));
+    if (!issue || !record) return sendError(res, 404, "未找到该数据完整性问题记录，请重新检查");
+    return sendJson(res, {
+      checked_at_utc: result.checked_at_utc,
+      issue: { code: issue.code, label: issue.label, count: issue.count },
+      record,
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/data-center/preflight.csv") {
-    return sendCsv(res, dataPreflightCsvRows(safeDataPreflight()), `数据完整性问题_${exportTimestamp()}.csv`);
+    return sendCsv(res, dataPreflightCsvRows(safeDataPreflight({ sampleLimit: 1000 })), `数据完整性问题_${exportTimestamp()}.csv`);
   }
 
   if (req.method === "GET" && url.pathname === "/api/data-center/baidu/status") {

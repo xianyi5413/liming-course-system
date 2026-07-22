@@ -51,7 +51,11 @@ test("environment example names required secrets but contains no values", () => 
 });
 
 test("server-side permission mapping protects every data center route", () => {
-  assert.match(server, /p\.startsWith\("\/api\/data-center"\).*coreExport/); assert.match(server, /url\.pathname\.startsWith\("\/api\/data-center"\).*\["audit"\]/); assert.match(server, /startsWith\("\/api\/data-center"\).*userHasAnyPermission\(user, \["audit"\]\)/);
+  assert.match(server, /p\.startsWith\("\/api\/data-center"\).*coreExport/);
+  assert.match(server, /function canManageDataCenter\(user\)[\s\S]*isSuperRole\(user\.role\)[\s\S]*userHasAnyPermission\(user, \["audit"\]\)/);
+  assert.match(server, /function canViewDataPreflight\(user\)[\s\S]*canManageDataCenter\(user\)/);
+  assert.match(server, /url\.pathname\.startsWith\("\/api\/data-center\/preflight"\).*canViewDataPreflight\(user\)/);
+  assert.match(server, /url\.pathname\.startsWith\("\/api\/data-center"\).*canManageDataCenter\(user\)/);
 });
 
 test("delete and overwrite operations require password and confirmation text", () => {

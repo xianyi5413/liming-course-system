@@ -1,5 +1,12 @@
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-01$/;
 const DATE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/;
+const ACCOUNT_ROLE_ALIASES = new Map([
+  ["owner", "owner"], ["boss", "owner"], ["admin", "owner"], ["老板", "owner"], ["管理员", "owner"],
+  ["academic", "academic"], ["jiaowu", "academic"], ["教务", "academic"],
+  ["helper", "helper"], ["finance", "helper"], ["xiaozhushou", "helper"], ["小助手", "helper"], ["财务", "helper"],
+  ["assistant", "assistant"], ["助教", "assistant"],
+  ["teacher", "teacher"], ["老师", "teacher"], ["教师", "teacher"],
+]);
 
 class DataPreflightError extends Error {
   constructor(result) {
@@ -14,6 +21,54 @@ function text(value) { return String(value ?? "").trim(); }
 function money(value) { const number = Number(value || 0); return Number.isFinite(number) ? number : 0; }
 function validMonth(value) { return MONTH_PATTERN.test(text(value)); }
 function validDate(value) { return DATE_PATTERN.test(text(value)); }
+function canonicalAccountRole(value) {
+  const raw = text(value);
+  return ACCOUNT_ROLE_ALIASES.get(raw) || ACCOUNT_ROLE_ALIASES.get(raw.toLowerCase()) || raw;
+}
+
+function accountRoleIssueRecords(db) {
+  const roles = db.prepare("SELECT id,code,name FROM roles ORDER BY id").all();
+  const byCode = new Map(roles.map((role) => [text(role.code), role]));
+  const byName = new Map(roles.map((role) => [text(role.name), role]));
+  const users = db.prepare(`
+    SELECT id,username,display_name,role
+    FROM users
+    WHERE status<>'deleted'
+    ORDER BY id
+  `).all();
+  return users.flatMap((row) => {
+    const rawRole = text(row.role);
+    const canonicalRole = canonicalAccountRole(rawRole);
+    const directRole = byCode.get(rawRole);
+    if (rawRole && directRole) return [];
+    const matchedRole = byCode.get(canonicalRole) || byName.get(rawRole) || null;
+    let invalidReasonCode = "ROLE_NOT_FOUND";
+    let invalidReason = "角色不存在";
+    let suggestion = "前往账号权限，为该账号选择一个现有角色后重新检查。";
+    if (!rawRole) {
+      invalidReasonCode = "ROLE_ID_EMPTY";
+      invalidReason = "角色ID为空";
+      suggestion = "前往账号权限，为该账号选择正确角色后重新检查。";
+    } else if (matchedRole) {
+      invalidReasonCode = "ROLE_NAME_INVALID";
+      invalidReason = "账号保存了错误的角色名称";
+      suggestion = `前往账号权限，将角色重新选择为“${text(matchedRole.name) || text(matchedRole.code)}”后保存并重新检查。`;
+    }
+    return [{
+      record_id: Number(row.id),
+      username: text(row.username),
+      display_name: text(row.display_name),
+      current_role_id: matchedRole ? Number(matchedRole.id) : null,
+      current_role_code: rawRole,
+      current_role_name: matchedRole ? text(matchedRole.name) : rawRole,
+      expected_role_code: matchedRole ? text(matchedRole.code) : "",
+      invalid_reason_code: invalidReasonCode,
+      invalid_reason: invalidReason,
+      suggestion,
+      target_view: "userAdmin",
+    }];
+  });
+}
 
 function normalizeBusinessMonth(value, { acceptMonthInput = false } = {}) {
   const raw = text(value);
@@ -23,7 +78,7 @@ function normalizeBusinessMonth(value, { acceptMonthInput = false } = {}) {
 }
 
 function runDataPreflight(db, options = {}) {
-  const sampleLimit = Math.max(1, Math.min(20, Number(options.sampleLimit || 5)));
+  const sampleLimit = Math.max(1, Math.min(1000, Number(options.sampleLimit || 5)));
   const issues = [];
   const addIssue = (code, label, rows, mapper = (row) => row) => {
     if (!rows.length) return;
@@ -60,8 +115,7 @@ function runDataPreflight(db, options = {}) {
   addIssue("CLASS_GROUP_KEY_MISSING", "班级关键字段缺失", all(`SELECT id,teacher,grade,subject,class_name FROM class_groups
     WHERE teacher IS NULL OR TRIM(teacher)='' OR grade IS NULL OR TRIM(grade)='' OR subject IS NULL OR TRIM(subject)='' ORDER BY id`), (row) => ({ record_id: Number(row.id), teacher: text(row.teacher), grade: text(row.grade), subject: text(row.subject), class_name: text(row.class_name) }));
 
-  addIssue("ACCOUNT_ROLE_INVALID", "账号角色关系无效", all(`SELECT u.id,u.username,u.display_name,u.role FROM users u
-    LEFT JOIN roles r ON r.code=u.role WHERE u.status<>'deleted' AND (u.role IS NULL OR TRIM(u.role)='' OR r.code IS NULL) ORDER BY u.id`), (row) => ({ record_id: Number(row.id), username: text(row.username), display_name: text(row.display_name), role: text(row.role) }));
+  addIssue("ACCOUNT_ROLE_INVALID", "账号角色关系无效", accountRoleIssueRecords(db));
   addIssue("FEE_OVERRIDE_RELATION_INVALID", "单节费用关联课程不存在", all(`SELECT f.lesson_id,f.student_name FROM fee_overrides f
     LEFT JOIN lessons l ON l.id=f.lesson_id WHERE l.id IS NULL ORDER BY f.lesson_id,f.student_name`), (row) => ({ lesson_id: Number(row.lesson_id), student_name: text(row.student_name) }));
   addIssue("STAFF_RELATION_INVALID", "员工薪资或考勤关联无效", all(`SELECT 'salary' AS source,s.id AS record_id,s.staff_id FROM staff_salary_monthly s LEFT JOIN staff f ON f.id=s.staff_id WHERE f.id IS NULL
@@ -94,6 +148,8 @@ module.exports = {
   normalizeBusinessMonth,
   validMonth,
   validDate,
+  canonicalAccountRole,
+  accountRoleIssueRecords,
   runDataPreflight,
   assertDataPreflight,
 };

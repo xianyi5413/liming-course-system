@@ -67,3 +67,22 @@ test("database unique constraint rejects a second opening balance for the same s
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM student_opening_balances WHERE student_name='唯一学生'").get().count, 1);
   db.close();
 }));
+
+test("account-role preflight distinguishes empty missing and historical-name relations without credentials", () => withDatabase(({ dbPath }) => {
+  const db = new DatabaseSync(dbPath);
+  const passwordHash = db.prepare("SELECT password_hash FROM users WHERE username='boss'").get().password_hash;
+  const insert = db.prepare("INSERT INTO users(username,display_name,role,password_hash,status) VALUES (?,?,?,?, 'active')");
+  insert.run("empty-role", "空角色", "", passwordHash);
+  insert.run("missing-role", "不存在角色", "role-does-not-exist", passwordHash);
+  insert.run("named-role", "历史名称角色", "老板", passwordHash);
+  const result = runDataPreflight(db, { sampleLimit: 1000 });
+  const records = result.issues.find((issue) => issue.code === "ACCOUNT_ROLE_INVALID").records;
+  assert.deepEqual(Object.fromEntries(records.map((record) => [record.username, record.invalid_reason_code])), {
+    "empty-role": "ROLE_ID_EMPTY",
+    "missing-role": "ROLE_NOT_FOUND",
+    "named-role": "ROLE_NAME_INVALID",
+  });
+  assert.equal(records.every((record) => record.suggestion.includes("账号权限")), true);
+  assert.doesNotMatch(JSON.stringify(records), /password_hash|access_token|refresh_token|app_secret/i);
+  db.close();
+}));

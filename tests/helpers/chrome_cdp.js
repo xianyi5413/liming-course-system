@@ -38,6 +38,7 @@ class CdpSession {
     this.consoleErrors = [];
     this.responses = [];
     this.failDataCenterOnce = false;
+    this.failPreflightDetailsOnce = false;
     socket.addEventListener("message", (event) => this.onMessage(event));
   }
 
@@ -67,7 +68,11 @@ class CdpSession {
     }
     if (message.method === "Fetch.requestPaused") {
       const request = message.params?.request || {};
-      if (this.failDataCenterOnce && /\/api\/data-center(?:\?.*)?$/.test(request.url || "")) {
+      if (this.failPreflightDetailsOnce && /\/api\/data-center\/preflight\/details(?:\?.*)?$/.test(request.url || "")) {
+        this.failPreflightDetailsOnce = false;
+        const body = Buffer.from(JSON.stringify({ error: "PREFLIGHT_DETAILS_TEMPORARY_FAILURE" })).toString("base64");
+        this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: 503, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});
+      } else if (this.failDataCenterOnce && /\/api\/data-center(?:\?.*)?$/.test(request.url || "")) {
         this.failDataCenterOnce = false;
         const body = Buffer.from(JSON.stringify({ error: "DATA_CENTER_TEMPORARY_FAILURE" })).toString("base64");
         this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: 503, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});
@@ -105,6 +110,13 @@ class CdpSession {
     const value = JSON.stringify(selector);
     const clicked = await this.evaluate(`(() => { const element = document.querySelector(${value}); if (!element) return false; element.click(); return true; })()`);
     if (!clicked) throw new Error(`BROWSER_ELEMENT_NOT_FOUND: ${selector}`);
+  }
+
+  async setFileInputFiles(selector, files) {
+    const document = await this.send("DOM.getDocument", { depth: 0, pierce: true });
+    const result = await this.send("DOM.querySelector", { nodeId: document.root.nodeId, selector });
+    if (!result.nodeId) throw new Error(`BROWSER_ELEMENT_NOT_FOUND: ${selector}`);
+    await this.send("DOM.setFileInputFiles", { nodeId: result.nodeId, files: files.map((file) => path.resolve(file)) });
   }
 
   async login(username = "boss", password = "123456") {
@@ -171,6 +183,7 @@ async function launchChrome(profileDirectory) {
     session.send("Runtime.enable"),
     session.send("Log.enable"),
     session.send("Network.enable"),
+    session.send("DOM.enable"),
     session.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] }),
   ]);
   await session.send("Network.setBlockedURLs", { urls: ["https://cdn.jsdelivr.net/*"] });

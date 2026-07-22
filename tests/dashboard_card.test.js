@@ -51,8 +51,8 @@ function addCurrentLessons(dbPath, from, to) {
   const date = localDateKey();
   const month = `${date.slice(0, 7)}-01`;
   for (let index = from; index <= to; index += 1) insert.run(
-    8500 + index, "状态教师", date, "上课", "00:00-23:59", `教室${index}`,
-    "初一", "数学", index % 2 ? "状态学生甲" : "状态学生乙",
+    8500 + index, index === 1 ? "姓名较长但仍需清晰显示的状态教师" : "状态教师", date, "上课", "00:00-23:59", index === 1 ? "名称较长的综合多媒体教室一号" : `教室${index}`,
+    "初一", "数学", index === 1 ? "状态学生甲；状态学生乙；学生三；学生四；学生五；学生六" : (index % 2 ? "状态学生甲" : "状态学生乙"),
     `正在课程${index}`, "未上", "待上", month, index,
   );
   db.close();
@@ -130,7 +130,7 @@ test("student and teacher rule pages share only set or unset visible price statu
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));
 
-test("dashboard live-course card is stable for zero one and twenty lessons with internal scrolling", async () => withBrowser(async ({ browser, database }) => {
+test("dashboard live-course card is stable for zero one six and twenty lessons with internal scrolling", async () => withBrowser(async ({ browser, database }) => {
   await browser.login("boss", "123456");
   await browser.waitFor("Boolean(document.querySelector('.dashboard-current-section .dashboard-current-empty'))");
   const zero = await dashboardMetrics(browser);
@@ -141,8 +141,15 @@ test("dashboard live-course card is stable for zero one and twenty lessons with 
   await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 1");
   const one = await dashboardMetrics(browser);
   assert.ok(Math.abs(one.height - zero.height) <= 1); assert.equal(one.scrollHeight <= one.clientHeight, true);
+  const oneLayout = await browser.evaluate(`(() => { const item=document.querySelector('.dashboard-current-item'); const nodes=[...item.querySelectorAll('.dashboard-current-top, .dashboard-current-fact, .dashboard-current-students, .entity-badge')]; const overlap=nodes.some((a,i)=>nodes.some((b,j)=>{ if(j<=i||a.contains(b)||b.contains(a)) return false; const x=a.getBoundingClientRect(),y=b.getBoundingClientRect(); return x.width>0&&y.width>0&&x.height>0&&y.height>0&&Math.min(x.right,y.right)-Math.max(x.left,y.left)>2&&Math.min(x.bottom,y.bottom)-Math.max(x.top,y.top)>2; })); return { overlap, overflow:item.scrollWidth>item.clientWidth, visibleStudents:item.querySelectorAll('.dashboard-current-students .student-badge').length, more:item.querySelector('.dashboard-current-more')?.textContent||'' }; })()`);
+  assert.equal(oneLayout.overlap, false); assert.equal(oneLayout.overflow, false); assert.equal(oneLayout.visibleStudents, 5); assert.equal(oneLayout.more, "等1人");
 
-  addCurrentLessons(database, 2, 20);
+  addCurrentLessons(database, 2, 6);
+  await browser.evaluate("invalidateRequestCache(['/api/dashboard']); refreshDashboardForActiveMonth()");
+  await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 6");
+  const six = await dashboardMetrics(browser); assert.equal(six.itemCount, 6); assert.equal(six.overflowX, "hidden"); assert.equal(six.pageOverflow, false);
+
+  addCurrentLessons(database, 7, 20);
   await browser.evaluate("invalidateRequestCache(['/api/dashboard']); refreshDashboardForActiveMonth()");
   await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 20");
   const twenty = await dashboardMetrics(browser);
@@ -170,6 +177,7 @@ test("dashboard live-course card is stable for zero one and twenty lessons with 
   await browser.waitFor("document.querySelector('.dashboard-current-section').getBoundingClientRect().height === 320");
   const mobile = await dashboardMetrics(browser);
   assert.equal(mobile.height, 320); assert.equal(mobile.overflowY, "auto"); assert.equal(mobile.overflowX, "hidden"); assert.ok(mobile.scrollHeight > mobile.clientHeight); assert.equal(mobile.pageOverflow, false);
+  assert.equal(await browser.evaluate("[...document.querySelectorAll('.dashboard-current-item')].every((item)=>item.scrollWidth<=item.clientWidth+1)"), true);
   const mobileScreenshot = await browser.send("Page.captureScreenshot", { format: "png", fromSurface: true }); assert.ok(mobileScreenshot.data.length > 1000);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));

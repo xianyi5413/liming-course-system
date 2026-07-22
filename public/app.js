@@ -337,6 +337,7 @@ let passwordModalOpen = false;
 let userMenuOpen = false;
 let userAdminNotice = "";
 let userAdminTab = localStorage.getItem("liming:user-admin-tab") || "accounts";
+let userAdminFocusId = null;
 let rolePermissionModal = null;
 let userAccessModal = null;
 let userCreateModalOpen = false;
@@ -451,7 +452,7 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   last_test_result: "not_tested",
   test_passed: false,
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -8508,8 +8509,9 @@ function renderOpeningBalances() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table">
+          <colgroup><col class="opening-balance-col-select"><col class="opening-balance-col-student"><col class="opening-balance-col-grade"><col class="opening-balance-col-money"><col class="opening-balance-col-money"><col class="opening-balance-col-notes"></colgroup>
           <thead>
-            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -8519,7 +8521,7 @@ function renderOpeningBalances() {
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
-                <td><input class="cell-input wide opening-balance-field" data-field="notes" value="${escapeHtml(row.notes)}"></td>
+                <td class="opening-balance-notes-cell"><textarea class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" rows="2">${escapeHtml(row.notes)}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
@@ -9308,13 +9310,75 @@ function dataPreflightMarkup() {
   const issueRows = (result.issues || []).map((issue) => `
     <div class="data-preflight-issue">
       <div><strong>${escapeHtml(issue.label || issue.code)}</strong><span>${Number(issue.count || 0)} 条</span></div>
-      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.student_name || "")}　${escapeHtml(record.grade || "")}${record.record_ids ? `　关联记录：${escapeHtml(record.record_ids)}` : ""}</div>`).join("")}
+      ${(issue.records || []).map((record) => `<div class="data-preflight-record">记录#${escapeHtml(record.record_id ?? "-")}　${escapeHtml(record.username || record.student_name || "")}　${escapeHtml(record.display_name || record.grade || "")}${record.invalid_reason ? `　${escapeHtml(record.invalid_reason)}` : ""}${record.record_ids ? `　关联记录：${escapeHtml(record.record_ids)}` : ""}</div>`).join("")}
     </div>`).join("");
   return `<section class="band data-preflight-panel danger">
     <div class="section-head"><div><div class="section-title">数据完整性预检未通过</div><div class="section-subtitle preflight-message">${escapeHtml(result.user_message || "请修复问题后重新检查")}</div></div><span class="data-count-chip">共 ${Number(result.issue_count || 0)} 个问题</span></div>
     <div class="data-preflight-list">${issueRows}</div>
     <div class="audit-toolbar"><button class="btn primary data-preflight-view" type="button">查看问题记录</button><button class="btn data-preflight-recheck" type="button">重新检查</button><button class="btn data-preflight-download" type="button">下载错误清单</button></div>
   </section>`;
+}
+
+async function loadPreflightDetails() {
+  backupState.preflightDetailsOpen = true;
+  backupState.preflightDetailsLoading = true;
+  backupState.preflightDetailsError = "";
+  render();
+  try {
+    backupState.preflightDetails = await request("/api/data-center/preflight/details");
+  } catch (error) {
+    backupState.preflightDetails = null;
+    backupState.preflightDetailsError = safeDataCenterLoadError(error);
+  } finally {
+    backupState.preflightDetailsLoading = false;
+    render();
+  }
+}
+
+function preflightRecordFields(record = {}) {
+  const accountRecord = Boolean(record.username || Object.prototype.hasOwnProperty.call(record, "current_role_code"));
+  const fields = [
+    ["账号记录ID", record.record_id],
+    ["账号", record.username],
+    ["姓名", record.display_name],
+    ["当前角色ID", accountRecord ? (record.current_role_id ?? "无") : record.current_role_id],
+    ["当前角色代码", record.current_role_code],
+    ["当前角色名称", accountRecord ? (record.current_role_name || "无") : record.current_role_name],
+    ["无效原因", record.invalid_reason],
+    ["建议处理方式", record.suggestion],
+    ["学生姓名", record.student_name],
+    ["年级", record.grade],
+    ["关联记录", record.record_ids],
+  ];
+  return fields.filter(([, value]) => value !== undefined && value !== null && String(value) !== "");
+}
+
+function preflightDetailsMarkup() {
+  if (!backupState.preflightDetailsOpen) return "";
+  const details = backupState.preflightDetails;
+  let body = `<div class="data-preflight-detail-state">正在加载问题详情…</div>`;
+  if (backupState.preflightDetailsError) {
+    body = `<div class="audit-inline-notice danger data-preflight-detail-error"><span>问题详情加载失败：${escapeHtml(backupState.preflightDetailsError)}</span><button class="btn data-preflight-detail-retry" type="button">重试</button></div>`;
+  } else if (!backupState.preflightDetailsLoading) {
+    if (details?.check_failed) {
+      body = `<div class="audit-inline-notice danger data-preflight-detail-error"><span>问题详情加载失败：${escapeHtml(details.user_message || "数据完整性预检暂时不可用")}</span><button class="btn data-preflight-detail-retry" type="button">重试</button></div>`;
+    } else {
+    const issues = details?.issues || [];
+    body = issues.length ? `<div class="data-preflight-detail-list">${issues.map((issue) => `
+      <section class="data-preflight-detail-issue">
+        <div class="data-preflight-detail-heading"><div><strong>${escapeHtml(issue.label || issue.code)}</strong><span>${escapeHtml(issue.code || "")}</span></div><span>${Number(issue.count || 0)} 条</span></div>
+        <div class="data-preflight-detail-records">${(issue.records || []).map((record) => `
+          <article class="data-preflight-detail-record" data-record-id="${escapeHtml(record.record_id ?? "")}">
+            <dl>${preflightRecordFields(record).map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("")}</dl>
+            ${issue.code === "ACCOUNT_ROLE_INVALID" && canView("userAdmin") ? `<button class="btn primary preflight-account-link" type="button" data-record-id="${escapeHtml(record.record_id)}" data-username="${escapeHtml(record.username || "")}">前往账号权限</button>` : ""}
+          </article>`).join("") || `<div class="empty">该类型暂无可显示记录，请重新检查。</div>`}</div>
+      </section>`).join("")}</div>` : `<div class="data-preflight-detail-state">没有可显示的问题记录，请重新检查。</div>`;
+    }
+  }
+  return `<div class="modal-backdrop data-preflight-detail-modal"><div class="modal-panel data-preflight-detail-panel" role="dialog" aria-modal="true" aria-labelledby="data-preflight-detail-title">
+    <div class="modal-head"><div><div class="modal-title" id="data-preflight-detail-title">数据完整性问题记录</div><div class="modal-subtitle">仅展示修复所需业务字段，不包含密码、Token、Cookie、Session 或 Secret。</div></div><button class="btn data-preflight-detail-close" type="button">关闭</button></div>
+    ${body}
+  </div></div>`;
 }
 
 function baiduSimpleGuideMarkup() {
@@ -9353,14 +9417,15 @@ function baiduSimpleSettingsCardMarkup() {
     </div>
     ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
     <div class="audit-inline-notice danger baidu-plaintext-warning"><strong>百度网盘将保存未加密的完整 Excel 备份。</strong><span>文件包含学生、课程、充值、账号权限及账号认证哈希等敏感数据。请确保百度账号已启用可靠密码和安全验证，不要公开分享备份文件。</span></div>
-    <label class="filter-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
-    <label class="history-toggle baidu-plaintext-ack"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${backupState.settings?.remote_plaintext_acknowledged ? "checked" : ""} ${isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label>
-    <label class="history-toggle"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && backupState.settings?.remote_plaintext_acknowledged && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
+    <label class="filter-field baidu-remote-directory-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
+    <label class="history-toggle baidu-plaintext-ack data-backup-checkbox-row"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${backupState.settings?.remote_plaintext_acknowledged ? "checked" : ""} ${isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label>
+    <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && backupState.settings?.remote_plaintext_acknowledged && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
     <div class="audit-toolbar">${configured && isOwnerRoleValue(auth.user?.role) ? `<button class="btn baidu-connect" type="button" ${baidu.authorized ? "disabled" : ""}>连接百度网盘</button><button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}</div>
   </div>`;
 }
 
 function renderAudit() {
+  const preflightBlocked = Boolean(backupState.preflight && !backupState.preflight.ok);
   renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
@@ -9373,7 +9438,11 @@ function renderAudit() {
         <button class="btn data-template-download" type="button" ${backupState.busy ? "disabled" : ""}>下载空白模板</button>
       </div>
       <div class="data-import-grid">
-        <label class="filter-field"><span>Excel 文件</span><input class="control data-import-file" type="file" accept=".xlsx"></label>
+        <div class="filter-field data-import-file-field"><span>Excel 文件</span><div class="data-file-picker">
+          <input id="data-import-file-input" class="data-import-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          <button class="btn data-import-file-trigger" type="button">${backupState.importFile ? "重新选择" : "选择Excel文件"}</button>
+          <span class="data-import-file-name ${backupState.importFile ? "has-file" : ""}" title="${escapeHtml(backupState.importFile?.name || "尚未选择文件")}">${escapeHtml(backupState.importFile?.name || "尚未选择文件")}</span>
+        </div></div>
         <label class="filter-field"><span>导入模式</span><select class="control data-import-mode"><option value="initialize" ${backupState.importMode === "initialize" ? "selected" : ""}>空系统初始化导入</option><option value="overwrite" ${backupState.importMode === "overwrite" ? "selected" : ""}>完整覆盖恢复</option></select></label>
         <button class="btn primary data-import-preview-button" type="button" ${backupState.busy ? "disabled" : ""}>上传并预检</button>
       </div>
@@ -9384,16 +9453,18 @@ function renderAudit() {
       <div class="data-backup-card-grid">
         <div class="data-backup-subcard local-backup-card">
           <div class="section-head"><div><div class="section-title">服务器本地备份</div><div class="section-subtitle">独立生成并验证全量 Excel，本功能不依赖百度配置。</div></div></div>
-          <div class="data-backup-settings-grid">
-            <label class="history-toggle"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
+          <div class="data-backup-primary-grid">
+            <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
             <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
             <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
+          </div>
+          <div class="data-backup-retention-grid">
             <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
             <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
             <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
             <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
           </div>
-          <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy ? "disabled" : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
+          <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy || preflightBlocked ? "disabled" : ""} ${preflightBlocked ? 'title="请先修复数据完整性问题并重新检查"' : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
         </div>
         ${baiduSimpleSettingsCardMarkup()}
       </div>
@@ -9405,7 +9476,8 @@ function renderAudit() {
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
-    ${baiduSimpleGuideMarkup()}`;
+    ${baiduSimpleGuideMarkup()}
+    ${preflightDetailsMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -9458,8 +9530,9 @@ function userAccountRowMarkup(user, teacherValues = userTeacherValues()) {
   const isSelf = Number(auth.user?.id) === Number(user.id);
   const canDelete = auth.user?.role === "owner" && !isSelf && !ownerAccount;
   const deleteTitle = ownerAccount ? "老板账号不可删除" : (isSelf ? "不能删除当前登录账号" : "软删除账号");
+  const isPreflightTarget = Number(userAdminFocusId) === Number(user.id);
   return `
-    <tr class="user-row" data-id="${escapeHtml(user.id)}">
+    <tr class="user-row ${isPreflightTarget ? "preflight-target" : ""}" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}">
       <td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
       <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
       <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
@@ -10158,6 +10231,15 @@ function renderUserAdmin() {
   document.querySelectorAll(".permission-parent").forEach((input) => {
     input.indeterminate = input.dataset.partial === "1";
   });
+  if (userAdminTab === "accounts" && userAdminFocusId != null) {
+    const target = document.querySelector(`.user-row[data-id="${selectorEscape(String(userAdminFocusId))}"]`);
+    if (target) {
+      requestAnimationFrame(() => {
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+        target.querySelector('.user-field[data-field="username"]')?.focus({ preventScroll: true });
+      });
+    }
+  }
 }
 
 function renderBaseData() {
@@ -12714,21 +12796,28 @@ function dashboardCurrentLessonsMarkup(rows = [], statusMessage = "") {
     <div class="dashboard-current-viewport">
       ${!statusMessage && rows.length ? `
         <div class="dashboard-current-list">
-          ${rows.map((row) => `
+          ${rows.map((row) => {
+            const students = splitStudents(row.student_names);
+            const shownStudents = students.slice(0, 5);
+            const hiddenStudentCount = Math.max(0, students.length - shownStudents.length);
+            return `
             <div class="dashboard-current-item">
-              <div class="dashboard-current-main">
-                <strong>${escapeHtml(row.teacher_name || "未填老师")}</strong>
-                <span>${escapeHtml(row.time_slot || "未填时间")}</span>
+              <div class="dashboard-current-top">
+                <strong title="${escapeHtml(row.teacher_name || "未填老师")}">${escapeHtml(row.teacher_name || "未填老师")}</strong>
+                <span title="${escapeHtml(row.time_slot || "未填时间")}">${escapeHtml(row.time_slot || "未填时间")}</span>
               </div>
-              <div class="dashboard-current-meta">
-                <span>${escapeHtml(row.classroom || "未填教室")}</span>
-                ${renderEntityBadge("grade", row.grade)}
-                ${renderEntityBadge("subject", row.subject)}
-                <span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>
+              <div class="dashboard-current-facts">
+                <span class="dashboard-current-fact"><em>教室</em><b title="${escapeHtml(row.classroom || "未填教室")}">${escapeHtml(row.classroom || "未填教室")}</b></span>
+                <span class="dashboard-current-fact"><em>年级</em>${renderEntityBadge("grade", row.grade)}</span>
+                <span class="dashboard-current-fact"><em>科目</em>${renderEntityBadge("subject", row.subject)}</span>
+                <span class="dashboard-current-fact"><em>状态</em>${statusBadge(row.status || "待上")}</span>
               </div>
-              ${statusBadge(row.status || "待上")}
+              <div class="dashboard-current-students" title="${escapeHtml(students.join("、") || "未填学生")}">
+                <em>学生</em><span class="entity-badge-list">${shownStudents.map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>${hiddenStudentCount ? `<span class="dashboard-current-more">等${hiddenStudentCount}人</span>` : ""}
+              </div>
             </div>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       ` : `<div class="dashboard-current-empty">${escapeHtml(statusMessage || "当前没有正在上的课程")}</div>`}
     </div>
@@ -15160,7 +15249,28 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".data-import-file").forEach((input) => {
-    input.addEventListener("change", () => { backupState.importFile = input.files?.[0] || null; backupState.importPreview = null; });
+    input.addEventListener("change", () => {
+      const file = input.files?.[0] || null;
+      if (file && !/\.xlsx$/i.test(file.name || "")) {
+        backupState.importFile = null;
+        backupState.importPreview = null;
+        backupState.error = "请选择 .xlsx 格式的 Excel 文件";
+      } else {
+        backupState.importFile = file;
+        backupState.importPreview = null;
+        backupState.error = "";
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".data-import-file-trigger").forEach((button) => {
+    const activateFilePicker = () => document.getElementById("data-import-file-input")?.click();
+    button.addEventListener("click", activateFilePicker);
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activateFilePicker();
+    });
   });
 
   document.querySelectorAll(".data-import-mode").forEach((select) => {
@@ -15309,11 +15419,28 @@ function wireEvents() {
     catch (error) { showToast(error.message || "下载错误清单失败", "error"); }
   }));
   document.querySelectorAll(".data-preflight-view").forEach((button) => button.addEventListener("click", async () => {
-    const opening = (backupState.preflight?.issues || []).find((issue) => issue.code === "OPENING_BALANCE_STUDENT_DUPLICATE");
-    const first = opening?.records?.[0];
-    if (!first || !canView("openingBalances")) return showToast("当前账号不能进入期初余额页面", "error");
-    openingBalanceFilter = { student: first.student_name || "", grade: first.grade || "" };
-    setActiveView("openingBalances");
+    await loadPreflightDetails();
+  }));
+  document.querySelectorAll(".data-preflight-detail-retry").forEach((button) => button.addEventListener("click", loadPreflightDetails));
+  document.querySelectorAll(".data-preflight-detail-close").forEach((button) => button.addEventListener("click", () => {
+    backupState.preflightDetailsOpen = false;
+    backupState.preflightDetailsError = "";
+    render();
+  }));
+  document.querySelectorAll(".data-preflight-detail-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    backupState.preflightDetailsOpen = false;
+    backupState.preflightDetailsError = "";
+    render();
+  }));
+  document.querySelectorAll(".preflight-account-link").forEach((button) => button.addEventListener("click", async () => {
+    if (!canView("userAdmin")) return showToast("当前账号没有账号权限页面访问权限", "error");
+    userAdminFocusId = Number(button.dataset.recordId || 0) || null;
+    userAdminTab = "accounts";
+    userAdminNotice = button.dataset.username ? `已定位需要修复角色的账号：${button.dataset.username}` : "已定位需要修复角色的账号";
+    localStorage.setItem("liming:user-admin-tab", userAdminTab);
+    backupState.preflightDetailsOpen = false;
+    setActiveView("userAdmin");
     renderViewTransitionSkeleton();
     try { await load({ refreshGlobal: false }); }
     catch (error) { renderLoadFailure(error); }
