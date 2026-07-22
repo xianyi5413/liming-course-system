@@ -36,7 +36,9 @@ function memoryClient(manager, options = {}) {
   manager.client.uploadFile = async (filename, remotePath) => {
     uploads.push(remotePath);
     if (options.failUpload?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成上传失败");
-    const bytes = fs.readFileSync(filename); files.set(remotePath, bytes); return { file_id: `id-${uploads.length}`, path: remotePath };
+    const bytes = fs.readFileSync(filename); files.set(remotePath, bytes);
+    if (options.throwAfterUpload?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成上传响应丢失");
+    return { file_id: `id-${uploads.length}`, path: remotePath };
   };
   manager.client.downloadFile = async (remotePath) => {
     if (options.missingDownload?.(remotePath) || !files.has(remotePath)) throw new BaiduError("BAIDU_DOWNLOAD_FAILED", "合成下载失败");
@@ -103,7 +105,7 @@ test("chunk upload retries a transient provider failure without changing the rem
 test("connection test uploads, downloads, verifies and deletes a synthetic plaintext pair", async () => {
   const manager = configuredManager(path.join(tempRoot, "connection-test")); const memory = memoryClient(manager);
   const result = await manager.testConnection("/apps/liming-course-system");
-  assert.deepEqual(result.steps, { authorization: true, connection: true, test_directory: true, file_upload: true, checksum_upload: true, download: true, integrity_check: true, test_delete_file: true, test_delete_checksum: true });
+  assert.deepEqual(result.steps, { authorization: true, connection: true, test_directory: true, file_upload: true, checksum_upload: true, file_download: true, checksum_download: true, integrity_check: true, test_delete_file: true, test_delete_checksum: true });
   assert.equal(memory.uploads.length, 2); assert.equal(memory.uploads.some((name) => name.endsWith(".sha256")), true); assert.equal(memory.uploads.some((name) => name.endsWith(".enc")), false); assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
   assert.deepEqual(fs.readdirSync(path.join(tempRoot, "connection-test", "backups", "full-excel", ".secrets")).filter((name) => name.startsWith(".connection-") || name.startsWith("plaintext-test-")), []);
 });
@@ -112,6 +114,48 @@ test("failed connection test removes every remote test file that was created", a
   const manager = configuredManager(path.join(tempRoot, "connection-cleanup")); const memory = memoryClient(manager, { missingDownload: () => true });
   await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => error.code === "BAIDU_DOWNLOAD_FAILED");
   assert.equal(memory.uploads.length, 2); assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
+});
+
+test("connection test attempts cleanup when an upload completed remotely but its response failed", async () => {
+  const manager = configuredManager(path.join(tempRoot, "connection-upload-response-failure")); const memory = memoryClient(manager, { throwAfterUpload: () => true });
+  await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => {
+    assert.equal(error.code, "BAIDU_API_FAILED"); assert.equal(error.details.stage, "file_upload"); assert.equal(error.details.steps.file_upload, false); assert.equal(error.details.steps.test_delete_file, true); assert.equal(error.details.cleanup.complete, true); return true;
+  });
+  assert.equal(memory.uploads.length, 1); assert.equal(memory.deletes.length, 1); assert.equal(memory.files.size, 0);
+});
+
+test("connection diagnostics identify download failures and expose no credentials", async () => {
+  const manager = configuredManager(path.join(tempRoot, "connection-stage")); const memory = memoryClient(manager, { missingDownload: (name) => name.endsWith(".sha256") });
+  await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => {
+    assert.equal(error.code, "BAIDU_DOWNLOAD_FAILED"); assert.equal(error.details.stage, "checksum_download"); assert.equal(error.details.steps.file_download, true); assert.equal(error.details.steps.checksum_download, false); assert.equal(error.details.cleanup.complete, true);
+    assert.doesNotMatch(JSON.stringify(error.details), /APP-SECRET|MOCK-R|access_token/i); return true;
+  });
+  assert.equal(memory.files.size, 0);
+});
+
+test("core connection success remains successful when cleanup is partial", async () => {
+  const manager = configuredManager(path.join(tempRoot, "connection-cleanup-partial")); const memory = memoryClient(manager, { failDelete: (name) => name.endsWith(".sha256") });
+  const result = await manager.testConnection("/apps/liming-course-system");
+  assert.equal(result.ok, true); assert.equal(result.core_ok, true); assert.equal(result.cleanup_ok, false); assert.equal(result.warning_code, "BAIDU_TEST_CLEANUP_PARTIAL"); assert.equal(result.steps.integrity_check, true); assert.equal(result.steps.test_delete_checksum, false); assert.equal(result.cleanup.remaining_paths.length, 1); assert.equal(memory.files.size, 1);
+});
+
+test("delete accepts task responses and verifies ambiguous successful responses", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "delete-token.json")); tokenStore.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 });
+  let mode = "task"; const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.searchParams.get("method") === "filemanager") return mode === "task" ? Response.json({ taskid: 123 }) : new Response("", { status: 200 });
+    if (url.searchParams.get("method") === "filemetas") return Response.json({ errno: 0, list: [] });
+    throw new Error("unexpected endpoint");
+  };
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, fetchImpl, endpoints: { xpan: "https://xpan.example.test" } });
+  assert.equal((await client.deleteFile("/apps/liming/test.txt")).ok, true); mode = "ambiguous"; assert.equal((await client.deleteFile("/apps/liming/test.txt")).verified_absent, true);
+});
+
+test("download rejects a provider JSON error body instead of treating it as file bytes", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "download-token.json")); tokenStore.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 });
+  const fetchImpl = async (input) => { const url = new URL(String(input)); if (url.searchParams.get("method") === "filemetas") return Response.json({ errno: 0, list: [{ dlink: "https://download.example.test/file" }] }); return Response.json({ errno: 31326 }, { status: 200 }); };
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, fetchImpl, endpoints: { xpan: "https://xpan.example.test" } });
+  await assert.rejects(() => client.downloadFile("/apps/liming/test.txt"), (error) => error.code === "BAIDU_DOWNLOAD_FAILED" && error.details.provider_code === "31326" && error.details.http_status === 200);
 });
 
 test("managed backup uploads the original Excel bytes and matching SHA-256 sidecar", async () => {

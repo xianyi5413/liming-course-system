@@ -1545,7 +1545,7 @@ button:disabled,
 #app {
   height: 100vh;
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-columns: 208px minmax(0, 1fr);
   overflow: hidden;
   transition: grid-template-columns 180ms var(--ease-out);
 }
@@ -1998,9 +1998,9 @@ button:disabled,
 
 .nav-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .nav-btn:hover {
@@ -2035,9 +2035,9 @@ button:disabled,
 .nav-subtabs {
   display: grid;
   gap: 4px;
-  padding: 4px 0 4px 12px;
+  padding: 4px 0 4px 8px;
   border-left: 2px solid var(--brand-border);
-  margin-left: 14px;
+  margin-left: 10px;
 }
 
 .nav-sub-btn {
@@ -4575,6 +4575,37 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   align-items: flex-start;
 }
 
+.baidu-settings-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.baidu-settings-schedule {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.baidu-test-step-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.baidu-test-step-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.data-export-log-option {
+  margin-left: auto;
+}
+
 .remote-pair-status {
   display: grid;
   gap: 3px;
@@ -4775,6 +4806,9 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 
   .data-backup-card-grid,
   .baidu-status-grid,
+  .baidu-settings-group,
+  .baidu-settings-schedule,
+  .baidu-test-step-list,
   .data-backup-primary-grid,
   .data-backup-retention-grid {
     grid-template-columns: minmax(0, 1fr);

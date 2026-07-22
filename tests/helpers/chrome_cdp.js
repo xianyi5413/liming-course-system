@@ -39,6 +39,7 @@ class CdpSession {
     this.responses = [];
     this.failDataCenterOnce = false;
     this.failPreflightDetailsOnce = false;
+    this.baiduTestResult = null;
     socket.addEventListener("message", (event) => this.onMessage(event));
   }
 
@@ -68,7 +69,11 @@ class CdpSession {
     }
     if (message.method === "Fetch.requestPaused") {
       const request = message.params?.request || {};
-      if (this.failPreflightDetailsOnce && /\/api\/data-center\/preflight\/details(?:\?.*)?$/.test(request.url || "")) {
+      if (this.baiduTestResult && /\/api\/data-center\/baidu\/test(?:\?.*)?$/.test(request.url || "")) {
+        const mocked = this.baiduTestResult; this.baiduTestResult = mocked.once === false ? mocked : null;
+        const body = Buffer.from(JSON.stringify(mocked.body || {})).toString("base64");
+        this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: mocked.status || 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});
+      } else if (this.failPreflightDetailsOnce && /\/api\/data-center\/preflight\/details(?:\?.*)?$/.test(request.url || "")) {
         this.failPreflightDetailsOnce = false;
         const body = Buffer.from(JSON.stringify({ error: "PREFLIGHT_DETAILS_TEMPORARY_FAILURE" })).toString("base64");
         this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: 503, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});

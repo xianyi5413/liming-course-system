@@ -7,8 +7,8 @@ const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
-const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, startBackupScheduler } = require("./backup/scheduler");
-const { BaiduBackupManager } = require("./backup/baidu_provider");
+const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, remoteDueState, startBackupScheduler } = require("./backup/scheduler");
+const { BaiduBackupManager, safeRemotePath } = require("./backup/baidu_provider");
 const { DataPreflightError, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
 const { studentPriceStatus, teacherPriceStatus } = require("./domain/price_status");
 const { migrateOpeningBalancesToGlobal } = require("./domain/opening_balance_migration");
@@ -968,7 +968,16 @@ function initDb() {
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_monthly_retention', '12')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_manual_retention', '20')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_retry_count', '3')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_local_include_operation_logs', '0')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_enabled', '0')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_frequency', 'weekly')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_time', '03:30')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_weekday', '3')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_monthday', '1')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_timezone', 'Asia/Shanghai')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_retention', '20')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_retry_count', '3')").run();
+  db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_include_operation_logs', '1')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_directory', '/apps/liming-course-system')").run();
   db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('full_backup_remote_plaintext_acknowledged', '0')").run();
   const currentMonth = db.prepare("SELECT value FROM settings WHERE key = 'month_key'").get().value;
@@ -1013,6 +1022,34 @@ function backupService() {
   return backupServiceInstance;
 }
 function baiduBackupManager() { if (!baiduBackupManagerInstance) baiduBackupManagerInstance = new BaiduBackupManager({ dataDir }); return baiduBackupManagerInstance; }
+function validateBackupSettingsPatch(body = {}, scope = "all") {
+  const localKeys = ["enabled", "time", "timezone", "daily_retention", "monthly_retention", "manual_retention", "retry_count", "local_include_operation_logs"];
+  const remoteKeys = ["remote_enabled", "remote_frequency", "remote_time", "remote_timezone", "remote_weekday", "remote_monthday", "remote_retention", "remote_retry_count", "remote_include_operation_logs", "remote_directory", "remote_plaintext_acknowledged"];
+  const checkBoolean = (key) => { if (Object.hasOwn(body, key) && typeof body[key] !== "boolean") throw Object.assign(new Error(`${key} 必须为布尔值`), { code: "BACKUP_SETTING_TYPE_INVALID" }); };
+  const checkInteger = (key, min, max) => { if (Object.hasOwn(body, key) && (!Number.isInteger(Number(body[key])) || Number(body[key]) < min || Number(body[key]) > max)) throw Object.assign(new Error(`${key} 超出允许范围`), { code: "BACKUP_SETTING_RANGE_INVALID" }); };
+  const checkTime = (key) => { if (Object.hasOwn(body, key) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(body[key] || ""))) throw Object.assign(new Error(`${key} 时间格式无效`), { code: "BACKUP_SETTING_TIME_INVALID" }); };
+  if (scope !== "remote") {
+    ["enabled", "local_include_operation_logs"].forEach(checkBoolean); checkTime("time");
+    [["daily_retention", 1, 365], ["monthly_retention", 1, 120], ["manual_retention", 1, 200], ["retry_count", 0, 10]].forEach(([key, min, max]) => checkInteger(key, min, max));
+  }
+  if (scope !== "local") {
+    ["remote_enabled", "remote_include_operation_logs", "remote_plaintext_acknowledged"].forEach(checkBoolean); checkTime("remote_time");
+    [["remote_weekday", 1, 7], ["remote_monthday", 1, 28], ["remote_retention", 1, 200], ["remote_retry_count", 0, 10]].forEach(([key, min, max]) => checkInteger(key, min, max));
+    if (Object.hasOwn(body, "remote_frequency") && !["manual", "daily", "weekly", "monthly"].includes(String(body.remote_frequency))) throw Object.assign(new Error("百度备份频率无效"), { code: "BACKUP_SETTING_FREQUENCY_INVALID" });
+    if (Object.hasOwn(body, "remote_timezone") && body.remote_timezone !== "Asia/Shanghai") throw Object.assign(new Error("百度备份时区只支持 Asia/Shanghai"), { code: "BACKUP_SETTING_TIMEZONE_INVALID" });
+    if (Object.hasOwn(body, "remote_directory")) safeRemotePath(body.remote_directory);
+  }
+  const allowed = scope === "local" ? localKeys : scope === "remote" ? remoteKeys : [...localKeys, ...remoteKeys];
+  return Object.fromEntries(allowed.filter((key) => Object.hasOwn(body, key)).map((key) => [key, body[key]]));
+}
+function safeBaiduTestFailure(error) {
+  const details = error?.details || {};
+  return {
+    error: error?.message || "百度连接测试失败", code: String(error?.code || "BAIDU_CONNECTION_TEST_FAILED").slice(0, 100),
+    stage: String(details.stage || "unknown").slice(0, 80), provider_code: String(details.provider_code || "").slice(0, 80),
+    http_status: Number(details.http_status || 0), cleanup: details.cleanup || { complete: false }, steps: details.steps || {},
+  };
+}
 function baiduCallbackUrl(req) {
   const forwardedProto = text(String(req.headers["x-forwarded-proto"] || "").split(",")[0]).toLowerCase();
   const protocol = ["http", "https"].includes(forwardedProto) ? forwardedProto : (req.socket?.encrypted ? "https" : "http");
@@ -9381,8 +9418,16 @@ const READONLY_SAFE_MUTATION_PATHS = new Set([
 ]);
 
 function isReadonlySafeMutation(req, url) {
-  return String(req.method || "").toUpperCase() === "POST"
-    && READONLY_SAFE_MUTATION_PATHS.has(url.pathname);
+  const method = String(req.method || "").toUpperCase();
+  if (method === "POST" && READONLY_SAFE_MUTATION_PATHS.has(url.pathname)) return true;
+  const dataCenterManagerMutations = new Set([
+    "PUT /api/data-center/baidu/config",
+    "PUT /api/data-center/baidu/settings",
+    "POST /api/data-center/baidu/authorize",
+    "POST /api/data-center/baidu/test",
+    "POST /api/data-center/baidu/backups",
+  ]);
+  return dataCenterManagerMutations.has(`${method} ${url.pathname}`);
 }
 
 const READONLY_WRITE_MESSAGE = "当前账号为只读，不能修改数据";
@@ -11608,8 +11653,9 @@ async function handleApi(req, res, url) {
   // deliberately SameSite=Strict. The short-lived, one-use state is the
   // callback capability; starting authorization remains owner-only below.
   if (req.method === "GET" && url.pathname === "/api/data-center/baidu/callback") {
+    if (url.searchParams.get("error")) { res.writeHead(302, { location: "/?baidu=denied", "cache-control": "no-store" }); return res.end(); }
     try { await baiduBackupManager().finishAuthorization(url.searchParams.get("code"), url.searchParams.get("state")); res.writeHead(302, { location: "/?baidu=connected", "cache-control": "no-store" }); return res.end(); }
-    catch (error) { return sendError(res, 400, error.message || "百度授权失败"); }
+    catch { res.writeHead(302, { location: "/?baidu=failed", "cache-control": "no-store" }); return res.end(); }
   }
   const user = currentUser(req);
   if (!user) return sendError(res, 401, "请先登录");
@@ -12440,9 +12486,10 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center/export.xlsx") {
     try {
+      const includeOperationLogs = url.searchParams.get("include_operation_logs") !== "0";
       db.exec("BEGIN");
       let exported;
-      try { exported = buildFullDataBuffer(db, { appVersion: APP_VERSION, appGitCommit: APP_GIT_COMMIT }); db.exec("COMMIT"); }
+      try { exported = buildFullDataBuffer(db, { appVersion: APP_VERSION, appGitCommit: APP_GIT_COMMIT, includeOperationLogs }); db.exec("COMMIT"); }
       catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
       const filename = fullDataFilename(exported.createdAt);
       writeOperationLog(user, {
@@ -12450,7 +12497,7 @@ async function handleApi(req, res, url) {
         operation_content: `导出文件 ${filename}`,
         target_type: "full_data_export",
         target_id: "all",
-        details: { filename, file_size: exported.buffer.length },
+        details: { filename, file_size: exported.buffer.length, operation_logs_included: includeOperationLogs },
       }, req);
       return sendBuffer(res, exported.buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename);
     } catch (error) {
@@ -12511,33 +12558,53 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/settings") {
-    const body = await readBody(req);
-    const remote = baiduBackupManager().configurationStatus();
-    const currentBackupSettings = loadFullBackupSettings(dbPath);
-    if (!isSuperRole(user.role)) {
-      const remoteChanged = (Object.hasOwn(body, "remote_enabled") && Boolean(body.remote_enabled) !== currentBackupSettings.remote_enabled)
-        || (Object.hasOwn(body, "remote_directory") && String(body.remote_directory || "") !== currentBackupSettings.remote_directory)
-        || (Object.hasOwn(body, "remote_plaintext_acknowledged") && Boolean(body.remote_plaintext_acknowledged) !== currentBackupSettings.remote_plaintext_acknowledged);
-      if (remoteChanged) return sendError(res, 403, "只有老板可以修改百度网盘备份设置");
-    }
-    if (body.remote_enabled && remote.missing_items.length) return sendJson(res, { error: `尚缺少：${remote.missing_items.join("、")}`, code: "BAIDU_CONFIGURATION_INCOMPLETE", baidu: remote }, 400);
-    if (body.remote_enabled && !remote.authorized) return sendJson(res, { error: "请先完成百度网盘授权并测试连接", code: "BAIDU_AUTHORIZATION_REQUIRED", baidu: remote }, 400);
-    if (body.remote_enabled && !remote.test_passed) return sendJson(res, { error: "请先完成百度网盘明文文件与 SHA-256 校验测试", code: "BAIDU_CONNECTION_TEST_REQUIRED", baidu: remote }, 400);
-    if (body.remote_enabled && !(body.remote_plaintext_acknowledged || currentBackupSettings.remote_plaintext_acknowledged)) return sendJson(res, { error: "启用前必须确认百度网盘将保存未加密的完整 Excel 备份", code: "BAIDU_PLAINTEXT_RISK_ACK_REQUIRED" }, 400);
-    const settings = saveFullBackupSettings(dbPath, { ...body, remote_plaintext_acknowledged: body.remote_plaintext_acknowledged || currentBackupSettings.remote_plaintext_acknowledged });
-    writeOperationLog(user, { operation_type: "修改全量备份设置", operation_content: `自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, remote_enabled: settings.remote_enabled } }, req);
-    return sendJson(res, { ok: true, settings });
+    try {
+      const body = validateBackupSettingsPatch(await readBody(req), "local");
+      const settings = saveFullBackupSettings(dbPath, body);
+      writeOperationLog(user, { operation_type: "修改服务器备份设置", operation_content: `本地自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "local_backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, operation_logs_included: settings.local_include_operation_logs } }, req);
+      return sendJson(res, { ok: true, settings });
+    } catch (error) { return sendJson(res, { error: error.message || "本地备份设置无效", code: error.code || "BACKUP_SETTINGS_INVALID" }, 400); }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/baidu/schedule") {
+    const settings = loadFullBackupSettings(dbPath);
+    return sendJson(res, { enabled: settings.remote_enabled, frequency: settings.remote_frequency, state: remoteDueState(dbPath, settings) });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/data-center/baidu/settings") {
+    try {
+      const body = validateBackupSettingsPatch(await readBody(req), "remote"); const remote = baiduBackupManager().configurationStatus(); const current = loadFullBackupSettings(dbPath);
+      const merged = { ...current, ...body };
+      if (merged.remote_enabled && remote.missing_items.length) return sendJson(res, { error: `尚缺少：${remote.missing_items.join("、")}`, code: "BAIDU_CONFIGURATION_INCOMPLETE", baidu: remote }, 400);
+      if (merged.remote_enabled && !remote.authorized) return sendJson(res, { error: "请先完成百度网盘授权并测试连接", code: "BAIDU_AUTHORIZATION_REQUIRED", baidu: remote }, 400);
+      if (merged.remote_enabled && !remote.test_passed) return sendJson(res, { error: "请先完成百度网盘明文文件与 SHA-256 校验测试", code: "BAIDU_CONNECTION_TEST_REQUIRED", baidu: remote }, 400);
+      if (merged.remote_enabled && !merged.remote_plaintext_acknowledged) return sendJson(res, { error: "启用前必须确认百度网盘将保存未加密的完整 Excel 备份", code: "BAIDU_PLAINTEXT_RISK_ACK_REQUIRED" }, 400);
+      const settings = saveFullBackupSettings(dbPath, body);
+      writeOperationLog(user, { operation_type: "修改百度备份设置", operation_content: `百度自动备份${settings.remote_enabled ? "已启用" : "已关闭"}，频率 ${settings.remote_frequency}`, target_type: "data_center", target_id: "baidu_backup_settings", details: { remote_enabled: settings.remote_enabled, remote_frequency: settings.remote_frequency, remote_time: settings.remote_time, remote_weekday: settings.remote_weekday, remote_monthday: settings.remote_monthday, remote_retention: settings.remote_retention, remote_retry_count: settings.remote_retry_count, operation_logs_included: settings.remote_include_operation_logs } }, req);
+      return sendJson(res, { ok: true, settings });
+    } catch (error) { writeOperationLog(user, { operation_type: "修改百度备份设置", operation_content: "百度备份设置保存失败", target_type: "data_center", target_id: "baidu_backup_settings", result_status: "failure", details: { code: error.code || "BACKUP_SETTINGS_INVALID" } }, req); return sendJson(res, { error: error.message || "百度备份设置无效", code: error.code || "BACKUP_SETTINGS_INVALID" }, 400); }
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
     try {
-      const settings = loadFullBackupSettings(dbPath); const remote = baiduBackupManager(); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: settings.remote_enabled && remote.configured() });
+      const settings = loadFullBackupSettings(dbPath); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: false, includeOperationLogs: settings.local_include_operation_logs });
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
       return sendJson(res, { ...result, records: backupService().list() }, 201);
     } catch (error) {
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: "服务器备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BACKUP_FAILED" } }, req);
       return sendDataPreflightFailure(res, error, error.message || "备份失败", error.code === "BACKUP_ALREADY_RUNNING" ? 409 : 500);
     }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/baidu/backups") {
+    try {
+      const settings = loadFullBackupSettings(dbPath); const manager = baiduBackupManager(); const status = manager.configurationStatus();
+      if (!status.authorized || !status.test_passed || !settings.remote_plaintext_acknowledged) throw Object.assign(new Error("请先完成百度配置、授权、连接测试和风险确认"), { code: "BAIDU_BACKUP_NOT_READY" });
+      const result = await backupService().create({ trigger: "remote_manual", retentionClass: "remote", createdByUserId: user.id, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs });
+      const retention = result.record.remote_status === "success" ? await backupService().applyRemoteRetention(settings.remote_retention, (record) => manager.delete(record)) : { removed: [], skipped: [], retention: settings.remote_retention };
+      writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: `百度备份 ${result.record.remote_status}`, target_type: "backup_records", target_id: String(result.record.id), result_status: result.record.remote_status === "success" ? "success" : "failure", details: { code: result.record.remote_error_safe || "", operation_logs_included: result.record.operation_logs_included } }, req);
+      return sendJson(res, { ...result, retention, records: backupService().list() }, result.record.remote_status === "success" ? 201 : 502);
+    } catch (error) { writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: "百度备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BAIDU_BACKUP_FAILED" } }, req); return sendJson(res, { error: error.message || "百度备份失败", code: error.code || "BAIDU_BACKUP_FAILED" }, 400); }
   }
 
   const dataBackupVerify = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/verify$/);
@@ -12590,12 +12657,21 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/authorize") {
-    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以连接百度网盘");
+    if (!canManageDataCenter(user)) return sendError(res, 403, "当前账号不能连接百度网盘");
     try { return sendJson(res, baiduBackupManager().beginAuthorization()); } catch (error) { return sendError(res, 400, error.message || "百度网盘未配置"); }
   }
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/test") {
-    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以测试百度网盘");
-    try { return sendJson(res, await baiduBackupManager().testConnection(loadFullBackupSettings(dbPath).remote_directory)); } catch (error) { return sendError(res, 400, error.message || "百度连接测试失败"); }
+    if (!canManageDataCenter(user)) return sendError(res, 403, "当前账号不能测试百度网盘");
+    const body = await readBody(req);
+    try {
+      if (Object.hasOwn(body, "remote_directory")) safeRemotePath(body.remote_directory);
+      const result = await baiduBackupManager().testConnection(body.remote_directory || loadFullBackupSettings(dbPath).remote_directory);
+      writeOperationLog(user, { operation_type: "测试百度网盘连接", operation_content: result.cleanup_ok ? "连接、完整性与测试文件清理均通过" : "连接及完整性通过，测试文件清理不完整", target_type: "data_center", target_id: "baidu", details: { code: result.warning_code || "SUCCESS", cleanup_ok: result.cleanup_ok } }, req);
+      return sendJson(res, result);
+    } catch (error) {
+      const safe = safeBaiduTestFailure(error); writeOperationLog(user, { operation_type: "测试百度网盘连接", operation_content: `连接测试失败：${safe.stage}`, target_type: "data_center", target_id: "baidu", result_status: "failure", details: { code: safe.code, stage: safe.stage, provider_code: safe.provider_code, http_status: safe.http_status, cleanup_complete: Boolean(safe.cleanup?.complete) } }, req);
+      return sendJson(res, safe, 400);
+    }
   }
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/disconnect") {
     if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以解除百度授权");
@@ -12603,15 +12679,13 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/baidu/config") {
-    if (!isSuperRole(user.role)) return sendError(res, 403, "只有老板可以保存百度配置");
-    const body = await readBody(req); const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
-    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "当前密码不正确");
-    if (text(body.confirmation) !== "保存百度配置") return sendError(res, 400, "请输入确认文字：保存百度配置");
+    if (!canManageDataCenter(user)) return sendError(res, 403, "当前账号不能保存百度配置");
+    const body = await readBody(req);
     try {
       const status = baiduBackupManager().saveConfiguration({ appKey: body.app_key, appSecret: body.app_secret, redirectUri: baiduCallbackUrl(req) });
       writeOperationLog(user, { operation_type: "保存百度网盘配置", operation_content: "百度应用已配置，需继续授权并完成明文文件与 SHA-256 测试", target_type: "data_center", target_id: "baidu" }, req);
       return sendJson(res, { ok: true, status: { ...status, redirect_uri: baiduCallbackUrl(req) } });
-    } catch (error) { return sendError(res, 400, error.message || "百度配置保存失败"); }
+    } catch (error) { writeOperationLog(user, { operation_type: "保存百度网盘配置", operation_content: "百度应用配置保存失败", target_type: "data_center", target_id: "baidu", result_status: "failure", details: { code: error.code || "BAIDU_CONFIGURATION_INVALID" } }, req); return sendJson(res, { error: error.message || "百度配置保存失败", code: error.code || "BAIDU_CONFIGURATION_INVALID" }, 400); }
   }
 
   if (req.method === "DELETE" && url.pathname === "/api/data-center/baidu/config") {

@@ -431,7 +431,16 @@ const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
   monthly_retention: 12,
   manual_retention: 20,
   retry_count: 3,
+  local_include_operation_logs: false,
   remote_enabled: false,
+  remote_frequency: "weekly",
+  remote_time: "03:30",
+  remote_timezone: "Asia/Shanghai",
+  remote_weekday: 3,
+  remote_monthday: 1,
+  remote_retention: 20,
+  remote_retry_count: 3,
+  remote_include_operation_logs: true,
   remote_directory: "/apps/liming-course-system",
   remote_status: "not_configured",
   remote_plaintext_acknowledged: false,
@@ -452,7 +461,7 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   last_test_result: "not_tested",
   test_passed: false,
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -473,6 +482,7 @@ let activeDateRangePicker = null;
 let dateRangePickerEventsBound = false;
 let navigationEventsBound = false;
 let toastDismissTimer = 0;
+let pendingBaiduOAuthNotice = "";
 
 const navEl = document.querySelector("#nav");
 const topbarEl = document.querySelector("#topbar");
@@ -548,6 +558,14 @@ function showToast(message, type = "success") {
   toast.textContent = String(message || "操作完成");
   clearTimeout(toastDismissTimer);
   toastDismissTimer = window.setTimeout(() => dismissToast(), 2600);
+}
+
+function consumeBaiduOAuthResult() {
+  const url = new URL(window.location.href); const result = url.searchParams.get("baidu");
+  if (!["connected", "failed", "denied"].includes(result || "") && !url.searchParams.has("code") && !url.searchParams.has("state")) return "";
+  url.searchParams.delete("baidu"); url.searchParams.delete("code"); url.searchParams.delete("state");
+  const query = url.searchParams.toString(); history.replaceState(history.state, "", `${url.pathname}${query ? `?${query}` : ""}${url.hash}`);
+  return result || "";
 }
 
 function isCacheableGetRequest(path, options = {}) {
@@ -1724,7 +1742,9 @@ async function load(options = {}) {
     if (loadGeneration !== thisGeneration) return;
     auth = { ...auth, ...authResult };
   }
+  if (!pendingBaiduOAuthNotice) pendingBaiduOAuthNotice = consumeBaiduOAuthResult();
   if (!auth.user) return renderLogin();
+  if (pendingBaiduOAuthNotice && canView("audit")) setActiveView("audit");
   if (!ensureAccessibleView()) return;
   if (refreshGlobal || !months.length) {
     months = await request("/api/months");
@@ -1766,6 +1786,10 @@ async function load(options = {}) {
     selectedTeacher = teachers[0] || "";
   }
   render();
+  if (pendingBaiduOAuthNotice) {
+    const result = pendingBaiduOAuthNotice; pendingBaiduOAuthNotice = "";
+    showToast(result === "connected" ? "百度网盘连接成功" : result === "denied" ? "百度网盘授权已取消" : "百度网盘连接失败", result === "connected" ? "success" : "error");
+  }
 }
 
 function escapeHtml(value) {
@@ -4550,9 +4574,11 @@ function safeDataCenterLoadError(error) {
 async function refreshBackupData({ logView = false, tolerateFailure = false } = {}) {
   try {
     const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
+    const serverSettings = normalizeDataCenterSettings(data.settings);
     backupState = {
       ...backupState,
-      settings: normalizeDataCenterSettings(data.settings),
+      settings: serverSettings,
+      draft: backupState.draftDirty ? normalizeDataCenterSettings(backupState.draft) : { ...serverSettings },
       baidu: { ...DATA_CENTER_DEFAULT_BAIDU, ...(data.baidu || {}) },
       preflight: data.preflight || null,
       records: Array.isArray(data.records) ? data.records : [],
@@ -4570,6 +4596,22 @@ async function refreshBackupData({ logView = false, tolerateFailure = false } = 
     if (!tolerateFailure) throw error;
     return false;
   }
+}
+
+function markBackupDraftFromDom() {
+  const draft = { ...normalizeDataCenterSettings(backupState.draft) };
+  const read = (selector, fallback = "") => document.querySelector(selector)?.value ?? fallback;
+  const checked = (selector, fallback = false) => document.querySelector(selector)?.checked ?? fallback;
+  Object.assign(draft, {
+    enabled: checked(".data-backup-enabled", draft.enabled), time: read(".data-backup-time", draft.time), timezone: read(".data-backup-timezone", draft.timezone),
+    daily_retention: Number(read(".data-backup-daily", draft.daily_retention)), monthly_retention: Number(read(".data-backup-monthly", draft.monthly_retention)), manual_retention: Number(read(".data-backup-manual", draft.manual_retention)), retry_count: Number(read(".data-backup-retries", draft.retry_count)),
+    local_include_operation_logs: checked(".data-backup-local-logs", draft.local_include_operation_logs),
+    remote_directory: read(".data-backup-remote-directory", draft.remote_directory), remote_plaintext_acknowledged: checked(".data-backup-remote-plaintext-ack", draft.remote_plaintext_acknowledged), remote_include_operation_logs: checked(".data-backup-remote-logs", draft.remote_include_operation_logs),
+    remote_enabled: checked(".data-backup-remote-enabled", draft.remote_enabled), remote_frequency: read(".data-backup-remote-frequency", draft.remote_frequency), remote_time: read(".data-backup-remote-time", draft.remote_time), remote_timezone: read(".data-backup-remote-timezone", draft.remote_timezone),
+    remote_weekday: Number(read(".data-backup-remote-weekday", draft.remote_weekday)), remote_monthday: Number(read(".data-backup-remote-monthday", draft.remote_monthday)), remote_retention: Number(read(".data-backup-remote-retention", draft.remote_retention)), remote_retry_count: Number(read(".data-backup-remote-retries", draft.remote_retry_count)),
+  });
+  backupState.draft = normalizeDataCenterSettings(draft); backupState.draftDirty = true;
+  return backupState.draft;
 }
 
 function options(values, current, emptyText = "") {
@@ -9270,7 +9312,7 @@ function dataCenterBackupRows() {
     const downloadPath = legacy ? `/api/backups/${encodeURIComponent(row.id)}/download` : `/api/data-center/backups/${encodeURIComponent(row.id)}/download`;
     return `<tr>
       <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
-      <td>${escapeHtml(legacy ? "旧版业务归档" : (row.retention_class || "全量数据"))}</td>
+      <td>${escapeHtml(legacy ? "旧版业务归档" : `${row.retention_class || "全量数据"} · ${row.operation_logs_included === false ? "不含操作日志" : "包含操作日志"}`)}</td>
       <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
       <td>${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
       <td><div>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</div>${legacy ? "" : dataCenterRemoteSummary(row)}</td>
@@ -9384,22 +9426,30 @@ function preflightDetailsMarkup() {
 function baiduSimpleGuideMarkup() {
   if (!backupState.showBaiduGuide) return "";
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
-  const owner = isOwnerRoleValue(auth.user?.role);
+  const owner = canView("audit");
   const callback = baidu.redirect_uri || `${window.location.origin}/api/data-center/baidu/callback`;
   const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
+  const editing = !configured || backupState.baiduConfigEditing;
+  let configMarkup = `<div class="audit-inline-notice neutral">当前账号没有提交百度应用配置的权限。</div>`;
+  if (owner && editing) configMarkup = `<p>App Key 与 App Secret 保存后均不回显。此表单不会使用登录账号自动填充。</p><form class="data-backup-settings-grid baidu-secret-form" autocomplete="off" onsubmit="return false">
+    <label class="filter-field"><span>App Key</span><input class="control baidu-config-app-key" type="search" name="baidu_app_key_new" value="" autocomplete="off" autocapitalize="none" spellcheck="false" data-lpignore="true" data-1p-ignore="true"></label>
+    <label class="filter-field"><span>App Secret</span><input class="control baidu-config-app-secret" type="password" name="baidu_app_secret_new" value="" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true"></label>
+  </form><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn baidu-config-edit-cancel" type="button">取消重新配置</button>` : ""}</div>`;
+  else if (owner) configMarkup = `<div class="audit-inline-notice neutral"><strong>百度应用已配置</strong><br>App Key：已配置；App Secret：已配置。出于安全原因不回显。</div><div class="audit-toolbar"><button class="btn baidu-config-edit" type="button">重新配置</button><button class="btn danger baidu-config-clear" type="button">清除配置</button></div>`;
   return `<div class="modal-backdrop baidu-guide-modal"><div class="modal-panel baidu-guide-panel">
     <div class="modal-head"><div><div class="modal-title">百度网盘备份三步配置</div><div class="modal-subtitle">本地备份不依赖百度配置；远端保存未加密 Excel 及其 SHA-256 校验文件。</div></div><button class="btn baidu-guide-close" type="button">关闭</button></div>
     <div class="baidu-guide-steps">
-      <section><h3>第一步：填写百度应用信息</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准确回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>${owner ? `<p>App Secret 保存后不再回显；重新配置时请重新填写 App Key 和 App Secret。</p><div class="data-backup-settings-grid baidu-secret-form">
-        <label class="filter-field"><span>App Key</span><input class="control baidu-config-app-key" autocomplete="off"></label>
-        <label class="filter-field"><span>App Secret</span><input class="control baidu-config-app-secret" type="password" autocomplete="new-password"></label>
-        <label class="filter-field"><span>当前老板密码</span><input class="control baidu-config-password" type="password" autocomplete="current-password"></label>
-        <label class="filter-field"><span>确认文字：保存百度配置</span><input class="control baidu-config-confirmation" autocomplete="off"></label>
-      </div><div class="audit-toolbar"><button class="btn primary baidu-config-save" type="button">保存百度配置</button>${configured ? `<button class="btn danger baidu-config-clear" type="button">清除并重新配置</button>` : ""}</div>` : `<div class="audit-inline-notice neutral">只有老板账号可以查看和提交 Secret 配置表单。</div>`}</section>
+      <section><h3>第一步：填写百度应用信息</h3><ol><li>打开百度开放平台并创建应用。</li><li>把下方回调地址原样复制到应用配置。</li><li>复制应用的 App Key 和 App Secret。</li></ol><div class="audit-toolbar"><a class="btn" href="https://pan.baidu.com/union" target="_blank" rel="noopener noreferrer">打开百度开放平台</a><button class="btn baidu-copy-callback" type="button">复制回调地址</button><a class="btn" href="https://openauth.baidu.com/doc/" target="_blank" rel="noopener noreferrer">查看图文说明</a></div><label class="filter-field wide"><span>准备回调地址</span><input class="control" value="${escapeHtml(callback)}" readonly></label>${configMarkup}</section>
       <section><h3>第二步：连接百度网盘</h3><p>保存配置后完成 OAuth 授权。Token 仅保存在服务器受限文件中，不会回显到页面。</p><div class="audit-toolbar"><button class="btn baidu-connect" type="button" ${configured && owner ? "" : "disabled"}>连接百度网盘</button><button class="btn baidu-disconnect" type="button" ${baidu.authorized && owner ? "" : "disabled"}>解除授权</button></div></section>
       <section><h3>第三步：测试并启用</h3><p>测试会上传无业务数据的普通文本及 SHA-256 文件，再下载校验并分别删除。全部通过后才可启用自动上传。</p><div class="audit-toolbar"><button class="btn baidu-test" type="button" ${configured && baidu.authorized && owner ? "" : "disabled"}>测试连接</button></div></section>
     </div>
   </div></div>`;
+}
+
+function baiduTestDetailsMarkup() {
+  const result = backupState.baiduTestDetails; if (!result || !backupState.baiduTestDetailsOpen) return "";
+  const labels = { authorization: "授权", connection: "连接", test_directory: "测试目录", file_upload: "普通文件上传", checksum_upload: "校验文件上传", file_download: "普通文件下载", checksum_download: "校验文件下载", integrity_check: "SHA-256完整性", test_delete_file: "普通文件清理", test_delete_checksum: "校验文件清理" };
+  return `<div class="modal-backdrop baidu-test-detail-modal"><div class="modal-panel baidu-test-detail-panel" role="dialog" aria-modal="true"><div class="modal-head"><div><div class="modal-title">百度连接测试详情</div><div class="modal-subtitle">仅显示安全诊断，不含凭据或下载链接。</div></div><button class="btn baidu-test-detail-close" type="button">关闭</button></div><div class="baidu-test-step-list">${Object.entries(labels).map(([key,label]) => `<div><span>${label}</span><strong>${result.steps?.[key] ? "通过" : "未通过"}</strong></div>`).join("")}</div>${result.code ? `<div class="audit-inline-notice danger">阶段：${escapeHtml(result.stage || "unknown")}；内部码：${escapeHtml(result.code)}；百度码：${escapeHtml(result.provider_code || "无")}；HTTP：${Number(result.http_status || 0) || "无"}</div>` : ""}<div class="audit-inline-notice ${result.cleanup?.complete || result.cleanup_ok ? "neutral" : "warning"}">测试文件清理：${result.cleanup?.complete || result.cleanup_ok ? "已完成" : "未完全完成"}${result.cleanup?.remaining_paths?.length ? `；请人工处理：${result.cleanup.remaining_paths.map(escapeHtml).join("、")}` : ""}</div></div></div>`;
 }
 
 function baiduSimpleSettingsCardMarkup() {
@@ -9407,8 +9457,10 @@ function baiduSimpleSettingsCardMarkup() {
   const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
   const tested = baidu.test_passed || baidu.last_test_result === "success";
   const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
+  const draft = backupState.draft || backupState.settings || DATA_CENTER_DEFAULT_SETTINGS; const owner = canView("audit");
+  const frequency = draft.remote_frequency || "weekly"; const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   return `<div class="data-backup-subcard baidu-backup-card">
-    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "重新配置" : "配置百度网盘"}</button>` : ""}</div>
+    <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${owner ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "查看配置" : "配置百度网盘"}</button>` : ""}</div>
     <div class="baidu-status-grid simple">
       <div><span>① 百度应用</span><strong>${configured ? "已配置" : "未配置"}</strong></div>
       <div><span>② 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
@@ -9417,15 +9469,16 @@ function baiduSimpleSettingsCardMarkup() {
     </div>
     ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
     <div class="audit-inline-notice danger baidu-plaintext-warning"><strong>百度网盘将保存未加密的完整 Excel 备份。</strong><span>文件包含学生、课程、充值、账号权限及账号认证哈希等敏感数据。请确保百度账号已启用可靠密码和安全验证，不要公开分享备份文件。</span></div>
-    <label class="filter-field baidu-remote-directory-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(backupState.settings?.remote_directory || baidu.remote_directory || "/apps/liming-course-system")}" ${isOwnerRoleValue(auth.user?.role) ? "" : "readonly"}></label>
-    <label class="history-toggle baidu-plaintext-ack data-backup-checkbox-row"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${backupState.settings?.remote_plaintext_acknowledged ? "checked" : ""} ${isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label>
-    <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-enabled" type="checkbox" ${backupState.settings?.remote_enabled && tested ? "checked" : ""} ${tested && backupState.settings?.remote_plaintext_acknowledged && isOwnerRoleValue(auth.user?.role) ? "" : "disabled"}><span>启用百度网盘自动备份</span></label>
-    <div class="audit-toolbar">${configured && isOwnerRoleValue(auth.user?.role) ? `<button class="btn baidu-connect" type="button" ${baidu.authorized ? "disabled" : ""}>连接百度网盘</button><button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}</div>
+    <div class="baidu-settings-group baidu-settings-files"><label class="filter-field baidu-remote-directory-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(draft.remote_directory)}" ${owner ? "" : "readonly"}></label><label class="history-toggle baidu-plaintext-ack data-backup-checkbox-row"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${draft.remote_plaintext_acknowledged ? "checked" : ""} ${owner ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-logs" type="checkbox" ${draft.remote_include_operation_logs ? "checked" : ""} ${owner ? "" : "disabled"}><span>百度备份中包含操作日志</span></label></div>
+    <div class="baidu-settings-group baidu-settings-schedule"><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-enabled" type="checkbox" ${draft.remote_enabled ? "checked" : ""} ${owner ? "" : "disabled"}><span>启用百度网盘自动备份</span></label><label class="filter-field"><span>备份频率</span><select class="control data-backup-remote-frequency"><option value="manual" ${frequency === "manual" ? "selected" : ""}>仅手动</option><option value="daily" ${frequency === "daily" ? "selected" : ""}>每天</option><option value="weekly" ${frequency === "weekly" ? "selected" : ""}>每周</option><option value="monthly" ${frequency === "monthly" ? "selected" : ""}>每月</option></select></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>执行时间</span><input class="control data-backup-remote-time" type="time" value="${escapeHtml(draft.remote_time)}"></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>时区</span><select class="control data-backup-remote-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label></div>
+    <div class="baidu-settings-group baidu-settings-policy"><label class="filter-field remote-weekday" ${frequency === "weekly" ? "" : "hidden"}><span>每周执行日</span><select class="control data-backup-remote-weekday">${weekdayLabels.map((label,index) => `<option value="${index + 1}" ${Number(draft.remote_weekday) === index + 1 ? "selected" : ""}>${label}</option>`).join("")}</select></label><label class="filter-field remote-monthday" ${frequency === "monthly" ? "" : "hidden"}><span>每月执行日</span><input class="control data-backup-remote-monthday" type="number" min="1" max="28" value="${Number(draft.remote_monthday)}"></label><label class="filter-field"><span>远端保留数量</span><input class="control data-backup-remote-retention" type="number" min="1" max="200" value="${Number(draft.remote_retention)}"></label><label class="filter-field"><span>失败重试次数</span><input class="control data-backup-remote-retries" type="number" min="0" max="10" value="${Number(draft.remote_retry_count)}"></label></div>
+    <div class="audit-toolbar"><button class="btn primary baidu-backup-now" type="button" ${baidu.authorized && tested && draft.remote_plaintext_acknowledged ? "" : "disabled"}>立即备份到百度网盘</button><button class="btn baidu-settings-save" type="button">保存百度备份设置</button>${configured ? `<button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}${backupState.baiduTestDetails ? `<button class="btn baidu-test-detail-open" type="button">查看测试详情</button>` : ""}</div>
   </div>`;
 }
 
 function renderAudit() {
   const preflightBlocked = Boolean(backupState.preflight && !backupState.preflight.ok);
+  const draft = backupState.draft || backupState.settings || DATA_CENTER_DEFAULT_SETTINGS;
   renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
@@ -9436,6 +9489,7 @@ function renderAudit() {
       <div class="audit-toolbar">
         <button class="btn primary data-full-export" type="button" ${backupState.busy ? "disabled" : ""}>导出全部数据</button>
         <button class="btn data-template-download" type="button" ${backupState.busy ? "disabled" : ""}>下载空白模板</button>
+        <label class="history-toggle data-backup-checkbox-row data-export-log-option"><input class="data-export-include-logs" type="checkbox" ${backupState.exportIncludeOperationLogs ? "checked" : ""}><span>导出时包含操作日志</span></label>
       </div>
       <div class="data-import-grid">
         <div class="filter-field data-import-file-field"><span>Excel 文件</span><div class="data-file-picker">
@@ -9454,15 +9508,16 @@ function renderAudit() {
         <div class="data-backup-subcard local-backup-card">
           <div class="section-head"><div><div class="section-title">服务器本地备份</div><div class="section-subtitle">独立生成并验证全量 Excel，本功能不依赖百度配置。</div></div></div>
           <div class="data-backup-primary-grid">
-            <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-enabled" type="checkbox" ${backupState.settings?.enabled ? "checked" : ""}><span>启用自动备份</span></label>
-            <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(backupState.settings?.time || "02:30")}"></label>
+            <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-enabled" type="checkbox" ${draft.enabled ? "checked" : ""}><span>启用自动备份</span></label>
+            <label class="filter-field"><span>每天执行时间</span><input class="control data-backup-time" type="time" value="${escapeHtml(draft.time || "02:30")}"></label>
             <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
+            <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-local-logs" type="checkbox" ${draft.local_include_operation_logs ? "checked" : ""}><span>备份中包含操作日志</span></label>
           </div>
           <div class="data-backup-retention-grid">
-            <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(backupState.settings?.daily_retention || 14)}"></label>
-            <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(backupState.settings?.monthly_retention || 12)}"></label>
-            <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(backupState.settings?.manual_retention || 20)}"></label>
-            <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(backupState.settings?.retry_count ?? 3)}"></label>
+            <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(draft.daily_retention || 14)}"></label>
+            <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(draft.monthly_retention || 12)}"></label>
+            <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(draft.manual_retention || 20)}"></label>
+            <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(draft.retry_count ?? 3)}"></label>
           </div>
           <div class="audit-toolbar"><button class="btn primary backup-run-now" type="button" ${backupState.busy || preflightBlocked ? "disabled" : ""} ${preflightBlocked ? 'title="请先修复数据完整性问题并重新检查"' : ""}>立即备份</button><button class="btn backup-settings-save" type="button" ${backupState.busy ? "disabled" : ""}>保存设置</button><span class="audit-toolbar-note">自动备份：${backupState.settings?.enabled ? "已启用" : "未启用"}</span></div>
         </div>
@@ -9477,6 +9532,7 @@ function renderAudit() {
       </table></div>
     </section>
     ${baiduSimpleGuideMarkup()}
+    ${baiduTestDetailsMarkup()}
     ${preflightDetailsMarkup()}`;
 }
 
@@ -15222,7 +15278,8 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/export.xlsx", `黎明教育_全量数据_${Date.now()}.xlsx`);
+        const includeLogs = Boolean(backupState.exportIncludeOperationLogs);
+        await downloadBlob(`/api/data-center/export.xlsx?include_operation_logs=${includeLogs ? "1" : "0"}`, `黎明教育_全量数据_${Date.now()}.xlsx`);
       } catch (error) {
         if (error.data?.preflight) backupState.preflight = error.data.preflight;
         showToast(error.message || "导出全部数据失败", "error");
@@ -15232,6 +15289,7 @@ function wireEvents() {
       }
     });
   });
+  document.querySelectorAll(".data-export-include-logs").forEach((checkbox) => checkbox.addEventListener("change", () => { backupState.exportIncludeOperationLogs = checkbox.checked; }));
 
   document.querySelectorAll(".data-template-download").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -15356,29 +15414,36 @@ function wireEvents() {
     button.addEventListener("click", async () => {
       backupState.busy = true;
       try {
+        const draft = markBackupDraftFromDom();
         const result = await request("/api/data-center/settings", { method: "PUT", body: {
-          enabled: Boolean(document.querySelector(".data-backup-enabled")?.checked), time: document.querySelector(".data-backup-time")?.value,
-          timezone: document.querySelector(".data-backup-timezone")?.value, daily_retention: Number(document.querySelector(".data-backup-daily")?.value),
-          monthly_retention: Number(document.querySelector(".data-backup-monthly")?.value), manual_retention: Number(document.querySelector(".data-backup-manual")?.value),
-          retry_count: Number(document.querySelector(".data-backup-retries")?.value),
-          remote_enabled: Boolean(document.querySelector(".data-backup-remote-enabled")?.checked), remote_directory: document.querySelector(".data-backup-remote-directory")?.value,
-          remote_plaintext_acknowledged: Boolean(document.querySelector(".data-backup-remote-plaintext-ack")?.checked),
+          enabled: draft.enabled, time: draft.time, timezone: draft.timezone, daily_retention: draft.daily_retention,
+          monthly_retention: draft.monthly_retention, manual_retention: draft.manual_retention, retry_count: draft.retry_count,
+          local_include_operation_logs: draft.local_include_operation_logs,
         } });
-        backupState.settings = { ...backupState.settings, ...result.settings }; showToast("备份设置已保存");
+        backupState.settings = { ...backupState.settings, ...result.settings }; backupState.draft = { ...backupState.settings }; backupState.draftDirty = false; showToast("服务器备份设置已保存");
       } catch (error) { backupState.error = error.message || "保存备份设置失败"; }
       finally { backupState.busy = false; render(); }
     });
   });
 
-  document.querySelectorAll(".data-backup-remote-plaintext-ack").forEach((checkbox) => {
-    checkbox.addEventListener("change", () => {
-      const enabled = document.querySelector(".data-backup-remote-enabled");
-      const tested = backupState.baidu?.test_passed || backupState.baidu?.last_test_result === "success";
-      if (!enabled) return;
-      enabled.disabled = !(checkbox.checked && tested && isOwnerRoleValue(auth.user?.role));
-      if (!checkbox.checked) enabled.checked = false;
-    });
-  });
+  document.querySelectorAll(".baidu-settings-save").forEach((button) => button.addEventListener("click", async () => {
+    backupState.busy = true;
+    try {
+      const draft = markBackupDraftFromDom(); const result = await request("/api/data-center/baidu/settings", { method: "PUT", body: {
+        remote_enabled: draft.remote_enabled, remote_directory: draft.remote_directory, remote_plaintext_acknowledged: draft.remote_plaintext_acknowledged,
+        remote_include_operation_logs: draft.remote_include_operation_logs, remote_frequency: draft.remote_frequency, remote_time: draft.remote_time,
+        remote_timezone: draft.remote_timezone, remote_weekday: draft.remote_weekday, remote_monthday: draft.remote_monthday,
+        remote_retention: draft.remote_retention, remote_retry_count: draft.remote_retry_count,
+      } });
+      backupState.settings = { ...backupState.settings, ...result.settings }; backupState.draft = { ...backupState.settings }; backupState.draftDirty = false; backupState.error = ""; showToast("百度备份设置已保存");
+    } catch (error) { backupState.error = error.message || "保存百度备份设置失败"; }
+    finally { backupState.busy = false; render(); }
+  }));
+
+  document.querySelectorAll(".data-backup-subcard input, .data-backup-subcard select").forEach((control) => control.addEventListener("input", () => { markBackupDraftFromDom(); }));
+  document.querySelectorAll(".data-backup-remote-frequency").forEach((select) => select.addEventListener("change", () => { markBackupDraftFromDom(); render(); }));
+
+  document.querySelectorAll(".data-backup-remote-plaintext-ack").forEach((checkbox) => checkbox.addEventListener("change", () => { markBackupDraftFromDom(); }));
 
   document.querySelectorAll(".backup-verify").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -15468,8 +15533,9 @@ function wireEvents() {
     catch (error) { showToast(error.message || "无法发起百度授权", "error"); }
   }));
   document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
-    try { await request("/api/data-center/baidu/test", { method: "POST", body: {} }); await refreshBackupData(); showToast("授权、普通测试文件、SHA-256 下载校验和成对删除均已通过"); }
-    catch (error) { showToast(error.message || "百度网盘连接失败", "error"); }
+    const draft = markBackupDraftFromDom();
+    try { const result = await request("/api/data-center/baidu/test", { method: "POST", body: { remote_directory: draft.remote_directory } }); backupState.baiduTestDetails = result; await refreshBackupData(); showToast(result.cleanup_ok ? "百度连接、下载校验和测试文件清理均已通过" : "连接及完整性测试通过，但测试文件清理失败", result.cleanup_ok ? "success" : "error"); }
+    catch (error) { backupState.baiduTestDetails = error.data || { code: error.message, stage: "unknown", steps: {}, cleanup: { complete: false } }; const detail = error.data || {}; showToast(`连接测试失败：${detail.stage || "未知阶段"}${detail.provider_code ? `（百度错误码：${detail.provider_code}）` : ""}${detail.cleanup?.complete ? "，测试文件已清理" : ""}`, "error"); }
     finally { render(); }
   }));
   document.querySelectorAll(".baidu-disconnect").forEach((button) => button.addEventListener("click", async () => {
@@ -15489,13 +15555,21 @@ function wireEvents() {
     const body = {
       app_key: document.querySelector(".baidu-config-app-key")?.value || "",
       app_secret: document.querySelector(".baidu-config-app-secret")?.value || "",
-      password: document.querySelector(".baidu-config-password")?.value || "",
-      confirmation: document.querySelector(".baidu-config-confirmation")?.value || "",
     };
     button.disabled = true;
-    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; showToast("百度应用配置已保存，请继续授权"); }
+    try { await request("/api/data-center/baidu/config", { method: "PUT", body }); await refreshBackupData(); backupState.showBaiduGuide = false; backupState.baiduConfigEditing = false; showToast("百度应用配置已保存，请继续授权"); }
     catch (error) { showToast(error.message || "百度配置保存失败", "error"); }
     finally { render(); }
+  }));
+  document.querySelectorAll(".baidu-config-edit").forEach((button) => button.addEventListener("click", () => { backupState.baiduConfigEditing = true; render(); }));
+  document.querySelectorAll(".baidu-config-edit-cancel").forEach((button) => button.addEventListener("click", () => { backupState.baiduConfigEditing = false; render(); }));
+  document.querySelectorAll(".baidu-test-detail-open").forEach((button) => button.addEventListener("click", () => { backupState.baiduTestDetailsOpen = true; render(); }));
+  document.querySelectorAll(".baidu-test-detail-close").forEach((button) => button.addEventListener("click", () => { backupState.baiduTestDetailsOpen = false; render(); }));
+  document.querySelectorAll(".baidu-backup-now").forEach((button) => button.addEventListener("click", async () => {
+    markBackupDraftFromDom(); backupState.busy = true; render();
+    try { const result = await request("/api/data-center/baidu/backups", { method: "POST", body: {} }); backupState.records = result.records || backupState.records; showToast("百度网盘备份成功"); }
+    catch (error) { showToast(error.message || "百度网盘备份失败", "error"); }
+    finally { backupState.busy = false; render(); }
   }));
   document.querySelectorAll(".baidu-config-clear").forEach((button) => button.addEventListener("click", async () => {
     const password = prompt("请输入当前老板密码"); if (password == null) return;

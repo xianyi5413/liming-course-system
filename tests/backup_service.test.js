@@ -35,7 +35,7 @@ after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-data-ce
 
 test("backup_records receives only the incremental data-center columns", () => {
   const db = new DatabaseSync(dbPath, { readOnly: true }); const columns = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((row) => row.name)); db.close();
-  for (const name of ["backup_format", "format_version", "trigger", "managed_relative_path", "sha256", "remote_status", "remote_checksum_file_id", "remote_checksum_path", "remote_file_status", "remote_checksum_status", "remote_integrity_status", "deleted_at"]) assert.equal(columns.has(name), true, name);
+  for (const name of ["backup_format", "format_version", "trigger", "managed_relative_path", "sha256", "operation_logs_included", "remote_status", "remote_checksum_file_id", "remote_checksum_path", "remote_file_status", "remote_checksum_status", "remote_integrity_status", "remote_attempt_count", "deleted_at"]) assert.equal(columns.has(name), true, name);
 });
 
 test("manual backup atomically publishes a validated full Excel and checksum", () => {
@@ -90,6 +90,11 @@ test("failed publication leaves no staging directory or extra formal file", asyn
   assert.equal(fs.readdirSync(managed).filter((name) => name.endsWith(".xlsx")).length, 1);
 });
 
+test("backup records and workbooks carry the selected operation-log policy", async () => {
+  const withoutLogs = await service.create({ trigger: "manual", includeOperationLogs: false, createdAt: new Date("2026-07-20T05:00:00Z") }); const filename = path.join(dataDir, withoutLogs.record.managed_relative_path); const verified = verifyFullData(filename);
+  assert.equal(withoutLogs.record.operation_logs_included, false); assert.equal(verified.operation_logs_included, false); assert.equal(verified.workbook.sheetMap.get("操作日志").rows.length, 1);
+});
+
 test("metadata updates preserve the backup and support note and pin", () => {
   const updated = service.updateMetadata(created.record.id, { note: "人工核验", pinned: true }); assert.equal(updated.note, "人工核验"); assert.equal(updated.pinned, 1); assert.equal(service.verify(created.record.id).status, "success");
 });
@@ -125,4 +130,13 @@ test("partial remote upload and partial pair deletion remain explicit", async ()
   const deleted = await remoteService.deleteBackup(first.record.id, { remoteDeleter: async () => ({ excel: "deleted", checksum: "delete_failed" }) });
   assert.deepEqual({ remote: deleted.result.remote, excel: deleted.result.remote_excel, checksum: deleted.result.remote_checksum }, { remote: "delete_partial", excel: "deleted", checksum: "delete_failed" });
   assert.equal(deleted.record.remote_status, "delete_partial");
+});
+
+test("remote retention deletes Excel and checksum as pairs, skips pinned and encrypted records, and keeps one", async () => {
+  const directory = path.join(tempRoot, "remote-retention"); const database = path.join(directory, "data.sqlite"); initDatabase(database); const remoteService = new BackupService({ dbPath: database, dataDir: directory }); const db = remoteService.database();
+  const insert = db.prepare("INSERT INTO backup_records(backup_type,filename,status,backup_format,format_version,trigger,retention_class,remote_status,remote_path,remote_checksum_path,pinned,remote_updated_at) VALUES ('auto',?,'success','full_data_excel',4,'remote_automatic','remote','success',?,?,?,?)");
+  insert.run("one.xlsx", "/apps/liming/one.xlsx", "/apps/liming/one.xlsx.sha256", 0, "2026-01-01"); insert.run("pinned.xlsx", "/apps/liming/pinned.xlsx", "/apps/liming/pinned.xlsx.sha256", 1, "2026-02-01"); insert.run("legacy.xlsx", "/apps/liming/legacy.xlsx.enc", "/apps/liming/legacy.xlsx.enc.sha256", 0, "2026-03-01"); insert.run("new.xlsx", "/apps/liming/new.xlsx", "/apps/liming/new.xlsx.sha256", 0, "2026-04-01"); db.close();
+  const calls = []; const result = await remoteService.applyRemoteRetention(2, async (row) => { calls.push([row.remote_path, row.remote_checksum_path]); return { excel: "deleted", checksum: "deleted" }; });
+  assert.ok(result.removed.length >= 1); assert.equal(calls.every(([excel, checksum]) => checksum === `${excel}.sha256`), true); assert.equal(calls.some(([excel]) => /\.enc$/i.test(excel)), false); assert.ok(result.skipped.some((item) => item.reason === "pinned"));
+  const checked = remoteService.database(); assert.ok(checked.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE remote_status='success'").get().count >= 1); assert.equal(checked.prepare("SELECT remote_status FROM backup_records WHERE filename='pinned.xlsx'").get().remote_status, "success"); checked.close();
 });

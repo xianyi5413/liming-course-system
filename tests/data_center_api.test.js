@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { after, before, test } = require("node:test");
+const { verifyFullData } = require("../src/excel/full_backup");
 
 const root = path.resolve(__dirname, ".."); let tempRoot; let databasePath; let port; let server; let serverEnvironment; let ownerCookie; let teacherCookie; let backupRecord;
 async function freePort() { return await new Promise((resolve) => { const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => { const value = socket.address().port; socket.close(() => resolve(value)); }); }); }
@@ -35,7 +36,7 @@ after(async () => {
 });
 
 test("anonymous requests cannot access the data center", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`); assert.equal(response.status, 401); });
-test("cross-site OAuth callback reaches one-time state validation without a session cookie", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/callback?code=synthetic&state=invalid`, { redirect: "manual" }); const result = await response.json(); assert.equal(response.status, 400); assert.match(result.error, /state/); assert.notEqual(response.status, 401); });
+test("cross-site OAuth callback converts invalid state to a safe one-time result marker", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/callback?code=synthetic&state=invalid`, { redirect: "manual" }); assert.equal(response.status, 302); assert.equal(response.headers.get("location"), "/?baidu=failed"); assert.notEqual(response.status, 401); });
 test("ordinary teacher cannot access full-data management", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie: teacherCookie } }); assert.equal(response.status, 403); });
 test("owner can read the neutral initial data-center state", async () => { const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie: ownerCookie } }); const data = await response.json(); assert.equal(response.status, 200); assert.equal(data.settings.remote_status, "not_configured"); assert.equal(data.settings.remote_plaintext_acknowledged, false); assert.equal(data.settings.local_storage_status, "not_created"); assert.equal(data.settings.enabled, false); });
 test("all historical owner role values can read the data center and preflight details", async () => { const db = new DatabaseSync(databasePath); try { for (const role of ["owner", "boss", "admin", "老板", "管理员"]) { db.prepare("UPDATE users SET role=? WHERE username='boss'").run(role); const cookie = await login("boss"); const response = await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie } }); assert.equal(response.status, 200, role); const details = await fetch(`http://127.0.0.1:${port}/api/data-center/preflight/details`, { headers: { cookie } }); assert.equal(details.status, 200, role); } } finally { db.prepare("UPDATE users SET role='owner' WHERE username='boss'").run(); db.close(); } });
@@ -68,12 +69,29 @@ test("Baidu status endpoint returns configuration booleans without secrets or to
   assert.equal(data.token_status, "not_configured");
   assert.doesNotMatch(JSON.stringify(data), /access_token|refresh_token|password_hash/i);
 });
+test("manual full export defaults to logs and supports a request-only exclusion", async () => {
+  const included = await fetch(`http://127.0.0.1:${port}/api/data-center/export.xlsx`, { headers: { cookie: ownerCookie } }); const includedWorkbook = verifyFullData(Buffer.from(await included.arrayBuffer()));
+  const excluded = await fetch(`http://127.0.0.1:${port}/api/data-center/export.xlsx?include_operation_logs=0`, { headers: { cookie: ownerCookie } }); const excludedWorkbook = verifyFullData(Buffer.from(await excluded.arrayBuffer()));
+  assert.equal(included.status, 200); assert.equal(includedWorkbook.operation_logs_included, true); assert.ok(includedWorkbook.data.operation_logs.length > 0); assert.equal(excluded.status, 200); assert.equal(excludedWorkbook.operation_logs_included, false); assert.equal(excludedWorkbook.data.operation_logs.length, 0);
+});
+test("local and remote operation-log settings have independent defaults and validation", async () => {
+  const initial = await (await fetch(`http://127.0.0.1:${port}/api/data-center`, { headers: { cookie: ownerCookie } })).json(); assert.equal(initial.settings.local_include_operation_logs, false); assert.equal(initial.settings.remote_include_operation_logs, true); assert.equal(initial.settings.remote_frequency, "weekly");
+  const local = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ local_include_operation_logs: true, remote_include_operation_logs: false }) }); assert.equal(local.status, 200);
+  const afterLocal = await local.json(); assert.equal(afterLocal.settings.remote_include_operation_logs, true);
+  const remote = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_include_operation_logs: false, remote_frequency: "monthly", remote_monthday: 28, remote_directory: "/apps/liming-course-system", local_include_operation_logs: false }) }); assert.equal(remote.status, 200);
+  const saved = await remote.json(); assert.equal(saved.settings.local_include_operation_logs, true); assert.equal(saved.settings.remote_include_operation_logs, false); assert.equal(saved.settings.remote_frequency, "monthly");
+  const invalid = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_monthday: 29, remote_directory: "/outside" }) }); assert.equal(invalid.status, 400);
+});
 test("remote backup cannot be enabled until the three application settings are configured", async () => {
-  const response = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) });
+  const response = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) });
   const data = await response.json();
   assert.equal(response.status, 400);
   assert.equal(data.code, "BAIDU_CONFIGURATION_INCOMPLETE");
   assert.equal(data.baidu.app_secret_configured, false);
+});
+test("explicit data-center manager reaches Baidu configuration validation while ordinary teacher is forbidden", async () => {
+  const auditCookie = await login("audit-user"); const manager = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: auditCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "", app_secret: "" }) }); const managerResult = await manager.json(); assert.equal(manager.status, 400, JSON.stringify(managerResult)); assert.equal(managerResult.code, "BAIDU_CONFIGURATION_INVALID");
+  const ordinary = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: teacherCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "K", app_secret: "S" }) }); assert.equal(ordinary.status, 403);
 });
 test("global opening balance passes preflight and the persisted table has no month column", async () => {
   const db = new DatabaseSync(databasePath);
@@ -141,23 +159,21 @@ test("global opening balance remains the single base for cumulative February Mar
   assert.deepEqual([june.actual_balance, june.gift_balance], [1600, 150]);
 });
 
-test("owner-only one-time Baidu configuration is reauthenticated, private and clearable", async () => {
+test("data-center manager can save one-time Baidu configuration without secondary password and it remains private and clearable", async () => {
   const secret = "NEVER-REFLECT-APP-SECRET";
-  const ordinary = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: teacherCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, password: "123456", confirmation: "保存百度配置" }) });
+  const ordinary = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: teacherCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret }) });
   assert.equal(ordinary.status, 403);
-  const wrongPassword = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, password: "wrong", confirmation: "保存百度配置" }) });
-  assert.equal(wrongPassword.status, 401);
-  const saved = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret, password: "123456", confirmation: "保存百度配置" }) });
+  const saved = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ app_key: "APP", app_secret: secret }) });
   const result = await saved.json(); assert.equal(saved.status, 200); assert.equal(result.status.oauth_configured, true); assert.equal(result.status.redirect_uri, `http://127.0.0.1:${port}/api/data-center/baidu/callback`);
   assert.equal(JSON.stringify(result).includes("NEVER-REFLECT"), false);
   const filename = path.join(tempRoot, "backups", "full-excel", ".secrets", "baidu-config.json"); assert.equal(fs.existsSync(filename), true); if (process.platform !== "win32") assert.equal(fs.statSync(filename).mode & 0o777, 0o600);
-  const beforeAuthorization = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeAuthorizationResult = await beforeAuthorization.json(); assert.equal(beforeAuthorization.status, 400); assert.equal(beforeAuthorizationResult.code, "BAIDU_AUTHORIZATION_REQUIRED");
+  const beforeAuthorization = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeAuthorizationResult = await beforeAuthorization.json(); assert.equal(beforeAuthorization.status, 400); assert.equal(beforeAuthorizationResult.code, "BAIDU_AUTHORIZATION_REQUIRED");
   fs.writeFileSync(path.join(path.dirname(filename), "baidu-token.json"), JSON.stringify({ access_token: "SYNTHETIC-ONLY", refresh_token: "SYNTHETIC-ONLY", expires_at: Date.now() + 3600000 }), { mode: 0o600 });
-  const beforeTest = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeTestResult = await beforeTest.json(); assert.equal(beforeTest.status, 400); assert.equal(beforeTestResult.code, "BAIDU_CONNECTION_TEST_REQUIRED");
+  const beforeTest = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const beforeTestResult = await beforeTest.json(); assert.equal(beforeTest.status, 400); assert.equal(beforeTestResult.code, "BAIDU_CONNECTION_TEST_REQUIRED");
   const storedConfig = JSON.parse(fs.readFileSync(filename, "utf8")); storedConfig.last_test_at = new Date().toISOString(); storedConfig.last_test_result = "success"; fs.writeFileSync(filename, JSON.stringify(storedConfig), { mode: 0o600 });
   await restartServer();
-  const withoutRiskAcknowledgment = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const riskResult = await withoutRiskAcknowledgment.json(); assert.equal(withoutRiskAcknowledgment.status, 400); assert.equal(riskResult.code, "BAIDU_PLAINTEXT_RISK_ACK_REQUIRED");
-  const enabled = await fetch(`http://127.0.0.1:${port}/api/data-center/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true, remote_plaintext_acknowledged: true }) }); const enabledResult = await enabled.json(); assert.equal(enabled.status, 200); assert.equal(enabledResult.settings.remote_enabled, true); assert.equal(enabledResult.settings.remote_plaintext_acknowledged, true);
+  const withoutRiskAcknowledgment = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true }) }); const riskResult = await withoutRiskAcknowledgment.json(); assert.equal(withoutRiskAcknowledgment.status, 400); assert.equal(riskResult.code, "BAIDU_PLAINTEXT_RISK_ACK_REQUIRED");
+  const enabled = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/settings`, { method: "PUT", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ remote_enabled: true, remote_plaintext_acknowledged: true }) }); const enabledResult = await enabled.json(); assert.equal(enabled.status, 200); assert.equal(enabledResult.settings.remote_enabled, true); assert.equal(enabledResult.settings.remote_plaintext_acknowledged, true);
   const db = new DatabaseSync(databasePath, { readOnly: true }); const logs = JSON.stringify(db.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE operation_type='保存百度网盘配置'").all()); db.close(); assert.equal(logs.includes("NEVER-REFLECT"), false);
   const obsoleteGuide = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/key-custody.txt`, { headers: { cookie: ownerCookie } }); assert.equal(obsoleteGuide.status, 404);
   const badClear = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "123456", confirmation: "wrong" }) }); assert.equal(badClear.status, 400);
