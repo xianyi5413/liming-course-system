@@ -9448,8 +9448,23 @@ function baiduSimpleGuideMarkup() {
 
 function baiduTestDetailsMarkup() {
   const result = backupState.baiduTestDetails; if (!result || !backupState.baiduTestDetailsOpen) return "";
-  const labels = { authorization: "授权", connection: "连接", test_directory: "测试目录", file_upload: "普通文件上传", checksum_upload: "校验文件上传", file_download: "普通文件下载", checksum_download: "校验文件下载", integrity_check: "SHA-256完整性", test_delete_file: "普通文件清理", test_delete_checksum: "校验文件清理" };
+  const labels = { authorization: "授权", connection: "连接", test_directory: "测试目录", file_upload: "普通文件上传", checksum_upload: "校验文件上传", file_metadata: "普通文件元信息", checksum_metadata: "校验文件元信息", file_download: "普通文件下载", checksum_download: "校验文件下载", integrity_check: "SHA-256完整性", test_delete_file: "普通文件清理", test_delete_checksum: "校验文件清理" };
   return `<div class="modal-backdrop baidu-test-detail-modal"><div class="modal-panel baidu-test-detail-panel" role="dialog" aria-modal="true"><div class="modal-head"><div><div class="modal-title">百度连接测试详情</div><div class="modal-subtitle">仅显示安全诊断，不含凭据或下载链接。</div></div><button class="btn baidu-test-detail-close" type="button">关闭</button></div><div class="baidu-test-step-list">${Object.entries(labels).map(([key,label]) => `<div><span>${label}</span><strong>${result.steps?.[key] ? "通过" : "未通过"}</strong></div>`).join("")}</div>${result.code ? `<div class="audit-inline-notice danger">阶段：${escapeHtml(result.stage || "unknown")}；内部码：${escapeHtml(result.code)}；百度码：${escapeHtml(result.provider_code || "无")}；HTTP：${Number(result.http_status || 0) || "无"}</div>` : ""}<div class="audit-inline-notice ${result.cleanup?.complete || result.cleanup_ok ? "neutral" : "warning"}">测试文件清理：${result.cleanup?.complete || result.cleanup_ok ? "已完成" : "未完全完成"}${result.cleanup?.remaining_paths?.length ? `；请人工处理：${result.cleanup.remaining_paths.map(escapeHtml).join("、")}` : ""}</div></div></div>`;
+}
+
+function baiduTestFailureMessage(detail = {}) {
+  const labels = {
+    file_metadata: "获取文件元信息失败",
+    checksum_metadata: "获取校验文件元信息失败",
+    file_download: "下载文件失败",
+    checksum_download: "下载校验文件失败",
+    integrity_check: "远端文件完整性校验失败",
+  };
+  let message = labels[detail.stage] || detail.error || "百度连接测试失败";
+  if (["file_metadata", "checksum_metadata"].includes(detail.stage) && String(detail.provider_code) === "2") message += "：百度参数错误（错误码2）";
+  else if (detail.provider_code) message += `（百度错误码：${detail.provider_code}）`;
+  if (detail.cleanup?.complete) message += "，测试文件已清理";
+  return message;
 }
 
 function baiduSimpleSettingsCardMarkup() {
@@ -15535,7 +15550,7 @@ function wireEvents() {
   document.querySelectorAll(".baidu-test").forEach((button) => button.addEventListener("click", async () => {
     const draft = markBackupDraftFromDom();
     try { const result = await request("/api/data-center/baidu/test", { method: "POST", body: { remote_directory: draft.remote_directory } }); backupState.baiduTestDetails = result; await refreshBackupData(); showToast(result.cleanup_ok ? "百度连接、下载校验和测试文件清理均已通过" : "连接及完整性测试通过，但测试文件清理失败", result.cleanup_ok ? "success" : "error"); }
-    catch (error) { backupState.baiduTestDetails = error.data || { code: error.message, stage: "unknown", steps: {}, cleanup: { complete: false } }; const detail = error.data || {}; showToast(`连接测试失败：${detail.stage || "未知阶段"}${detail.provider_code ? `（百度错误码：${detail.provider_code}）` : ""}${detail.cleanup?.complete ? "，测试文件已清理" : ""}`, "error"); }
+    catch (error) { backupState.baiduTestDetails = error.data || { code: error.message, stage: "unknown", steps: {}, cleanup: { complete: false } }; const detail = error.data || {}; showToast(baiduTestFailureMessage(detail), "error"); }
     finally { render(); }
   }));
   document.querySelectorAll(".baidu-disconnect").forEach((button) => button.addEventListener("click", async () => {

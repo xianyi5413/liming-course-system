@@ -12644,7 +12644,7 @@ async function handleApi(req, res, url) {
       return sendBuffer(res, downloaded.excel, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", row.filename || path.posix.basename(row.remote_path));
     } catch (error) {
       if (error.code !== "BACKUP_NOT_FOUND") try { backupService().markRemoteIntegrity(backupId, "failed", error.code); } catch {}
-      return sendError(res, 400, error.message || "远端备份下载或校验失败");
+      return sendJson(res, { error: error.message || "远端备份下载或校验失败", code: String(error.code || "BAIDU_FILE_DOWNLOAD_FAILED").slice(0, 100) }, 400);
     }
   }
 

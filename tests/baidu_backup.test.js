@@ -6,7 +6,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { BaiduBackupManager, BaiduClient, BaiduError, TokenStore, safeRemotePath, verifyPayloadPair } = require("../src/backup/baidu_provider");
+const { BaiduBackupManager, BaiduClient, BaiduError, TokenStore, safeRemotePath, remoteFileId, parseProviderJson, verifyPayloadPair } = require("../src/backup/baidu_provider");
 const { FORMAT_VERSION, exportFullData, verifyFullData } = require("../src/excel/full_backup");
 
 const projectRoot = path.resolve(__dirname, "..");
@@ -30,7 +30,7 @@ function configuredManager(directory = tempRoot) {
 }
 
 function memoryClient(manager, options = {}) {
-  const files = new Map(); const uploads = []; const deletes = [];
+  const files = new Map(); const ids = new Map(); const metadataRequests = []; const downloads = []; const uploads = []; const deletes = [];
   manager.client.testConnection = async () => ({ ok: true });
   manager.client.createDirectory = async () => ({ ok: true });
   manager.client.uploadFile = async (filename, remotePath) => {
@@ -38,18 +38,30 @@ function memoryClient(manager, options = {}) {
     if (options.failUpload?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成上传失败");
     const bytes = fs.readFileSync(filename); files.set(remotePath, bytes);
     if (options.throwAfterUpload?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成上传响应丢失");
-    return { file_id: `id-${uploads.length}`, path: remotePath };
+    const fileId = String(9007199254740993000n + BigInt(uploads.length)); ids.set(fileId, remotePath);
+    return { file_id: fileId, path: remotePath };
   };
-  manager.client.downloadFile = async (remotePath) => {
-    if (options.missingDownload?.(remotePath) || !files.has(remotePath)) throw new BaiduError("BAIDU_DOWNLOAD_FAILED", "合成下载失败");
+  manager.client.metadataByFileId = async (fileId, { errorCode = "BAIDU_FILE_METADATA_FAILED", allowMissing = false } = {}) => {
+    metadataRequests.push({ fileId, errorCode }); const remotePath = ids.get(fileId);
+    if (options.failMetadata?.(remotePath, errorCode)) throw new BaiduError(errorCode, "合成元信息失败", { provider_code: "2", http_status: 200 });
+    if (!remotePath) { if (allowMissing) return null; throw new BaiduError(errorCode, "合成元信息为空", { provider_code: "EMPTY_LIST", http_status: 200 }); }
+    return { fs_id: fileId, dlink: `https://download.example.test/${fileId}`, remotePath };
+  };
+  manager.client.downloadFromMetadata = async (metadata, { remotePath, errorCode = "BAIDU_FILE_DOWNLOAD_FAILED" }) => {
+    downloads.push({ fileId: metadata.fs_id, remotePath, errorCode });
+    if (options.missingDownload?.(remotePath) || !files.has(remotePath)) throw new BaiduError(errorCode, "合成下载失败");
     return files.get(remotePath);
   };
-  manager.client.deleteFile = async (remotePath) => {
-    deletes.push(remotePath);
-    if (options.failDelete?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成删除失败");
-    files.delete(remotePath); return { ok: true };
+  manager.client.downloadFile = async ({ fileId, remotePath, metadataErrorCode, downloadErrorCode }) => {
+    const metadata = await manager.client.metadataByFileId(fileId, { errorCode: metadataErrorCode });
+    return manager.client.downloadFromMetadata(metadata, { remotePath, errorCode: downloadErrorCode });
   };
-  return { files, uploads, deletes };
+  manager.client.deleteFile = async (remotePath, fileId = "") => {
+    deletes.push({ remotePath, fileId });
+    if (options.failDelete?.(remotePath)) throw new BaiduError("BAIDU_API_FAILED", "合成删除失败");
+    files.delete(remotePath); if (fileId) ids.delete(fileId); return { ok: true };
+  };
+  return { files, ids, metadataRequests, downloads, uploads, deletes };
 }
 
 test("configuration needs only App Key, App Secret and redirect URI and never reflects secrets", () => {
@@ -105,14 +117,14 @@ test("chunk upload retries a transient provider failure without changing the rem
 test("connection test uploads, downloads, verifies and deletes a synthetic plaintext pair", async () => {
   const manager = configuredManager(path.join(tempRoot, "connection-test")); const memory = memoryClient(manager);
   const result = await manager.testConnection("/apps/liming-course-system");
-  assert.deepEqual(result.steps, { authorization: true, connection: true, test_directory: true, file_upload: true, checksum_upload: true, file_download: true, checksum_download: true, integrity_check: true, test_delete_file: true, test_delete_checksum: true });
-  assert.equal(memory.uploads.length, 2); assert.equal(memory.uploads.some((name) => name.endsWith(".sha256")), true); assert.equal(memory.uploads.some((name) => name.endsWith(".enc")), false); assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
+  assert.deepEqual(result.steps, { authorization: true, connection: true, test_directory: true, file_upload: true, checksum_upload: true, file_metadata: true, checksum_metadata: true, file_download: true, checksum_download: true, integrity_check: true, test_delete_file: true, test_delete_checksum: true });
+  assert.equal(memory.uploads.length, 2); assert.equal(memory.uploads.some((name) => name.endsWith(".sha256")), true); assert.equal(memory.uploads.some((name) => name.endsWith(".enc")), false); assert.equal(memory.metadataRequests.length, 2); assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
   assert.deepEqual(fs.readdirSync(path.join(tempRoot, "connection-test", "backups", "full-excel", ".secrets")).filter((name) => name.startsWith(".connection-") || name.startsWith("plaintext-test-")), []);
 });
 
 test("failed connection test removes every remote test file that was created", async () => {
   const manager = configuredManager(path.join(tempRoot, "connection-cleanup")); const memory = memoryClient(manager, { missingDownload: () => true });
-  await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => error.code === "BAIDU_DOWNLOAD_FAILED");
+  await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => error.code === "BAIDU_FILE_DOWNLOAD_FAILED");
   assert.equal(memory.uploads.length, 2); assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
 });
 
@@ -127,10 +139,17 @@ test("connection test attempts cleanup when an upload completed remotely but its
 test("connection diagnostics identify download failures and expose no credentials", async () => {
   const manager = configuredManager(path.join(tempRoot, "connection-stage")); const memory = memoryClient(manager, { missingDownload: (name) => name.endsWith(".sha256") });
   await assert.rejects(() => manager.testConnection("/apps/liming-course-system"), (error) => {
-    assert.equal(error.code, "BAIDU_DOWNLOAD_FAILED"); assert.equal(error.details.stage, "checksum_download"); assert.equal(error.details.steps.file_download, true); assert.equal(error.details.steps.checksum_download, false); assert.equal(error.details.cleanup.complete, true);
+    assert.equal(error.code, "BAIDU_CHECKSUM_DOWNLOAD_FAILED"); assert.equal(error.details.stage, "checksum_download"); assert.equal(error.details.steps.file_download, true); assert.equal(error.details.steps.checksum_download, false); assert.equal(error.details.cleanup.complete, true);
     assert.doesNotMatch(JSON.stringify(error.details), /APP-SECRET|MOCK-R|access_token/i); return true;
   });
   assert.equal(memory.files.size, 0);
+});
+
+test("cleanup failure never replaces the core download failure", async () => {
+  const manager = configuredManager(path.join(tempRoot, "core-and-cleanup-failure")); memoryClient(manager, { missingDownload: (name) => !name.endsWith(".sha256"), failDelete: (name) => name.endsWith(".sha256") });
+  await assert.rejects(() => manager.testConnection("/apps/liming"), (error) => {
+    assert.equal(error.code, "BAIDU_FILE_DOWNLOAD_FAILED"); assert.equal(error.details.stage, "file_download"); assert.equal(error.details.cleanup.complete, false); assert.equal(error.details.cleanup.checksum, "failed"); return true;
+  });
 });
 
 test("core connection success remains successful when cleanup is partial", async () => {
@@ -139,23 +158,92 @@ test("core connection success remains successful when cleanup is partial", async
   assert.equal(result.ok, true); assert.equal(result.core_ok, true); assert.equal(result.cleanup_ok, false); assert.equal(result.warning_code, "BAIDU_TEST_CLEANUP_PARTIAL"); assert.equal(result.steps.integrity_check, true); assert.equal(result.steps.test_delete_checksum, false); assert.equal(result.cleanup.remaining_paths.length, 1); assert.equal(memory.files.size, 1);
 });
 
-test("delete accepts task responses and verifies ambiguous successful responses", async () => {
+test("delete accepts task responses and verifies ambiguous successful responses by fs_id", async () => {
   const tokenStore = new TokenStore(path.join(tempRoot, "delete-token.json")); tokenStore.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 });
   let mode = "task"; const fetchImpl = async (input) => {
     const url = new URL(String(input));
     if (url.searchParams.get("method") === "filemanager") return mode === "task" ? Response.json({ taskid: 123 }) : new Response("", { status: 200 });
-    if (url.searchParams.get("method") === "filemetas") return Response.json({ errno: 0, list: [] });
+    if (url.searchParams.get("method") === "filemetas") { assert.equal(url.searchParams.get("fsids"), "[12345678901234567890]"); assert.equal(url.searchParams.has("path_list"), false); return Response.json({ errno: 0, list: [] }); }
     throw new Error("unexpected endpoint");
   };
   const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, fetchImpl, endpoints: { xpan: "https://xpan.example.test" } });
-  assert.equal((await client.deleteFile("/apps/liming/test.txt")).ok, true); mode = "ambiguous"; assert.equal((await client.deleteFile("/apps/liming/test.txt")).verified_absent, true);
+  assert.equal((await client.deleteFile("/apps/liming/test.txt", "12345678901234567890")).ok, true); mode = "ambiguous"; assert.equal((await client.deleteFile("/apps/liming/test.txt", "12345678901234567890")).verified_absent, true);
 });
 
 test("download rejects a provider JSON error body instead of treating it as file bytes", async () => {
   const tokenStore = new TokenStore(path.join(tempRoot, "download-token.json")); tokenStore.write({ access_token: "MOCK", refresh_token: "MOCK-R", expires_at: Date.now() + 3600000 });
-  const fetchImpl = async (input) => { const url = new URL(String(input)); if (url.searchParams.get("method") === "filemetas") return Response.json({ errno: 0, list: [{ dlink: "https://download.example.test/file" }] }); return Response.json({ errno: 31326 }, { status: 200 }); };
+  const fetchImpl = async (input, options = {}) => { const url = new URL(String(input)); if (url.searchParams.get("method") === "filemetas") { assert.equal(url.searchParams.get("fsids"), "[12345678901234567890]"); return Response.json({ errno: 0, list: [{ fs_id: "12345678901234567890", dlink: "https://download.example.test/file" }] }); } assert.equal(options.redirect, "follow"); assert.equal(options.headers["User-Agent"], "pan.baidu.com"); assert.match(options.headers.Accept, /application\/octet-stream/); return Response.json({ errno: 31326 }, { status: 200 }); };
   const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, fetchImpl, endpoints: { xpan: "https://xpan.example.test" } });
-  await assert.rejects(() => client.downloadFile("/apps/liming/test.txt"), (error) => error.code === "BAIDU_DOWNLOAD_FAILED" && error.details.provider_code === "31326" && error.details.http_status === 200);
+  await assert.rejects(() => client.downloadFile({ fileId: "12345678901234567890", remotePath: "/apps/liming/test.txt" }), (error) => error.code === "BAIDU_FILE_DOWNLOAD_FAILED" && error.details.provider_code === "31326" && error.details.http_status === 200);
+});
+
+test("download reports a non-JSON HTTP 403 without leaking its dlink", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "download-403-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  const secretDlink = "https://download.example.test/private?sign=DO-NOT-LEAK";
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, endpoints: { xpan: "https://xpan.example.test" }, fetchImpl: async (input) => {
+    const url = new URL(String(input)); return url.searchParams.get("method") === "filemetas" ? Response.json({ errno: 0, list: [{ fs_id: "123", dlink: secretDlink }] }) : new Response("forbidden", { status: 403, headers: { "content-type": "text/plain" } });
+  } });
+  await assert.rejects(() => client.downloadFile({ fileId: "123", remotePath: "/apps/liming/a.xlsx" }), (error) => {
+    assert.equal(error.code, "BAIDU_FILE_DOWNLOAD_FAILED"); assert.equal(error.details.http_status, 403); assert.equal(error.details.provider_code, "403"); assert.doesNotMatch(JSON.stringify(error), /DO-NOT-LEAK|access_token/); return true;
+  });
+});
+
+test("successful dlink download follows redirects and sends the required User-Agent", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "download-success-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  let downloadOptions;
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, endpoints: { xpan: "https://xpan.example.test" }, fetchImpl: async (input, options = {}) => {
+    const url = new URL(String(input)); if (url.searchParams.get("method") === "filemetas") return Response.json({ errno: 0, list: [{ fs_id: "123", dlink: "https://download.example.test/redirect" }] });
+    downloadOptions = options; return new Response("synthetic-download", { status: 200, headers: { "content-type": "application/octet-stream" } });
+  } });
+  const bytes = await client.downloadFile({ fileId: "123", remotePath: "/apps/liming/a.xlsx" });
+  assert.equal(bytes.toString(), "synthetic-download"); assert.equal(downloadOptions.redirect, "follow"); assert.match(downloadOptions.headers["User-Agent"], /pan\.baidu\.com/); assert.match(downloadOptions.headers.Accept, /application\/octet-stream/);
+});
+
+test("filemetas uses fsids and dlink without path_list", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "metadata-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  const calls = [];
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, endpoints: { xpan: "https://xpan.example.test" }, fetchImpl: async (input) => {
+    const url = new URL(String(input)); calls.push(url); return new Response('{"errno":0,"list":[{"fs_id":98765432109876543210,"dlink":"https://download.example.test/a"}]}', { headers: { "content-type": "application/json" } });
+  } });
+  const metadata = await client.metadataByFileId("98765432109876543210");
+  assert.equal(metadata.fs_id, "98765432109876543210"); assert.equal(calls[0].searchParams.get("fsids"), "[98765432109876543210]"); assert.equal(calls[0].searchParams.get("dlink"), "1"); assert.equal(calls[0].searchParams.has("path_list"), false);
+});
+
+test("upload preserves an fs_id beyond Number.MAX_SAFE_INTEGER as a decimal string", async () => {
+  const source = path.join(tempRoot, "large-id-upload.txt"); fs.writeFileSync(source, "large id");
+  const tokenStore = new TokenStore(path.join(tempRoot, "large-id-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input)); if (url.host === "upload.example.test") return Response.json({ errno: 0 });
+    if (url.searchParams.get("method") === "precreate") return Response.json({ errno: 0, uploadid: "U" });
+    return new Response('{"errno":0,"fs_id":98765432109876543210}', { headers: { "content-type": "application/json" } });
+  };
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, fetchImpl, endpoints: { xpan: "https://xpan.example.test", upload: "https://upload.example.test" }, sleepImpl: async () => {} });
+  assert.equal((await client.uploadFile(source, "/apps/liming/large-id.txt")).file_id, "98765432109876543210");
+  assert.equal(parseProviderJson('{"fs_id":98765432109876543210}').fs_id, "98765432109876543210");
+  assert.equal(remoteFileId("98765432109876543210"), "98765432109876543210"); assert.throws(() => remoteFileId(98765432109876540000), (error) => error.code === "BAIDU_REMOTE_FILE_ID_MISSING"); assert.throws(() => remoteFileId("12x34"), (error) => error.code === "BAIDU_REMOTE_FILE_ID_MISSING");
+});
+
+test("provider code 2 is standardized as file and checksum metadata failures", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "metadata-error-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, endpoints: { xpan: "https://xpan.example.test" }, fetchImpl: async () => Response.json({ errno: 2 }) });
+  await assert.rejects(() => client.metadataByFileId("123"), (error) => error.code === "BAIDU_FILE_METADATA_FAILED" && error.details.provider_code === "2" && /百度参数错误/.test(error.message));
+  await assert.rejects(() => client.metadataByFileId("456", { errorCode: "BAIDU_CHECKSUM_METADATA_FAILED" }), (error) => error.code === "BAIDU_CHECKSUM_METADATA_FAILED" && error.details.provider_code === "2" && /校验文件/.test(error.message));
+});
+
+test("empty metadata and missing dlink fail with stable codes", async () => {
+  const tokenStore = new TokenStore(path.join(tempRoot, "empty-metadata-token.json")); tokenStore.write({ access_token: "MOCK", expires_at: Date.now() + 3600000 });
+  let empty = true;
+  const client = new BaiduClient({ appKey: "K", appSecret: "S", redirectUri: "https://example.test/cb", tokenStore, endpoints: { xpan: "https://xpan.example.test" }, fetchImpl: async () => empty ? Response.json({ errno: 0, list: [] }) : Response.json({ errno: 0, list: [{ fs_id: "123" }] }) });
+  await assert.rejects(() => client.metadataByFileId("123"), (error) => error.code === "BAIDU_FILE_METADATA_FAILED" && error.details.provider_code === "EMPTY_LIST");
+  empty = false; await assert.rejects(() => client.downloadFile({ fileId: "123", remotePath: "/apps/liming/a.xlsx" }), (error) => error.code === "BAIDU_DOWNLOAD_LINK_MISSING");
+});
+
+test("connection metadata failure remains distinct and cleanup still runs", async () => {
+  const manager = configuredManager(path.join(tempRoot, "metadata-cleanup")); const memory = memoryClient(manager, { failMetadata: (name) => name?.endsWith(".sha256") });
+  await assert.rejects(() => manager.testConnection("/apps/liming"), (error) => {
+    assert.equal(error.code, "BAIDU_CHECKSUM_METADATA_FAILED"); assert.equal(error.details.stage, "checksum_metadata"); assert.equal(error.details.steps.file_metadata, true); assert.equal(error.details.steps.checksum_metadata, false); assert.equal(error.details.cleanup.complete, true); return true;
+  });
+  assert.equal(memory.deletes.length, 2); assert.equal(memory.files.size, 0);
 });
 
 test("managed backup uploads the original Excel bytes and matching SHA-256 sidecar", async () => {
@@ -163,6 +251,7 @@ test("managed backup uploads the original Excel bytes and matching SHA-256 sidec
   assert.equal(remote.path.endsWith(".xlsx"), true); assert.equal(remote.path.endsWith([".xlsx", ".enc"].join("")), false); assert.equal(remote.checksum_path.endsWith(".xlsx.sha256"), true);
   assert.deepEqual(memory.files.get(remote.path), plainBytes); assert.equal(memory.files.get(remote.checksum_path).toString("utf8"), `${digest}  ${path.basename(plain)}\n`);
   assert.deepEqual({ file: remote.file_status, checksum: remote.checksum_status, integrity: remote.integrity_status }, { file: "success", checksum: "success", integrity: "verified" });
+  assert.notEqual(remote.file_id, remote.checksum_file_id); assert.deepEqual(memory.metadataRequests.map((item) => item.fileId), [remote.file_id, remote.checksum_file_id]);
 });
 
 test("local upload refuses a missing or mismatched sidecar before contacting Baidu", async () => {
@@ -180,17 +269,24 @@ test("sidecar upload failure preserves local backup and reports the two remote p
 
 test("verified remote download rejects mismatch, missing sidecar and legacy encrypted records", async () => {
   const manager = configuredManager(); const memory = memoryClient(manager); const uploaded = await manager.upload({ record: { id: 3 }, localPath: plain, remoteDirectory: "/apps/liming" });
-  const downloaded = await manager.downloadVerified({ remote_path: uploaded.path, remote_checksum_path: uploaded.checksum_path }); assert.deepEqual(downloaded.excel, plainBytes);
+  const record = { remote_file_id: uploaded.file_id, remote_path: uploaded.path, remote_checksum_file_id: uploaded.checksum_file_id, remote_checksum_path: uploaded.checksum_path };
+  const downloaded = await manager.downloadVerified(record); assert.deepEqual(downloaded.excel, plainBytes);
   memory.files.set(uploaded.path, Buffer.from(plainBytes)); memory.files.get(uploaded.path)[100] ^= 1;
-  await assert.rejects(() => manager.downloadVerified({ remote_path: uploaded.path, remote_checksum_path: uploaded.checksum_path }), (error) => error.code === "BAIDU_REMOTE_SHA256_MISMATCH");
+  await assert.rejects(() => manager.downloadVerified(record), (error) => error.code === "BAIDU_REMOTE_SHA256_MISMATCH");
   await assert.rejects(() => manager.downloadVerified({ remote_path: uploaded.path, remote_checksum_path: "" }), (error) => error.code === "BAIDU_CHECKSUM_MISSING");
   await assert.rejects(() => manager.downloadVerified({ remote_path: `${uploaded.path}.enc`, remote_checksum_path: "" }), (error) => error.code === "BAIDU_LEGACY_ENCRYPTED_BACKUP");
 });
 
+test("formal remote download refuses path-only legacy records before any provider request", async () => {
+  const manager = configuredManager(path.join(tempRoot, "missing-remote-id")); const memory = memoryClient(manager);
+  await assert.rejects(() => manager.downloadVerified({ remote_path: "/apps/liming/a.xlsx", remote_checksum_path: "/apps/liming/a.xlsx.sha256" }), (error) => error.code === "BAIDU_REMOTE_FILE_ID_MISSING");
+  assert.equal(memory.metadataRequests.length, 0); assert.equal(memory.downloads.length, 0);
+});
+
 test("pair deletion attempts both files and preserves a partial failure result", async () => {
   const manager = configuredManager(); const memory = memoryClient(manager, { failDelete: (name) => name.endsWith(".sha256") });
-  const result = await manager.delete({ remote_path: "/apps/liming/backup.xlsx", remote_checksum_path: "/apps/liming/backup.xlsx.sha256" });
-  assert.deepEqual(result, { excel: "deleted", checksum: "delete_failed" }); assert.deepEqual(memory.deletes, ["/apps/liming/backup.xlsx", "/apps/liming/backup.xlsx.sha256"]);
+  const result = await manager.delete({ remote_file_id: "123", remote_path: "/apps/liming/backup.xlsx", remote_checksum_file_id: "456", remote_checksum_path: "/apps/liming/backup.xlsx.sha256" });
+  assert.deepEqual(result, { excel: "deleted", checksum: "delete_failed" }); assert.deepEqual(memory.deletes, [{ remotePath: "/apps/liming/backup.xlsx", fileId: "123" }, { remotePath: "/apps/liming/backup.xlsx.sha256", fileId: "456" }]);
 });
 
 test("token status and errors never expose tokens or App Secret", async () => {
