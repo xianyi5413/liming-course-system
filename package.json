@@ -20,6 +20,7 @@
     "test:excel-import": "node --test --test-concurrency=1 tests/excel_import_template.test.js",
     "test:data-center": "node --test --test-concurrency=1 tests/backup_service.test.js",
     "test:data-preflight": "node --test --test-concurrency=1 tests/data_preflight.test.js",
+    "test:student-stage-conflicts": "node --test --test-concurrency=1 tests/student_grade_stage_conflicts.test.js",
     "test:backup-scheduler": "node --test --test-concurrency=1 tests/backup_scheduler.test.js",
     "test:baidu-backup": "node --test --test-concurrency=1 tests/baidu_backup.test.js",
     "test:data-center-contract": "node --test --test-concurrency=1 tests/data_center_contract.test.js",

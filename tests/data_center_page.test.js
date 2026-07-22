@@ -7,6 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { test } = require("node:test");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
 const { createTemplateBuffer } = require("../src/excel/import_service");
+const { safeBackupFailure, serializeBackupFailure } = require("../src/backup/backup_failure");
 
 const root = path.resolve(__dirname, "..");
 
@@ -220,6 +221,100 @@ test("manual backup accepts a global opening balance without requiring a month",
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.data-preflight-panel.danger'))"), false);
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("student profiles hide an empty conflict banner and count multiple conflicting students", async () => {
+  await withBrowserScenario({}, async ({ browser, database }) => {
+    await browser.login("boss", "123456");
+    await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("Boolean(document.querySelector('.student-profile-table'))");
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.student-stage-conflict-banner'))"), false);
+
+    const db = new DatabaseSync(database);
+    db.exec(`
+      INSERT INTO students(id,name,grade,status) VALUES
+        (8691,'合成多冲突学生甲','初三','在读'),
+        (8692,'合成多冲突学生乙','高二','在读');
+      INSERT INTO student_grade_stages(student_name,stage,start_date,end_date) VALUES
+        ('合成多冲突学生甲','初三','2025-09-01','2026-08-31'),
+        ('合成多冲突学生甲','高一','2026-08-01','2027-08-31'),
+        ('合成多冲突学生乙','高二','2025-09-01','2026-08-31'),
+        ('合成多冲突学生乙','高三','2026-08-31','2027-08-31');
+    `);
+    db.close();
+
+    await browser.send("Page.reload", { ignoreCache: true });
+    await browser.waitFor("Boolean(document.querySelector('.nav-btn[data-nav-group=\"students\"]'))");
+    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("document.querySelector('.student-stage-conflict-banner')?.textContent.includes('发现 2 名学生')");
+    await browser.click(".student-stage-conflict-view");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-record').length"), 2);
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("student profiles show stage conflicts, locate the editor, repair them and fit 390px", async () => {
+  const prepareDatabase = (db) => db.exec(`
+    INSERT INTO students(id,name,grade,status) VALUES (8701,'浏览器阶段冲突学生姓名较长用于窄屏验收','初三','在读');
+    INSERT INTO student_grade_stages(student_name,stage,start_date,end_date) VALUES
+      ('浏览器阶段冲突学生姓名较长用于窄屏验收','初三','2025-09-01','2026-08-31'),
+      ('浏览器阶段冲突学生姓名较长用于窄屏验收','高一','2026-08-01','2027-08-31');
+  `);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.login("boss", "123456");
+    await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("document.querySelector('.student-stage-conflict-banner')?.textContent.includes('发现 1 名学生')");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-marker').length"), 1);
+    await browser.click(".student-stage-conflict-view");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-modal')?.textContent.includes('初三') && document.querySelector('.student-stage-conflict-modal')?.textContent.includes('2026-08-01')");
+    await browser.click(".student-stage-conflict-close");
+    await browser.waitFor("!document.querySelector('.student-stage-conflict-modal') && document.activeElement?.classList.contains('student-stage-conflict-view')");
+    await browser.click(".student-stage-conflict-view");
+    await browser.click(".student-stage-conflict-edit");
+    await browser.waitFor("document.querySelector('.student-grade-stage-modal')?.textContent.includes('浏览器阶段冲突学生姓名较长用于窄屏验收')");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-card-conflict').length"), 2);
+    await browser.evaluate(`(() => { const input=document.querySelector('.student-grade-stage-field[data-stage="高一"][data-field="start_date"]'); input.value='2026-09-01'; input.dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('.student-grade-stage-save').click(); })()`);
+    await browser.waitFor("!document.querySelector('.student-grade-stage-modal') && !document.querySelector('.student-stage-conflict-banner')");
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    await browser.waitFor("window.innerWidth === 390");
+    assert.equal(await browser.evaluate("document.body.scrollWidth <= window.innerWidth && document.querySelector('#app').scrollWidth <= window.innerWidth"), true);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("backup failure reason is readable and delete uses a non-password confirmation dialog", async () => {
+  const failure = serializeBackupFailure(safeBackupFailure({ code: "BACKUP_DATA_PREFLIGHT_FAILED", details: { preflight: { issue_count: 1, issues: [{ code: "STUDENT_GRADE_STAGE_OVERLAP", label: "学生年级阶段时间冲突", count: 1, records: [{ student_id: 8801, student_name: "合成学生", stage_a: "初三", start_a: "2025-09-01", end_a: "2026-08-31", stage_b: "高一", start_b: "2026-08-01", end_b: "2027-08-31", overlap_start: "2026-08-01", overlap_end: "2026-08-31" }] }] } } }));
+  const prepareDatabase = (db) => {
+    db.prepare(`INSERT INTO backup_records(backup_type,filename,status,message,backup_format,format_version,trigger,retention_class,managed_relative_path,remote_status,pinned)
+      VALUES ('manual','黎明教育_全量数据_合成失败.xlsx','failed',?,'full_data_excel',4,'manual','manual','backups/full-excel/missing.xlsx','not_configured',0)`).run(failure);
+  };
+  await withBrowserScenario({ prepareDatabase }, async ({ browser, database }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    const recordText = await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent");
+    assert.match(recordText, /本地备份失败/); assert.match(recordText, /合成学生的初三与高一阶段时间重叠/); assert.doesNotMatch(recordText, /undefined|Error/);
+    await browser.click(".backup-delete");
+    await browser.waitFor("Boolean(document.querySelector('.backup-delete-modal'))");
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.backup-delete-modal input'))"), false);
+    assert.match(await browser.evaluate("document.querySelector('.backup-delete-modal')?.textContent"), /确认删除这条备份吗|服务器本地/);
+    await browser.click(".backup-delete-cancel");
+    await browser.waitFor("!document.querySelector('.backup-delete-modal') && document.activeElement?.classList.contains('backup-delete')");
+    let db = new DatabaseSync(database, { readOnly: true }); assert.equal(db.prepare("SELECT status FROM backup_records WHERE filename='黎明教育_全量数据_合成失败.xlsx'").get().status, "failed"); db.close();
+    await browser.click(".backup-delete"); await browser.click(".backup-delete-confirm");
+    await browser.waitFor("!document.querySelector('.backup-delete-modal')");
+    assert.equal(browser.responses.filter((item) => /\/api\/data-center\/backups\/\d+$/.test(item.url) && item.status === 200).length, 1);
+    db = new DatabaseSync(database, { readOnly: true });
+    assert.equal(db.prepare("SELECT status FROM backup_records WHERE filename='黎明教育_全量数据_合成失败.xlsx'").get().status, "missing");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM operation_logs WHERE operation_type='删除全量数据备份'").get().count, 1); db.close();
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });
 

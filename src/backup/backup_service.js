@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { assertDataPreflight } = require("./data_preflight");
+const { backupFailureDisplay, safeBackupFailure, serializeBackupFailure } = require("./backup_failure");
 const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = require("../excel/full_backup");
 
 const BACKUP_FORMAT = "full_data_excel";
@@ -69,14 +70,15 @@ class BackupService {
     return Number(result.lastInsertRowid);
   }
   record(db, id) { return db.prepare("SELECT * FROM backup_records WHERE id=?").get(Number(id)); }
-  dto(row) { return { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; }
+  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; return { ...dto, failure: backupFailureDisplay(dto) }; }
   updateRemoteResult(db, id, remote = {}, error = null) {
     const fileStatus = remote.file_status || (error ? "failed" : "success");
     const checksumStatus = remote.checksum_status || (error ? "failed" : "success");
     const integrityStatus = remote.integrity_status || (error ? "not_verified" : "verified");
     const overall = error ? (fileStatus === "success" || checksumStatus === "success" ? "partial_failed" : "failed") : "success";
-    db.prepare(`UPDATE backup_records SET remote_status=?,remote_file_id=?,remote_path=?,remote_checksum_file_id=?,remote_checksum_path=?,remote_file_status=?,remote_checksum_status=?,remote_integrity_status=?,remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(
-      overall, remote.file_id || "", remote.path || "", remote.checksum_file_id || "", remote.checksum_path || "", fileStatus, checksumStatus, integrityStatus, error ? safeMessage(error) : "", id,
+    const failure = error ? safeBackupFailure(error, { stage: "remote" }) : null;
+    db.prepare(`UPDATE backup_records SET remote_status=?,remote_file_id=?,remote_path=?,remote_checksum_file_id=?,remote_checksum_path=?,remote_file_status=?,remote_checksum_status=?,remote_integrity_status=?,remote_error_safe=?,message=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(
+      overall, remote.file_id || "", remote.path || "", remote.checksum_file_id || "", remote.checksum_path || "", fileStatus, checksumStatus, integrityStatus, failure?.code || "", failure ? serializeBackupFailure(failure) : "", id,
     );
   }
   markRemoteIntegrity(id, status, errorCode = "") {
@@ -93,7 +95,7 @@ class BackupService {
   }
   list(limit = 100) { const db = this.database(); try { return db.prepare("SELECT * FROM backup_records ORDER BY backup_time DESC,id DESC LIMIT ?").all(Math.max(1, Math.min(500, Number(limit) || 100))).map((row) => this.dto(row)); } finally { db.close(); } }
   managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
-  verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(safeMessage(error), id); } catch {} throw error; } finally { db.close(); } }
+  verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error)), id); } catch {} throw error; } finally { db.close(); } }
   async create(options = {}) {
     const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false;
     try {
@@ -112,10 +114,10 @@ class BackupService {
         db.prepare("UPDATE backup_records SET remote_status='uploading',remote_attempt_count=remote_attempt_count+1,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
         try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published }); this.updateRemoteResult(db, id, remote); }
         catch (error) { this.updateRemoteResult(db, id, error?.details?.remote || {}, error); }
-      } else if (options.remoteEnabled) db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe='BAIDU_NOT_CONFIGURED',remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      } else if (options.remoteEnabled) { const failure = safeBackupFailure("BAIDU_NOT_CONFIGURED", { stage: "remote" }); db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,message=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(failure.code, serializeBackupFailure(failure), id); }
       row = this.record(db, id); return { ok: true, record: this.dto(row) };
     } catch (error) {
-      if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(safeMessage(error), id); } catch {}
+      if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error, { stage: "local" })), id); } catch {}
       if (publishedByThisRun && published) try { fs.rmSync(published, { force: true }); } catch {} if (checksumPublishedByThisRun && checksumFile) try { fs.rmSync(checksumFile, { force: true }); } catch {}
       throw error;
     } finally { if (staging && inside(this.root, staging)) try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} db.close(); this.releaseLock(lock); }
@@ -187,15 +189,25 @@ class BackupService {
     } finally { db.close(); }
   }
   async deleteBackup(id, { remoteDeleter = null } = {}) {
-    const db = this.database(); const result = { local: "not_present", remote: "not_present", remote_excel: "not_present", remote_checksum: "not_present" };
+    const db = this.database(); const result = { local: "not_present", local_excel: "not_present", local_checksum: "not_present", remote: "not_present", remote_excel: "not_present", remote_checksum: "not_present" };
     try {
       const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
       if (row.backup_format !== BACKUP_FORMAT) throw new BackupError("BACKUP_PATH_UNMANAGED", "旧版备份不能由新体系删除");
+      if (Number(row.pinned || 0)) throw new BackupError("BACKUP_PINNED", "置顶备份受保护，请先取消置顶");
       if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading") throw new BackupError("BACKUP_BUSY", "备份正在使用中");
       const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ").get(BACKUP_FORMAT).count);
       if (row.status === "success" && validCount <= 1) throw new BackupError("BACKUP_LAST_VALID", "不能删除最后一份有效全量备份");
-      try { const filename = this.managedPath(row); fs.rmSync(filename); try { fs.rmSync(`${filename}.sha256`, { force: true }); } catch {} db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='manual_delete' WHERE id=?").run(id); result.local = "deleted"; }
-      catch (error) { if (error.code !== "BACKUP_FILE_MISSING") throw error; db.prepare("UPDATE backup_records SET status='missing',message='BACKUP_FILE_MISSING' WHERE id=?").run(id); result.local = "missing"; }
+      try {
+        const filename = this.managedPath(row); const checksum = `${filename}.sha256`;
+        fs.rmSync(filename); result.local_excel = "deleted";
+        if (fs.existsSync(checksum)) {
+          if (fs.lstatSync(checksum).isSymbolicLink() || !inside(this.root, fs.realpathSync(checksum))) result.local_checksum = "rejected_symlink";
+          else { try { fs.rmSync(checksum); result.local_checksum = "deleted"; } catch { result.local_checksum = "delete_failed"; } }
+        }
+        result.local = [result.local_excel, result.local_checksum].some((value) => ["delete_failed", "rejected_symlink"].includes(value)) ? "delete_partial" : "deleted";
+        db.prepare("UPDATE backup_records SET status=?,deleted_at=CURRENT_TIMESTAMP,message=? WHERE id=?").run(result.local === "deleted" ? "deleted" : "delete_partial", result.local === "deleted" ? "manual_delete" : "BACKUP_LOCAL_DELETE_PARTIAL", id);
+      }
+      catch (error) { if (error.code !== "BACKUP_FILE_MISSING") throw error; db.prepare("UPDATE backup_records SET status='missing',message='BACKUP_FILE_MISSING' WHERE id=?").run(id); result.local = "missing"; result.local_excel = "missing"; }
       if ((row.remote_path || row.remote_checksum_path) && remoteDeleter) {
         try {
           const remote = await remoteDeleter(this.dto(row)); result.remote_excel = remote.excel || "not_present"; result.remote_checksum = remote.checksum || "not_present";
