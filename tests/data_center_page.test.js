@@ -6,6 +6,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { test } = require("node:test");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
+const { createTemplateBuffer } = require("../src/excel/import_service");
 
 const root = path.resolve(__dirname, "..");
 
@@ -51,7 +52,7 @@ async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prep
     await waitForServer(server, port, () => stderr);
     chrome = await launchChrome(path.join(tempRoot, "chrome-profile"));
     await chrome.session.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
-    await action({ browser: chrome.session, database, port, serverLogs: () => ({ stdout, stderr }) });
+    await action({ browser: chrome.session, database, port, tempRoot, serverLogs: () => ({ stdout, stderr }) });
   } finally {
     if (chrome) {
       await chrome.session.close();
@@ -272,5 +273,112 @@ test("explicit audit permission opens the page while an ordinary account has no 
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"audit\"]'))"), false);
     assert.equal(browser.dataCenterResponses().length, 0);
     assert.deepEqual(browser.exceptions, []);
+  });
+});
+
+test("owner can inspect a safe invalid-role record and jump to the matching account", async () => {
+  const prepareDatabase = (db) => db.exec(`
+    INSERT INTO users(username,display_name,role,password_hash,status,permission_override_enabled)
+      SELECT 'role-broken','待修复账号','老板',password_hash,'active',0 FROM users WHERE username='boss';
+  `);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    await browser.waitFor("document.querySelector('.data-preflight-panel')?.textContent.includes('账号角色关系无效')");
+    assert.equal(await browser.evaluate("document.querySelector('.backup-run-now')?.disabled"), true);
+    await browser.click(".data-preflight-view");
+    await browser.waitFor("document.querySelector('.data-preflight-detail-modal')?.textContent.includes('待修复账号')");
+    const details = await browser.evaluate("document.querySelector('.data-preflight-detail-modal')?.textContent");
+    for (const value of ["账号记录ID", "role-broken", "待修复账号", "当前角色ID", "当前角色名称", "账号保存了错误的角色名称", "建议处理方式", "前往账号权限"]) assert.match(details, new RegExp(value));
+    assert.doesNotMatch(details, /password_hash|access_token|refresh_token|PAGE-APP-SECRET|SYNTHETIC-TOKEN/i);
+    assert.equal(browser.responses.some((item) => /\/api\/data-center\/preflight\/details$/.test(item.url) && item.status === 200), true);
+    await browser.click(".preflight-account-link");
+    await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('账号权限') && Boolean(document.querySelector('.user-row.preflight-target[data-username=\"role-broken\"]'))");
+    assert.equal(await browser.evaluate("document.activeElement?.closest('.user-row')?.dataset.username"), "role-broken");
+    await browser.evaluate("(() => { const select=document.querySelector('.user-row.preflight-target .user-field[data-field=\"role\"]'); select.dataset.pendingTest='1'; select.value='owner'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
+    await browser.waitFor("!document.querySelector('[data-pending-test]') && document.querySelector('.user-row.preflight-target .user-field[data-field=\"role\"]')?.value === 'owner'");
+    await browser.openDataCenter(); await assertThreeRegions(browser);
+    await browser.waitFor("!document.querySelector('.data-preflight-panel') && document.querySelector('.backup-run-now')?.disabled === false");
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("audit permission can inspect details without account-admin access and teacher has no route", async () => {
+  const prepareDatabase = (db) => db.exec(`
+    INSERT INTO users(username,display_name,role,password_hash,status,permission_override_enabled)
+      SELECT 'role-broken','待修复账号','不存在角色',password_hash,'active',0 FROM users WHERE username='boss';
+    INSERT INTO users(username,display_name,role,password_hash,status,permission_override_enabled)
+      SELECT 'audit-user','Audit User','teacher',password_hash,'active',1 FROM users WHERE username='boss';
+    INSERT INTO user_page_permissions(user_id,permission_key,enabled)
+      SELECT id,'audit',1 FROM users WHERE username='audit-user';
+  `);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.login("audit-user", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    await browser.click(".data-preflight-view");
+    await browser.waitFor("document.querySelector('.data-preflight-detail-modal')?.textContent.includes('role-broken')");
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.preflight-account-link'))"), false);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.login("teacher", "123456");
+    await browser.click('.nav-btn[data-nav-group="settings"]');
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"audit\"]'))"), false);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("preflight detail request failure shows a safe retry state instead of doing nothing", async () => {
+  const prepareDatabase = (db) => db.exec(`
+    INSERT INTO users(username,display_name,role,password_hash,status)
+      SELECT 'role-broken','待修复账号','不存在角色',password_hash,'active' FROM users WHERE username='boss';
+  `);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    browser.failPreflightDetailsOnce = true;
+    await browser.click(".data-preflight-view");
+    await browser.waitFor("document.querySelector('.data-preflight-detail-error')?.textContent.includes('问题详情加载失败')");
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.data-preflight-detail-retry'))"), true);
+    assert.equal(browser.consoleErrors.every((message) => /503|Failed to load resource/.test(message)), true);
+    browser.consoleErrors.length = 0;
+    await browser.click(".data-preflight-detail-retry");
+    await browser.waitFor("document.querySelector('.data-preflight-detail-modal')?.textContent.includes('role-broken') && !document.querySelector('.data-preflight-detail-error')");
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("custom Excel picker supports keyboard activation selection reselection and responsive layout", async () => {
+  await withBrowserScenario({}, async ({ browser, tempRoot }) => {
+    const firstName = "黎明教育_全量数据_带空格与很长很长很长很长的文件名.xlsx";
+    const secondName = "重新选择_合成测试.xlsx";
+    const first = path.join(tempRoot, firstName); const second = path.join(tempRoot, secondName);
+    fs.writeFileSync(first, createTemplateBuffer()); fs.writeFileSync(second, createTemplateBuffer());
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await browser.evaluate("window.dispatchEvent(new Event('resize'))");
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("document.querySelector('.data-import-file-name')?.textContent.trim()"), "尚未选择文件");
+    assert.equal(await browser.evaluate("document.querySelector('.data-import-file')?.getAttribute('accept').includes('.xlsx')"), true);
+    await browser.evaluate("(() => { const input=document.querySelector('.data-import-file'); input.addEventListener('click',(event)=>{event.preventDefault();document.body.dataset.fileKeyboard='yes';},{once:true}); document.querySelector('.data-import-file-trigger').focus(); })()");
+    await browser.evaluate("document.querySelector('.data-import-file-trigger').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true,cancelable:true}))");
+    await browser.waitFor("document.body.dataset.fileKeyboard === 'yes'");
+    await browser.setFileInputFiles("#data-import-file-input", [first]);
+    await browser.waitFor(`document.querySelector('.data-import-file-name')?.textContent === ${JSON.stringify(firstName)}`);
+    assert.equal(await browser.evaluate("document.querySelector('.data-import-file-trigger')?.textContent.trim()"), "重新选择");
+    assert.equal(await browser.evaluate("document.querySelector('.data-import-file-name')?.title"), firstName);
+    assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.data-import-file-name')).textOverflow"), "ellipsis");
+    await browser.setFileInputFiles("#data-import-file-input", [second]);
+    await browser.waitFor(`document.querySelector('.data-import-file-name')?.textContent === ${JSON.stringify(secondName)}`);
+    await browser.click(".data-import-preview-button");
+    await browser.waitFor("document.querySelector('.data-import-preview')?.textContent.includes('文件校验通过')");
+    await browser.evaluate("backupState.error='合成预检失败'; backupState.importPreview=null; render()");
+    await browser.waitFor("document.querySelector('[data-region=\"import-export\"]') && document.body.textContent.includes('合成预检失败')");
+    assert.equal(await browser.evaluate("document.querySelector('.data-import-file-name')?.textContent"), secondName);
+
+    const desktop = await browser.evaluate(`(() => { const cards=[...document.querySelectorAll('.data-backup-subcard')].map((node)=>node.getBoundingClientRect()); const controls=[...document.querySelectorAll('.local-backup-card .control')].map((node)=>node.getBoundingClientRect().height); return { cardCount:cards.length, topDelta:Math.abs(cards[0].top-cards[1].top), widthDelta:Math.abs(cards[0].width-cards[1].width), heightDelta:Math.max(...controls)-Math.min(...controls), overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, encryption:Boolean(document.querySelector('[class*=encryption], [name*=encryption]')) }; })()`);
+    assert.equal(desktop.cardCount, 2); assert.ok(desktop.topDelta <= 1); assert.ok(desktop.widthDelta <= 1); assert.ok(desktop.heightDelta <= 1); assert.equal(desktop.overflow, false); assert.equal(desktop.encryption, false);
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await browser.evaluate("window.dispatchEvent(new Event('resize'))");
+    const mobile = await browser.evaluate(`(() => { const cards=[...document.querySelectorAll('.data-backup-subcard')].map((node)=>node.getBoundingClientRect()); const picker=document.querySelector('.data-file-picker').getBoundingClientRect(); return { stacked:cards[1].top>cards[0].bottom, pickerWidth:picker.width, parentWidth:document.querySelector('.data-import-file-field').getBoundingClientRect().width, overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth }; })()`);
+    assert.equal(mobile.stacked, true); assert.ok(mobile.pickerWidth <= mobile.parentWidth + 1); assert.equal(mobile.overflow, false);
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });
