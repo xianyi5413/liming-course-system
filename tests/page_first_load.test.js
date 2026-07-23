@@ -73,7 +73,7 @@ const scenarios = [
   { name: "期初余额", group: "students", view: "openingBalances", title: "期初余额", row: ".opening-balance-row", text: "首次加载学生", direct: true },
   { name: "班级管理", group: "students", view: "classGroups", title: "班级管理", row: ".class-group-row", text: "首次加载老师", direct: true },
   { name: "学生档案", group: "students", view: "studentProfiles", title: "学生档案", row: ".profile-row[data-kind=\"students\"]", text: "首次加载学生", direct: true },
-  { name: "教师课时明细", group: "teachers", view: "teacherDetail", title: "课时明细", row: ".teacher-detail-table tbody tr:not(.empty)", text: "首次加载老师", direct: true },
+  { name: "教师课时明细", group: "teachers", view: "teacherDetail", title: "课时明细", row: ".teacher-detail-table tbody tr:not(.empty)", text: "首次加载老师", direct: true, selectTeacher: true },
   { name: "教师薪资规则", group: "teachers", view: "teacherSalaryRules", title: "薪资规则", row: ".teacher-salary-rule-row", text: "首次加载老师", direct: true },
   { name: "教师档案", group: "teachers", view: "teacherProfiles", title: "老师档案", row: ".profile-row[data-kind=\"teachers\"]", text: "首次加载老师", direct: true },
 ];
@@ -82,12 +82,21 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
   await browser.login("boss", "123456");
   assert.equal(await browser.evaluate("document.querySelector('#topbar')?.textContent.includes('首页')"), true);
   await openView(browser, scenario.group, scenario.view);
+  if (scenario.selectTeacher) {
+    await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
+    await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
+  }
   await browser.waitFor(`document.querySelector('#topbar')?.textContent.includes(${JSON.stringify(scenario.title)}) && document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0 && document.body.textContent.includes(${JSON.stringify(scenario.text)})`);
   assert.equal(await browser.evaluate("document.querySelector('.month-select')?.value || '2026-07-01'"), MONTH);
   if (!scenario.direct) assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   await openView(browser, "home", "dashboard"); await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('首页')");
-  await openView(browser, scenario.group, scenario.view); await browser.waitFor(`document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0`);
+  await openView(browser, scenario.group, scenario.view);
+  if (scenario.selectTeacher) {
+    await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
+    await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
+  }
+  await browser.waitFor(`document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0`);
   assert.deepEqual(browser.exceptions, []);
 }));
 
@@ -107,7 +116,9 @@ test("fee and teacher detail headers and row cells share the approved column ord
   assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用", "规则费用"]);
   assert.equal(await browser.evaluate("document.querySelector('.fee-detail-table tbody tr')?.children.length"), 13);
   assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fee-detail-scroll')).overflowX !== 'visible'"), true);
-  await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelectorAll('.teacher-detail-table tbody tr:not(.empty)').length > 0");
+  await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
+  await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
+  await browser.waitFor("Boolean(document.querySelector('.teacher-detail-table .teacher-salary-lesson-select'))");
   assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资", "规则薪资"]);
   assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.children.length"), 13);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

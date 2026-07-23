@@ -2556,6 +2556,30 @@ function teacherProfiles() {
   `).map((row) => ({ ...row, first_lesson_date: firstTeacherLessonDate(row.name) }));
 }
 
+function teacherDetailTeacherCandidates(user) {
+  const activeRows = all(`
+    SELECT id, name, phone, notes, status, joined_at, left_at
+    FROM teachers
+    WHERE status = '在职' AND TRIM(name) <> ''
+    ORDER BY name
+  `);
+  let allowedNames = null;
+  if (canonicalRole(user?.role) === "teacher") {
+    allowedNames = new Set(userTeacherBindings(user?.id));
+    if (!allowedNames.size && text(user?.teacher_name)) allowedNames.add(text(user.teacher_name));
+  }
+  const preset = rolePrefilterForView(user, "teacherDetail");
+  if (prefilterHas(preset, "teacher_names") || prefilterHas(preset, "teacher")) {
+    const presetNames = new Set(normalizeTeacherNameList(preset.teacher_names || preset.teacher || []));
+    allowedNames = allowedNames == null
+      ? presetNames
+      : new Set([...allowedNames].filter((name) => presetNames.has(name)));
+  }
+  return activeRows
+    .filter((row) => allowedNames == null || allowedNames.has(text(row.name)))
+    .sort((left, right) => text(left.name).localeCompare(text(right.name), "zh-Hans-CN"));
+}
+
 function studentProfiles() {
   // Fetch stages once: the prior per-student lookup was an N+1 query on every
   // profile/recharge page entry.
@@ -6988,24 +7012,31 @@ function teacherSalaryRules() {
   `).map((row) => ({ ...row, price_status: teacherPriceStatus(row) }));
 }
 
-function activeTeacherSalaryRuleForLesson(lesson) {
+function matchingTeacherSalaryRulesForLesson(lesson, rules = null) {
   const teacherName = text(lesson.teacher_name);
   const grade = text(lesson.grade);
   const subject = text(lesson.subject);
   const studentNames = normalizedStudents(lesson.student_names);
-  if (!teacherName || !grade || !subject || !studentNames) return null;
-  return get(`
+  if (!teacherName || !grade || !subject || !studentNames) return [];
+  const candidates = rules || all(`
     SELECT *
     FROM teacher_salary_rules
-    WHERE salary_per_unit > 0
-      AND is_active <> 0
-      AND teacher_name = ?
-      AND grade = ?
-      AND subject = ?
-      AND student_names = ?
+    WHERE teacher_name = ? AND grade = ? AND subject = ?
     ORDER BY id DESC
-    LIMIT 1
-  `, [teacherName, grade, subject, studentNames]);
+  `, [teacherName, grade, subject]);
+  return candidates
+    .filter((rule) => (
+      text(rule.teacher_name) === teacherName
+      && text(rule.grade) === grade
+      && text(rule.subject) === subject
+      && normalizedStudents(rule.student_names) === studentNames
+    ))
+    .sort((left, right) => Number(right.id) - Number(left.id));
+}
+
+function activeTeacherSalaryRuleForLesson(lesson, rules = null) {
+  return matchingTeacherSalaryRulesForLesson(lesson, rules)
+    .find((rule) => Number(rule.is_active) !== 0 && optionalNumber(rule.salary_per_unit) > 0) || null;
 }
 
 function normalizeTeacherSalaryRuleInput(body, current = {}) {
@@ -7228,6 +7259,61 @@ function calculateTeacherSalaryFromRule(rule, lesson) {
   };
 }
 
+function resolveTeacherSalaryRuleForLesson(lesson, rules = null) {
+  if (!isCompletedLesson(lesson)) {
+    return {
+      status: "ineligible",
+      reason: "当前课程状态不参与教师计薪",
+      calculation: null,
+      rule: null,
+    };
+  }
+  const matchingRules = matchingTeacherSalaryRulesForLesson(lesson, rules);
+  if (!matchingRules.length) {
+    return {
+      status: "no_match",
+      reason: "未找到匹配的教师薪资规则",
+      calculation: null,
+      rule: null,
+    };
+  }
+  const rule = matchingRules.find((candidate) => (
+    Number(candidate.is_active) !== 0
+    && optionalNumber(candidate.salary_per_unit) > 0
+  )) || null;
+  const calculation = calculateTeacherSalaryFromRule(rule, lesson);
+  if (!rule || !calculation) {
+    return {
+      status: "unavailable",
+      reason: "匹配规则当前不可用",
+      calculation: null,
+      rule: matchingRules[0],
+    };
+  }
+  return { status: "matched", reason: "", calculation, rule };
+}
+
+function teacherDetailLessonRuleData(lesson, rules = null) {
+  const resolved = resolveTeacherSalaryRuleForLesson(lesson, rules);
+  const calculated = resolved.calculation;
+  return {
+    ...lesson,
+    teacher_salary_rule_status: resolved.status,
+    teacher_salary_rule_reason: resolved.reason,
+    rule_salary: calculated ? calculated.salary : null,
+    rule_salary_rule_id: calculated ? calculated.rule_id : (resolved.rule ? Number(resolved.rule.id) : null),
+    rule_salary_per_unit: calculated ? calculated.salary_per_unit : null,
+    rule_salary_unit_hours: calculated ? calculated.unit_hours : null,
+    rule_salary_lesson_hours: calculated ? calculated.lesson_hours : null,
+    rule_salary_warning: calculated ? calculated.warning : "",
+  };
+}
+
+function teacherDetailLessonRows(rows = []) {
+  const rules = teacherSalaryRules();
+  return rows.map((lesson) => teacherDetailLessonRuleData(lesson, rules));
+}
+
 function resolvedTeacherSalaryForLesson(data, options = {}) {
   if (!isCompletedLesson(data)) {
     return {
@@ -7272,28 +7358,111 @@ function resolvedTeacherSalaryForLesson(data, options = {}) {
   };
 }
 
-function applyTeacherSalaryRulesToLessons(lessonIds) {
-  const ids = [...new Set((lessonIds || []).map(Number).filter(Boolean))];
-  if (!ids.length) return { error: "请至少选择一条课程记录", status: 400 };
-  if (ids.length > 500) return { error: "单次最多处理 500 条课程记录", status: 400 };
+function lessonAllowedForTeacherDetail(user, lesson) {
+  if (!lesson) return false;
+  if (canonicalRole(user?.role) === "teacher") {
+    const bindings = new Set(userTeacherBindings(user?.id));
+    if (!bindings.size && text(user?.teacher_name)) bindings.add(text(user.teacher_name));
+    if (!bindings.has(text(lesson.teacher_name))) return false;
+  }
+  const preset = rolePrefilterForView(user, "teacherDetail");
+  return lessonMatchesRolePrefilter(lesson, preset);
+}
+
+function normalizeSelectedLessonIds(lessonIds) {
+  const inputs = Array.isArray(lessonIds) ? lessonIds : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawId of inputs) {
+    const rawKey = typeof rawId === "string" ? rawId.trim() : String(rawId);
+    const numberId = Number(rawId);
+    const valid = Number.isSafeInteger(numberId) && numberId > 0 && rawKey !== "";
+    const key = valid ? `id:${numberId}` : `invalid:${rawKey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ raw_id: rawId, lesson_id: valid ? numberId : null, valid });
+  }
+  return normalized;
+}
+
+function applyTeacherSalaryRulesToLessons(lessonIds, user) {
+  const selected = normalizeSelectedLessonIds(lessonIds);
+  if (!selected.length) return { error: "请至少选择一条课程记录", status: 400 };
+  if (selected.length > 500) return { error: "单次最多处理 500 条课程记录", status: 400 };
+  const existingLessons = selected
+    .filter((item) => item.valid)
+    .map((item) => get("SELECT * FROM lessons WHERE id = ?", [item.lesson_id]))
+    .filter(Boolean);
+  const unauthorized = existingLessons.filter((lesson) => !lessonAllowedForTeacherDetail(user, lesson));
+  if (unauthorized.length) {
+    return {
+      error: `无权更新所选课程：${unauthorized.map((lesson) => `#${lesson.id}`).join("、")}`,
+      status: 403,
+    };
+  }
   return withTransaction(() => {
+    const rules = teacherSalaryRules();
+    const results = [];
     const updatedLessons = [];
-    const skippedReasons = [];
-    const warnings = [];
-    for (const id of ids) {
+    for (const selectedItem of selected) {
+      if (!selectedItem.valid) {
+        results.push({
+          lesson_id: selectedItem.raw_id == null ? "" : String(selectedItem.raw_id),
+          status: "failed",
+          old_salary: null,
+          new_salary: null,
+          rule_id: null,
+          reason: "无效课程ID",
+        });
+        continue;
+      }
+      const id = selectedItem.lesson_id;
       const lesson = get("SELECT * FROM lessons WHERE id = ?", [id]);
       if (!lesson) {
-        skippedReasons.push({ lesson_id: id, reason: "课程不存在" });
+        results.push({
+          lesson_id: id,
+          status: "failed",
+          old_salary: null,
+          new_salary: null,
+          rule_id: null,
+          reason: "课程不存在",
+        });
         continue;
       }
-      if (!isCompletedLesson(lesson)) {
-        skippedReasons.push({ lesson_id: id, reason: "非已上课程不参与薪资规则" });
+      const resolved = resolveTeacherSalaryRuleForLesson(lesson, rules);
+      if (resolved.status !== "matched") {
+        results.push({
+          lesson_id: id,
+          date: text(lesson.date),
+          teacher_name: text(lesson.teacher_name),
+          grade: text(lesson.grade),
+          subject: text(lesson.subject),
+          student_names: text(lesson.student_names),
+          status: "skipped",
+          old_salary: moneyRound(lesson.teacher_salary),
+          new_salary: null,
+          rule_id: resolved.rule ? Number(resolved.rule.id) : null,
+          reason: resolved.reason,
+        });
         continue;
       }
-      const rule = activeTeacherSalaryRuleForLesson(lesson);
-      const calculated = calculateTeacherSalaryFromRule(rule, lesson);
-      if (!calculated) {
-        skippedReasons.push({ lesson_id: id, reason: "未匹配到启用的薪资规则" });
+      const calculated = resolved.calculation;
+      const oldSalary = moneyRound(lesson.teacher_salary);
+      if (Math.abs(oldSalary - calculated.salary) < 0.005) {
+        results.push({
+          lesson_id: id,
+          date: text(lesson.date),
+          teacher_name: text(lesson.teacher_name),
+          grade: text(lesson.grade),
+          subject: text(lesson.subject),
+          student_names: text(lesson.student_names),
+          status: "unchanged",
+          old_salary: oldSalary,
+          new_salary: calculated.salary,
+          rule_id: calculated.rule_id,
+          reason: "",
+          warning: calculated.warning,
+        });
         continue;
       }
       db.prepare(`
@@ -7304,13 +7473,40 @@ function applyTeacherSalaryRulesToLessons(lessonIds) {
       `).run(calculated.salary, calculated.rule_id, id);
       const updated = get("SELECT * FROM lessons WHERE id = ?", [id]);
       updatedLessons.push(updated);
-      if (calculated.warning) warnings.push({ lesson_id: id, warning: calculated.warning });
+      results.push({
+        lesson_id: id,
+        date: text(lesson.date),
+        teacher_name: text(lesson.teacher_name),
+        grade: text(lesson.grade),
+        subject: text(lesson.subject),
+        student_names: text(lesson.student_names),
+        status: "updated",
+        old_salary: oldSalary,
+        new_salary: calculated.salary,
+        rule_id: calculated.rule_id,
+        reason: "",
+        warning: calculated.warning,
+      });
     }
+    const count = (status) => results.filter((item) => item.status === status).length;
+    const updatedCount = count("updated");
+    const unchangedCount = count("unchanged");
+    const skippedCount = count("skipped");
+    const failedCount = count("failed");
+    const warnings = results.filter((item) => item.warning).map((item) => ({ lesson_id: item.lesson_id, warning: item.warning }));
     return {
-      updatedCount: updatedLessons.length,
-      skippedCount: skippedReasons.length,
+      selected_count: selected.length,
+      updated_count: updatedCount,
+      unchanged_count: unchangedCount,
+      skipped_count: skippedCount,
+      failed_count: failedCount,
+      results,
+      updatedCount,
+      unchangedCount,
+      skippedCount,
+      failedCount,
       updatedLessons,
-      skippedReasons,
+      skippedReasons: results.filter((item) => item.status === "skipped").map((item) => ({ lesson_id: item.lesson_id, reason: item.reason })),
       warnings,
     };
   });
@@ -9386,6 +9582,7 @@ function roleCan(user, area, action = "read") {
 
 function apiArea(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/teacher-detail")) return p.includes("/salary/") ? "teacherSalary" : "profiles";
   if (p.startsWith("/api/data-center")) return "coreExport";
   if (p.startsWith("/api/roles")) return "roles";
   if (p.startsWith("/api/student-grade-stages")) return "students";
@@ -9414,6 +9611,8 @@ function apiArea(req, url) {
 
 function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
+  if (p === "/api/teacher-salary-rules/apply-selected") return ["teacherDetail"];
   if (p.startsWith("/api/data-center")) return ["audit"];
   if (p === "/api/dashboard") return ["dashboard"];
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
@@ -9596,12 +9795,22 @@ function prefilterViewFromUrl(url, fallback = "lessons") {
 
 function sanitizeLessonRows(rows, user) {
   const output = rows || [];
-  if (isSuperRole(user.role)) return output;
+  const canSeeTeacherSalary = isSuperRole(user.role)
+    || userHasAnyPermission(user, ["teacherSalary", "teacherSalaryRules"]);
+  if (canSeeTeacherSalary) return output;
   return output.map((row) => ({
     ...row,
     teacher_salary: 0,
     teacher_salary_source: "",
     teacher_salary_rule_id: null,
+    teacher_salary_rule_status: "",
+    teacher_salary_rule_reason: "",
+    rule_salary: null,
+    rule_salary_rule_id: null,
+    rule_salary_per_unit: null,
+    rule_salary_unit_hours: null,
+    rule_salary_lesson_hours: null,
+    rule_salary_warning: "",
   }));
 }
 
@@ -11865,11 +12074,14 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/teacher-salary-rules/apply-selected") {
     const body = await readBody(req);
-    const ids = [...new Set((body.lesson_ids || []).map(Number).filter(Boolean))];
+    const ids = Array.isArray(body.lesson_ids) ? body.lesson_ids : [];
     const before = ids.length
-      ? all(`SELECT * FROM lessons WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, ids)
+      ? all(
+        `SELECT * FROM lessons WHERE id IN (${normalizeSelectedLessonIds(ids).filter((item) => item.valid).map(() => "?").join(",") || "NULL"}) ORDER BY id`,
+        normalizeSelectedLessonIds(ids).filter((item) => item.valid).map((item) => item.lesson_id),
+      )
       : [];
-    const result = applyTeacherSalaryRulesToLessons(ids);
+    const result = applyTeacherSalaryRulesToLessons(ids, user);
     if (result.error) return sendError(res, result.status || 400, result.error);
     recordAuditEvent(req, user, {
       action: "apply_selected",
@@ -11880,9 +12092,16 @@ async function handleApi(req, res, url) {
     });
     writeOperationLog(user, {
       operation_type: "按规则更新教师薪资",
-      operation_content: `所选 ${ids.length} 条，更新 ${result.updatedCount} 条，跳过 ${result.skippedCount} 条`,
+      operation_content: `所选 ${result.selected_count} 条，更新 ${result.updated_count} 条，无需更新 ${result.unchanged_count} 条，跳过 ${result.skipped_count} 条，失败 ${result.failed_count} 条`,
       target_type: "lessons",
       target_id: result.updatedLessons.map((row) => row.id).join(","),
+      details: {
+        selected_count: result.selected_count,
+        updated_count: result.updated_count,
+        unchanged_count: result.unchanged_count,
+        skipped_count: result.skipped_count,
+        failed_count: result.failed_count,
+      },
     });
     return sendJson(res, result);
   }
@@ -12183,13 +12402,14 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
     const viewKey = prefilterViewFromUrl(url, "lessons");
     const rangeLessons = lessonsInDateRange(text(url.searchParams.get("start")), text(url.searchParams.get("end")));
-    const lessons = rangeLessons
+    const filteredLessons = rangeLessons
       ? filterLessonsByStudentNames(
         filterLessonsByTeacherNames(filterLessonsByRolePrefilter(rangeLessons, user, viewKey), teacherNamesFromUrl(url)),
         studentNamesFromUrl(url),
       )
       : null;
-    if (!lessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    if (!filteredLessons) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    const lessons = viewKey === "teacherDetail" ? teacherDetailLessonRows(filteredLessons) : filteredLessons;
     return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
   }
   if (req.method === "GET" && url.pathname === "/api/course-notice") {
@@ -12320,6 +12540,9 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/teachers") {
     return sendJson(res, { teachers: teacherProfiles() });
+  }
+  if (req.method === "GET" && url.pathname === "/api/teacher-detail/teachers") {
+    return sendJson(res, { teachers: teacherDetailTeacherCandidates(user) });
   }
   if (req.method === "POST" && url.pathname === "/api/teachers") {
     const result = createTeacherProfile(await readBody(req));
