@@ -224,14 +224,38 @@ test("manual backup accepts a global opening balance without requiring a month",
   });
 });
 
-test("student profiles hide an empty conflict banner and count multiple conflicting students", async () => {
+test("student profiles keep loading, empty and conflict states visible and refresh on re-entry", async () => {
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
-    await browser.click('.nav-btn[data-nav-group="students"]');
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
+      "/styles.css?v=20260723-stage-conflict-visibility-alignment",
+      "/app.js?v=20260723-stage-conflict-visibility-alignment",
+    ]);
+    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    browser.stageConflictDelayOnce = 250;
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.dataset.status === 'loading'");
+    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.disabled"), true);
+    await browser.waitFor("Boolean(document.querySelector('.student-profile-table'))");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.textContent.trim()"), "重新检查");
+    const firstCheckCount = browser.responses.filter((item) => /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(item.url)).length;
+    browser.stageConflictDelayOnce = 150;
+    await browser.click(".student-stage-conflict-refresh");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.dataset.status === 'loading'");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.dataset.status === 'success'");
+    assert.equal(browser.responses.filter((item) => /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(item.url)).length, firstCheckCount + 1);
+    const beforeReentry = browser.responses.filter((item) => /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(item.url)).length;
+    await browser.click('.nav-btn[data-nav-group="teachers"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"teacherProfiles\"]'))");
+    await browser.click('.nav-sub-btn[data-view="teacherProfiles"]');
+    await browser.waitFor("Boolean(document.querySelector('.teacher-profile-table'))");
+    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
     await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
-    await browser.waitFor("Boolean(document.querySelector('.student-profile-table'))");
-    assert.equal(await browser.evaluate("Boolean(document.querySelector('.student-stage-conflict-banner'))"), false);
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.dataset.status === 'success'");
+    assert.equal(browser.responses.filter((item) => /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(item.url)).length, beforeReentry + 1);
 
     const db = new DatabaseSync(database);
     db.exec(`
@@ -251,9 +275,109 @@ test("student profiles hide an empty conflict banner and count multiple conflict
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
     await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
-    await browser.waitFor("document.querySelector('.student-stage-conflict-banner')?.textContent.includes('发现 2 名学生')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('发现 2 名学生')");
     await browser.click(".student-stage-conflict-view");
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-record').length"), 2);
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("student profile conflict failures are safe and retry recovers", async () => {
+  await withBrowserScenario({}, async ({ browser }) => {
+    await browser.login("boss", "123456");
+    await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    browser.stageConflictResult = { status: 500, body: { error: "SQL internal stack token secret" } };
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突检查失败：服务器处理失败')");
+    let text = await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent");
+    assert.doesNotMatch(text, /SQL|stack|token|undefined|Error|Session|Cookie/);
+    assert.match(browser.consoleErrors.shift() || "", /500/);
+    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.textContent.trim()"), "重试");
+    await browser.click(".student-stage-conflict-refresh");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+
+    browser.stageConflictResult = { status: 403, body: { error: "permission details must stay private" } };
+    await browser.click(".student-stage-conflict-refresh");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突检查失败：无权限查看')");
+    text = await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent");
+    assert.doesNotMatch(text, /permission details|undefined|Error/);
+    assert.match(browser.consoleErrors.shift() || "", /403/);
+    await browser.click(".student-stage-conflict-refresh");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("student conflict totals ignore filters and historical students are revealed with centered profile columns", async () => {
+  const historicalName = "浏览器历史阶段冲突学生姓名较长用于换行验收";
+  const prepareDatabase = (db) => db.exec(`
+    INSERT INTO students(id,name,grade,status,left_at,notes) VALUES
+      (8711,'${historicalName}','初三','离校','2026-06-30','备注保持左对齐'),
+      (8712,'浏览器在读阶段冲突学生','高二','在读',NULL,'当前学生');
+    INSERT INTO student_grade_stages(student_name,stage,start_date,end_date) VALUES
+      ('${historicalName}','初三','2025-09-01','2026-08-31'),
+      ('${historicalName}','高一','2026-08-01','2027-08-31'),
+      ('浏览器在读阶段冲突学生','高二','2025-09-01','2026-08-31'),
+      ('浏览器在读阶段冲突学生','高三','2026-08-31','2027-08-31');
+  `);
+  await withBrowserScenario({ prepareDatabase }, async ({ browser }) => {
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.login("boss", "123456");
+    await browser.evaluate("localStorage.setItem('liming:include-inactive','0')");
+    await browser.click('.nav-btn[data-nav-group="students"]');
+    await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
+    await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('发现 2 名学生')");
+
+    await browser.evaluate(`(() => { const input=document.querySelector('input.profile-status-filter'); input.value='在读'; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+    await browser.waitFor("!document.querySelector('.student-profile-main-row[data-id=\"8711\"]')");
+    assert.match(await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent"), /发现 2 名学生/);
+    await browser.click(".student-stage-conflict-view");
+    await browser.click('.student-stage-conflict-edit[data-student-id="8711"]');
+    await browser.waitFor("Boolean(document.querySelector('.student-grade-stage-modal')) && Boolean(document.querySelector('.student-profile-main-row[data-id=\"8711\"]'))");
+    await browser.waitFor("document.activeElement?.matches('.student-stage-card-conflict input')");
+    assert.equal(await browser.evaluate("document.querySelector('.history-toggle-input')?.checked"), true);
+    assert.equal(await browser.evaluate("document.querySelector('input.profile-status-filter')?.value"), "");
+    assert.equal(await browser.evaluate("document.querySelector('input.profile-grade-filter')?.value"), "");
+
+    const alignment = await browser.evaluate(`(() => {
+      const row=document.querySelector('.student-profile-main-row[data-id="8711"]');
+      const cell=row.querySelector('.student-name-cell');
+      const wrapper=cell.querySelector('.student-name-with-conflict');
+      const badge=wrapper.querySelector('.student-badge');
+      const style=(element)=>getComputedStyle(element);
+      const rect=(element)=>element.getBoundingClientRect();
+      return {
+        nameHead: style(document.querySelector('.student-name-head')).textAlign,
+        nameCell: style(cell).textAlign,
+        wrapperDisplay: style(wrapper).display,
+        wrapperJustify: style(wrapper).justifyContent,
+        badgeWhiteSpace: style(badge).whiteSpace,
+        badgeInside: rect(badge).left >= rect(cell).left - 1 && rect(badge).right <= rect(cell).right + 1,
+        grade: style(row.querySelector('.current-grade-cell')).textAlign,
+        status: style(row.children[5]).textAlign,
+        joined: style(row.children[6]).textAlign,
+        left: style(row.children[7]).textAlign,
+        notes: style(row.querySelector('.profile-notes-col')).textAlign,
+        pageFits: document.body.scrollWidth <= innerWidth && document.querySelector('#app').scrollWidth <= innerWidth,
+      };
+    })()`);
+    assert.deepEqual(alignment, {
+      nameHead: "center", nameCell: "center", wrapperDisplay: "flex", wrapperJustify: "center",
+      badgeWhiteSpace: "normal", badgeInside: true, grade: "center", status: "center",
+      joined: "center", left: "center", notes: "left", pageFits: true,
+    });
+
+    await browser.click(".student-grade-stage-cancel");
+    await browser.click('.student-profile-main-row[data-id="8711"] .student-name-cell');
+    await browser.waitFor("Boolean(document.querySelector('.student-grade-stage-modal'))");
+    await browser.click(".student-grade-stage-cancel");
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    await browser.waitFor("window.innerWidth === 390");
+    assert.equal(await browser.evaluate("document.body.scrollWidth <= window.innerWidth && document.querySelector('#app').scrollWidth <= window.innerWidth"), true);
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
   });
@@ -283,7 +407,7 @@ test("student profiles show stage conflicts, locate the editor, repair them and 
     await browser.waitFor("document.querySelector('.student-grade-stage-modal')?.textContent.includes('浏览器阶段冲突学生姓名较长用于窄屏验收')");
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-card-conflict').length"), 2);
     await browser.evaluate(`(() => { const input=document.querySelector('.student-grade-stage-field[data-stage="高一"][data-field="start_date"]'); input.value='2026-09-01'; input.dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('.student-grade-stage-save').click(); })()`);
-    await browser.waitFor("!document.querySelector('.student-grade-stage-modal') && !document.querySelector('.student-stage-conflict-banner')");
+    await browser.waitFor("!document.querySelector('.student-grade-stage-modal') && document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
     await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
     await browser.waitFor("window.innerWidth === 390");
     assert.equal(await browser.evaluate("document.body.scrollWidth <= window.innerWidth && document.querySelector('#app').scrollWidth <= window.innerWidth"), true);

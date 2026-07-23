@@ -91,6 +91,31 @@ test("repairing the legacy conflict succeeds and removes it from the query", asy
   assert.equal(conflicts.conflicts.some((item) => item.student_name === "阶段接口学生"), false);
 });
 
+test("owner counts every student status while a teacher only counts bound lesson students", async () => {
+  const db = new DatabaseSync(databasePath);
+  const teacherUserId = db.prepare("SELECT id FROM users WHERE username='stage-readonly'").get().id;
+  db.prepare("INSERT OR IGNORE INTO user_teacher_bindings(user_id,teacher_name) VALUES (?,'阶段只读老师')").run(teacherUserId);
+  db.exec(`
+    INSERT INTO students(id,name,grade,status,left_at) VALUES
+      (8111,'教师范围历史冲突学生','初三','已毕业','2025-08-31'),
+      (8112,'老板范围暂停冲突学生','高二','暂停',NULL);
+    INSERT INTO lessons(teacher_name,date,student_names,month_key) VALUES
+      ('阶段只读老师','2024-01-10','教师范围历史冲突学生','2024-01');
+    INSERT INTO student_grade_stages(student_name,stage,start_date,end_date) VALUES
+      ('教师范围历史冲突学生','初三','2024-01-01','2025-08-31'),
+      ('教师范围历史冲突学生','高一','2025-08-01','2026-08-31'),
+      ('老板范围暂停冲突学生','高二','2024-01-01','2025-08-31'),
+      ('老板范围暂停冲突学生','高三','2025-08-31','2026-08-31');
+  `);
+  db.close();
+  const ownerResult = await (await api("/api/student-grade-stages/conflicts")).json();
+  const teacherResult = await (await api("/api/student-grade-stages/conflicts", { cookie: readonlyCookie })).json();
+  assert.deepEqual(new Set(ownerResult.conflicts.map((item) => item.student_name)), new Set(["教师范围历史冲突学生", "老板范围暂停冲突学生"]));
+  assert.deepEqual(new Set(teacherResult.conflicts.map((item) => item.student_name)), new Set(["教师范围历史冲突学生"]));
+  assert.equal(ownerResult.student_count, 2);
+  assert.equal(teacherResult.student_count, 1);
+});
+
 test("student-profile permission can read, missing permission is 403, and readonly cannot save", async () => {
   const readable = await api("/api/student-grade-stages/conflicts", { cookie: readonlyCookie }); assert.equal(readable.status, 200);
   const denied = await api("/api/student-grade-stages/conflicts", { cookie: deniedCookie }); assert.equal(denied.status, 403);

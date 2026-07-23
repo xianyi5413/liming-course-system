@@ -13289,3 +13289,87 @@ body {
     grid-template-rows: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Student profile conflict check: always visible and isolated from other pages. */
+.student-stage-conflict-check.loading {
+  border-color: var(--line);
+  background: var(--section-head);
+}
+
+.student-stage-conflict-check.success {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--line));
+  background: color-mix(in srgb, var(--success-bg) 72%, var(--panel));
+}
+
+.student-stage-conflict-check.success .student-stage-conflict-icon {
+  background: var(--success);
+}
+
+.student-stage-conflict-check.error,
+.student-stage-conflict-check.warning {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.student-stage-conflict-check.loading .student-stage-conflict-icon {
+  background: var(--muted);
+}
+
+.student-stage-conflict-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Student profile table alignment only; shared entity badges remain unchanged. */
+.student-profile-table col.student-profile-col-name {
+  width: 104px;
+}
+
+.profile-table.student-profile-table.uniform-table th.student-name-head,
+.profile-table.student-profile-table.uniform-table td.student-name-cell {
+  text-align: center !important;
+  vertical-align: middle !important;
+  white-space: normal;
+}
+
+.student-profile-table .student-name-with-conflict {
+  width: 100%;
+  max-width: 100%;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.student-profile-table .student-name-with-conflict .student-badge {
+  flex: 0 1 auto;
+  justify-self: center;
+  min-width: 0;
+  height: auto;
+  max-height: none;
+  white-space: normal;
+  overflow: visible;
+}
+
+.student-profile-table .student-name-with-conflict .student-badge > span:first-child {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.profile-table.student-profile-table.uniform-table :is(th, td).profile-notes-col {
+  text-align: left !important;
+}
+
+@media (max-width: 640px) {
+  .student-stage-conflict-check {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-stage-conflict-check > .student-stage-conflict-actions,
+  .student-stage-conflict-check > .student-stage-conflict-refresh {
+    align-self: flex-start;
+  }
+}

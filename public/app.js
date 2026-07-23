@@ -394,6 +394,8 @@ let selectedTeacherProfileIds = new Set();
 let selectedStudentProfileIds = new Set();
 let studentGradeStageModalDraft = null;
 let studentGradeStageConflicts = [];
+let studentGradeStageConflictCheck = { status: "idle", errorKind: "" };
+let studentGradeStageConflictRequestId = 0;
 let studentGradeStageConflictModalOpen = false;
 let studentGradeStageTrigger = null;
 let studentGradeStageReturnView = "";
@@ -1596,19 +1598,19 @@ function bootstrapQuery(lite = true) {
 
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
   const stillCurrent = () => loadGeneration === generation;
+  const stageConflictsPromise = view === "studentProfiles" && canView("studentProfiles")
+    ? refreshStudentGradeStageConflicts({ renderStatus: false, generation })
+    : null;
 
-  const [teachersResult, studentsResult, stageConflictsResult] = await Promise.all([
+  const [teachersResult, studentsResult] = await Promise.all([
     viewNeedsProfileTeachers() ? request("/api/teachers") : null,
     viewNeedsProfileStudents() && canArea("students") ? request("/api/students") : null,
-    view === "studentProfiles" && canView("studentProfiles") ? request("/api/student-grade-stages/conflicts") : null,
   ]);
   if (!stillCurrent()) return false;
   if (teachersResult) state.profile_teachers = teachersResult.teachers || [];
   if (studentsResult) state.profile_students = studentsResult.students || [];
-  if (stageConflictsResult) {
-    studentGradeStageConflicts = stageConflictsResult.conflicts || [];
-    state.student_grade_stage_conflicts = studentGradeStageConflicts;
-  }
+  if (stageConflictsPromise) await stageConflictsPromise;
+  if (!stillCurrent()) return false;
 
   if (viewNeedsLessonRange()) {
     const lessonRange = lessonLoadRange();
@@ -5075,6 +5077,7 @@ function renderViewTransitionSkeleton() {
   renderNav();
   renderTopbar(viewLabel());
   contentEl.innerHTML = `
+    ${view === "studentProfiles" ? studentStageConflictBannerMarkup("loading") : ""}
     <div class="view-loading-skeleton" role="status" aria-live="polite">
       <div class="view-loading-bar wide"></div>
       <div class="view-loading-grid"><span></span><span></span><span></span></div>
@@ -10635,12 +10638,53 @@ function studentStageConflictSummary(conflict = {}) {
   return `${conflict.student_name}：${conflict.stage_a}（${conflict.start_a || "未设置"}—${endA}）与${conflict.stage_b}（${conflict.start_b || "未设置"}—${endB}）重叠；重叠时间：${conflict.overlap_start || "-"}—${conflict.overlap_end || "-"}`;
 }
 
-function studentStageConflictBannerMarkup() {
+function studentStageConflictErrorKind(error = {}) {
+  const status = Number(error.status || 0);
+  if (status === 403) return "无权限查看";
+  if (status === 404) return "接口不存在";
+  if (status >= 500) return "服务器处理失败";
+  if (!status) return "网络连接失败";
+  return "无法获取检查结果";
+}
+
+async function refreshStudentGradeStageConflicts({ renderStatus = true, generation = loadGeneration } = {}) {
+  const requestId = ++studentGradeStageConflictRequestId;
+  studentGradeStageConflictCheck = { status: "loading", errorKind: "" };
+  if (renderStatus && view === "studentProfiles") rerenderCurrentView(() => renderProfileDirectory("students"));
+  try {
+    const result = await request("/api/student-grade-stages/conflicts", { cache: false });
+    if (requestId !== studentGradeStageConflictRequestId || generation !== loadGeneration) return false;
+    studentGradeStageConflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
+    state.student_grade_stage_conflicts = studentGradeStageConflicts;
+    studentGradeStageConflictCheck = { status: "success", errorKind: "" };
+  } catch (error) {
+    if (requestId !== studentGradeStageConflictRequestId || generation !== loadGeneration) return false;
+    studentGradeStageConflicts = [];
+    state.student_grade_stage_conflicts = [];
+    studentGradeStageConflictCheck = { status: "error", errorKind: studentStageConflictErrorKind(error) };
+  }
+  if (renderStatus && view === "studentProfiles") rerenderCurrentView(() => renderProfileDirectory("students"));
+  return studentGradeStageConflictCheck.status === "success";
+}
+
+function studentStageConflictBannerMarkup(forcedStatus = "") {
+  const status = forcedStatus || studentGradeStageConflictCheck.status || "idle";
   const studentCount = new Set((studentGradeStageConflicts || []).map((item) => Number(item.student_id) || item.student_name)).size;
-  if (!studentCount) return "";
-  return `<section class="student-stage-conflict-banner" role="status">
+  if (status === "loading" || status === "idle") return `<section class="student-stage-conflict-banner student-stage-conflict-check loading" data-status="loading" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">…</span><div><strong>阶段冲突：正在检查……</strong></div></div>
+    <button class="btn student-stage-conflict-refresh" type="button" disabled>重新检查</button>
+  </section>`;
+  if (status === "error") return `<section class="student-stage-conflict-banner student-stage-conflict-check error" data-status="error" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>阶段冲突检查失败：${escapeHtml(studentGradeStageConflictCheck.errorKind || "无法获取检查结果")}</strong></div></div>
+    <button class="btn danger student-stage-conflict-refresh" type="button">重试</button>
+  </section>`;
+  if (!studentCount) return `<section class="student-stage-conflict-banner student-stage-conflict-check success" data-status="success" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">✓</span><div><strong>阶段冲突：未发现冲突</strong></div></div>
+    <button class="btn student-stage-conflict-refresh" type="button">重新检查</button>
+  </section>`;
+  return `<section class="student-stage-conflict-banner student-stage-conflict-check warning" data-status="warning" role="status" aria-live="polite">
     <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>发现 ${studentCount} 名学生存在年级阶段时间冲突</strong><span class="student-stage-conflict-chip">阶段冲突 ${studentGradeStageConflicts.length}</span></div></div>
-    <button class="btn danger student-stage-conflict-view" type="button">查看冲突</button>
+    <div class="student-stage-conflict-actions"><button class="btn danger student-stage-conflict-view" type="button">查看冲突</button><button class="btn student-stage-conflict-refresh" type="button">重新检查</button></div>
   </section>`;
 }
 
@@ -10810,9 +10854,7 @@ async function saveStudentGradeStageModal(button) {
         if (gradeCell) gradeCell.innerHTML = renderGradeBadge(currentGrade);
       }
     }
-    const refreshedConflicts = await request("/api/student-grade-stages/conflicts", { cache: false });
-    studentGradeStageConflicts = refreshedConflicts.conflicts || [];
-    state.student_grade_stage_conflicts = studentGradeStageConflicts;
+    await refreshStudentGradeStageConflicts({ renderStatus: false });
     const returnView = studentGradeStageReturnView;
     closeStudentGradeStageModal();
     showToast("年级阶段已保存");
@@ -10861,6 +10903,23 @@ function studentProfileTableRowMarkup(row) {
 
 function studentProfileTableRows(rows) {
   return rows.map(studentProfileTableRowMarkup).join("");
+}
+
+function revealStudentProfileConflictTarget(studentId) {
+  const row = (state.profile_students || []).find((item) => Number(item.id) === Number(studentId));
+  if (!row) return null;
+  if (row.status && row.status !== "在读") {
+    includeInactive = true;
+    localStorage.setItem("liming:include-inactive", "1");
+  }
+  if (!profileRows("students").some((item) => Number(item.id) === Number(studentId))) {
+    profileNameFilter = { ...profileNameFilter, students: "" };
+    profileKeywordFilter = { ...profileKeywordFilter, students: "" };
+    profileGradeFilter = { ...profileGradeFilter, students: "" };
+    profileStatusFilter = { ...profileStatusFilter, students: "" };
+    localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
+  }
+  return row;
 }
 
 function studentGradeStageBatchModal() {
@@ -10974,7 +11033,7 @@ function renderProfileDirectory(kind = profileTab) {
         <col class="student-profile-col-date">
         <col class="student-profile-col-notes">
       </colgroup>
-      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th>姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
+      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th class="student-name-head">姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${studentProfileTableRows(rows) || `<tr><td colspan="9" class="empty">暂无学生档案</td></tr>`}
       </tbody>
@@ -14987,6 +15046,11 @@ function wireEvents() {
   if (!studentGradeStageEventsBound) {
     studentGradeStageEventsBound = true;
     contentEl.addEventListener("click", (event) => {
+      const refreshConflicts = event.target.closest(".student-stage-conflict-refresh");
+      if (refreshConflicts && !refreshConflicts.disabled) {
+        refreshStudentGradeStageConflicts();
+        return;
+      }
       const viewConflicts = event.target.closest(".student-stage-conflict-view");
       if (viewConflicts) {
         studentGradeStageConflictModalOpen = true;
@@ -15006,6 +15070,7 @@ function wireEvents() {
         const studentId = Number(conflictEdit.dataset.studentId);
         const stages = [conflictEdit.dataset.stage, conflictEdit.dataset.stageA, conflictEdit.dataset.stageB].filter(Boolean);
         studentGradeStageConflictModalOpen = false;
+        revealStudentProfileConflictTarget(studentId);
         render();
         const trigger = document.querySelector(`.student-stage-conflict-marker[data-student-id="${selectorEscape(studentId)}"]`);
         openStudentGradeStageModal(studentId, { stages, stage: stages[0], trigger });
@@ -15699,8 +15764,8 @@ function wireEvents() {
     renderViewTransitionSkeleton();
     try {
       await load({ refreshGlobal: false });
+      revealStudentProfileConflictTarget(studentId);
       render();
-      profileNameFilter.students = "";
       openStudentGradeStageModal(studentId, { stages, stage: stages[0] });
     } catch (error) { renderLoadFailure(error); }
   }));

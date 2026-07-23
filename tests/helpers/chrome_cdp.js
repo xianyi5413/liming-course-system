@@ -40,6 +40,8 @@ class CdpSession {
     this.failDataCenterOnce = false;
     this.failPreflightDetailsOnce = false;
     this.baiduTestResult = null;
+    this.stageConflictResult = null;
+    this.stageConflictDelayOnce = 0;
     socket.addEventListener("message", (event) => this.onMessage(event));
   }
 
@@ -69,7 +71,16 @@ class CdpSession {
     }
     if (message.method === "Fetch.requestPaused") {
       const request = message.params?.request || {};
-      if (this.baiduTestResult && /\/api\/data-center\/baidu\/test(?:\?.*)?$/.test(request.url || "")) {
+      if ((this.stageConflictResult || this.stageConflictDelayOnce) && /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(request.url || "")) {
+        const mocked = this.stageConflictResult || { status: 200, body: { conflicts: [] } };
+        this.stageConflictResult = mocked.once === false ? mocked : null;
+        const delay = this.stageConflictDelayOnce;
+        this.stageConflictDelayOnce = 0;
+        const body = Buffer.from(JSON.stringify(mocked.body || {})).toString("base64");
+        const fulfill = () => this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: mocked.status || 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});
+        if (delay > 0) setTimeout(fulfill, delay);
+        else fulfill();
+      } else if (this.baiduTestResult && /\/api\/data-center\/baidu\/test(?:\?.*)?$/.test(request.url || "")) {
         const mocked = this.baiduTestResult; this.baiduTestResult = mocked.once === false ? mocked : null;
         const body = Buffer.from(JSON.stringify(mocked.body || {})).toString("base64");
         this.send("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: mocked.status || 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body }).catch(() => {});
