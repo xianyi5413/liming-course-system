@@ -2,6 +2,15 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureBackupColumns } = require("./backup_service");
+const { BaiduBackupManager } = require("./baidu_provider");
+
+const REMOTE_NOT_READY_COOLDOWN_MS = 10 * 60_000;
+const REMOTE_READINESS_REASONS = new Set(["not_configured", "not_authorized", "plaintext_not_acknowledged"]);
+const REMOTE_READINESS_MESSAGES = Object.freeze({
+  not_configured: "百度应用尚未配置，已暂停远端自动备份",
+  not_authorized: "百度网盘尚未授权，已暂停远端自动备份",
+  plaintext_not_acknowledged: "尚未确认明文备份风险，已暂停远端自动备份",
+});
 
 const DEFAULT_BACKUP_SETTINGS = Object.freeze({
   enabled: false, time: "02:30", timezone: "Asia/Shanghai", daily_retention: 14,
@@ -78,6 +87,16 @@ function remoteScheduleKey(settings, local) {
   if (settings.remote_frequency === "weekly") return `full-data-remote:weekly:${local.date}`;
   return `full-data-remote:daily:${local.date}`;
 }
+
+function remoteReadinessReason(settings, remoteStatus = {}) {
+  if (!settings.remote_enabled) return "disabled";
+  if (settings.remote_frequency === "manual") return "manual";
+  if (!remoteStatus.oauth_configured) return "not_configured";
+  if (!remoteStatus.authorized) return "not_authorized";
+  if (!settings.remote_plaintext_acknowledged) return "plaintext_not_acknowledged";
+  return "";
+}
+
 function dueState(dbPath, settings, now = new Date()) {
   const local = shanghaiParts(now); const key = scheduleKey(local.date);
   if (!settings.enabled) return { due: false, reason: "disabled", key, scheduled_for: local.date };
@@ -97,10 +116,10 @@ function dueState(dbPath, settings, now = new Date()) {
   } finally { db.close(); }
 }
 
-function remoteDueState(dbPath, settings, now = new Date()) {
+function remoteDueState(dbPath, settings, now = new Date(), remoteStatus = {}) {
   const local = shanghaiParts(now); const key = remoteScheduleKey(settings, local);
-  if (!settings.remote_enabled) return { due: false, reason: "disabled", key, scheduled_for: local.date };
-  if (settings.remote_frequency === "manual") return { due: false, reason: "manual", key, scheduled_for: local.date };
+  const readinessReason = remoteReadinessReason(settings, remoteStatus);
+  if (readinessReason) return { due: false, reason: readinessReason, key, scheduled_for: local.date };
   if (settings.remote_frequency === "weekly" && local.weekday !== Number(settings.remote_weekday)) return { due: false, reason: "wrong_weekday", key, scheduled_for: local.date };
   if (settings.remote_frequency === "monthly" && local.monthday !== Number(settings.remote_monthday)) return { due: false, reason: "wrong_monthday", key, scheduled_for: local.date };
   if (local.time < settings.remote_time) return { due: false, reason: "before_time", key, scheduled_for: local.date };
@@ -121,24 +140,61 @@ function remoteDueState(dbPath, settings, now = new Date()) {
   } finally { db.close(); }
 }
 
-function startBackupScheduler({ dbPath, dataDir, intervalMs = 60_000, timeoutMs = 15 * 60_000, childScript = path.resolve(__dirname, "../../scripts/excel_backup/run_scheduled_backup.js"), logger = console } = {}) {
-  let child = null; let childTimeout = null; let stopped = false;
+function startBackupScheduler({
+  dbPath,
+  dataDir,
+  intervalMs = 60_000,
+  timeoutMs = 15 * 60_000,
+  childScript = path.resolve(__dirname, "../../scripts/excel_backup/run_scheduled_backup.js"),
+  logger = console,
+  spawnImpl = spawn,
+  nowProvider = () => new Date(),
+  remoteStatusProvider = () => new BaiduBackupManager({ dataDir }).configurationStatus(),
+  notReadyCooldownMs = REMOTE_NOT_READY_COOLDOWN_MS,
+  runImmediately = true,
+} = {}) {
+  let child = null; let childTimeout = null; let stopped = false; let lastRemoteReadinessReason = ""; let remoteNotReadyUntil = 0;
+  const reportRemoteReadiness = (state) => {
+    const reason = REMOTE_READINESS_REASONS.has(state?.reason) ? state.reason : "";
+    if (reason && reason !== lastRemoteReadinessReason) logger.warn?.(`[backup-scheduler] ${REMOTE_READINESS_MESSAGES[reason]}`);
+    lastRemoteReadinessReason = reason;
+  };
   const check = () => {
     if (stopped || child) return;
     try {
-      const settings = loadBackupSettings(dbPath); const localDue = dueState(dbPath, settings); const remoteDue = remoteDueState(dbPath, settings); const due = localDue.due ? { ...localDue, kind: "local" } : remoteDue.due ? { ...remoteDue, kind: "remote" } : null;
+      const now = nowProvider(); const settings = loadBackupSettings(dbPath); const localDue = dueState(dbPath, settings, now);
+      let remoteDue = null;
+      if (!localDue.due) {
+        const remoteStatus = settings.remote_enabled && settings.remote_frequency !== "manual" ? remoteStatusProvider() : {};
+        remoteDue = remoteDueState(dbPath, settings, now, remoteStatus);
+        reportRemoteReadiness(remoteDue);
+      }
+      const due = localDue.due ? { ...localDue, kind: "local" } : remoteDue?.due ? { ...remoteDue, kind: "remote" } : null;
       if (!due) return;
+      if (due.kind === "remote" && now.getTime() < remoteNotReadyUntil) return;
       const args = [childScript, "--scheduled-for", due.scheduled_for, "--schedule-key", due.key, "--kind", due.kind];
       if (due.retry_backup_id) args.push("--retry-backup-id", String(due.retry_backup_id));
-      child = spawn(process.execPath, args, { cwd: path.resolve(__dirname, "../.."), env: { ...process.env, DB_PATH: dbPath, DATA_DIR: dataDir }, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnImpl(process.execPath, args, { cwd: path.resolve(__dirname, "../.."), env: { ...process.env, DB_PATH: dbPath, DATA_DIR: dataDir }, stdio: ["ignore", "pipe", "pipe"] });
+      let stderrOutput = "";
       child.stdout.on("data", (chunk) => logger.info?.(`[backup-job] ${String(chunk).trim().slice(0, 500)}`));
-      child.stderr.on("data", (chunk) => logger.error?.(`[backup-job] ${String(chunk).trim().slice(0, 500)}`));
+      child.stderr.on("data", (chunk) => { const output = String(chunk); stderrOutput = `${stderrOutput}${output}`.slice(-2_000); logger.error?.(`[backup-job] ${output.trim().slice(0, 500)}`); });
       const launched = child; childTimeout = setTimeout(() => { if (child === launched) { logger.error?.("[backup-job] timeout"); launched.kill("SIGTERM"); } }, Math.max(1_000, timeoutMs)); childTimeout.unref();
-      child.on("exit", (code) => { if (childTimeout) clearTimeout(childTimeout); childTimeout = null; logger.info?.(`[backup-job] exit=${Number(code)}`); if (child === launched) child = null; });
+      child.on("exit", (code) => {
+        if (childTimeout) clearTimeout(childTimeout);
+        childTimeout = null;
+        const notReady = due.kind === "remote" && stderrOutput.includes("BAIDU_AUTOMATIC_BACKUP_NOT_READY");
+        if (notReady) remoteNotReadyUntil = nowProvider().getTime() + Math.max(60_000, notReadyCooldownMs);
+        else logger.info?.(`[backup-job] exit=${Number(code)}`);
+        if (child === launched) child = null;
+      });
     } catch (error) { logger.error?.(`[backup-scheduler] ${String(error.code || error.name || "CHECK_FAILED")}`); }
   };
-  const timer = setInterval(check, Math.max(1_000, intervalMs)); timer.unref(); setImmediate(check);
-  return { check, stop() { stopped = true; clearInterval(timer); if (childTimeout) clearTimeout(childTimeout); if (child) child.kill("SIGTERM"); }, running() { return Boolean(child); } };
+  const timer = setInterval(check, Math.max(1_000, intervalMs)); timer.unref(); if (runImmediately) setImmediate(check);
+  return { check, stop() { stopped = true; clearInterval(timer); if (childTimeout) clearTimeout(childTimeout); if (child) child.kill("SIGTERM"); }, running() { return Boolean(child); }, cooldownUntil() { return remoteNotReadyUntil; } };
 }
 
-module.exports = { DEFAULT_BACKUP_SETTINGS, SETTING_KEYS, normalizeSettings, loadBackupSettings, saveBackupSettings, shanghaiParts, scheduleKey, remoteScheduleKey, dueState, remoteDueState, startBackupScheduler };
+module.exports = {
+  DEFAULT_BACKUP_SETTINGS, SETTING_KEYS, REMOTE_NOT_READY_COOLDOWN_MS,
+  normalizeSettings, loadBackupSettings, saveBackupSettings, shanghaiParts, scheduleKey, remoteScheduleKey,
+  remoteReadinessReason, dueState, remoteDueState, startBackupScheduler,
+};

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const path = require("node:path");
 const { BackupService } = require("../../src/backup/backup_service");
-const { loadBackupSettings } = require("../../src/backup/scheduler");
+const { loadBackupSettings, remoteReadinessReason } = require("../../src/backup/scheduler");
 const { BaiduBackupManager } = require("../../src/backup/baidu_provider");
 
 function option(name) { const index = process.argv.indexOf(name); return index >= 0 ? String(process.argv[index + 1] || "") : ""; }
@@ -11,7 +11,8 @@ async function main() {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledFor) || !["local", "remote"].includes(kind) || (kind === "local" ? scheduleKey !== `full-data:${scheduledFor}` : !/^full-data-remote:(daily|weekly|monthly):/.test(scheduleKey))) throw Object.assign(new Error("计划参数无效"), { code: "BACKUP_SCHEDULE_ARGUMENT_INVALID" });
   const settings = loadBackupSettings(dbPath); const remote = new BaiduBackupManager({ dataDir }); const service = new BackupService({ dbPath, dataDir, appVersion: process.env.APP_VERSION || "unknown", remoteUploader: (options) => remote.upload({ ...options, remoteDirectory: settings.remote_directory }) });
   if (kind === "remote") {
-    if (!settings.remote_enabled || settings.remote_frequency === "manual" || !remote.configured()) throw Object.assign(new Error("百度自动备份未就绪"), { code: "BAIDU_AUTOMATIC_BACKUP_NOT_READY" });
+    const readinessReason = remoteReadinessReason(settings, remote.configurationStatus());
+    if (readinessReason) throw Object.assign(new Error("百度自动备份未就绪"), { code: "BAIDU_AUTOMATIC_BACKUP_NOT_READY" });
     const record = retryBackupId
       ? await service.retryRemote(retryBackupId, settings.remote_directory)
       : (await service.create({ trigger: "remote_automatic", retentionClass: "remote", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs })).record;

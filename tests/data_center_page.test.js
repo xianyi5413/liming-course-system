@@ -109,6 +109,7 @@ test("fresh database opens with no backup directory, optional secrets or records
     assert.match(settingsText, /自动备份：未启用/);
     assert.match(settingsText, /① 百度应用未配置/);
     assert.match(settingsText, /② 百度授权未连接/);
+    assert.match(settingsText, /⑤ 计划状态自动备份未启用/);
     assert.match(settingsText, /百度网盘将保存未加密的完整 Excel 备份/);
     assert.match(settingsText, /尚未创建/);
     assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('暂无备份记录')"), true);
@@ -118,6 +119,46 @@ test("fresh database opens with no backup directory, optional secrets or records
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.baidu-disconnect'))"), false);
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("Baidu schedule status shows every readiness and timing state in clear Chinese", async () => {
+  await withBrowserScenario({}, async ({ browser, database, tempRoot }) => {
+    await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
+    const statusText = () => browser.evaluate("document.querySelector('.baidu-schedule-state')?.textContent");
+    const refresh = async (expected) => { await browser.click(".backup-refresh"); await browser.waitFor(`document.querySelector('.baidu-schedule-state')?.textContent === ${JSON.stringify(expected)}`); };
+    assert.equal(await statusText(), "自动备份未启用");
+
+    let db = new DatabaseSync(database);
+    const put = db.prepare("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    for (const [key, value] of [["full_backup_remote_enabled", "1"], ["full_backup_remote_frequency", "daily"], ["full_backup_remote_time", "00:00"], ["full_backup_remote_plaintext_acknowledged", "0"]]) put.run(key, value);
+    db.close();
+    await refresh("百度应用尚未配置");
+
+    const configured = await browser.evaluate(`fetch("/api/data-center/baidu/config",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({app_key:"PAGE-STATUS-KEY",app_secret:"PAGE-STATUS-SECRET"})}).then(async response=>({status:response.status,body:await response.json()}))`);
+    assert.equal(configured.status, 200, JSON.stringify(configured.body));
+    const unauthorizedSchedule = await browser.evaluate(`fetch("/api/data-center/baidu/schedule").then(response=>response.json())`);
+    assert.equal(unauthorizedSchedule.state.reason, "not_authorized", JSON.stringify(unauthorizedSchedule));
+    await refresh("百度网盘尚未授权");
+
+    const secretDirectory = path.join(tempRoot, "backups", "full-excel", ".secrets");
+    fs.writeFileSync(path.join(secretDirectory, "baidu-token.json"), JSON.stringify({ access_token: "STATUS-TOKEN", refresh_token: "STATUS-REFRESH", expires_at: Date.now() + 3600000 }));
+    await refresh("尚未确认明文备份风险");
+
+    const shanghaiDay = Number(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", day: "2-digit" }).format(new Date()));
+    const differentDay = shanghaiDay >= 1 && shanghaiDay <= 28 ? (shanghaiDay % 28) + 1 : 1;
+    db = new DatabaseSync(database);
+    const putWaiting = db.prepare("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    for (const [key, value] of [["full_backup_remote_plaintext_acknowledged", "1"], ["full_backup_remote_frequency", "monthly"], ["full_backup_remote_monthday", String(differentDay)]]) putWaiting.run(key, value);
+    db.close();
+    await refresh("等待计划时间");
+
+    db = new DatabaseSync(database);
+    const update = db.prepare("UPDATE settings SET value=? WHERE key=?");
+    update.run("daily", "full_backup_remote_frequency"); update.run("00:00", "full_backup_remote_time");
+    db.close();
+    await refresh("可以执行");
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });
 
@@ -228,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260723-stage-conflict-visibility-alignment",
-      "/app.js?v=20260723-stage-conflict-visibility-alignment",
+      "/styles.css?v=20260723-baidu-scheduler-readiness",
+      "/app.js?v=20260723-baidu-scheduler-readiness",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");

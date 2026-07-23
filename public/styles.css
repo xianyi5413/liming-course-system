@@ -2544,6 +2544,29 @@ td.text-cell {
   margin: 0 0 var(--space-4);
 }
 
+.teacher-salary-batch-result {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.teacher-salary-batch-details summary {
+  width: fit-content;
+  color: var(--brand);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.teacher-salary-batch-details .table-wrap {
+  max-width: 100%;
+  margin-top: var(--space-3);
+  overflow-x: auto;
+}
+
 .teacher-salary-lesson-select:not(:disabled),
 .teacher-salary-select-all:not(:disabled) {
   cursor: pointer;
