@@ -58,8 +58,11 @@ test("server-side permission mapping protects every data center route", () => {
   assert.match(server, /url\.pathname\.startsWith\("\/api\/data-center"\).*canManageDataCenter\(user\)/);
 });
 
-test("delete and overwrite operations require password and confirmation text", () => {
-  assert.match(server, /verifyPassword\(body\.password/); assert.match(server, /body\.confirmation.*删除备份/); assert.match(server, /body\.confirmation.*expected/);
+test("backup deletion needs no credentials while overwrite restore keeps password and confirmation", () => {
+  const deleteBlock = server.match(/if \(req\.method === "DELETE" && dataBackupDelete\) \{[\s\S]*?\n  \}/)?.[0] || "";
+  assert.doesNotMatch(deleteBlock, /verifyPassword|body\.password|body\.confirmation/);
+  const restoreBlock = server.match(/if \(req\.method === "POST" && url\.pathname === "\/api\/data-center\/import\/execute"\) \{[\s\S]*?\n  \}/)?.[0] || "";
+  assert.match(restoreBlock, /verifyPassword\(body\.password/); assert.match(restoreBlock, /body\.confirmation.*expected/); assert.match(restoreBlock, /mode === "overwrite"/);
 });
 
 test("overwrite import holds the shared backup lock and always removes the upload", () => {

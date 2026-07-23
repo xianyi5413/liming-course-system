@@ -9,7 +9,7 @@ const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel 
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, remoteDueState, startBackupScheduler } = require("./backup/scheduler");
 const { BaiduBackupManager, safeRemotePath } = require("./backup/baidu_provider");
-const { DataPreflightError, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
+const { DataPreflightError, findStudentGradeStageConflicts, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
 const { studentPriceStatus, teacherPriceStatus } = require("./domain/price_status");
 const { migrateOpeningBalancesToGlobal } = require("./domain/opening_balance_migration");
 
@@ -2635,11 +2635,61 @@ function normalizeStudentGradeStageInput(body = {}, current = {}) {
   return { student_name: studentName, stage, start_date: startDate, end_date: endDate };
 }
 
+function studentGradeStageConflictsForUser(user) {
+  let studentNames = null;
+  if (canonicalRole(user?.role) === "teacher") {
+    const teacherNames = uniqueNames([...(user?.bound_teacher_names || []), user?.teacher_name]);
+    if (!teacherNames.length) return [];
+    const placeholders = teacherNames.map(() => "?").join(",");
+    studentNames = uniqueNames(all(`SELECT student_names FROM lessons WHERE teacher_name IN (${placeholders})`, teacherNames)
+      .flatMap((row) => splitStudents(row.student_names)));
+    if (!studentNames.length) return [];
+  }
+  return findStudentGradeStageConflicts(db, studentNames ? { studentNames } : {});
+}
+
+function studentGradeStageConflictKey(conflict = {}) {
+  return [conflict.stage_a, conflict.start_a, conflict.end_a, conflict.stage_b, conflict.start_b, conflict.end_b]
+    .map(text).join("|");
+}
+
+function validateStudentGradeStageChanges(student, changes = []) {
+  const existing = studentGradeStages(student.name);
+  const byStage = new Map(existing.map((row) => [text(row.stage), { ...row, student_id: student.id, current_grade: student.grade }]));
+  for (const change of changes) {
+    const current = byStage.get(change.stage) || {};
+    byStage.set(change.stage, { ...current, ...change, id: current.id, student_id: student.id, current_grade: student.grade });
+  }
+  const candidate = [...byStage.values()];
+  const oldConflicts = findStudentGradeStageConflicts(db, { rows: existing.map((row) => ({ ...row, student_id: student.id, current_grade: student.grade })) });
+  const conflicts = findStudentGradeStageConflicts(db, { rows: candidate });
+  const oldKeys = new Set(oldConflicts.map(studentGradeStageConflictKey));
+  const introducesConflict = conflicts.some((conflict) => !oldKeys.has(studentGradeStageConflictKey(conflict)));
+  const didNotImproveLegacyConflict = oldConflicts.length > 0 && conflicts.length >= oldConflicts.length;
+  if (conflicts.length && (introducesConflict || didNotImproveLegacyConflict)) {
+    return {
+      error: "学生年级阶段时间存在冲突",
+      code: "STUDENT_GRADE_STAGE_OVERLAP",
+      status: 409,
+      conflicts,
+    };
+  }
+  const populated = candidate.filter((row) => row.start_date || row.end_date);
+  if (populated.length && GRADE_ORDER.includes(text(student.grade)) && !populated.some((row) => row.stage === text(student.grade))) {
+    return { error: `当前年级${student.grade}缺少对应时间字段`, status: 400 };
+  }
+  return { ok: true, candidate, conflicts };
+}
+
 function upsertStudentGradeStage(body = {}) {
   const payload = normalizeStudentGradeStageInput(body);
   if (payload.error) return payload;
   const student = get("SELECT * FROM students WHERE name = ?", [payload.student_name]);
   if (!student) return { error: "学生档案不存在", status: 404 };
+  if (!body.__skip_conflict_validation) {
+    const validation = validateStudentGradeStageChanges(student, [payload]);
+    if (validation.error) return validation;
+  }
   const before = get("SELECT * FROM student_grade_stages WHERE student_name = ? AND stage = ?", [payload.student_name, payload.stage]);
   db.prepare(`
     INSERT INTO student_grade_stages(student_name, stage, start_date, end_date, updated_at)
@@ -2681,15 +2731,13 @@ function upsertStudentGradeStageSet(body = {}) {
   if (!student) return { error: "学生档案不存在", status: 404 };
   const populated = normalized.filter((row) => row.start_date || row.end_date).sort((a, b) => text(a.start_date).localeCompare(text(b.start_date)));
   for (const row of populated) if (!row.start_date && row.end_date) return { error: `${row.stage}缺少起始日期`, status: 400 };
-  for (let index = 1; index < populated.length; index += 1) {
-    if (text(populated[index].start_date) <= (text(populated[index - 1].end_date) || "9999-12-31")) return { error: `${populated[index - 1].stage}与${populated[index].stage}的时间范围重叠`, status: 400 };
-  }
-  if (populated.length && GRADE_ORDER.includes(text(student.grade)) && !populated.some((row) => row.stage === text(student.grade))) return { error: `当前年级${student.grade}缺少对应时间字段`, status: 400 };
+  const validation = validateStudentGradeStageChanges(student, normalized);
+  if (validation.error) return validation;
   return withTransaction(() => {
     const before = [];
     const after = [];
     for (const payload of normalized) {
-      const result = upsertStudentGradeStage(payload);
+      const result = upsertStudentGradeStage({ ...payload, __skip_conflict_validation: true });
       if (result.error) throw new Error(result.error);
       before.push(result.before || null);
       after.push(result.after);
@@ -2723,6 +2771,11 @@ function batchUpdateStudentGradeStages(body = {}) {
   if (!names.length) return { error: "选中的学生档案不存在", status: 404 };
   const sample = normalizeStudentGradeStageInput({ ...body, student_name: names[0] });
   if (sample.error) return sample;
+  for (const studentName of names) {
+    const student = get("SELECT * FROM students WHERE name = ?", [studentName]);
+    const validation = validateStudentGradeStageChanges(student, [{ ...sample, student_name: studentName }]);
+    if (validation.error) return validation;
+  }
   return withTransaction(() => {
     const rows = [];
     const before = [];
@@ -2732,6 +2785,7 @@ function batchUpdateStudentGradeStages(body = {}) {
         stage: sample.stage,
         start_date: sample.start_date,
         end_date: sample.end_date,
+        __skip_conflict_validation: true,
       });
       if (result.error) throw new Error(result.error);
       before.push(result.before);
@@ -7683,7 +7737,7 @@ function sendDataPreflightFailure(res, error, fallbackMessage, fallbackStatus = 
 }
 
 function dataPreflightCsvRows(result) {
-  const rows = [["问题代码", "问题类型", "记录ID", "账号", "姓名", "当前角色ID", "当前角色代码", "当前角色名称", "错误原因", "处理建议", "学生姓名", "年级", "关联记录", "说明"]];
+  const rows = [["问题代码", "问题类型", "记录ID", "账号", "姓名", "当前角色ID", "当前角色代码", "当前角色名称", "错误原因", "处理建议", "学生姓名", "当前年级", "阶段A", "阶段A起始", "阶段A截止", "阶段B", "阶段B起始", "阶段B截止", "重叠起始", "重叠截止", "冲突原因", "关联记录", "说明"]];
   for (const issue of result.issues || []) for (const record of issue.records || []) rows.push([
     issue.code,
     issue.label,
@@ -7696,7 +7750,16 @@ function dataPreflightCsvRows(result) {
     record.invalid_reason ?? "",
     record.suggestion ?? "",
     record.student_name ?? "",
-    record.grade ?? "",
+    record.current_grade ?? record.grade ?? "",
+    record.stage_a ?? "",
+    record.start_a ?? "",
+    record.end_a ?? "",
+    record.stage_b ?? "",
+    record.start_b ?? "",
+    record.end_b ?? "",
+    record.overlap_start ?? "",
+    record.overlap_end ?? "",
+    record.reason ?? "",
     record.record_ids ?? "",
     record.requires_confirmation ? "必须由老板确认后修复" : "",
   ]);
@@ -12284,6 +12347,14 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/students") return sendJson(res, { students: studentProfiles() });
+  if (req.method === "GET" && url.pathname === "/api/student-grade-stages/conflicts") {
+    const conflicts = studentGradeStageConflictsForUser(user);
+    return sendJson(res, {
+      conflicts,
+      student_count: new Set(conflicts.map((item) => Number(item.student_id) || item.student_name)).size,
+      conflict_count: conflicts.length,
+    });
+  }
   if (req.method === "GET" && url.pathname === "/api/student-grade-stages") {
     const studentName = text(url.searchParams.get("student") || url.searchParams.get("student_name"));
     return sendJson(res, { student_name: studentName, stages: studentGradeStages(studentName) });
@@ -12292,7 +12363,7 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     if (Array.isArray(body.stages)) {
       const result = upsertStudentGradeStageSet(body);
-      if (result.error) return sendError(res, result.status || 400, result.error);
+      if (result.error) return sendJson(res, { error: result.error, ...(result.code ? { code: result.code } : {}), ...(result.conflicts ? { conflicts: result.conflicts } : {}) }, result.status || 400);
       recordAuditEvent(req, user, {
         action: "upsert_set",
         entity_type: "student_grade_stages",
@@ -12309,7 +12380,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, { ok: true, rows: result.after, student: result.student });
     }
     const result = upsertStudentGradeStage(body);
-    if (result.error) return sendError(res, result.status || 400, result.error);
+    if (result.error) return sendJson(res, { error: result.error, ...(result.code ? { code: result.code } : {}), ...(result.conflicts ? { conflicts: result.conflicts } : {}) }, result.status || 400);
     recordAuditEvent(req, user, {
       action: "upsert",
       entity_type: "student_grade_stages",
@@ -12327,7 +12398,7 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/student-grade-stages/batch") {
     const result = batchUpdateStudentGradeStages(await readBody(req));
-    if (result.error) return sendError(res, result.status || 400, result.error);
+    if (result.error) return sendJson(res, { error: result.error, ...(result.code ? { code: result.code } : {}), ...(result.conflicts ? { conflicts: result.conflicts } : {}) }, result.status || 400);
     recordAuditEvent(req, user, {
       action: "batch_upsert",
       entity_type: "student_grade_stages",
@@ -12604,7 +12675,7 @@ async function handleApi(req, res, url) {
       const retention = result.record.remote_status === "success" ? await backupService().applyRemoteRetention(settings.remote_retention, (record) => manager.delete(record)) : { removed: [], skipped: [], retention: settings.remote_retention };
       writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: `百度备份 ${result.record.remote_status}`, target_type: "backup_records", target_id: String(result.record.id), result_status: result.record.remote_status === "success" ? "success" : "failure", details: { code: result.record.remote_error_safe || "", operation_logs_included: result.record.operation_logs_included } }, req);
       return sendJson(res, { ...result, retention, records: backupService().list() }, result.record.remote_status === "success" ? 201 : 502);
-    } catch (error) { writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: "百度备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BAIDU_BACKUP_FAILED" } }, req); return sendJson(res, { error: error.message || "百度备份失败", code: error.code || "BAIDU_BACKUP_FAILED" }, 400); }
+    } catch (error) { writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: "百度备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BAIDU_BACKUP_FAILED" } }, req); return sendDataPreflightFailure(res, error, error.message || "百度备份失败", 400); }
   }
 
   const dataBackupVerify = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/verify$/);
@@ -12650,10 +12721,19 @@ async function handleApi(req, res, url) {
 
   const dataBackupDelete = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)$/);
   if (req.method === "DELETE" && dataBackupDelete) {
-    if (normalizeRole(user.role) !== "owner") return sendError(res, 403, "仅老板可以删除完整备份"); const body = await readBody(req); const account = get("SELECT password_hash FROM users WHERE id=?", [user.id]);
-    if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, "密码验证失败"); if (text(body.confirmation) !== "删除备份") return sendError(res, 400, "请输入确认文字：删除备份");
-    try { const result = await backupService().deleteBackup(Number(dataBackupDelete[1]), { remoteDeleter: (record) => baiduBackupManager().delete(record) }); writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `备份 ${dataBackupDelete[1]}：服务器 ${result.result.local}，百度 Excel ${result.result.remote_excel}，校验文件 ${result.result.remote_checksum}`, target_type: "backup_records", target_id: dataBackupDelete[1], details: result.result }, req); return sendJson(res, result); }
-    catch (error) { return sendError(res, 400, error.message || "删除备份失败"); }
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以删除完整备份");
+    const backupId = Number(dataBackupDelete[1]);
+    try {
+      const service = backupService(); const database = service.database(); let before;
+      try { before = service.record(database, backupId); } finally { database.close(); }
+      if (!before) return sendError(res, 404, "备份记录不存在");
+      const result = await service.deleteBackup(backupId, { remoteDeleter: (record) => baiduBackupManager().delete(record) });
+      writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `${before.filename || `备份 ${backupId}`}：本地 Excel ${result.result.local_excel}，本地 SHA-256 ${result.result.local_checksum}，百度 Excel ${result.result.remote_excel}，百度 SHA-256 ${result.result.remote_checksum}`, target_type: "backup_records", target_id: String(backupId), details: { backup_id: backupId, filename: before.filename || "", ...result.result } }, req);
+      return sendJson(res, result);
+    } catch (error) {
+      writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `备份 ${backupId} 删除失败`, target_type: "backup_records", target_id: String(backupId), result_status: "failure", details: { backup_id: backupId, code: error.code || "BACKUP_DELETE_FAILED" } }, req);
+      return sendJson(res, { error: error.message || "删除备份失败", code: String(error.code || "BACKUP_DELETE_FAILED").slice(0, 100) }, error.code === "BACKUP_NOT_FOUND" ? 404 : 400);
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/data-center/baidu/authorize") {

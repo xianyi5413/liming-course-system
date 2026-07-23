@@ -26,6 +26,70 @@ function canonicalAccountRole(value) {
   return ACCOUNT_ROLE_ALIASES.get(raw) || ACCOUNT_ROLE_ALIASES.get(raw.toLowerCase()) || raw;
 }
 
+function normalizedStudentGradeStageInterval(row = {}) {
+  const stage = text(row.stage);
+  const start = text(row.start_date);
+  const end = stage === "已毕业" ? "9999-12-31" : text(row.end_date);
+  if (!stage || (!start && !end) || !validDate(start)) return null;
+  if (stage !== "已毕业" && (!validDate(end) || start > end)) return null;
+  return { ...row, stage, start_date: start, end_date: stage === "已毕业" ? "" : end, interval_end: end };
+}
+
+function findStudentGradeStageConflicts(db, options = {}) {
+  const requestedNames = Array.isArray(options.studentNames)
+    ? new Set(options.studentNames.map(text).filter(Boolean))
+    : null;
+  const stageRows = Array.isArray(options.rows)
+    ? options.rows
+    : db.prepare(`
+      SELECT g.id,g.student_name,g.stage,g.start_date,g.end_date,
+             s.id AS student_id,s.grade AS current_grade
+      FROM student_grade_stages g
+      LEFT JOIN students s ON TRIM(s.name)=TRIM(g.student_name)
+      ORDER BY g.student_name,g.start_date,g.end_date,g.id
+    `).all();
+  const byStudent = new Map();
+  for (const source of stageRows) {
+    const studentName = text(source.student_name);
+    if (!studentName || (requestedNames && !requestedNames.has(studentName))) continue;
+    const interval = normalizedStudentGradeStageInterval(source);
+    if (!interval) continue;
+    if (!byStudent.has(studentName)) byStudent.set(studentName, []);
+    byStudent.get(studentName).push(interval);
+  }
+  const conflicts = [];
+  for (const [studentName, rows] of byStudent) {
+    for (let leftIndex = 0; leftIndex < rows.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < rows.length; rightIndex += 1) {
+        const left = rows[leftIndex];
+        const right = rows[rightIndex];
+        const overlapStart = left.start_date > right.start_date ? left.start_date : right.start_date;
+        const overlapEnd = left.interval_end < right.interval_end ? left.interval_end : right.interval_end;
+        if (overlapStart > overlapEnd) continue;
+        const sameStage = left.stage === right.stage;
+        conflicts.push({
+          record_id: Number(left.id || 0) || null,
+          record_ids: [left.id, right.id].filter((value) => value !== undefined && value !== null).join(","),
+          student_id: Number(left.student_id || right.student_id || 0) || null,
+          student_name: studentName,
+          current_grade: text(left.current_grade || right.current_grade),
+          stage_a: left.stage,
+          start_a: left.start_date,
+          end_a: left.end_date,
+          stage_b: right.stage,
+          start_b: right.start_date,
+          end_b: right.end_date,
+          overlap_start: overlapStart,
+          overlap_end: overlapEnd === "9999-12-31" ? "长期" : overlapEnd,
+          reason: sameStage ? `同一阶段“${left.stage}”存在重复记录且时间重叠` : `${left.stage}与${right.stage}阶段时间重叠`,
+          target_view: "studentProfiles",
+        });
+      }
+    }
+  }
+  return conflicts;
+}
+
 function accountRoleIssueRecords(db) {
   const roles = db.prepare("SELECT id,code,name FROM roles ORDER BY id").all();
   const byCode = new Map(roles.map((role) => [text(role.code), role]));
@@ -103,6 +167,7 @@ function runDataPreflight(db, options = {}) {
     WHERE (COALESCE(cur_recharge,0)<>0 OR COALESCE(cur_gift,0)<>0) AND (student_name IS NULL OR TRIM(student_name)='') ORDER BY id`), (row) => ({ record_id: Number(row.id), recharge_date: text(row.recharge_date), grade: text(row.grade) }));
 
   addIssue("STUDENT_NAME_MISSING", "学生档案缺少姓名", all("SELECT id,grade,status FROM students WHERE name IS NULL OR TRIM(name)='' ORDER BY id"), (row) => ({ record_id: Number(row.id), grade: text(row.grade), status: text(row.status) }));
+  addIssue("STUDENT_GRADE_STAGE_OVERLAP", "学生年级阶段时间冲突", findStudentGradeStageConflicts(db));
   addIssue("TEACHER_NAME_MISSING", "教师档案缺少姓名", all("SELECT id,status FROM teachers WHERE name IS NULL OR TRIM(name)='' ORDER BY id"), (row) => ({ record_id: Number(row.id), status: text(row.status) }));
   addIssue("STAFF_NAME_MISSING", "员工档案缺少姓名", all("SELECT id,role,status FROM staff WHERE name IS NULL OR TRIM(name)='' ORDER BY id"), (row) => ({ record_id: Number(row.id), role: text(row.role), status: text(row.status) }));
 
@@ -127,8 +192,12 @@ function runDataPreflight(db, options = {}) {
   const issueCount = issues.reduce((total, issue) => total + issue.count, 0);
   let userMessage = "完整备份数据预检通过";
   const duplicateOpenings = issues.find((issue) => issue.code === "OPENING_BALANCE_STUDENT_DUPLICATE");
+  const stageConflicts = issues.find((issue) => issue.code === "STUDENT_GRADE_STAGE_OVERLAP");
   if (duplicateOpenings) {
     userMessage = `无法创建完整备份：发现${duplicateOpenings.count}名学生存在多条期初余额，请人工确认每名学生唯一的权威记录。`;
+  } else if (stageConflicts) {
+    const first = stageConflicts.records[0];
+    userMessage = `数据完整性预检未通过：${first.student_name}的${first.stage_a}与${first.stage_b}阶段时间重叠，共发现${issueCount}个问题。`;
   } else if (issueCount) {
     userMessage = `无法创建完整备份：数据完整性预检发现${issueCount}个问题。请查看问题记录并修复后重新检查。`;
   }
@@ -150,6 +219,8 @@ module.exports = {
   validDate,
   canonicalAccountRole,
   accountRoleIssueRecords,
+  normalizedStudentGradeStageInterval,
+  findStudentGradeStageConflicts,
   runDataPreflight,
   assertDataPreflight,
 };

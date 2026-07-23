@@ -184,3 +184,21 @@ test("data-center manager can save one-time Baidu configuration without secondar
   const badClear = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "123456", confirmation: "wrong" }) }); assert.equal(badClear.status, 400);
   const cleared = await fetch(`http://127.0.0.1:${port}/api/data-center/baidu/config`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "123456", confirmation: "清除百度配置" }) }); const clearedResult = await cleared.json(); assert.equal(cleared.status, 200); assert.equal(clearedResult.status.oauth_configured, false); assert.equal(fs.existsSync(filename), false);
 });
+
+test("backup deletion needs no password or confirmation text but keeps authorization and path protections", async () => {
+  const db = new DatabaseSync(databasePath);
+  const insert = db.prepare(`INSERT INTO backup_records(backup_type,filename,status,message,backup_format,format_version,trigger,retention_class,managed_relative_path,remote_status,pinned)
+    VALUES ('manual',?,'failed','','full_data_excel',4,'manual','manual',?,'not_configured',?)`);
+  const deletable = Number(insert.run("delete-without-password.xlsx", "backups/full-excel/missing-delete.xlsx", 0).lastInsertRowid);
+  const legacyBody = Number(insert.run("delete-ignore-legacy-fields.xlsx", "backups/full-excel/missing-legacy.xlsx", 0).lastInsertRowid);
+  const pinned = Number(insert.run("pinned-protected.xlsx", "backups/full-excel/missing-pinned.xlsx", 1).lastInsertRowid);
+  const traversal = Number(insert.run("traversal.xlsx", "../outside.xlsx", 0).lastInsertRowid);
+  db.close();
+  const forbidden = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${deletable}`, { method: "DELETE", headers: { cookie: teacherCookie, "content-type": "application/json" }, body: "{}" }); assert.equal(forbidden.status, 403);
+  const removed = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${deletable}`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" }); const removedResult = await removed.json(); assert.equal(removed.status, 200, JSON.stringify(removedResult)); assert.equal(removedResult.result.local_excel, "missing");
+  const compatible = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${legacyBody}`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: JSON.stringify({ password: "wrong-is-ignored", confirmation: "wrong-is-ignored" }) }); assert.equal(compatible.status, 200);
+  const pinnedResponse = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${pinned}`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" }); const pinnedResult = await pinnedResponse.json(); assert.equal(pinnedResponse.status, 400); assert.equal(pinnedResult.code, "BACKUP_PINNED");
+  const traversalResponse = await fetch(`http://127.0.0.1:${port}/api/data-center/backups/${traversal}`, { method: "DELETE", headers: { cookie: ownerCookie, "content-type": "application/json" }, body: "{}" }); const traversalResult = await traversalResponse.json(); assert.equal(traversalResponse.status, 400); assert.equal(traversalResult.code, "BACKUP_PATH_INVALID");
+  const checked = new DatabaseSync(databasePath, { readOnly: true }); const logs = checked.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE operation_type='删除全量数据备份' ORDER BY id").all(); checked.close();
+  assert.equal(logs.some((row) => row.operation_content.includes("delete-without-password.xlsx")), true); assert.doesNotMatch(JSON.stringify(logs), /wrong-is-ignored/);
+});

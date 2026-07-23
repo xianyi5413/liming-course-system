@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 const { BackupService, ensureBackupColumns, sha256File } = require("../src/backup/backup_service");
+const { mappedFailureMessage, parseBackupFailure, safeBackupFailure, serializeBackupFailure } = require("../src/backup/backup_failure");
 const { FORMAT_VERSION, expectedVisibleSheetNames, verifyFullData } = require("../src/excel/full_backup");
 
 const root = path.resolve(__dirname, "..");
@@ -125,11 +126,42 @@ test("partial remote upload and partial pair deletion remain explicit", async ()
   const remoteService = new BackupService({ dbPath: database, dataDir: directory, remoteUploader: async () => { throw error; } });
   const first = await remoteService.create({ trigger: "manual", remoteEnabled: true, createdAt: new Date("2026-07-22T03:00:00Z") });
   assert.deepEqual({ overall: first.record.remote_status, excel: first.record.remote_file_status, checksum: first.record.remote_checksum_status, integrity: first.record.remote_integrity_status }, { overall: "partial_failed", excel: "success", checksum: "failed", integrity: "not_verified" });
+  assert.equal(first.record.failure.stage, "remote"); assert.match(first.record.failure.message, /百度网盘接口调用失败/);
   assert.equal(fs.existsSync(path.join(directory, first.record.managed_relative_path)), true);
   await remoteService.create({ trigger: "manual", remoteEnabled: false, createdAt: new Date("2026-07-22T04:00:00Z") });
   const deleted = await remoteService.deleteBackup(first.record.id, { remoteDeleter: async () => ({ excel: "deleted", checksum: "delete_failed" }) });
   assert.deepEqual({ remote: deleted.result.remote, excel: deleted.result.remote_excel, checksum: deleted.result.remote_checksum }, { remote: "delete_partial", excel: "deleted", checksum: "delete_failed" });
   assert.equal(deleted.record.remote_status, "delete_partial");
+});
+
+test("managed path lookup rejects a simulated symbolic-link backup before deletion", () => {
+  service.ensureRoot(); const relative = path.join("backups", "full-excel", "symlink.xlsx"); const target = path.join(dataDir, relative); fs.writeFileSync(target, "synthetic");
+  const originalLstat = fs.lstatSync;
+  fs.lstatSync = (filename, ...args) => path.resolve(filename) === path.resolve(target) ? { isSymbolicLink: () => true } : originalLstat(filename, ...args);
+  try { assert.throws(() => service.managedPath({ backup_format: "full_data_excel", managed_relative_path: relative }), (error) => error.code === "BACKUP_PATH_SYMLINK"); }
+  finally { fs.lstatSync = originalLstat; fs.rmSync(target, { force: true }); }
+});
+
+test("preflight conflict reason persists safely and remains readable after reopening the service", async () => {
+  const directory = path.join(tempRoot, "failure-persistence"); const database = path.join(directory, "data.sqlite"); initDatabase(database);
+  const db = new DatabaseSync(database); db.exec(`
+    INSERT INTO students(id,name,grade,status) VALUES (7301,'合成冲突学生','初三','在读');
+    INSERT INTO student_grade_stages(student_name,stage,start_date,end_date) VALUES
+      ('合成冲突学生','初三','2025-09-01','2026-08-31'),('合成冲突学生','高一','2026-08-01','2027-08-31');
+  `); db.close();
+  const failedService = new BackupService({ dbPath: database, dataDir: directory });
+  await assert.rejects(failedService.create({ trigger: "manual", createdAt: new Date("2026-07-22T05:00:00Z") }), (error) => error.code === "BACKUP_DATA_PREFLIGHT_FAILED");
+  const reopened = new BackupService({ dbPath: database, dataDir: directory }).list(); const record = reopened.find((row) => row.status === "failed");
+  assert.ok(record); assert.match(record.failure.message, /合成冲突学生的初三与高一阶段时间重叠/); assert.equal(record.failure.details.preflight.issue_count, 1);
+  assert.doesNotMatch(JSON.stringify(record.failure), /password_hash|token|cookie|session|stack|SELECT |data\.sqlite/i);
+});
+
+test("known historical failure codes have Chinese labels and unknown codes use a stable fallback", () => {
+  for (const code of ["DATA_PREFLIGHT_FAILED", "BACKUP_ALREADY_RUNNING", "BACKUP_ROOT_INVALID", "BACKUP_ROOT_UNWRITABLE", "BACKUP_TARGET_EXISTS", "BACKUP_FILE_MISSING", "BACKUP_SHA256_MISMATCH", "BAIDU_NOT_CONFIGURED", "BAIDU_AUTHORIZATION_REQUIRED", "BAIDU_AUTHORIZATION_EXPIRED", "BAIDU_REMOTE_FILE_ID_MISSING", "BAIDU_API_FAILED", "BAIDU_DOWNLOAD_FAILED", "BAIDU_REMOTE_SHA256_MISMATCH"]) assert.doesNotMatch(mappedFailureMessage(code), /错误代码/);
+  assert.equal(mappedFailureMessage("SYNTHETIC_UNKNOWN"), "备份失败（错误代码：SYNTHETIC_UNKNOWN）");
+  const sanitized = safeBackupFailure({ code: "BAIDU_FILE_METADATA_FAILED", details: { provider_code: "2", token: "never" }, stack: "never" }, { stage: "remote" });
+  assert.equal(sanitized.message, "获取百度 Excel 文件元信息失败（错误码2）"); assert.doesNotMatch(JSON.stringify(sanitized), /never|token|stack/);
+  assert.deepEqual(parseBackupFailure(serializeBackupFailure(sanitized)), sanitized);
 });
 
 test("remote retention deletes Excel and checksum as pairs, skips pinned and encrypted records, and keeps one", async () => {

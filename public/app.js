@@ -393,6 +393,12 @@ let profileModal = null;
 let selectedTeacherProfileIds = new Set();
 let selectedStudentProfileIds = new Set();
 let studentGradeStageModalDraft = null;
+let studentGradeStageConflicts = [];
+let studentGradeStageConflictCheck = { status: "idle", errorKind: "" };
+let studentGradeStageConflictRequestId = 0;
+let studentGradeStageConflictModalOpen = false;
+let studentGradeStageTrigger = null;
+let studentGradeStageReturnView = "";
 let studentGradeStageEventsBound = false;
 let studentGradeStageBatchModalOpen = false;
 let studentGradeStageBatchDraft = { stage: "初一", start_date: "", end_date: "" };
@@ -461,7 +467,8 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   last_test_result: "not_tested",
   test_passed: false,
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false };
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null };
+let backupDeleteEventsBound = false;
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
 let dashboardShortcutDraft = null;
@@ -587,7 +594,7 @@ function invalidateRequestCache(prefixes = []) {
 
 function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
-  if (base.startsWith("/api/student-grade-stages")) return ["/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
@@ -1526,6 +1533,7 @@ function normalizeBootstrapState(data = {}, previousState = {}, keepPreviousPage
     finance: keepPreviousPageData ? previousState.finance || null : null,
     profile_teachers: keepPreviousPageData ? previousState.profile_teachers || [] : [],
     profile_students: keepPreviousPageData ? previousState.profile_students || [] : [],
+    student_grade_stage_conflicts: keepPreviousPageData ? previousState.student_grade_stage_conflicts || [] : [],
     users: keepPreviousPageData ? previousState.users || [] : [],
     roles: keepPreviousPageData ? previousState.roles || [] : [],
     permission_tree: keepPreviousPageData ? previousState.permission_tree || [] : [],
@@ -1590,6 +1598,9 @@ function bootstrapQuery(lite = true) {
 
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
   const stillCurrent = () => loadGeneration === generation;
+  const stageConflictsPromise = view === "studentProfiles" && canView("studentProfiles")
+    ? refreshStudentGradeStageConflicts({ renderStatus: false, generation })
+    : null;
 
   const [teachersResult, studentsResult] = await Promise.all([
     viewNeedsProfileTeachers() ? request("/api/teachers") : null,
@@ -1598,6 +1609,8 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   if (!stillCurrent()) return false;
   if (teachersResult) state.profile_teachers = teachersResult.teachers || [];
   if (studentsResult) state.profile_students = studentsResult.students || [];
+  if (stageConflictsPromise) await stageConflictsPromise;
+  if (!stillCurrent()) return false;
 
   if (viewNeedsLessonRange()) {
     const lessonRange = lessonLoadRange();
@@ -5064,6 +5077,7 @@ function renderViewTransitionSkeleton() {
   renderNav();
   renderTopbar(viewLabel());
   contentEl.innerHTML = `
+    ${view === "studentProfiles" ? studentStageConflictBannerMarkup("loading") : ""}
     <div class="view-loading-skeleton" role="status" aria-live="polite">
       <div class="view-loading-bar wide"></div>
       <div class="view-loading-grid"><span></span><span></span><span></span></div>
@@ -9269,7 +9283,7 @@ function dataCenterRemoteLabel(value) {
 }
 
 function dataCenterRemotePartLabel(value) {
-  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", not_present: "无记录" };
+  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", delete_partial: "部分删除失败", rejected_symlink: "已拒绝符号链接", missing: "文件缺失", not_present: "无记录" };
   return labels[value] || "未上传";
 }
 
@@ -9288,7 +9302,7 @@ function dataCenterRemoteSummary(row) {
 }
 
 function backupStatusLabel(value) {
-  const labels = { creating: "创建中", success: "成功", failed: "失败", verifying: "验证中", restoring: "恢复中", deleted: "已删除", missing: "文件缺失" };
+  const labels = { creating: "创建中", success: "成功", failed: "失败", verifying: "验证中", restoring: "恢复中", deleted: "已删除", delete_partial: "本地部分删除失败", missing: "文件缺失" };
   return labels[value] || value || "未知";
 }
 
@@ -9306,6 +9320,40 @@ function dataCenterStorageLabel(value) {
   return labels[value] || "状态未知";
 }
 
+function backupFailureMarkup(row = {}) {
+  const failure = row.failure;
+  if (!failure?.message) return `<span class="backup-failure-empty">—</span>`;
+  const issues = failure.details?.preflight?.issues || [];
+  const conflict = issues.find((issue) => issue.code === "STUDENT_GRADE_STAGE_OVERLAP")?.records?.[0];
+  return `<div class="backup-failure-reason"><strong>失败原因</strong><span>${escapeHtml(failure.message)}</span>${issues.length ? `<div class="backup-failure-actions"><button class="btn data-preflight-view" type="button">查看全部问题</button>${conflict?.student_id ? `<button class="btn backup-failure-student-link" type="button" data-student-id="${escapeHtml(conflict.student_id)}" data-stage-a="${escapeHtml(conflict.stage_a)}" data-stage-b="${escapeHtml(conflict.stage_b)}">前往学生档案</button>` : ""}</div>` : ""}</div>`;
+}
+
+function backupLocalStatusMarkup(row = {}) {
+  const label = row.status === "success" ? "本地备份成功" : row.status === "failed" ? "本地备份失败" : backupStatusLabel(row.status);
+  return `<div class="backup-local-status">${escapeHtml(label)}</div>`;
+}
+
+function backupDeleteLocation(row = {}) {
+  const locations = [];
+  if (row.managed_relative_path || !["missing", "deleted"].includes(row.status)) locations.push("服务器本地");
+  if (row.remote_path || row.remote_checksum_path) locations.push("百度网盘");
+  return locations.join(" / ") || "备份记录";
+}
+
+function backupDeleteDialogMarkup() {
+  const dialog = backupState.deleteDialog;
+  if (!dialog) return "";
+  const row = dialog.record || {};
+  const status = dialog.result?.result;
+  return `<div class="modal-backdrop backup-delete-modal"><div class="modal-panel backup-delete-panel" role="dialog" aria-modal="true" aria-labelledby="backup-delete-title">
+    <div class="modal-head"><div><div class="modal-title" id="backup-delete-title">确认删除这条备份吗？</div><div class="modal-subtitle">此操作无法撤销。</div></div><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button></div>
+    <div class="backup-delete-summary"><div><span>文件</span><strong>${escapeHtml(row.filename || "未记录文件名")}</strong></div><div><span>位置</span><strong>${escapeHtml(backupDeleteLocation(row))}</strong></div><p>此操作会按当前规则删除对应备份文件和记录，且无法撤销。</p></div>
+    ${dialog.error ? `<div class="audit-inline-notice danger backup-delete-error">${escapeHtml(dialog.error)}</div>` : ""}
+    ${status ? `<dl class="backup-delete-result"><div><dt>本地 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_excel))}</dd></div><div><dt>本地 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_checksum))}</dd></div><div><dt>百度 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_excel))}</dd></div><div><dt>百度 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_checksum))}</dd></div></dl>` : ""}
+    <div class="modal-actions"><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>取消</button><button class="btn danger backup-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : "确认删除"}</button></div>
+  </div></div>`;
+}
+
 function dataCenterBackupRows() {
   return (backupState.records || []).map((row) => {
     const legacy = row.backup_format !== "full_data_excel";
@@ -9314,8 +9362,10 @@ function dataCenterBackupRows() {
       <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
       <td>${escapeHtml(legacy ? "旧版业务归档" : `${row.retention_class || "全量数据"} · ${row.operation_logs_included === false ? "不含操作日志" : "包含操作日志"}`)}</td>
       <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
-      <td>${renderEntityBadge("status", backupStatusLabel(row.status))}</td>
+      <td class="backup-filename-cell" title="${escapeHtml(row.filename || "")}">${escapeHtml(row.filename || "-")}</td>
+      <td>${backupLocalStatusMarkup(row)}</td>
       <td><div>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</div>${legacy ? "" : dataCenterRemoteSummary(row)}</td>
+      <td class="backup-failure-cell">${backupFailureMarkup(row)}</td>
       <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
       <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
       <td>${escapeHtml(row.created_by_user_id || "-")}</td>
@@ -9326,7 +9376,7 @@ function dataCenterBackupRows() {
         ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="11" class="empty">暂无备份记录</td></tr>`;
+  }).join("") || `<tr><td colspan="13" class="empty">暂无备份记录</td></tr>`;
 }
 
 function importPreviewMarkup() {
@@ -9389,7 +9439,13 @@ function preflightRecordFields(record = {}) {
     ["无效原因", record.invalid_reason],
     ["建议处理方式", record.suggestion],
     ["学生姓名", record.student_name],
-    ["年级", record.grade],
+    ["当前年级", record.current_grade || record.grade],
+    ["冲突阶段 A", record.stage_a],
+    ["阶段 A 日期", record.stage_a ? `${record.start_a || "未设置"}—${record.end_a || "长期"}` : ""],
+    ["冲突阶段 B", record.stage_b],
+    ["阶段 B 日期", record.stage_b ? `${record.start_b || "未设置"}—${record.end_b || "长期"}` : ""],
+    ["实际重叠", record.overlap_start ? `${record.overlap_start}—${record.overlap_end || "长期"}` : ""],
+    ["冲突原因", record.reason],
     ["关联记录", record.record_ids],
   ];
   return fields.filter(([, value]) => value !== undefined && value !== null && String(value) !== "");
@@ -9413,6 +9469,7 @@ function preflightDetailsMarkup() {
           <article class="data-preflight-detail-record" data-record-id="${escapeHtml(record.record_id ?? "")}">
             <dl>${preflightRecordFields(record).map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("")}</dl>
             ${issue.code === "ACCOUNT_ROLE_INVALID" && canView("userAdmin") ? `<button class="btn primary preflight-account-link" type="button" data-record-id="${escapeHtml(record.record_id)}" data-username="${escapeHtml(record.username || "")}">前往账号权限</button>` : ""}
+            ${issue.code === "STUDENT_GRADE_STAGE_OVERLAP" && canView("studentProfiles") ? `<button class="btn primary preflight-student-stage-link" type="button" data-student-id="${escapeHtml(record.student_id)}" data-stage-a="${escapeHtml(record.stage_a)}" data-stage-b="${escapeHtml(record.stage_b)}">前往学生档案</button>` : ""}
           </article>`).join("") || `<div class="empty">该类型暂无可显示记录，请重新检查。</div>`}</div>
       </section>`).join("")}</div>` : `<div class="data-preflight-detail-state">没有可显示的问题记录，请重新检查。</div>`;
     }
@@ -9469,6 +9526,7 @@ function baiduTestFailureMessage(detail = {}) {
 
 function baiduSimpleSettingsCardMarkup() {
   const baidu = backupState.baidu || DATA_CENTER_DEFAULT_BAIDU;
+  const preflightBlocked = Boolean(backupState.preflight && !backupState.preflight.ok);
   const configured = baidu.app_key_configured && baidu.app_secret_configured && baidu.redirect_uri_configured;
   const tested = baidu.test_passed || baidu.last_test_result === "success";
   const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
@@ -9487,7 +9545,7 @@ function baiduSimpleSettingsCardMarkup() {
     <div class="baidu-settings-group baidu-settings-files"><label class="filter-field baidu-remote-directory-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(draft.remote_directory)}" ${owner ? "" : "readonly"}></label><label class="history-toggle baidu-plaintext-ack data-backup-checkbox-row"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${draft.remote_plaintext_acknowledged ? "checked" : ""} ${owner ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-logs" type="checkbox" ${draft.remote_include_operation_logs ? "checked" : ""} ${owner ? "" : "disabled"}><span>百度备份中包含操作日志</span></label></div>
     <div class="baidu-settings-group baidu-settings-schedule"><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-enabled" type="checkbox" ${draft.remote_enabled ? "checked" : ""} ${owner ? "" : "disabled"}><span>启用百度网盘自动备份</span></label><label class="filter-field"><span>备份频率</span><select class="control data-backup-remote-frequency"><option value="manual" ${frequency === "manual" ? "selected" : ""}>仅手动</option><option value="daily" ${frequency === "daily" ? "selected" : ""}>每天</option><option value="weekly" ${frequency === "weekly" ? "selected" : ""}>每周</option><option value="monthly" ${frequency === "monthly" ? "selected" : ""}>每月</option></select></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>执行时间</span><input class="control data-backup-remote-time" type="time" value="${escapeHtml(draft.remote_time)}"></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>时区</span><select class="control data-backup-remote-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label></div>
     <div class="baidu-settings-group baidu-settings-policy"><label class="filter-field remote-weekday" ${frequency === "weekly" ? "" : "hidden"}><span>每周执行日</span><select class="control data-backup-remote-weekday">${weekdayLabels.map((label,index) => `<option value="${index + 1}" ${Number(draft.remote_weekday) === index + 1 ? "selected" : ""}>${label}</option>`).join("")}</select></label><label class="filter-field remote-monthday" ${frequency === "monthly" ? "" : "hidden"}><span>每月执行日</span><input class="control data-backup-remote-monthday" type="number" min="1" max="28" value="${Number(draft.remote_monthday)}"></label><label class="filter-field"><span>远端保留数量</span><input class="control data-backup-remote-retention" type="number" min="1" max="200" value="${Number(draft.remote_retention)}"></label><label class="filter-field"><span>失败重试次数</span><input class="control data-backup-remote-retries" type="number" min="0" max="10" value="${Number(draft.remote_retry_count)}"></label></div>
-    <div class="audit-toolbar"><button class="btn primary baidu-backup-now" type="button" ${baidu.authorized && tested && draft.remote_plaintext_acknowledged ? "" : "disabled"}>立即备份到百度网盘</button><button class="btn baidu-settings-save" type="button">保存百度备份设置</button>${configured ? `<button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}${backupState.baiduTestDetails ? `<button class="btn baidu-test-detail-open" type="button">查看测试详情</button>` : ""}</div>
+    <div class="audit-toolbar"><button class="btn primary baidu-backup-now" type="button" ${baidu.authorized && tested && draft.remote_plaintext_acknowledged && !preflightBlocked ? "" : "disabled"} ${preflightBlocked ? 'title="请先修复数据完整性问题并重新检查"' : ""}>立即备份到百度网盘</button><button class="btn baidu-settings-save" type="button">保存百度备份设置</button>${configured ? `<button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}${backupState.baiduTestDetails ? `<button class="btn baidu-test-detail-open" type="button">查看测试详情</button>` : ""}</div>
   </div>`;
 }
 
@@ -9542,13 +9600,14 @@ function renderAudit() {
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
-        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>服务器</th><th>百度网盘</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
     ${baiduSimpleGuideMarkup()}
     ${baiduTestDetailsMarkup()}
-    ${preflightDetailsMarkup()}`;
+    ${preflightDetailsMarkup()}
+    ${backupDeleteDialogMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -10569,6 +10628,84 @@ function studentGradeStageMap(row = {}) {
   return map;
 }
 
+function studentStageConflictsFor(studentId) {
+  return (studentGradeStageConflicts || []).filter((conflict) => Number(conflict.student_id) === Number(studentId));
+}
+
+function studentStageConflictSummary(conflict = {}) {
+  const endA = conflict.end_a || "长期";
+  const endB = conflict.end_b || "长期";
+  return `${conflict.student_name}：${conflict.stage_a}（${conflict.start_a || "未设置"}—${endA}）与${conflict.stage_b}（${conflict.start_b || "未设置"}—${endB}）重叠；重叠时间：${conflict.overlap_start || "-"}—${conflict.overlap_end || "-"}`;
+}
+
+function studentStageConflictErrorKind(error = {}) {
+  const status = Number(error.status || 0);
+  if (status === 403) return "无权限查看";
+  if (status === 404) return "接口不存在";
+  if (status >= 500) return "服务器处理失败";
+  if (!status) return "网络连接失败";
+  return "无法获取检查结果";
+}
+
+async function refreshStudentGradeStageConflicts({ renderStatus = true, generation = loadGeneration } = {}) {
+  const requestId = ++studentGradeStageConflictRequestId;
+  studentGradeStageConflictCheck = { status: "loading", errorKind: "" };
+  if (renderStatus && view === "studentProfiles") rerenderCurrentView(() => renderProfileDirectory("students"));
+  try {
+    const result = await request("/api/student-grade-stages/conflicts", { cache: false });
+    if (requestId !== studentGradeStageConflictRequestId || generation !== loadGeneration) return false;
+    studentGradeStageConflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
+    state.student_grade_stage_conflicts = studentGradeStageConflicts;
+    studentGradeStageConflictCheck = { status: "success", errorKind: "" };
+  } catch (error) {
+    if (requestId !== studentGradeStageConflictRequestId || generation !== loadGeneration) return false;
+    studentGradeStageConflicts = [];
+    state.student_grade_stage_conflicts = [];
+    studentGradeStageConflictCheck = { status: "error", errorKind: studentStageConflictErrorKind(error) };
+  }
+  if (renderStatus && view === "studentProfiles") rerenderCurrentView(() => renderProfileDirectory("students"));
+  return studentGradeStageConflictCheck.status === "success";
+}
+
+function studentStageConflictBannerMarkup(forcedStatus = "") {
+  const status = forcedStatus || studentGradeStageConflictCheck.status || "idle";
+  const studentCount = new Set((studentGradeStageConflicts || []).map((item) => Number(item.student_id) || item.student_name)).size;
+  if (status === "loading" || status === "idle") return `<section class="student-stage-conflict-banner student-stage-conflict-check loading" data-status="loading" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">…</span><div><strong>阶段冲突：正在检查……</strong></div></div>
+    <button class="btn student-stage-conflict-refresh" type="button" disabled>重新检查</button>
+  </section>`;
+  if (status === "error") return `<section class="student-stage-conflict-banner student-stage-conflict-check error" data-status="error" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>阶段冲突检查失败：${escapeHtml(studentGradeStageConflictCheck.errorKind || "无法获取检查结果")}</strong></div></div>
+    <button class="btn danger student-stage-conflict-refresh" type="button">重试</button>
+  </section>`;
+  if (!studentCount) return `<section class="student-stage-conflict-banner student-stage-conflict-check success" data-status="success" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">✓</span><div><strong>阶段冲突：未发现冲突</strong></div></div>
+    <button class="btn student-stage-conflict-refresh" type="button">重新检查</button>
+  </section>`;
+  return `<section class="student-stage-conflict-banner student-stage-conflict-check warning" data-status="warning" role="status" aria-live="polite">
+    <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>发现 ${studentCount} 名学生存在年级阶段时间冲突</strong><span class="student-stage-conflict-chip">阶段冲突 ${studentGradeStageConflicts.length}</span></div></div>
+    <div class="student-stage-conflict-actions"><button class="btn danger student-stage-conflict-view" type="button">查看冲突</button><button class="btn student-stage-conflict-refresh" type="button">重新检查</button></div>
+  </section>`;
+}
+
+function studentStageConflictModalMarkup() {
+  if (!studentGradeStageConflictModalOpen) return "";
+  return `<div class="modal-backdrop student-stage-conflict-modal"><div class="modal-panel student-stage-conflict-panel" role="dialog" aria-modal="true" aria-labelledby="student-stage-conflict-title">
+    <div class="modal-head"><div><div class="modal-title" id="student-stage-conflict-title">年级阶段时间冲突</div><div class="modal-subtitle">共 ${studentGradeStageConflicts.length} 组冲突；日期端点相同也视为重叠。</div></div><button class="btn student-stage-conflict-close" type="button">关闭</button></div>
+    <div class="student-stage-conflict-list">${studentGradeStageConflicts.map((conflict) => `<article class="student-stage-conflict-record">
+      <div class="student-stage-conflict-record-head"><strong>${escapeHtml(conflict.student_name || "未命名学生")}</strong><span>${escapeHtml(conflict.current_grade || "未设置")}</span></div>
+      <p>${escapeHtml(studentStageConflictSummary(conflict))}</p>
+      <dl>
+        <div><dt>冲突阶段 A</dt><dd>${escapeHtml(conflict.stage_a)} · ${escapeHtml(conflict.start_a || "未设置")}—${escapeHtml(conflict.end_a || "长期")}</dd></div>
+        <div><dt>冲突阶段 B</dt><dd>${escapeHtml(conflict.stage_b)} · ${escapeHtml(conflict.start_b || "未设置")}—${escapeHtml(conflict.end_b || "长期")}</dd></div>
+        <div><dt>实际重叠</dt><dd>${escapeHtml(conflict.overlap_start || "-")}—${escapeHtml(conflict.overlap_end || "-")}</dd></div>
+        <div><dt>原因</dt><dd>${escapeHtml(conflict.reason || "阶段时间重叠")}</dd></div>
+      </dl>
+      <button class="btn primary student-stage-conflict-edit" type="button" data-student-id="${escapeHtml(conflict.student_id)}" data-stage-a="${escapeHtml(conflict.stage_a)}" data-stage-b="${escapeHtml(conflict.stage_b)}">修改该学生</button>
+    </article>`).join("")}</div>
+  </div></div>`;
+}
+
 function studentGradeStageDraftFor(row = {}) {
   const map = studentGradeStageMap(row);
   const stages = Object.fromEntries(gradeSortOrder.map((stage) => {
@@ -10604,17 +10741,19 @@ function studentGradeStageModalRows(draft) {
     const item = draft.stages?.[stage] || { start_date: "", end_date: "" };
     const isGraduated = stage === "已毕业";
     const disabled = isReadonlyUser() ? "disabled" : "";
+    const conflict = (draft.conflict_stages || []).includes(stage);
     return `
-      <section class="student-stage-card" data-stage="${escapeHtml(stage)}">
+      <section class="student-stage-card ${conflict ? "student-stage-card-conflict" : ""}" data-stage="${escapeHtml(stage)}">
         <div class="student-stage-name">${escapeHtml(stage)}</div>
         <label>
           <span>起始日期</span>
-          <input class="control student-grade-stage-field" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="start_date" value="${escapeHtml(item.start_date || "")}" ${disabled}>
+          <input class="control student-grade-stage-field ${conflict ? "student-grade-stage-field-conflict" : ""}" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="start_date" value="${escapeHtml(item.start_date || "")}" ${disabled}>
         </label>
         ${isGraduated ? "" : `<label>
           <span>截止日期</span>
-          <input class="control student-grade-stage-field" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="end_date" value="${escapeHtml(item.end_date || "")}" ${disabled}>
+          <input class="control student-grade-stage-field ${conflict ? "student-grade-stage-field-conflict" : ""}" type="date" data-date-kind="single" data-stage="${escapeHtml(stage)}" data-field="end_date" value="${escapeHtml(item.end_date || "")}" ${disabled}>
         </label>`}
+        ${conflict ? `<div class="student-stage-field-error">此阶段与另一阶段时间重叠，请核对起止日期。</div>` : ""}
       </section>
     `;
   }).join("");
@@ -10647,16 +10786,23 @@ function studentGradeStageModalMarkup() {
   `;
 }
 
-function openStudentGradeStageModal(studentId) {
+function openStudentGradeStageModal(studentId, options = {}) {
   const row = (state.profile_students || []).find((item) => Number(item.id) === Number(studentId));
   const region = document.querySelector(".student-grade-stage-modal-region");
   if (!row || !region) return;
   closeSearchablePicker();
-  studentGradeStageModalDraft = studentGradeStageDraftFor(row);
+  studentGradeStageTrigger = options.trigger || document.activeElement;
+  studentGradeStageModalDraft = { ...studentGradeStageDraftFor(row), conflict_stages: uniqueSorted([...(options.stages || []), ...studentStageConflictsFor(studentId).flatMap((item) => [item.stage_a, item.stage_b])]) };
   region.innerHTML = studentGradeStageModalMarkup();
   document.body.classList.add("student-grade-stage-modal-open");
   enhanceCustomDateInputs();
   applyReadonlyUi();
+  const targetStage = options.stage || studentGradeStageModalDraft.conflict_stages[0];
+  requestAnimationFrame(() => {
+    const target = targetStage ? region.querySelector(`.student-stage-card[data-stage="${selectorEscape(targetStage)}"]`) : null;
+    target?.scrollIntoView({ block: "center", behavior: "smooth" });
+    (target?.querySelector("input") || region.querySelector(".student-grade-stage-cancel"))?.focus();
+  });
 }
 
 function closeStudentGradeStageModal() {
@@ -10664,6 +10810,9 @@ function closeStudentGradeStageModal() {
   studentGradeStageModalDraft = null;
   document.querySelector(".student-grade-stage-modal-region")?.replaceChildren();
   document.body.classList.remove("student-grade-stage-modal-open");
+  if (studentGradeStageTrigger?.isConnected) studentGradeStageTrigger.focus();
+  studentGradeStageTrigger = null;
+  studentGradeStageReturnView = "";
 }
 
 async function saveStudentGradeStageModal(button) {
@@ -10705,20 +10854,42 @@ async function saveStudentGradeStageModal(button) {
         if (gradeCell) gradeCell.innerHTML = renderGradeBadge(currentGrade);
       }
     }
+    await refreshStudentGradeStageConflicts({ renderStatus: false });
+    const returnView = studentGradeStageReturnView;
     closeStudentGradeStageModal();
     showToast("年级阶段已保存");
+    if (returnView === "audit") {
+      setActiveView("audit");
+      await refreshBackupData({ tolerateFailure: true });
+      render();
+    } else {
+      rerenderContent(() => renderProfileDirectory("students"));
+    }
   } catch (error) {
     button.disabled = false;
-    showToast(error.message || "保存失败", "error");
+    const conflicts = error.data?.conflicts || [];
+    if (error.data?.code === "STUDENT_GRADE_STAGE_OVERLAP" && conflicts.length) {
+      studentGradeStageModalDraft.conflict_stages = uniqueSorted(conflicts.flatMap((item) => [item.stage_a, item.stage_b]));
+      const region = document.querySelector(".student-grade-stage-modal-region");
+      if (region) {
+        region.innerHTML = studentGradeStageModalMarkup();
+        enhanceCustomDateInputs();
+        const first = conflicts[0];
+        requestAnimationFrame(() => region.querySelector(`.student-stage-card[data-stage="${selectorEscape(first.stage_a)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+      }
+      showToast(`${studentStageConflictSummary(conflicts[0])}`, "error");
+    } else showToast(error.message || "保存失败", "error");
   }
 }
 
 function studentProfileTableRowMarkup(row) {
   const currentGrade = studentCurrentGrade(row);
+  const conflicts = studentStageConflictsFor(row.id);
+  const conflictMarker = conflicts.length ? `<button class="student-stage-conflict-marker" type="button" data-student-id="${escapeHtml(row.id)}" data-stage="${escapeHtml(conflicts[0].stage_a)}" title="${escapeHtml(studentStageConflictSummary(conflicts[0]))}">阶段冲突${conflicts.length > 1 ? ` ${conflicts.length}` : ""}</button>` : "";
   return `
     <tr class="profile-row student-profile-main-row" data-kind="students" data-id="${row.id}" title="点击查看年级阶段">
       <td class="select-col"><input class="student-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择学生档案"></td>
-      <td class="student-name-cell">${renderStudentBadge(row.name, { grade: currentGrade })}</td>
+      <td class="student-name-cell"><div class="student-name-with-conflict">${renderStudentBadge(row.name, { grade: currentGrade })}${conflictMarker}</div></td>
       <td class="text-cell center current-grade-cell">${renderGradeBadge(currentGrade)}</td>
       <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
       <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
@@ -10732,6 +10903,23 @@ function studentProfileTableRowMarkup(row) {
 
 function studentProfileTableRows(rows) {
   return rows.map(studentProfileTableRowMarkup).join("");
+}
+
+function revealStudentProfileConflictTarget(studentId) {
+  const row = (state.profile_students || []).find((item) => Number(item.id) === Number(studentId));
+  if (!row) return null;
+  if (row.status && row.status !== "在读") {
+    includeInactive = true;
+    localStorage.setItem("liming:include-inactive", "1");
+  }
+  if (!profileRows("students").some((item) => Number(item.id) === Number(studentId))) {
+    profileNameFilter = { ...profileNameFilter, students: "" };
+    profileKeywordFilter = { ...profileKeywordFilter, students: "" };
+    profileGradeFilter = { ...profileGradeFilter, students: "" };
+    profileStatusFilter = { ...profileStatusFilter, students: "" };
+    localStorage.setItem("liming:profile-status-filter", JSON.stringify(profileStatusFilter));
+  }
+  return row;
 }
 
 function studentGradeStageBatchModal() {
@@ -10845,13 +11033,14 @@ function renderProfileDirectory(kind = profileTab) {
         <col class="student-profile-col-date">
         <col class="student-profile-col-notes">
       </colgroup>
-      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th>姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
+      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th class="student-name-head">姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${studentProfileTableRows(rows) || `<tr><td colspan="9" class="empty">暂无学生档案</td></tr>`}
       </tbody>
     </table>
   `;
   contentEl.innerHTML = `
+    ${isTeacher ? "" : studentStageConflictBannerMarkup()}
     <div class="band profile-panel">
       <div class="filter-bar compact unified-filter-bar profile-filter-bar">
         <div class="filter-controls">
@@ -10875,6 +11064,7 @@ function renderProfileDirectory(kind = profileTab) {
     </div>
     ${profileModalMarkup()}
     ${studentGradeStageBatchModal()}
+    ${isTeacher ? "" : studentStageConflictModalMarkup()}
     <div class="student-grade-stage-modal-region">${isTeacher ? "" : studentGradeStageModalMarkup()}</div>
   `;
 }
@@ -13157,6 +13347,7 @@ function render() {
     studentGradeStageModalDraft = null;
     document.body.classList.remove("student-grade-stage-modal-open");
   }
+  if (view !== "studentProfiles") studentGradeStageConflictModalOpen = false;
   closeSearchablePicker();
   closeDateRangePicker();
   appEl?.classList.remove("login-mode");
@@ -14855,6 +15046,36 @@ function wireEvents() {
   if (!studentGradeStageEventsBound) {
     studentGradeStageEventsBound = true;
     contentEl.addEventListener("click", (event) => {
+      const refreshConflicts = event.target.closest(".student-stage-conflict-refresh");
+      if (refreshConflicts && !refreshConflicts.disabled) {
+        refreshStudentGradeStageConflicts();
+        return;
+      }
+      const viewConflicts = event.target.closest(".student-stage-conflict-view");
+      if (viewConflicts) {
+        studentGradeStageConflictModalOpen = true;
+        render();
+        requestAnimationFrame(() => document.querySelector(".student-stage-conflict-close")?.focus());
+        return;
+      }
+      const closeConflicts = event.target.closest(".student-stage-conflict-close");
+      if (closeConflicts || event.target.classList?.contains("student-stage-conflict-modal")) {
+        studentGradeStageConflictModalOpen = false;
+        render();
+        requestAnimationFrame(() => document.querySelector(".student-stage-conflict-view")?.focus());
+        return;
+      }
+      const conflictEdit = event.target.closest(".student-stage-conflict-edit, .student-stage-conflict-marker");
+      if (conflictEdit) {
+        const studentId = Number(conflictEdit.dataset.studentId);
+        const stages = [conflictEdit.dataset.stage, conflictEdit.dataset.stageA, conflictEdit.dataset.stageB].filter(Boolean);
+        studentGradeStageConflictModalOpen = false;
+        revealStudentProfileConflictTarget(studentId);
+        render();
+        const trigger = document.querySelector(`.student-stage-conflict-marker[data-student-id="${selectorEscape(studentId)}"]`);
+        openStudentGradeStageModal(studentId, { stages, stage: stages[0], trigger });
+        return;
+      }
       const cancelButton = event.target.closest(".student-grade-stage-cancel");
       if (cancelButton) {
         event.preventDefault();
@@ -14884,7 +15105,15 @@ function wireEvents() {
       if (studentGradeStageModalDraft.stages?.[stage] && field) studentGradeStageModalDraft.stages[stage][field] = String(input.value || "").trim();
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !studentGradeStageModalDraft) return;
+      if (event.key !== "Escape") return;
+      if (studentGradeStageConflictModalOpen) {
+        event.preventDefault();
+        studentGradeStageConflictModalOpen = false;
+        render();
+        requestAnimationFrame(() => document.querySelector(".student-stage-conflict-view")?.focus());
+        return;
+      }
+      if (!studentGradeStageModalDraft) return;
       if (activeCustomDateInput || activeDateRangePicker || event.target.closest?.(".custom-select-menu, .multi-select-menu, .custom-date-picker, .date-range-picker-panel")) {
         event.preventDefault();
         closeSearchablePicker();
@@ -15525,6 +15754,21 @@ function wireEvents() {
     try { await load({ refreshGlobal: false }); }
     catch (error) { renderLoadFailure(error); }
   }));
+  document.querySelectorAll(".preflight-student-stage-link, .backup-failure-student-link").forEach((button) => button.addEventListener("click", async () => {
+    if (!canView("studentProfiles")) return showToast("当前账号没有学生档案访问权限", "error");
+    const studentId = Number(button.dataset.studentId || 0);
+    const stages = [button.dataset.stageA, button.dataset.stageB].filter(Boolean);
+    studentGradeStageReturnView = "audit";
+    backupState.preflightDetailsOpen = false;
+    setActiveView("studentProfiles");
+    renderViewTransitionSkeleton();
+    try {
+      await load({ refreshGlobal: false });
+      revealStudentProfileConflictTarget(studentId);
+      render();
+      openStudentGradeStageModal(studentId, { stages, stage: stages[0] });
+    } catch (error) { renderLoadFailure(error); }
+  }));
 
   document.querySelectorAll(".backup-remote-retry").forEach((button) => button.addEventListener("click", async () => {
     try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}/remote-retry`, { method: "POST", body: {} }); await refreshBackupData(); showToast("百度网盘上传成功"); }
@@ -15537,11 +15781,60 @@ function wireEvents() {
     catch (error) { showToast(error.message || "远端备份下载或 SHA-256 校验失败", "error"); }
   }));
 
-  document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", async () => {
-    const password = prompt("请输入老板密码"); if (password == null) return; const confirmation = prompt("请输入确认文字：删除备份"); if (confirmation == null) return;
-    try { await request(`/api/data-center/backups/${encodeURIComponent(button.dataset.id)}`, { method: "DELETE", body: { password, confirmation } }); await refreshBackupData(); showToast("备份删除流程已完成"); }
-    catch (error) { showToast(error.message || "删除备份失败", "error"); } finally { render(); }
+  document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", () => {
+    const record = (backupState.records || []).find((row) => Number(row.id) === Number(button.dataset.id));
+    if (!record) return showToast("备份记录不存在", "error");
+    backupState.deleteDialog = { record, busy: false, error: "", result: null };
+    render();
+    requestAnimationFrame(() => document.querySelector(".backup-delete-cancel")?.focus());
   }));
+  document.querySelectorAll(".backup-delete-cancel").forEach((button) => button.addEventListener("click", () => {
+    if (backupState.deleteDialog?.busy) return;
+    const id = backupState.deleteDialog?.record?.id;
+    backupState.deleteDialog = null;
+    render();
+    requestAnimationFrame(() => document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.focus());
+  }));
+  document.querySelectorAll(".backup-delete-confirm").forEach((button) => button.addEventListener("click", async () => {
+    const dialog = backupState.deleteDialog;
+    if (!dialog || dialog.busy) return;
+    const id = dialog.record.id;
+    backupState.deleteDialog = { ...dialog, busy: true, error: "" };
+    render();
+    try {
+      const result = await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
+      const statuses = result.result || {};
+      const partial = [statuses.local, statuses.remote].some((value) => ["delete_failed", "delete_partial"].includes(value));
+      await refreshBackupData({ tolerateFailure: true });
+      if (partial) {
+        backupState.deleteDialog = { ...dialog, busy: false, result, error: "备份仅部分删除，请查看各文件状态后处理。" };
+      } else {
+        backupState.deleteDialog = null;
+        showToast("备份删除流程已完成");
+      }
+    } catch (error) {
+      backupState.deleteDialog = { ...dialog, busy: false, error: error.message || "删除备份失败", result: error.data || null };
+    }
+    render();
+  }));
+  document.querySelectorAll(".backup-delete-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal || backupState.deleteDialog?.busy) return;
+    const id = backupState.deleteDialog?.record?.id;
+    backupState.deleteDialog = null;
+    render();
+    requestAnimationFrame(() => document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.focus());
+  }));
+  if (!backupDeleteEventsBound) {
+    backupDeleteEventsBound = true;
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !backupState.deleteDialog || backupState.deleteDialog.busy) return;
+      event.preventDefault();
+      const id = backupState.deleteDialog.record?.id;
+      backupState.deleteDialog = null;
+      render();
+      requestAnimationFrame(() => document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.focus());
+    });
+  }
 
   document.querySelectorAll(".baidu-connect").forEach((button) => button.addEventListener("click", async () => {
     try { const result = await request("/api/data-center/baidu/authorize", { method: "POST", body: {} }); window.location.assign(result.authorization_url); }
