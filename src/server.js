@@ -12842,10 +12842,12 @@ async function handleApi(req, res, url) {
     const service = backupService();
     const remote = baiduBackupManager().configurationStatus();
     const settings = loadFullBackupSettings(dbPath);
+    const baiduSchedule = remoteDueState(dbPath, settings, new Date(), remote);
     return sendJson(res, {
       records: service.list(),
       settings: { ...settings, managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status },
       baidu: { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory },
+      baidu_schedule: baiduSchedule,
       preflight: safeDataPreflight(),
       maintenance: dataImportMaintenance,
     });
@@ -12862,7 +12864,8 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/data-center/baidu/schedule") {
     const settings = loadFullBackupSettings(dbPath);
-    return sendJson(res, { enabled: settings.remote_enabled, frequency: settings.remote_frequency, state: remoteDueState(dbPath, settings) });
+    const remote = baiduBackupManager().configurationStatus();
+    return sendJson(res, { enabled: settings.remote_enabled, frequency: settings.remote_frequency, state: remoteDueState(dbPath, settings, new Date(), remote) });
   }
 
   if (req.method === "PUT" && url.pathname === "/api/data-center/baidu/settings") {

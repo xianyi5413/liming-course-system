@@ -469,7 +469,7 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   last_test_result: "not_tested",
   test_passed: false,
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null };
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduSchedule: { due: false, reason: "disabled" }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null };
 let backupDeleteEventsBound = false;
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
@@ -4610,13 +4610,14 @@ function safeDataCenterLoadError(error) {
 
 async function refreshBackupData({ logView = false, tolerateFailure = false } = {}) {
   try {
-    const data = await request(`/api/data-center${logView ? "?log=1" : ""}`);
+    const data = await request(`/api/data-center${logView ? "?log=1" : ""}`, { cache: false });
     const serverSettings = normalizeDataCenterSettings(data.settings);
     backupState = {
       ...backupState,
       settings: serverSettings,
       draft: backupState.draftDirty ? normalizeDataCenterSettings(backupState.draft) : { ...serverSettings },
       baidu: { ...DATA_CENTER_DEFAULT_BAIDU, ...(data.baidu || {}) },
+      baiduSchedule: data.baidu_schedule || { due: false, reason: "disabled" },
       preflight: data.preflight || null,
       records: Array.isArray(data.records) ? data.records : [],
       error: "",
@@ -9556,6 +9557,14 @@ function baiduSimpleSettingsCardMarkup() {
   const testLabel = tested ? "测试通过" : baidu.last_test_result && baidu.last_test_result !== "not_tested" ? "测试失败，请重新测试" : "未测试";
   const draft = backupState.draft || backupState.settings || DATA_CENTER_DEFAULT_SETTINGS; const owner = canView("audit");
   const frequency = draft.remote_frequency || "weekly"; const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const scheduleState = backupState.baiduSchedule || { due: false, reason: "disabled" };
+  const scheduleLabel = scheduleState.due ? "可以执行" : ({
+    not_configured: "百度应用尚未配置",
+    not_authorized: "百度网盘尚未授权",
+    plaintext_not_acknowledged: "尚未确认明文备份风险",
+    disabled: "自动备份未启用",
+    manual: "自动备份未启用",
+  }[scheduleState.reason] || "等待计划时间");
   return `<div class="data-backup-subcard baidu-backup-card">
     <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${owner ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "查看配置" : "配置百度网盘"}</button>` : ""}</div>
     <div class="baidu-status-grid simple">
@@ -9563,6 +9572,7 @@ function baiduSimpleSettingsCardMarkup() {
       <div><span>② 百度授权</span><strong>${baidu.authorized ? "已连接" : "未连接"}</strong></div>
       <div><span>③ 连接测试</span><strong>${testLabel}</strong></div>
       <div><span>④ 自动上传</span><strong>${backupState.settings?.remote_enabled ? "已启用" : "未启用"}</strong></div>
+      <div><span>⑤ 计划状态</span><strong class="baidu-schedule-state">${scheduleLabel}</strong></div>
     </div>
     ${configured ? "" : `<div class="audit-inline-notice neutral">尚未填写App Key和App Secret，请先点击“配置百度网盘”。</div>`}
     <div class="audit-inline-notice danger baidu-plaintext-warning"><strong>百度网盘将保存未加密的完整 Excel 备份。</strong><span>文件包含学生、课程、充值、账号权限及账号认证哈希等敏感数据。请确保百度账号已启用可靠密码和安全验证，不要公开分享备份文件。</span></div>
@@ -15749,7 +15759,7 @@ function wireEvents() {
         remote_timezone: draft.remote_timezone, remote_weekday: draft.remote_weekday, remote_monthday: draft.remote_monthday,
         remote_retention: draft.remote_retention, remote_retry_count: draft.remote_retry_count,
       } });
-      backupState.settings = { ...backupState.settings, ...result.settings }; backupState.draft = { ...backupState.settings }; backupState.draftDirty = false; backupState.error = ""; showToast("百度备份设置已保存");
+      backupState.settings = { ...backupState.settings, ...result.settings }; backupState.draft = { ...backupState.settings }; backupState.draftDirty = false; backupState.error = ""; await refreshBackupData({ tolerateFailure: true }); showToast("百度备份设置已保存");
     } catch (error) { backupState.error = error.message || "保存百度备份设置失败"; }
     finally { backupState.busy = false; render(); }
   }));

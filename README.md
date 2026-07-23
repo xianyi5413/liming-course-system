@@ -346,6 +346,8 @@ npm.cmd run excel:full:restore -- --db data/test-restore.sqlite --input data/bac
 
 App Secret 和 Token 存在 `data/backups/full-excel/.secrets/` 的受限 JSON 文件中，不回显。环境变量也可提供三项应用配置，但不要同时维护互相冲突的来源。
 
+SQLite 中保存的是本地/百度备份的启用状态、频率、时间、保留数量、远端目录和明文风险确认等计划设置；百度 App Key、App Secret 与 OAuth Token 则保存在上述私密配置文件中。这是两套相互独立的数据。只复制 `liming-local.sqlite` 不会复制百度凭据，恢复或迁移数据库后必须在目标环境单独、安全地配置并授权百度网盘。
+
 ### 文件格式与下载链路
 
 每次成功远端备份包含一对普通文件：
@@ -415,6 +417,8 @@ authorization → connection → test_directory
 | 保留 | 每日 14、月度 12、手动 20 | 最近 20 份 |
 
 本地 `schedule_key` 是 `full-data:YYYY-MM-DD`；远端键包含 daily/weekly/monthly 和计划日期。成功键唯一，服务重启会补查但不会重复成功任务。失败重试按 10、30、120 分钟等待。
+
+百度远端计划只有在应用配置完整、OAuth 授权有效且已确认明文备份风险时才会启动子进程。未就绪时状态分别为 `not_configured`、`not_authorized`、`plaintext_not_acknowledged`，调度器不会创建任务，并且相同安全提示只记录一次；配置或设置变化后，下一分钟检查会重新读取 SQLite 与私密文件，无需重启服务。子进程仍会在执行前重复校验，若调度检查后发生竞态并返回 `BAIDU_AUTOMATIC_BACKUP_NOT_READY`，调度器会冷却 10 分钟，避免每分钟重复启动和刷屏。本地自动备份不依赖这些百度状态。
 
 首个成功日备份可晋升为月度保留意义而不复制文件。固定记录不自动删除；任何清理都只处理当前受管格式，跳过忙碌/无效/最后一个可用备份。远端保留按配对文件删除，部分失败会保留独立状态，不能伪装为全部成功。
 
@@ -521,17 +525,19 @@ npm.cmd run test:dashboard-card
 npm.cmd run test:student-balances
 ```
 
-`test:teacher-detail` 使用隔离合成 SQLite、临时 Node 服务和真实 Chromium/CDP，覆盖在职档案候选、离职/无档案历史名称排除、教师绑定与角色范围、初始未选择、空状态不查询、字符串/数字/重复 ID、学生集合顺序、课程时长、规则金额 0、更新/无需更新/跳过/失败、只读 403、越权 403、日志、薪资汇总缓存失效、更新后局部刷新、离开再进入清空、1440px/390px 和 Console。`test:student-stage-conflicts` 覆盖闭区间重叠边界、预检/查询一致性、保存拒绝、修复、老板全学生范围、教师绑定学生范围、权限和只读行为。`test:data-center-page` 使用隔离的真实 Chromium/CDP 页面环境验证数据中心和学生阶段冲突交互；不是字符串存在性测试。API 测试启动临时服务和合成 SQLite；Excel 测试只用合成数据和临时目录，要求失败、跳过和未解释 Console 错误均为零。
+`test:teacher-detail` 使用隔离合成 SQLite、临时 Node 服务和真实 Chromium/CDP，覆盖在职档案候选、离职/无档案历史名称排除、教师绑定与角色范围、初始未选择、空状态不查询、字符串/数字/重复 ID、学生集合顺序、课程时长、规则金额 0、更新/无需更新/跳过/失败、只读 403、越权 403、日志、薪资汇总缓存失效、更新后局部刷新、离开再进入清空、1440px/390px 和 Console。`test:backup-scheduler` 覆盖百度未配置、未授权、未确认风险时不启动，状态恢复后无需重启即可启动，竞态 `NOT_READY` 冷却，以及本地自动备份独立运行。`test:student-stage-conflicts` 覆盖闭区间重叠边界、预检/查询一致性、保存拒绝、修复、老板全学生范围、教师绑定学生范围、权限和只读行为。`test:data-center-page` 使用隔离的真实 Chromium/CDP 页面环境验证数据中心、百度计划中文状态和学生阶段冲突交互；不是字符串存在性测试。API 测试启动临时服务和合成 SQLite；Excel 测试只用合成数据和临时目录，要求失败、跳过和未解释 Console 错误均为零。
 
-本轮浏览器静态资源版本为 `20260723-teacher-detail-salary-filter`，同时写入 `public/index.html` 的 `app.js` 与 `styles.css` 查询参数。本地重启 `npm.cmd start` 后使用 `Ctrl+F5` 强制刷新，并在网络面板确认加载该版本，避免旧页面进程或旧入口缓存造成“修复未生效”的误判。
+本轮浏览器静态资源版本为 `20260723-baidu-scheduler-readiness`，同时写入 `public/index.html` 的 `app.js` 与 `styles.css` 查询参数。本地重启 `npm.cmd start` 后使用 `Ctrl+F5` 强制刷新，并在网络面板确认加载该版本，避免旧页面进程或旧入口缓存造成“修复未生效”的误判。
 
-本轮教师课时明细修复没有数据库结构变化，不新增迁移；自动化只操作临时合成数据库。本轮未连接或修改正式数据库，未使用真实百度账号，也未部署到正式服务器；只有在分支通过本地验收并按正式变更流程部署后，这些页面与接口变化才会生效。
+本轮教师课时明细与百度调度修复都没有数据库结构变化，不新增迁移；自动化只操作临时合成数据库和临时私密配置。本轮未连接或修改正式数据库，未使用真实百度账号，也未部署到正式服务器；只有在分支通过本地验收并按正式变更流程部署后，这些页面、接口与调度变化才会生效。
 
 提交前还应执行：
 
 ```powershell
 node --check src/server.js
+node --check src/backup/scheduler.js
 node --check src/backup/baidu_provider.js
+node --check scripts/excel_backup/run_scheduled_backup.js
 node --check public/app.js
 git diff --check
 ```
@@ -606,6 +612,7 @@ npm.cmd run trace:student-balance
 
 ## 19. 更新记录
 
+- **2026-07-23**：百度自动备份调度增加配置、授权与明文风险就绪检查，未就绪不再启动子进程；竞态 `NOT_READY` 增加冷却，页面补充中文计划状态，并明确 SQLite 计划设置与百度私密凭据相互独立。
 - **2026-07-23**：教师课时明细改用在职教师档案候选并默认未选择；规则薪资展示与批量写入统一到服务端解析，补充结构化结果、权限、日志、缓存和 Chromium 专项回归。
 - **2026-07-22**：百度下载改为使用上传返回的两个 `fs_id` 查询 `filemetas`；保留超大 ID 精度，补充 dlink User-Agent、分阶段诊断和失败清理回归；README 按当前系统重建。
 - **2026-07-22**：数据中心完善本地/百度独立调度、操作日志选项、备份状态与权限；百度远端文件明确为明文 Excel + SHA-256。
