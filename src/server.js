@@ -10,8 +10,14 @@ const { BackupService, ensureBackupColumns } = require("./backup/backup_service"
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, remoteDueState, startBackupScheduler } = require("./backup/scheduler");
 const { BaiduBackupManager, safeRemotePath } = require("./backup/baidu_provider");
 const { DataPreflightError, findStudentGradeStageConflicts, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
-const { studentPriceStatus, teacherPriceStatus } = require("./domain/price_status");
+const { studentPriceStatus } = require("./domain/price_status");
 const { migrateOpeningBalancesToGlobal } = require("./domain/opening_balance_migration");
+const {
+  normalizeStoredStudentSet,
+  splitStoredStudents,
+  teacherSalaryRuleActivation,
+  teacherSalaryRuleDateState,
+} = require("./domain/teacher_salary_rule");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
@@ -1799,10 +1805,7 @@ function monthKeyFromFilename(filename) {
 }
 
 function splitStudents(value) {
-  return text(value)
-    .split(/[、,，;；\n\r]/)
-    .map((name) => name.trim())
-    .filter(Boolean);
+  return splitStoredStudents(value);
 }
 
 function weekdayCn(dateValue) {
@@ -6843,7 +6846,7 @@ function lessonsInDateRange(start, end) {
 }
 
 function normalizedStudents(value) {
-  return uniqueNames(splitStudents(value)).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).join("、");
+  return normalizeStoredStudentSet(value);
 }
 
 function uniqueNames(values) {
@@ -7009,7 +7012,15 @@ function teacherSalaryRules() {
         ELSE 99
       END,
       grade, subject, student_names, id
-  `).map((row) => ({ ...row, price_status: teacherPriceStatus(row) }));
+  `).map((row) => {
+    const activation = teacherSalaryRuleActivation(row);
+    return {
+      ...row,
+      price_status: activation.enabled && optionalNumber(row.salary_per_unit) != null ? "已设置" : "未设置",
+      effective_is_active: activation.enabled,
+      activation_source: activation.source,
+    };
+  });
 }
 
 function matchingTeacherSalaryRulesForLesson(lesson, rules = null) {
@@ -7036,7 +7047,7 @@ function matchingTeacherSalaryRulesForLesson(lesson, rules = null) {
 
 function activeTeacherSalaryRuleForLesson(lesson, rules = null) {
   return matchingTeacherSalaryRulesForLesson(lesson, rules)
-    .find((rule) => Number(rule.is_active) !== 0 && optionalNumber(rule.salary_per_unit) > 0) || null;
+    .find((rule) => teacherSalaryRuleActivation(rule).enabled && optionalNumber(rule.salary_per_unit) != null) || null;
 }
 
 function normalizeTeacherSalaryRuleInput(body, current = {}) {
@@ -7053,9 +7064,11 @@ function normalizeTeacherSalaryRuleInput(body, current = {}) {
     ? optionalNumber(body.unit_hours)
     : optionalNumber(current.unit_hours);
   const unitHours = unitHoursValue == null ? 2 : unitHoursValue;
-  const isActive = Object.prototype.hasOwnProperty.call(body, "is_active")
-    ? (Number(body.is_active) === 0 ? 0 : 1)
-    : (Number(current.is_active) === 0 ? 0 : 1);
+  const activeProvided = Object.prototype.hasOwnProperty.call(body, "is_active");
+  const requestedActive = activeProvided
+    ? ![false, 0, "0", "-1", "false", "停用", "禁用"].includes(body.is_active)
+    : teacherSalaryRuleActivation({ ...current, salary_per_unit: salaryPerUnit }).enabled;
+  const isActive = requestedActive ? 1 : -1;
   if (!teacherName || !grade || !subject || !studentNames) {
     return { error: "老师、年级、科目和学生集合均为必填项", status: 400 };
   }
@@ -7149,7 +7162,7 @@ function deactivateTeacherSalaryRule(id) {
   if (!current) return { error: "薪资规则不存在", status: 404 };
   db.prepare(`
     UPDATE teacher_salary_rules
-    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+    SET is_active = -1, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(Number(id));
   return get("SELECT * FROM teacher_salary_rules WHERE id = ?", [Number(id)]);
@@ -7232,65 +7245,138 @@ function parseLessonHours(timeSlot) {
 
 function lessonSalaryUnits(timeSlot, unitHours = 2) {
   const normalizedUnitHours = optionalNumber(unitHours);
-  const divisor = normalizedUnitHours != null && normalizedUnitHours > 0 ? normalizedUnitHours : 2;
+  if (normalizedUnitHours == null || normalizedUnitHours <= 0) {
+    return { hours: null, units: null, warning: "规则课时口径无效" };
+  }
   const hours = parseLessonHours(timeSlot);
   if (hours == null) {
     return {
       hours: null,
-      units: 1,
-      warning: `无法解析课程时间「${text(timeSlot) || "空"}」，已默认按 1 课时计算`,
+      units: null,
+      warning: "课程时长无法识别",
     };
   }
-  return { hours, units: hours / divisor, warning: "" };
+  return { hours, units: hours / normalizedUnitHours, warning: "" };
 }
 
 function calculateTeacherSalaryFromRule(rule, lesson) {
   if (!rule) return null;
-  if (!isCompletedLesson(lesson)) return null;
   const unitResult = lessonSalaryUnits(lesson.time_slot, rule.unit_hours);
+  if (unitResult.units == null) return null;
   return {
     rule_id: Number(rule.id),
     salary: moneyRound(num(rule.salary_per_unit) * unitResult.units),
     salary_per_unit: num(rule.salary_per_unit),
-    unit_hours: num(rule.unit_hours) || 2,
+    unit_hours: num(rule.unit_hours),
     lesson_hours: unitResult.hours,
     lesson_units: unitResult.units,
     warning: unitResult.warning,
   };
 }
 
+function teacherSalaryMatchDiagnostics(lesson, rules, matchingRules = []) {
+  const teacher = text(lesson.teacher_name);
+  const grade = text(lesson.grade);
+  const subject = text(lesson.subject);
+  const students = normalizedStudents(lesson.student_names);
+  const sameTeacher = rules.filter((rule) => text(rule.teacher_name) === teacher);
+  const sameGrade = sameTeacher.filter((rule) => text(rule.grade) === grade);
+  const sameSubject = sameGrade.filter((rule) => text(rule.subject) === subject);
+  const reference = matchingRules[0] || sameSubject[0] || sameGrade[0] || sameTeacher[0] || null;
+  const activation = reference ? teacherSalaryRuleActivation(reference) : null;
+  const dateState = reference ? teacherSalaryRuleDateState(reference, lesson) : null;
+  const duration = parseLessonHours(lesson.time_slot);
+  return {
+    teacher: sameTeacher.length ? "匹配" : "不匹配",
+    grade: sameGrade.length ? "匹配" : "不匹配",
+    subject: sameSubject.length ? "匹配" : "不匹配",
+    students: sameSubject.some((rule) => normalizedStudents(rule.student_names) === students) ? "匹配" : "不匹配",
+    rule_status: activation ? (activation.enabled ? "启用" : "停用") : "无规则",
+    rule_date: dateState?.status || "无规则",
+    lesson_duration: duration == null ? "无法识别" : "可计算",
+    course_status: isCompletedLesson(lesson) ? "参与计薪" : "不参与计薪",
+  };
+}
+
 function resolveTeacherSalaryRuleForLesson(lesson, rules = null) {
-  if (!isCompletedLesson(lesson)) {
-    return {
-      status: "ineligible",
-      reason: "当前课程状态不参与教师计薪",
-      calculation: null,
-      rule: null,
-    };
-  }
-  const matchingRules = matchingTeacherSalaryRulesForLesson(lesson, rules);
+  const availableRules = rules || teacherSalaryRules();
+  const matchingRules = matchingTeacherSalaryRulesForLesson(lesson, availableRules);
+  const diagnostics = teacherSalaryMatchDiagnostics(lesson, availableRules, matchingRules);
+  const payrollEligible = isCompletedLesson(lesson);
   if (!matchingRules.length) {
+    let reason = "未找到教师、年级、科目和学生集合完全一致的规则";
+    if (diagnostics.teacher === "不匹配") reason = "未找到教师完全一致的规则";
+    else if (diagnostics.grade === "不匹配") reason = "未找到年级完全一致的规则";
+    else if (diagnostics.subject === "不匹配") reason = "未找到科目完全一致的规则";
+    else if (diagnostics.students === "不匹配") reason = "未找到学生集合完全一致的规则";
     return {
-      status: "no_match",
-      reason: "未找到匹配的教师薪资规则",
+      status: "not_matched",
+      reason,
       calculation: null,
       rule: null,
+      payroll_eligible: payrollEligible,
+      diagnostics,
     };
   }
-  const rule = matchingRules.find((candidate) => (
-    Number(candidate.is_active) !== 0
-    && optionalNumber(candidate.salary_per_unit) > 0
-  )) || null;
-  const calculation = calculateTeacherSalaryFromRule(rule, lesson);
-  if (!rule || !calculation) {
+  const usableRules = [];
+  let firstUnavailable = null;
+  for (const candidate of matchingRules) {
+    const activation = teacherSalaryRuleActivation(candidate);
+    const dateState = teacherSalaryRuleDateState(candidate, lesson);
+    const amount = optionalNumber(candidate.salary_per_unit);
+    const unitHours = optionalNumber(candidate.unit_hours);
+    if (!activation.enabled) {
+      firstUnavailable ||= { rule: candidate, reason: "规则已停用" };
+    } else if (!dateState.usable) {
+      firstUnavailable ||= { rule: candidate, reason: dateState.reason };
+    } else if (amount == null || amount < 0) {
+      firstUnavailable ||= { rule: candidate, reason: "规则金额无效" };
+    } else if (unitHours == null || unitHours <= 0) {
+      firstUnavailable ||= { rule: candidate, reason: "规则课时口径无效" };
+    } else {
+      usableRules.push(candidate);
+    }
+  }
+  if (usableRules.length > 1) {
     return {
-      status: "unavailable",
-      reason: "匹配规则当前不可用",
+      status: "ambiguous",
+      reason: "存在多条完全匹配的有效规则",
       calculation: null,
-      rule: matchingRules[0],
+      rule: null,
+      payroll_eligible: payrollEligible,
+      diagnostics: { ...diagnostics, rule_status: "多条有效规则" },
     };
   }
-  return { status: "matched", reason: "", calculation, rule };
+  const rule = usableRules[0] || null;
+  if (!rule) {
+    return {
+      status: "rule_unavailable",
+      reason: firstUnavailable?.reason || "匹配规则当前不可用",
+      calculation: null,
+      rule: firstUnavailable?.rule || matchingRules[0],
+      payroll_eligible: payrollEligible,
+      diagnostics,
+    };
+  }
+  const calculation = calculateTeacherSalaryFromRule(rule, lesson);
+  if (!calculation) {
+    return {
+      status: "calculation_error",
+      reason: parseLessonHours(lesson.time_slot) == null ? "课程时长无法识别" : "规则薪资无法计算",
+      calculation: null,
+      rule,
+      payroll_eligible: payrollEligible,
+      diagnostics,
+    };
+  }
+  return {
+    status: "matched",
+    reason: payrollEligible ? "" : "当前课程状态不参与教师计薪",
+    calculation,
+    rule,
+    payroll_eligible: payrollEligible,
+    diagnostics,
+  };
 }
 
 function teacherDetailLessonRuleData(lesson, rules = null) {
@@ -7300,10 +7386,18 @@ function teacherDetailLessonRuleData(lesson, rules = null) {
     ...lesson,
     teacher_salary_rule_status: resolved.status,
     teacher_salary_rule_reason: resolved.reason,
+    rule_match_status: resolved.status,
+    rule_match_reason: resolved.reason,
+    payroll_eligible: resolved.payroll_eligible,
+    rule_match_diagnostics: resolved.diagnostics,
     rule_salary: calculated ? calculated.salary : null,
+    rule_salary_per_2h: calculated
+      ? moneyRound(calculated.salary_per_unit * (2 / calculated.unit_hours))
+      : null,
+    rule_id: calculated ? calculated.rule_id : (resolved.rule ? Number(resolved.rule.id) : null),
     rule_salary_rule_id: calculated ? calculated.rule_id : (resolved.rule ? Number(resolved.rule.id) : null),
-    rule_salary_per_unit: calculated ? calculated.salary_per_unit : null,
-    rule_salary_unit_hours: calculated ? calculated.unit_hours : null,
+    rule_salary_per_unit: calculated ? calculated.salary_per_unit : optionalNumber(resolved.rule?.salary_per_unit),
+    rule_salary_unit_hours: calculated ? calculated.unit_hours : optionalNumber(resolved.rule?.unit_hours),
     rule_salary_lesson_hours: calculated ? calculated.lesson_hours : null,
     rule_salary_warning: calculated ? calculated.warning : "",
   };
@@ -7430,7 +7524,7 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
         continue;
       }
       const resolved = resolveTeacherSalaryRuleForLesson(lesson, rules);
-      if (resolved.status !== "matched") {
+      if (resolved.status !== "matched" || !resolved.payroll_eligible) {
         results.push({
           lesson_id: id,
           date: text(lesson.date),
@@ -7442,7 +7536,7 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
           old_salary: moneyRound(lesson.teacher_salary),
           new_salary: null,
           rule_id: resolved.rule ? Number(resolved.rule.id) : null,
-          reason: resolved.reason,
+          reason: resolved.reason || "当前课程状态不参与教师计薪",
         });
         continue;
       }
@@ -9796,7 +9890,7 @@ function prefilterViewFromUrl(url, fallback = "lessons") {
 function sanitizeLessonRows(rows, user) {
   const output = rows || [];
   const canSeeTeacherSalary = isSuperRole(user.role)
-    || userHasAnyPermission(user, ["teacherSalary", "teacherSalaryRules"]);
+    || userHasAnyPermission(user, ["teacherDetail", "teacherSalary", "teacherSalaryRules"]);
   if (canSeeTeacherSalary) return output;
   return output.map((row) => ({
     ...row,
@@ -9805,7 +9899,13 @@ function sanitizeLessonRows(rows, user) {
     teacher_salary_rule_id: null,
     teacher_salary_rule_status: "",
     teacher_salary_rule_reason: "",
+    rule_match_status: "",
+    rule_match_reason: "",
+    payroll_eligible: null,
+    rule_match_diagnostics: null,
     rule_salary: null,
+    rule_salary_per_2h: null,
+    rule_id: null,
     rule_salary_rule_id: null,
     rule_salary_per_unit: null,
     rule_salary_unit_hours: null,

@@ -35,7 +35,7 @@ function seedBase(dbPath) {
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes)
       VALUES (8401,'状态教师','初一','数学','状态学生甲',220,2,1,'有效薪资'),
              (8402,'状态教师','初一','英语','状态学生乙',0,2,1,'零金额'),
-             (8403,'状态教师','初二','物理','状态学生甲',330,2,0,'技术停用');
+             (8403,'状态教师','初二','物理','状态学生甲',330,2,-1,'明确停用');
   `);
   db.close();
 }
@@ -122,7 +122,7 @@ test("student and teacher rule pages share only set or unset visible price statu
 
   await openView(browser, "teachers", "teacherSalaryRules");
   await browser.waitFor("document.querySelectorAll('.teacher-salary-rule-row').length === 3");
-  assert.deepEqual((await browser.evaluate("[...document.querySelectorAll('.teacher-salary-rule-table .visible-price-status')].map((node)=>node.textContent.trim())")).reduce((counts, value) => ({ ...counts, [value]: (counts[value] || 0) + 1 }), {}), { 已设置: 1, 未设置: 2 });
+  assert.deepEqual((await browser.evaluate("[...document.querySelectorAll('.teacher-salary-rule-table .visible-price-status')].map((node)=>node.textContent.trim())")).reduce((counts, value) => ({ ...counts, [value]: (counts[value] || 0) + 1 }), {}), { 已设置: 2, 未设置: 1 });
   const visibleText = await browser.evaluate("document.querySelector('.teacher-salary-rule-table').closest('.band').textContent");
   assert.doesNotMatch(visibleText, /已停用|是否启用|enabled|disabled|\btrue\b|\bfalse\b/);
   assert.deepEqual(await browser.evaluate(`(() => { const input=document.querySelector('input.teacher-salary-rule-filter-input[data-filter-field="salary_status"]'); return [...input.closest('.multi-select').querySelectorAll('.multi-select-option')].map((node)=>node.dataset.value); })()`), ["已设置", "未设置"]);
