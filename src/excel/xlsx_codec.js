@@ -25,16 +25,17 @@ function zipStore(files) {
   for (const file of files) {
     const name = Buffer.from(file.name, "utf8");
     const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data, "utf8");
+    const compressed = zlib.deflateRawSync(data, { level: 6 });
     const crc = crc32(data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6);
-    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(name.length, 26);
-    localParts.push(local, name, data);
+    local.writeUInt16LE(8, 8); local.writeUInt32LE(crc, 14); local.writeUInt32LE(compressed.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, compressed);
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x0800, 8);
-    central.writeUInt32LE(crc, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    central.writeUInt16LE(8, 10); central.writeUInt32LE(crc, 16); central.writeUInt32LE(compressed.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
     centralParts.push(central, name);
-    offset += local.length + name.length + data.length;
+    offset += local.length + name.length + compressed.length;
   }
   const central = Buffer.concat(centralParts);
   const end = Buffer.alloc(22);
@@ -108,7 +109,7 @@ function worksheetXml(sheet) {
   const rows = sheet.rows || [];
   const widths = sheet.columnWidths || [];
   const numberFormatColumns = new Set(sheet.numberFormatColumns || []);
-  const cols = widths.length ? `<cols>${widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${Math.max(8, Math.min(40, Number(width) || 14))}" customWidth="1"${numberFormatColumns.has(index) ? ' style="2"' : ""}/>`).join("")}</cols>` : "";
+  const cols = widths.length ? `<cols>${widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${Math.max(8, Math.min(40, Number(width) || 14))}" customWidth="1"/>`).join("")}</cols>` : "";
   const body = rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((raw, columnIndex) => {
     const value = safeCellValue(raw, sheet.name, rowIndex, columnIndex);
     const ref = `${columnName(columnIndex)}${rowIndex + 1}`;

@@ -4298,6 +4298,44 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   min-height: 42px;
 }
 
+.recharge-channel-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.recharge-channel-fieldset legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.recharge-channel-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+
+.recharge-channel-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.recharge-channel-cell {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recharge-channel-other[hidden] {
+  display: none;
+}
+
 .recharge-modal .modal-actions {
   gap: var(--space-3);
 }
@@ -11872,6 +11910,39 @@ table th,
   margin: 0;
 }
 
+.teacher-salary-rule-toolbar {
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.teacher-salary-rule-toolbar .filter-controls,
+.teacher-salary-rule-toolbar .filter-field,
+.teacher-salary-rule-toolbar .filter-combo,
+.teacher-salary-rule-toolbar .filter-combo-input,
+.teacher-salary-rule-toolbar .control,
+.teacher-salary-rule-toolbar .btn {
+  min-height: 38px;
+}
+
+.teacher-salary-rule-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .teacher-salary-rule-toolbar-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .teacher-salary-rule-toolbar-actions .btn {
+    flex: 1 1 0;
+  }
+}
+
 .teacher-rule-salary-cell {
   min-width: 180px;
   max-width: 260px;
@@ -12801,7 +12872,8 @@ body {
   width: 100%;
   min-height: 54px;
   box-sizing: border-box;
-  resize: vertical;
+  resize: none;
+  overflow-y: auto;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
@@ -13357,10 +13429,63 @@ body {
 
 /* Keep the live-course card stable while only its lesson viewport scrolls. */
 .dashboard-main-grid > :is(.dashboard-current-section, .dashboard-todo-section, .dashboard-pie-section) {
-  height: 360px;
+  height: auto;
   min-height: 360px;
-  max-height: 360px;
+  max-height: none;
+  overflow: visible;
+}
+
+.dashboard-current-section {
+  height: 360px !important;
+  max-height: 360px !important;
+  overflow: hidden !important;
+}
+
+.dashboard-pie-section,
+.dashboard-todo-section {
+  align-self: stretch;
+}
+
+.student-query-detail-table.uniform-table tbody tr > td,
+.student-query-detail-table.uniform-table tbody tr:is(.abnormal, .exam-row, .receivable) > td {
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: inherit;
+}
+
+.student-query-detail-table.uniform-table tbody tr:hover > td,
+.student-query-detail-table.uniform-table tbody tr:is(.abnormal, .exam-row, .receivable):hover > td {
+  background: var(--surface-hover);
+}
+
+.student-pricing-table .student-pricing-value-cell,
+.student-pricing-table .student-pricing-value-cell .currency-input-wrap,
+.student-pricing-table .student-pricing-value-cell .student-pricing-field {
+  background: var(--panel);
+}
+
+.student-pricing-table .student-pricing-field:focus {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
+}
+
+.student-pricing-table .student-pricing-field[aria-invalid="true"] {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.class-group-students-cell {
+  max-width: 460px;
   overflow: hidden;
+}
+
+.class-group-student-set {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
 }
 
 .dashboard-current-viewport {
@@ -13387,9 +13512,9 @@ body {
 
 @media (max-width: 760px) {
   .dashboard-main-grid > .dashboard-current-section {
-    height: 320px;
-    min-height: 320px;
-    max-height: 320px;
+    height: 320px !important;
+    min-height: 320px !important;
+    max-height: 320px !important;
   }
 
   .dashboard-main-grid > :is(.dashboard-todo-section, .dashboard-pie-section) {

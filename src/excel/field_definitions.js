@@ -64,7 +64,8 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
   ], { restore_source: false, sort_fields: ["date", "teacher_name", "student_name"] }),
   sheet("recharge_records", "所有充值记录", "recharge_records", [
     ["month_label", "月份", { ...T, source_field: null, nullable: false }], ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],
-    ["cur_recharge", "本月实际充值", M], ["cur_gift", "本月赠送充值", M], ["recharge_date", "充值日期", D], ["notes", "备注", T],
+    ["cur_recharge", "本月实际充值", M], ["cur_gift", "本月赠送充值", M], ["recharge_date", "充值日期", D],
+    ["channel", "来源/渠道", { ...T, enum_values: ["", "wechat", "cash", "alipay", "other"] }], ["channel_other", "其他渠道说明", T], ["notes", "备注", T],
   ], { sort_fields: ["month_key", "recharge_date", "id"] }),
   sheet("student_opening_balances", "期初余额", "student_opening_balances", [
     ["student_name", "学生姓名", { ...T, nullable: false }], ["grade", "年级", T],

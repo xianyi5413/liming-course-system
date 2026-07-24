@@ -19,7 +19,7 @@ function filledTemplate() {
   add("费用标准", ["初一", 1, 300, "初一-1", "1对1"]); add("所有学生单价", ["模板学生", "初一", "数学", "模板学生", 188.5, "已设置", "规则"]);
   add("所有教师薪资规则", ["模板教师", "初一", "数学", "模板学生", 200, "已设置", "薪资规则"]); add("所有班级管理", ["模板教师", "初一", "数学", "模板学生", "模板班"]);
   add("所有课程数据", ["模板教师", "2026-04-08", "周三", "09:00-11:00", "A1", "已上", "初一", "数学", "模板学生", "课程"]);
-  add("所有充值记录", ["2026年4月", "模板学生", "初一", 1000, 100, "2026-04-03", "充值"]); add("期初余额", ["模板学生", "初一", 100, 50, "期初"]);
+  add("所有充值记录", ["2026年4月", "模板学生", "初一", 1000, 100, "2026-04-03", "wechat", "", "充值"]); add("期初余额", ["模板学生", "初一", 100, 50, "期初"]);
   add("所有教师车费明细", ["2026-04-01", "模板教师", 1, "2026-04-01", "2026-04-07", 20, "车费"]);
   add("员工", ["模板员工", "教务", "月薪", 5000, 0, 26, "13700000001", "在职", "2025-01-01", "", "员工"]);
   add("所有员工薪资", ["2026-04-01", "模板员工", 5200, 300, 100, "工资"]); add("所有员工考勤", ["模板员工", "2026-04-02", "上班", 1, 8, "", "考勤"]); add("所有日常开销", ["2026-04-09", "办公", 88.8, "模板商家", "开销"]);
@@ -38,6 +38,7 @@ test("blank template contains no hidden recovery worksheets", () => assert.equal
 test("every blank template worksheet is visible", () => assert.equal(parseWorkbook(createTemplateBuffer()).sheets.every((sheet) => sheet.state === "visible"), true));
 test("blank template data worksheets contain only headers", () => { const workbook = parseWorkbook(createTemplateBuffer()); for (const name of VISIBLE_SHEET_NAMES.filter((item) => item !== "导出说明")) assert.equal(workbook.sheetMap.get(name).rows.length, 1, name); });
 test("blank template opening balances are global and contain no month column", () => assert.deepEqual(parseWorkbook(createTemplateBuffer()).sheetMap.get("期初余额").rows[0], ["学生姓名", "年级", "期初实际余额", "期初赠送余额", "备注"]));
+test("blank template exposes structured recharge channel columns", () => assert.deepEqual(parseWorkbook(createTemplateBuffer()).sheetMap.get("所有充值记录").rows[0], ["月份", "学生姓名", "年级", "本月实际充值", "本月赠送充值", "充值日期", "来源/渠道", "其他渠道说明", "备注"]));
 test("blank v4 template omits recalculable fee and salary columns", () => { const workbook = parseWorkbook(createTemplateBuffer()); assert.deepEqual(workbook.sheetMap.get("所有学生费用明细").rows[0], ["学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用"]); assert.deepEqual(workbook.sheetMap.get("所有教师课时明细").rows[0], ["授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资"]); });
 test("account template uses initial password and no password hash", () => { const headers = parseWorkbook(createTemplateBuffer()).sheetMap.get("账号管理").rows[0]; assert.equal(headers.at(-1), "初始密码"); assert.equal(JSON.stringify(headers).includes("password_hash"), false); });
 test("template guide contains only synthetic examples", () => assert.doesNotMatch(JSON.stringify(parseWorkbook(createTemplateBuffer()).sheetMap.get(TEMPLATE_GUIDE_SHEET).rows), /pbkdf2\$|access_token|138\d{8}/i));
