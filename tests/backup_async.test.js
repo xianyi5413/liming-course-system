@@ -2,10 +2,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { after, before, test } = require("node:test");
 const { BackupService } = require("../src/backup/backup_service");
+const { freePort } = require("./helpers/chrome_cdp");
 
 const root = path.resolve(__dirname, "..");
 let tempRoot; let dbPath; let service;
@@ -65,4 +66,42 @@ test("job records do not persist secrets or remote download links", () => {
   const db = new DatabaseSync(dbPath, { readOnly: true }); const columns = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((row) => row.name)); db.close();
   for (const name of ["job_status", "job_error_code", "job_started_at", "job_updated_at", "job_completed_at", "job_pid"]) assert.equal(columns.has(name), true);
   for (const forbidden of ["access_token", "refresh_token", "app_secret", "dlink", "session"]) assert.equal(columns.has(forbidden), false);
+});
+
+test("a delayed 30 MB worker load does not block login, course or student APIs", async () => {
+  const payload = path.join(tempRoot, "simulated-30mb.bin");
+  fs.writeFileSync(payload, Buffer.alloc(30 * 1024 * 1024, 0x5a));
+  const port = await freePort();
+  const server = spawn(process.execPath, [path.join(root, "src/server.js")], {
+    cwd: root,
+    env: { ...process.env, DATA_DIR: tempRoot, DB_PATH: dbPath, PORT: String(port), SESSION_COOKIE_SECURE: "false", BAIDU_APP_KEY: "", BAIDU_APP_SECRET: "", BAIDU_REDIRECT_URI: "" },
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/version`)).ok) break; } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(server.exitCode, null);
+  const workerCode = "const fs=require('node:fs'),crypto=require('node:crypto');const b=fs.readFileSync(process.argv[1]);crypto.createHash('sha256').update(b).digest('hex');setTimeout(()=>{},3000);";
+  const worker = spawn(process.execPath, ["-e", workerCode, payload], { stdio: "ignore", windowsHide: true });
+  try {
+    const started = Date.now();
+    const login = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "boss", password: "123456" }) });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const [health, lessons, bootstrap] = await Promise.all([
+      fetch(`http://127.0.0.1:${port}/api/version`),
+      fetch(`http://127.0.0.1:${port}/api/lessons-range?start=2026-07-01&end=2026-07-31`, { headers: { cookie } }),
+      fetch(`http://127.0.0.1:${port}/api/bootstrap?month=2026-07-01`, { headers: { cookie } }),
+    ]);
+    assert.deepEqual([health.status, lessons.status, bootstrap.status], [200, 200, 200]);
+    assert.equal(worker.exitCode, null, "worker should still be in its simulated upload delay");
+    assert.ok(Date.now() - started < 2500, "ordinary APIs must finish before the delayed worker");
+  } finally {
+    if (worker.exitCode == null) worker.kill("SIGTERM");
+    if (server.exitCode == null) server.kill("SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 });
