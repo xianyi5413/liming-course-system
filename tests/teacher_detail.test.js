@@ -6,6 +6,11 @@ const { spawn, spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { after, before, test } = require("node:test");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
+const {
+  normalizeStoredStudentSet,
+  teacherSalaryRuleActivation,
+  teacherSalaryRuleDateState,
+} = require("../src/domain/teacher_salary_rule");
 
 const root = path.resolve(__dirname, "..");
 const MONTH = "2026-07-01";
@@ -16,6 +21,98 @@ let server;
 let ownerCookie;
 let teacherCookie;
 let academicCookie;
+
+const studentSetCases = [
+  ["顿号", "张三、李四", "李四、张三"],
+  ["中文逗号", "张三，李四", "李四、张三"],
+  ["英文逗号", "张三,李四", "李四、张三"],
+  ["中文分号", "张三；李四", "李四、张三"],
+  ["英文分号", "张三;李四", "李四、张三"],
+  ["换行", "张三\n李四", "李四、张三"],
+  ["JSON数组字符串", "[\"张三\",\"李四\"]", "李四、张三"],
+  ["数组值", ["张三", "李四"], "李四、张三"],
+  ["嵌套数组", ["张三", ["李四"]], "李四、张三"],
+  ["首尾空格", "  张三 、 李四  ", "李四、张三"],
+  ["姓名内历史空格", "张 三、李 四", "李四、张三"],
+  ["重复姓名", "张三、李四、张三", "李四、张三"],
+  ["顺序稳定", "李四、张三", "李四、张三"],
+  ["空值", "", ""],
+];
+
+for (const [label, input, expected] of studentSetCases) {
+  test(`student set normalization: ${label}`, () => {
+    assert.equal(normalizeStoredStudentSet(input), expected);
+  });
+}
+
+const activationCases = [
+  ["numeric enabled", 1, 300, true, "explicit_enabled"],
+  ["string enabled", "1", "300", true, "explicit_enabled"],
+  ["boolean enabled", true, 300, true, "explicit_enabled"],
+  ["Chinese enabled", "启用", 300, true, "explicit_enabled"],
+  ["Chinese active", "在用", 300, true, "explicit_enabled"],
+  ["English enabled", "enabled", 300, true, "explicit_enabled"],
+  ["English active", "active", 300, true, "explicit_enabled"],
+  ["legacy candidate amount", 0, 300, true, "legacy_candidate_with_amount"],
+  ["legacy candidate string amount", "0", "300.00", true, "legacy_candidate_with_amount"],
+  ["unconfigured candidate", 0, 0, false, "candidate_unconfigured"],
+  ["explicit negative disabled", -1, 300, false, "explicit_disabled"],
+  ["boolean disabled", false, 300, false, "explicit_disabled"],
+  ["Chinese disabled", "停用", 300, false, "explicit_disabled"],
+  ["Chinese forbidden", "禁用", 300, false, "explicit_disabled"],
+  ["English disabled", "disabled", 300, false, "explicit_disabled"],
+  ["missing status amount", null, 300, true, "legacy_missing"],
+  ["missing status zero", null, 0, true, "legacy_missing"],
+  ["invalid status", "unknown", 300, false, "invalid_status"],
+];
+
+for (const [label, isActive, salary, enabled, source] of activationCases) {
+  test(`activation compatibility: ${label}`, () => {
+    assert.deepEqual(
+      teacherSalaryRuleActivation({ is_active: isActive, salary_per_unit: salary }),
+      { enabled, source },
+    );
+  });
+}
+
+const dateCases = [
+  ["empty dates", {}, "2026-07-10", true, "有效"],
+  ["start boundary", { start_date: "2026-07-10" }, "2026-07-10", true, "有效"],
+  ["end boundary", { end_date: "2026-07-10" }, "2026-07-10", true, "有效"],
+  ["before start", { start_date: "2026-07-11" }, "2026-07-10", false, "未生效"],
+  ["after end", { end_date: "2026-07-09" }, "2026-07-10", false, "已失效"],
+  ["inside range", { start_date: "2026-07-01", end_date: "2026-07-31" }, "2026-07-10", true, "有效"],
+];
+
+for (const [label, rule, date, usable, status] of dateCases) {
+  test(`rule date compatibility: ${label}`, () => {
+    const result = teacherSalaryRuleDateState(rule, { date });
+    assert.equal(result.usable, usable);
+    assert.equal(result.status, status);
+  });
+}
+
+const frontendSource = fs.readFileSync(path.join(root, "public/app.js"), "utf8");
+const serverSource = fs.readFileSync(path.join(root, "src/server.js"), "utf8");
+const indexSource = fs.readFileSync(path.join(root, "public/index.html"), "utf8");
+const sourceContracts = [
+  ["frontend reads rule_salary", frontendSource, /optionalNumberValue\(lesson\.rule_salary\)/],
+  ["zero is checked without truthiness", frontendSource, /salary != null/],
+  ["unmatched label is explicit", frontendSource, /not_matched: "未匹配"/],
+  ["unavailable label is explicit", frontendSource, /rule_unavailable: "规则不可用"/],
+  ["calculation error label is explicit", frontendSource, /calculation_error: "无法计算"/],
+  ["diagnostic entry exists", frontendSource, /查看匹配详情/],
+  ["rule writes invalidate lesson cache", frontendSource, /teacher-salary-rules[^]*lessons-range/],
+  ["teacher detail GET bypasses cache", frontendSource, /view === "teacherDetail" \? \{ cache: false \}/],
+  ["batch and page share resolver", serverSource, /const resolved = resolveTeacherSalaryRuleForLesson\(lesson, rules\)/],
+  ["static resource version is current", indexSource, /20260724-teacher-rule-salary-display/g],
+];
+
+for (const [label, source, pattern] of sourceContracts) {
+  test(`source contract: ${label}`, () => {
+    assert.match(source, pattern);
+  });
+}
 
 async function waitForServer() {
   const deadline = Date.now() + 10000;
@@ -51,6 +148,12 @@ async function api(pathname, { cookie = ownerCookie, method = "GET", body } = {}
   return { response, payload };
 }
 
+async function julyRows(cookie = ownerCookie) {
+  const result = await api("/api/lessons-range?start=2026-07-01&end=2026-07-31&view=teacherDetail&teacher_names=%E5%9C%A8%E8%81%8C%E7%94%B2", { cookie });
+  assert.equal(result.response.status, 200);
+  return new Map(result.payload.lessons.map((row) => [row.id, row]));
+}
+
 function seed(db) {
   const passwordHash = db.prepare("SELECT password_hash FROM users WHERE username='boss'").get().password_hash;
   db.exec(`
@@ -61,8 +164,14 @@ function seed(db) {
       (9003,'离职丙','离职');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES
       (9101,'在职甲','初一','数学','李四、张 三',300,2,1,'顺序与空格规范化规则'),
-      (9102,'在职甲','初一','英语','张三、李四',280,2,0,'停用规则'),
-      (9103,'在职甲','初一','物理','张三、李四',0,2,1,'零金额按现有口径不可用');
+      (9102,'在职甲','初一','英语','张三、李四',280,2,-1,'明确停用规则'),
+      (9103,'在职甲','初一','物理','张三、李四',0,2,1,'零金额有效规则'),
+      (9104,'在职甲','初二','生物','王五',200,2,0,'历史候选已填写金额'),
+      (9105,'在职甲','初二','历史','王五','bad',2,1,'无效金额'),
+      (9106,'在职甲','初二','语文','王五',220,2,0,'歧义一'),
+      (9107,'在职甲','初二','语文','王五',240,2,0,'歧义二'),
+      (9108,'在职甲','初二','地理','王五',260,2,1,'时长异常'),
+      (9109,'在职甲','初二','化学','["王五","赵六"]',240,2,1,'JSON学生集合');
     INSERT INTO lessons(id,teacher_name,date,lesson_status,time_slot,classroom,grade,subject,student_names,notes,course_status,status,teacher_salary,teacher_salary_source,teacher_salary_rule_id,month_key,sort_order) VALUES
       (9201,'在职甲','2026-07-01','上课','09:00-11:00','A1','初一','数学','张三； 李四','应更新','已上','已上',120,'manual',NULL,'2026-07-01',1),
       (9202,'在职甲','2026-07-02','上课','09:00-10:00','A1','初一','数学','李四、张三','已一致','已上','已上',150,'auto',9101,'2026-07-01',2),
@@ -71,7 +180,13 @@ function seed(db) {
       (9205,'在职甲','2026-07-05','上课','09:00-11:00','A1','初一','物理','张三、李四','零金额规则','已上','已上',80,'manual',NULL,'2026-07-01',5),
       (9206,'在职甲','2026-07-06','上课','09:00-11:00','A1','初一','数学','张三、李四','未上课程','未上','待上',0,'empty',NULL,'2026-07-01',6),
       (9207,'在职乙','2026-07-07','上课','09:00-11:00','A2','初一','数学','张三、李四','权限外课程','已上','已上',10,'manual',NULL,'2026-07-01',7),
-      (9210,'在职甲','2026-08-01','上课','09:00-11:00','A1','初一','数学','张三、李四','八月课程','已上','已上',300,'auto',9101,'2026-08-01',1);
+      (9210,'在职甲','2026-08-01','上课','09:00-11:00','A1','初一','数学','张三、李四','八月课程','已上','已上',300,'auto',9101,'2026-08-01',1),
+      (9211,'在职甲','2026-07-11','上课','09:00-11:00','A1','初二','生物','王五','历史状态兼容','已上','已上',20,'manual',NULL,'2026-07-01',11),
+      (9212,'在职甲','2026-07-12','上课','09:00-11:00','A1','初二','历史','王五','金额异常','已上','已上',20,'manual',NULL,'2026-07-01',12),
+      (9213,'在职甲','2026-07-13','上课','09:00-11:00','A1','初二','语文','王五','规则歧义','已上','已上',20,'manual',NULL,'2026-07-01',13),
+      (9214,'在职甲','2026-07-14','上课','','A1','初二','地理','王五','时长异常','已上','已上',20,'manual',NULL,'2026-07-01',14),
+      (9215,'在职甲','2026-07-15','上课','09:00-10:30','A1','初二','化学','赵六，王五、王五','JSON与非标准时长','已上','已上',20,'manual',NULL,'2026-07-01',15),
+      (9220,'在职甲','2026-07-20','上课','09:00-11:00','A1','初三','生物','王五','缓存即时刷新','已上','已上',20,'manual',NULL,'2026-07-01',20);
   `);
   const teacherUser = db.prepare(`
     INSERT INTO users(username,display_name,role,teacher_name,password_hash,status)
@@ -93,6 +208,7 @@ function resetJulySalaries() {
   db.exec(`
     UPDATE lessons SET teacher_salary=120,teacher_salary_source='manual',teacher_salary_rule_id=NULL WHERE id=9201;
     UPDATE lessons SET teacher_salary=150,teacher_salary_source='auto',teacher_salary_rule_id=9101 WHERE id=9202;
+    UPDATE lessons SET teacher_salary=80,teacher_salary_source='manual',teacher_salary_rule_id=NULL WHERE id=9205;
   `);
   db.close();
 }
@@ -189,10 +305,13 @@ test("lesson detail and batch update share normalized student matching and durat
   assert.equal(rows.get(9201).rule_salary_rule_id, 9101);
   assert.equal(rows.get(9202).rule_salary, 150);
   assert.equal(rows.get(9202).rule_salary_lesson_hours, 1);
-  assert.equal(rows.get(9203).teacher_salary_rule_status, "no_match");
-  assert.equal(rows.get(9204).teacher_salary_rule_status, "unavailable");
-  assert.equal(rows.get(9205).teacher_salary_rule_status, "unavailable");
-  assert.equal(rows.get(9206).teacher_salary_rule_status, "ineligible");
+  assert.equal(rows.get(9203).teacher_salary_rule_status, "not_matched");
+  assert.equal(rows.get(9204).teacher_salary_rule_status, "rule_unavailable");
+  assert.equal(rows.get(9205).teacher_salary_rule_status, "matched");
+  assert.equal(rows.get(9205).rule_salary, 0);
+  assert.equal(rows.get(9206).teacher_salary_rule_status, "matched");
+  assert.equal(rows.get(9206).rule_salary, 300);
+  assert.equal(rows.get(9206).payroll_eligible, false);
 });
 
 test("mixed string, numeric, duplicate, unchanged and skipped IDs return structured results", async () => {
@@ -210,13 +329,12 @@ test("mixed string, numeric, duplicate, unchanged and skipped IDs return structu
       skipped: payload.skipped_count,
       failed: payload.failed_count,
     },
-    { selected: 6, updated: 1, unchanged: 1, skipped: 4, failed: 0 },
+    { selected: 6, updated: 2, unchanged: 1, skipped: 3, failed: 0 },
   );
-  assert.deepEqual(payload.results.map((item) => item.status), ["updated", "unchanged", "skipped", "skipped", "skipped", "skipped"]);
-  assert.deepEqual(payload.results.slice(2).map((item) => item.reason), [
-    "未找到匹配的教师薪资规则",
-    "匹配规则当前不可用",
-    "匹配规则当前不可用",
+  assert.deepEqual(payload.results.map((item) => item.status), ["updated", "unchanged", "skipped", "skipped", "updated", "skipped"]);
+  assert.deepEqual(payload.results.filter((item) => item.status === "skipped").map((item) => item.reason), [
+    "未找到科目完全一致的规则",
+    "规则已停用",
     "当前课程状态不参与教师计薪",
   ]);
   const db = new DatabaseSync(databasePath, { readOnly: true });
@@ -224,12 +342,12 @@ test("mixed string, numeric, duplicate, unchanged and skipped IDs return structu
   assert.deepEqual({ ...lesson }, { teacher_salary: 300, teacher_salary_source: "auto", teacher_salary_rule_id: 9101 });
   const log = db.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE operation_type='按规则更新教师薪资' ORDER BY id DESC LIMIT 1").get();
   db.close();
-  assert.match(log.operation_content, /所选 6 条，更新 1 条，无需更新 1 条，跳过 4 条/);
+  assert.match(log.operation_content, /所选 6 条，更新 2 条，无需更新 1 条，跳过 3 条/);
   assert.deepEqual(JSON.parse(log.extra_json), {
     selected_count: 6,
-    updated_count: 1,
+    updated_count: 2,
     unchanged_count: 1,
-    skipped_count: 4,
+    skipped_count: 3,
     failed_count: 0,
   });
 });
@@ -271,6 +389,109 @@ test("salary summary cache is invalidated after a valid batch write", async () =
   assert.equal(afterRow.salary_total - before.salary_total, 180);
 });
 
+test("legacy activation, JSON students, nonstandard duration and structured diagnostics work through API", async () => {
+  const rows = await julyRows();
+  assert.equal(rows.get(9211).rule_match_status, "matched");
+  assert.equal(rows.get(9211).rule_salary, 200);
+  assert.equal(rows.get(9212).rule_match_status, "rule_unavailable");
+  assert.equal(rows.get(9212).rule_match_reason, "规则金额无效");
+  assert.equal(rows.get(9213).rule_match_status, "ambiguous");
+  assert.equal(rows.get(9213).rule_match_reason, "存在多条完全匹配的有效规则");
+  assert.equal(rows.get(9214).rule_match_status, "calculation_error");
+  assert.equal(rows.get(9214).rule_match_reason, "课程时长无法识别");
+  assert.equal(rows.get(9215).rule_match_status, "matched");
+  assert.equal(rows.get(9215).rule_salary, 180);
+  assert.equal(rows.get(9215).rule_salary_per_2h, 240);
+  assert.deepEqual(rows.get(9215).rule_match_diagnostics, {
+    teacher: "匹配",
+    grade: "匹配",
+    subject: "匹配",
+    students: "匹配",
+    rule_status: "启用",
+    rule_date: "有效",
+    lesson_duration: "可计算",
+    course_status: "参与计薪",
+  });
+});
+
+test("ambiguous, unavailable and calculation-error rows are never batch-written", async () => {
+  const beforeDb = new DatabaseSync(databasePath, { readOnly: true });
+  const before = beforeDb.prepare("SELECT id,teacher_salary FROM lessons WHERE id IN (9212,9213,9214) ORDER BY id").all();
+  beforeDb.close();
+  const result = await api("/api/teacher-salary-rules/apply-selected", {
+    method: "POST",
+    body: { lesson_ids: [9212, 9213, 9214] },
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.payload.updated_count, 0);
+  assert.equal(result.payload.skipped_count, 3);
+  assert.deepEqual(result.payload.results.map((row) => row.reason), [
+    "规则金额无效",
+    "存在多条完全匹配的有效规则",
+    "课程时长无法识别",
+  ]);
+  const afterDb = new DatabaseSync(databasePath, { readOnly: true });
+  const afterRows = afterDb.prepare("SELECT id,teacher_salary FROM lessons WHERE id IN (9212,9213,9214) ORDER BY id").all();
+  afterDb.close();
+  assert.deepEqual(afterRows, before);
+});
+
+test("create, string amount update and disable are visible on the next detail request without restart", async () => {
+  let rows = await julyRows();
+  assert.equal(rows.get(9220).rule_match_status, "not_matched");
+  const created = await api("/api/teacher-salary-rules", {
+    method: "POST",
+    body: {
+      teacher_name: "在职甲",
+      grade: "初三",
+      subject: "生物",
+      student_names: "王五",
+      salary_per_unit: 220,
+      unit_hours: 2,
+      is_active: true,
+    },
+  });
+  assert.equal(created.response.status, 201);
+  rows = await julyRows();
+  assert.equal(rows.get(9220).rule_salary, 220);
+  const updated = await api(`/api/teacher-salary-rules/${created.payload.id}`, {
+    method: "PUT",
+    body: { salary_per_unit: "260.50", is_active: true },
+  });
+  assert.equal(updated.response.status, 200);
+  rows = await julyRows();
+  assert.equal(rows.get(9220).rule_salary, 260.5);
+  const disabled = await api(`/api/teacher-salary-rules/${created.payload.id}`, { method: "DELETE" });
+  assert.equal(disabled.response.status, 200);
+  rows = await julyRows();
+  assert.equal(rows.get(9220).rule_match_status, "rule_unavailable");
+  assert.equal(rows.get(9220).rule_match_reason, "规则已停用");
+});
+
+test("teacher readonly account can see own rule result but cannot see out-of-scope lessons", async () => {
+  const rows = await julyRows(teacherCookie);
+  assert.equal(rows.get(9201).rule_match_status, "matched");
+  assert.equal(rows.get(9201).rule_salary, 300);
+  assert.equal(rows.has(9207), false);
+  const write = await api("/api/teacher-salary-rules/apply-selected", {
+    cookie: teacherCookie,
+    method: "POST",
+    body: { lesson_ids: [9201] },
+  });
+  assert.equal(write.response.status, 403);
+});
+
+test("diagnostics expose safe match states without SQL, paths or unrelated rule payloads", async () => {
+  const rows = await julyRows();
+  const payload = rows.get(9203);
+  assert.equal(payload.rule_match_status, "not_matched");
+  assert.equal(payload.rule_match_diagnostics.teacher, "匹配");
+  assert.equal(payload.rule_match_diagnostics.grade, "匹配");
+  assert.equal(payload.rule_match_diagnostics.subject, "不匹配");
+  const serialized = JSON.stringify(payload.rule_match_diagnostics);
+  assert.doesNotMatch(serialized, /SELECT|teacher_salary_rules|sqlite|stack|phone|guardian/i);
+});
+
 test("real Chromium keeps initial state empty, updates mixed results, and works at 1440px and 390px", async () => {
   resetJulySalaries();
   const db = new DatabaseSync(databasePath);
@@ -300,17 +521,26 @@ test("real Chromium keeps initial state empty, updates mixed results, and works 
         && item.status === 200;
     }), true, JSON.stringify(browser.responses.filter((item) => item.url.includes("/api/lessons-range"))));
     assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.textContent.includes('300.00')"), true);
+    const ruleCellText = await browser.evaluate("[...document.querySelectorAll('.teacher-rule-salary-cell')].map((cell)=>cell.textContent).join('|')");
+    assert.match(ruleCellText, /未匹配/);
+    assert.match(ruleCellText, /规则不可用/);
+    assert.match(ruleCellText, /存在多条匹配规则/);
+    assert.match(ruleCellText, /无法计算/);
+    assert.match(ruleCellText, /当前状态不参与计薪/);
+    assert.match(ruleCellText, /0\.00/);
+    await browser.click(".teacher-rule-match-details summary");
+    assert.match(await browser.evaluate("document.querySelector('.teacher-rule-match-details')?.textContent"), /教师.*年级.*科目.*学生集合/s);
     await browser.evaluate("window.confirm=()=>true");
     await browser.click(".teacher-salary-select-all");
     await browser.click(".apply-selected-teacher-salary-rules");
-    await browser.waitFor("document.querySelector('.teacher-salary-batch-result')?.textContent.includes('更新1节，无需更新1节，跳过4节')");
+    await browser.waitFor("document.querySelector('.teacher-salary-batch-result')?.textContent.includes('更新4节，无需更新1节，跳过7节')");
     assert.equal(await browser.evaluate("document.querySelector('.teacher-salary-batch-result')?.textContent.includes('全部跳过')"), false);
     await browser.click(".teacher-salary-batch-details summary");
     const detailText = await browser.evaluate("document.querySelector('.teacher-salary-batch-details')?.textContent");
-    assert.match(detailText, /未找到匹配的教师薪资规则/);
-    assert.match(detailText, /匹配规则当前不可用/);
+    assert.match(detailText, /未找到科目完全一致的规则/);
+    assert.match(detailText, /规则已停用/);
     assert.match(detailText, /当前课程状态不参与教师计薪/);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-salary-lesson-select:checked').length"), 4);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-salary-lesson-select:checked').length"), 7);
 
     await browser.evaluate(`(() => {
       const select = document.querySelector('.month-select');

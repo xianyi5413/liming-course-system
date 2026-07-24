@@ -11872,6 +11872,100 @@ table th,
   margin: 0;
 }
 
+.teacher-rule-salary-cell {
+  min-width: 180px;
+  max-width: 260px;
+  white-space: normal !important;
+  vertical-align: top;
+}
+
+.teacher-rule-result {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  line-height: 1.35;
+}
+
+.teacher-rule-result strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.teacher-rule-result small {
+  max-width: 230px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.teacher-rule-result.matched strong {
+  color: var(--success);
+}
+
+.teacher-rule-match-details {
+  max-width: 240px;
+  font-family: var(--font-sans);
+  text-align: left;
+}
+
+.teacher-rule-match-details summary {
+  color: var(--brand);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: right;
+}
+
+.teacher-rule-match-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.teacher-rule-match-grid span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.7rem;
+}
+
+.teacher-rule-match-grid b {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.teacher-salary-rule-table :is(th, td):nth-child(6),
+.teacher-salary-rule-table :is(th, td):nth-child(7) {
+  text-align: center !important;
+}
+
+.teacher-salary-rule-table :is(th, td):nth-child(8) {
+  min-width: 150px;
+  max-width: 280px;
+  text-align: left !important;
+}
+
+.teacher-salary-rule-table td:nth-child(8) .cell-input {
+  text-align: left;
+}
+
+@media (max-width: 480px) {
+  .teacher-rule-salary-cell {
+    min-width: 160px;
+  }
+
+  .teacher-rule-match-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* 首页内容量较小时不再保留过高卡片或趋势空白，仍保留可点击面积。 */
 .dashboard-page {
   gap: var(--space-3);

@@ -598,6 +598,7 @@ function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
   return [];
@@ -1638,7 +1639,10 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
       state.lessons = [];
       state.lesson_loaded_range = lessonRange || null;
     } else if (lessonRange) {
-      const lessonsResult = await request(lessonsRangeUrl(lessonRange, lessonDataViewKey()));
+      const lessonsResult = await request(
+        lessonsRangeUrl(lessonRange, lessonDataViewKey()),
+        view === "teacherDetail" ? { cache: false } : {},
+      );
       if (!stillCurrent()) return false;
       state.lessons = lessonsResult.lessons || [];
       state.lesson_loaded_range = lessonRange;
@@ -2522,7 +2526,20 @@ function numberValue(value) {
 }
 
 function splitStudents(value) {
-  return String(value || "")
+  let source = value;
+  if (typeof source === "string") {
+    const raw = source.trim();
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) source = parsed;
+      } catch {
+        // Historical delimiter strings continue through the normal parser.
+      }
+    }
+  }
+  if (Array.isArray(source)) return source.flatMap((item) => splitStudents(item));
+  return String(source || "")
     .split(/[、,，;；\n\r]/)
     .map((name) => name.trim())
     .filter(Boolean);
@@ -2609,7 +2626,7 @@ function teacherSalaryLessonHours(timeSlot) {
 }
 
 function teacherSalaryRuleCalculation(lesson) {
-  if (lesson.teacher_salary_rule_status !== "matched") return null;
+  if ((lesson.rule_match_status || lesson.teacher_salary_rule_status) !== "matched") return null;
   const salary = optionalNumberValue(lesson.rule_salary);
   if (salary == null) return null;
   return {
@@ -2646,7 +2663,7 @@ function teacherSalarySourceTitle(lesson) {
   const label = teacherSalarySourceLabel(lesson);
   const amount = formatMoney(displayTeacherSalaryForLesson(lesson));
   const ruleSalary = displayTeacherRuleSalaryForLesson(lesson);
-  const rule = `，规则薪资 ${formatMoney(ruleSalary)}`;
+  const rule = ruleSalary == null ? "" : `，规则薪资 ${formatMoney(ruleSalary)}`;
   if (label === "未设置") return "已上课程未设置有效薪资规则";
   if (label === "手动") return `当前薪资 ${amount}${rule}，与规则不一致，视为手动`;
   return `系统自动薪资 ${amount}${rule}`;
@@ -2658,17 +2675,75 @@ function teacherSalarySourceBadge(lesson) {
 
 function teacherSalaryRuleDisableReason(lesson) {
   const reasons = {
-    ineligible: "当前课程状态不参与教师计薪",
-    no_match: "未找到匹配的教师薪资规则",
-    unavailable: "匹配规则当前不可用",
+    not_matched: "未找到教师、年级、科目和学生集合完全一致的规则",
+    rule_unavailable: "匹配规则当前不可用",
+    ambiguous: "存在多条完全匹配的有效规则",
+    calculation_error: "规则薪资无法计算",
   };
-  return lesson.teacher_salary_rule_reason || reasons[lesson.teacher_salary_rule_status] || "未设置有效薪资规则";
+  const status = lesson.rule_match_status || lesson.teacher_salary_rule_status;
+  return lesson.rule_match_reason || lesson.teacher_salary_rule_reason || reasons[status] || "未设置有效薪资规则";
 }
 
 function teacherSalaryRuleStatusForLesson(lesson) {
-  if (!isCompletedLesson(lesson)) return "非已上";
-  if (teacherSalaryRuleCalculation(lesson)) return "有有效规则";
-  return "未设置";
+  const status = lesson.rule_match_status || lesson.teacher_salary_rule_status;
+  return {
+    matched: lesson.payroll_eligible === false ? "已匹配（不参与计薪）" : "已匹配",
+    not_matched: "未匹配",
+    rule_unavailable: "规则不可用",
+    ambiguous: "存在多条匹配规则",
+    calculation_error: "无法计算",
+  }[status] || "未匹配";
+}
+
+function teacherSalaryRuleDiagnosticMarkup(lesson) {
+  const status = lesson.rule_match_status || lesson.teacher_salary_rule_status;
+  if (status === "matched") return "";
+  const diagnostics = lesson.rule_match_diagnostics || {};
+  const items = [
+    ["教师", diagnostics.teacher],
+    ["年级", diagnostics.grade],
+    ["科目", diagnostics.subject],
+    ["学生集合", diagnostics.students],
+    ["规则状态", diagnostics.rule_status],
+    ["规则日期", diagnostics.rule_date],
+    ["课程时长", diagnostics.lesson_duration],
+    ["课程状态", diagnostics.course_status],
+  ];
+  return `
+    <details class="teacher-rule-match-details">
+      <summary>查看匹配详情</summary>
+      <div class="teacher-rule-match-grid">
+        ${items.map(([label, value]) => `<span><b>${label}</b>${escapeHtml(value || "未知")}</span>`).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function teacherSalaryRuleCellMarkup(lesson) {
+  const status = lesson.rule_match_status || lesson.teacher_salary_rule_status;
+  const salary = optionalNumberValue(lesson.rule_salary);
+  const reason = teacherSalaryRuleDisableReason(lesson);
+  if (status === "matched" && salary != null) {
+    return `
+      <div class="teacher-rule-result matched">
+        <strong>${formatMoney(salary)}</strong>
+        ${lesson.payroll_eligible === false ? `<small>当前状态不参与计薪</small>` : ""}
+      </div>
+    `;
+  }
+  const label = {
+    not_matched: "未匹配",
+    rule_unavailable: "规则不可用",
+    ambiguous: "存在多条匹配规则",
+    calculation_error: "无法计算",
+  }[status] || "未匹配";
+  return `
+    <div class="teacher-rule-result ${escapeHtml(status || "not_matched")}">
+      <strong>${label}</strong>
+      <small>${escapeHtml(reason)}</small>
+      ${teacherSalaryRuleDiagnosticMarkup(lesson)}
+    </div>
+  `;
 }
 
 function teacherDetailMatchesFilter(row, filter = teacherDetailFilter) {
@@ -2714,7 +2789,15 @@ function studentPricingVisibleStatus(rule) {
 }
 
 function teacherSalaryRuleSalaryStatus(rule) {
-  return visiblePriceStatus(rule.salary_per_unit, rule.is_active);
+  return teacherSalaryRuleEnabled(rule) && optionalNumberValue(rule.salary_per_unit) != null ? "已设置" : "未设置";
+}
+
+function teacherSalaryRuleEnabled(rule) {
+  if (typeof rule.effective_is_active === "boolean") return rule.effective_is_active;
+  const raw = String(rule.is_active ?? "").trim().toLowerCase();
+  if (["1", "true", "启用", "在用", "enabled", "active", "on"].includes(raw)) return true;
+  if (["-1", "false", "停用", "禁用", "disabled", "inactive", "off"].includes(raw)) return false;
+  return raw === "0" && (optionalNumberValue(rule.salary_per_unit) || 0) > 0;
 }
 
 function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) {
@@ -11898,7 +11981,7 @@ function renderTeacherSalaryRules() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="teacher-salary-rule-table uniform-table nowrap-table">
-          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
@@ -11907,10 +11990,11 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(rule.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: rule.grade })).join("")}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
+                <td class="text-cell"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
                 <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无符合条件的薪资规则</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -11922,7 +12006,7 @@ function renderTeacherSalaryRules() {
           <div class="modal-head">
             <div>
               <div class="modal-title">新增薪资规则</div>
-              <div class="modal-subtitle">学生集合会自动规范化；薪资大于 0 后才参与匹配。</div>
+              <div class="modal-subtitle">学生集合会自动规范化；规则启用后参与匹配，0 元也是有效金额。</div>
             </div>
           </div>
           <div class="lesson-create-form">
@@ -11931,6 +12015,7 @@ function renderTeacherSalaryRules() {
             <label>科目${filterComboControl({ id: "new-teacher-salary-rule-subject", className: "modal-combo-input", field: "subject", value: "", values: modalCandidates.subjects, placeholder: "输入或选择科目", emptyLabel: "" })}</label>
             <label class="wide">学生集合${filterComboControl({ id: "new-teacher-salary-rule-students", className: "modal-combo-input", field: "students", value: "", values: modalCandidates.students, placeholder: "多个学生用顿号分隔", emptyLabel: "" })}</label>
             <label>每2小时薪资<input id="new-teacher-salary-rule-salary" class="control money-input" type="number" min="0" step="0.01" placeholder="可先留空为 0"></label>
+            <label class="history-toggle"><input id="new-teacher-salary-rule-active" type="checkbox" checked><span>启用规则</span></label>
             <label class="wide">备注<input id="new-teacher-salary-rule-notes" class="control" placeholder="备注"></label>
           </div>
           <div class="modal-actions">
@@ -11996,7 +12081,7 @@ function renderTeacherDetail() {
   const filterOptions = dynamicTeacherDetailFilterOptions(rows);
   const visibleRows = rows.filter((row) => teacherDetailMatchesFilter(row));
   const count = rows.filter(isCompletedLesson).length;
-  const showSalary = canArea("salary");
+  const showSalary = canView("teacherDetail") || canArea("salary");
   const canUpdateSalary = showSalary && canWriteData() && Boolean(selectedTeacherDetail);
   const salary = rows.reduce((sum, row) => sum + displayTeacherSalaryForLesson(row), 0);
   const selectableRows = canUpdateSalary ? visibleRows : [];
@@ -12059,7 +12144,7 @@ function renderTeacherDetail() {
                   <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
-                    <td class="text-cell right" title="${escapeHtml(ruleTitle)}">${displayedRuleSalary === null ? "" : formatMoney(displayedRuleSalary)}</td>
+                    <td class="text-cell right teacher-rule-salary-cell" title="${escapeHtml(ruleTitle)}">${teacherSalaryRuleCellMarkup(row)}</td>
                   ` : ""}
                 </tr>
               `;
@@ -17358,6 +17443,7 @@ function wireEvents() {
       const subject = document.querySelector("#new-teacher-salary-rule-subject")?.value.trim() || "";
       const studentNames = document.querySelector("#new-teacher-salary-rule-students")?.value.trim() || "";
       const salaryValue = document.querySelector("#new-teacher-salary-rule-salary")?.value.trim() || "";
+      const isActive = document.querySelector("#new-teacher-salary-rule-active")?.checked !== false;
       const notes = document.querySelector("#new-teacher-salary-rule-notes")?.value || "";
       if (!teacherName || !grade || !subject || !studentNames) return alert("请填写老师、年级、科目和学生集合");
       if (salaryValue !== "" && optionalNumberValue(salaryValue) === null) return alert("请填写有效的每2小时薪资");
@@ -17372,6 +17458,7 @@ function wireEvents() {
             student_names: studentNames,
             salary_per_unit: salaryValue === "" ? 0 : optionalNumberValue(salaryValue),
             unit_hours: 2,
+            is_active: isActive,
             notes,
           },
         });
@@ -17393,9 +17480,17 @@ function wireEvents() {
     input.addEventListener("change", () => {
       const row = input.closest(".teacher-salary-rule-row");
       if (!row) return;
+      if (input.dataset.field === "salary_per_unit" && optionalNumberValue(input.value) != null) {
+        const activeInput = row.querySelector(".teacher-salary-rule-active");
+        if (activeInput) activeInput.checked = true;
+      }
       const payload = {};
       row.querySelectorAll(".teacher-salary-rule-field").forEach((field) => {
-        payload[field.dataset.field] = field.type === "number" ? optionalNumberValue(field.value) : field.value;
+        payload[field.dataset.field] = field.type === "checkbox"
+          ? field.checked
+          : field.type === "number"
+            ? optionalNumberValue(field.value)
+            : field.value;
       });
       if (payload.salary_per_unit === null) payload.salary_per_unit = 0;
       refreshAfter(() => request(`/api/teacher-salary-rules/${row.dataset.ruleId}`, {
