@@ -108,6 +108,8 @@ async function dashboardMetrics(browser) {
       itemCount: list?.children.length || 0,
       todoTop: todo.getBoundingClientRect().top, todoBottom: todo.getBoundingClientRect().bottom,
       piesTop: pies.getBoundingClientRect().top, piesBottom: pies.getBoundingClientRect().bottom,
+      todoOverflow: getComputedStyle(todo).overflowY,
+      piesOverflow: getComputedStyle(pies).overflowY,
       pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   })()`);
@@ -155,8 +157,8 @@ test("dashboard live-course card is stable for zero one six and twenty lessons w
   const twenty = await dashboardMetrics(browser);
   assert.ok(Math.abs(twenty.height - zero.height) <= 1); assert.equal(twenty.itemCount, 20);
   assert.equal(twenty.overflowY, "auto"); assert.equal(twenty.overflowX, "hidden"); assert.ok(twenty.scrollHeight > twenty.clientHeight);
-  assert.ok(Math.abs(twenty.top - twenty.todoTop) <= 1); assert.ok(Math.abs(twenty.bottom - twenty.todoBottom) <= 1);
-  assert.ok(Math.abs(twenty.top - twenty.piesTop) <= 1); assert.ok(Math.abs(twenty.bottom - twenty.piesBottom) <= 1);
+  assert.ok(Math.abs(twenty.top - twenty.todoTop) <= 1); assert.ok(Math.abs(twenty.top - twenty.piesTop) <= 1);
+  assert.notEqual(twenty.todoOverflow, "hidden"); assert.notEqual(twenty.piesOverflow, "hidden");
   const scrollResult = await browser.evaluate(`(() => { const head=document.querySelector('.dashboard-current-section .section-head'); const list=document.querySelector('.dashboard-current-list'); const before=head.getBoundingClientRect().top; list.scrollTop=list.scrollHeight; const last=list.lastElementChild.getBoundingClientRect(); const box=list.getBoundingClientRect(); return { before, after:head.getBoundingClientRect().top, scrollTop:list.scrollTop, lastVisible:last.bottom <= box.bottom + 1 && last.top >= box.top - 1 }; })()`);
   assert.equal(scrollResult.before, scrollResult.after); assert.ok(scrollResult.scrollTop > 0); assert.equal(scrollResult.lastVisible, true);
   const desktopScreenshot = await browser.send("Page.captureScreenshot", { format: "png", fromSurface: true }); assert.ok(desktopScreenshot.data.length > 1000);

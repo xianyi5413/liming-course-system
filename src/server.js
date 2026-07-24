@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
@@ -12,6 +13,11 @@ const { BaiduBackupManager, safeRemotePath } = require("./backup/baidu_provider"
 const { DataPreflightError, findStudentGradeStageConflicts, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
 const { studentPriceStatus } = require("./domain/price_status");
 const { migrateOpeningBalancesToGlobal } = require("./domain/opening_balance_migration");
+const {
+  beijingDateKey: beijingBusinessDateKey,
+  beijingParts,
+  isBeijingBusinessTimeInRange,
+} = require("./domain/beijing_time");
 const {
   normalizeStoredStudentSet,
   splitStoredStudents,
@@ -438,6 +444,8 @@ function initDb() {
       recharge_date TEXT DEFAULT '',
       notes TEXT DEFAULT '',
       source TEXT DEFAULT '',
+      channel TEXT DEFAULT '',
+      channel_other TEXT DEFAULT '',
       month_key TEXT DEFAULT ''
     );
 
@@ -758,6 +766,12 @@ function initDb() {
   if (!rechargeColumns.includes("source")) {
     db.prepare("ALTER TABLE recharge_records ADD COLUMN source TEXT DEFAULT ''").run();
   }
+  if (!rechargeColumns.includes("channel")) {
+    db.prepare("ALTER TABLE recharge_records ADD COLUMN channel TEXT DEFAULT ''").run();
+  }
+  if (!rechargeColumns.includes("channel_other")) {
+    db.prepare("ALTER TABLE recharge_records ADD COLUMN channel_other TEXT DEFAULT ''").run();
+  }
   const rechargeTableSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recharge_records'")?.sql);
   if (/UNIQUE\s*\(\s*student_name\s*,\s*month_key\s*\)/i.test(rechargeTableSql)) {
     withTransaction(() => {
@@ -774,16 +788,18 @@ function initDb() {
           recharge_date TEXT DEFAULT '',
           notes TEXT DEFAULT '',
           source TEXT DEFAULT '',
+          channel TEXT DEFAULT '',
+          channel_other TEXT DEFAULT '',
           month_key TEXT DEFAULT ''
         );
       `);
       db.prepare(`
         INSERT INTO recharge_records(
           id, student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
-          recharge_date, notes, source, month_key
+          recharge_date, notes, source, channel, channel_other, month_key
         )
         SELECT id, student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
-               recharge_date, notes, source, month_key
+               recharge_date, notes, source, channel, channel_other, month_key
         FROM recharge_records_unique_legacy
       `).run();
       db.prepare("DROP TABLE recharge_records_unique_legacy").run();
@@ -1028,6 +1044,29 @@ function backupService() {
   return backupServiceInstance;
 }
 function baiduBackupManager() { if (!baiduBackupManagerInstance) baiduBackupManagerInstance = new BaiduBackupManager({ dataDir }); return baiduBackupManagerInstance; }
+function startRemoteManualBackupWorker(backupId) {
+  const workerPath = path.join(rootDir, "scripts", "excel_backup", "run_remote_manual_backup.js");
+  const safeEnv = {};
+  for (const key of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "NODE_EXTRA_CA_CERTS", "BAIDU_APP_KEY", "BAIDU_APP_SECRET", "BAIDU_REDIRECT_URI"]) {
+    if (process.env[key]) safeEnv[key] = process.env[key];
+  }
+  Object.assign(safeEnv, { DATA_DIR: dataDir, DB_PATH: dbPath, APP_VERSION, APP_GIT_COMMIT });
+  const child = spawn(process.execPath, [workerPath, String(backupId)], { cwd: rootDir, env: safeEnv, stdio: "ignore", windowsHide: true });
+  backupService().setJobPid(backupId, child.pid || 0);
+  child.once("error", (error) => {
+    try { backupService().markJobStage(backupId, "failed", error.code || "BACKUP_WORKER_START_FAILED", 0); } catch {}
+  });
+  child.once("exit", (code, signal) => {
+    try {
+      const service = backupService(); const database = service.database(); let record;
+      try { record = service.record(database, backupId); } finally { database.close(); }
+      if (record && !["success", "partial_failed", "failed"].includes(record.job_status || "")) {
+        service.markJobStage(backupId, "failed", signal ? "BACKUP_WORKER_SIGNALLED" : `BACKUP_WORKER_EXIT_${Number(code || 0)}`, 0);
+      }
+    } catch {}
+  });
+  return child.pid || 0;
+}
 function validateBackupSettingsPatch(body = {}, scope = "all") {
   const localKeys = ["enabled", "time", "timezone", "daily_retention", "monthly_retention", "manual_retention", "retry_count", "local_include_operation_logs"];
   const remoteKeys = ["remote_enabled", "remote_frequency", "remote_time", "remote_timezone", "remote_weekday", "remote_monthday", "remote_retention", "remote_retry_count", "remote_include_operation_logs", "remote_directory", "remote_plaintext_acknowledged"];
@@ -1150,16 +1189,37 @@ function isRealRechargeRecord(row) {
   return num(row?.cur_recharge) !== 0 || num(row?.cur_gift) !== 0;
 }
 
+const RECHARGE_CHANNELS = new Set(["wechat", "cash", "alipay", "other"]);
+function normalizeRechargeChannel(channel, channelOther = "", { allowEmpty = false, defaultWechat = false } = {}) {
+  const aliases = { 微信: "wechat", 现金: "cash", 支付宝: "alipay", 其他: "other" };
+  const raw = text(channel);
+  const value = aliases[raw] || raw.toLowerCase();
+  const normalized = value || (defaultWechat ? "wechat" : "");
+  if (!normalized && allowEmpty) return { channel: "", channel_other: "" };
+  if (!RECHARGE_CHANNELS.has(normalized)) return { error: "来源/渠道只允许微信、现金、支付宝或其他" };
+  const other = normalized === "other" ? text(channelOther) : "";
+  if (normalized === "other" && !other) return { error: "选择其他来源/渠道时必须填写说明" };
+  if (other.length > 100) return { error: "其他来源/渠道说明不能超过100个字符" };
+  return { channel: normalized, channel_other: other };
+}
+
 function openingBalanceRows() {
-  return all(`
-    SELECT ob.*, COALESCE(NULLIF(ob.grade, ''), s.grade, '') AS display_grade
-    FROM student_opening_balances ob
-    LEFT JOIN students s ON s.name = ob.student_name
-    ORDER BY ob.student_name
-  `).map((row) => ({
-    ...row,
-    grade: row.display_grade || row.grade || "",
-  }));
+  const profiles = new Map(all("SELECT name, grade, status FROM students").map((row) => [text(row.name), row]));
+  const stagesByStudent = new Map();
+  for (const stage of studentGradeStages()) {
+    const name = text(stage.student_name);
+    if (!stagesByStudent.has(name)) stagesByStudent.set(name, []);
+    stagesByStudent.get(name).push(stage);
+  }
+  return all("SELECT * FROM student_opening_balances ORDER BY student_name").map((row) => {
+    const profile = profiles.get(text(row.student_name)) || {};
+    return {
+      ...row,
+      historical_grade: text(row.grade),
+      grade: currentStudentGradeFromStages(stagesByStudent.get(text(row.student_name)) || [], profile.grade || row.grade),
+      student_status: text(profile.status),
+    };
+  });
 }
 
 function openingBalanceMap() {
@@ -4164,9 +4224,9 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
   ).map((row) => [`${row.teacher_name}\u0001${Number(row.week_index)}`, row]));
   const byTeacher = new Map();
   const active = activeTeacherNames(monthKey);
-  const seedTeachers = includeInactive
-    ? all("SELECT name FROM teachers ORDER BY name").map((row) => row.name)
-    : [...active];
+  // Salary and travel pages use the same selected-month course scope. Teacher
+  // profile status, salary rules and travel rows from other months must not seed it.
+  const seedTeachers = [...active];
   for (const teacherName of seedTeachers) {
     byTeacher.set(teacherName, {
       teacher_name: teacherName,
@@ -4189,7 +4249,7 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
       row.salary_total = moneyRound(row.salary_total + num(lesson.teacher_salary));
     }
   }
-  return [...byTeacher.values()].filter((row) => includeInactive || row.active_this_month).map((row) => {
+  return [...byTeacher.values()].filter((row) => row.active_this_month).map((row) => {
     const adj = adjustments.get(row.teacher_name) || {};
     const travelWeeks = weeks.map((week) => {
       const detail = travelFees.get(`${row.teacher_name}\u0001${week.week_index}`);
@@ -5585,12 +5645,7 @@ function dashboardTeacherPie(user) {
   };
 }
 
-function currentTimeMinutes() {
-  const now = new Date();
-  return now.getHours() * 60 + now.getMinutes();
-}
-
-// 首页“正在上的课程”：课程日期必须是今天，且当前本地时间落在 time_slot 起止时间内。
+// 首页“正在上的课程”：数据库日期和时间段始终按北京时间业务口径解释。
 function isDashboardCurrentLessonCandidate(row) {
   const status = deriveStatus(row);
   const fields = [status, row.status, row.lesson_status, row.course_status].map(text).filter(Boolean);
@@ -5600,17 +5655,16 @@ function isDashboardCurrentLessonCandidate(row) {
   return fields.some((value) => activeStatuses.has(value));
 }
 
-function dashboardCurrentLessons(user) {
-  const today = todayKey();
-  const nowMinutes = currentTimeMinutes();
+function dashboardCurrentLessons(user, now = new Date()) {
+  const today = beijingBusinessDateKey(now);
+  const yesterday = addDays(today, -1);
   return all(
-    "SELECT * FROM lessons WHERE date = ? ORDER BY time_slot, teacher_name, classroom, sort_order, id",
-    [today],
+    "SELECT * FROM lessons WHERE date IN (?, ?) ORDER BY date, time_slot, teacher_name, classroom, sort_order, id",
+    [yesterday, today],
   )
     .filter((row) => {
       if (!isDashboardCurrentLessonCandidate(row)) return false;
-      const range = parseTimeRange(row.time_slot);
-      return Boolean(range && range.start <= nowMinutes && nowMinutes <= range.end);
+      return isBeijingBusinessTimeInRange({ courseDate: row.date, timeSlot: row.time_slot, now });
     })
     .map((row) => ({
       id: row.id,
@@ -5635,6 +5689,7 @@ function dashboardData(url, user) {
   const trend = dashboardTrend(start, end, user);
   if (!trend) return { error: "start/end must be YYYY-MM-DD and start must be before end", status: 400 };
   const monthData = dashboardMonthData(monthKey, user);
+  const currentBeijing = beijingParts();
   return {
     month_key: monthKey,
     range: { start, end },
@@ -5643,6 +5698,9 @@ function dashboardData(url, user) {
     student_pie: dashboardStudentPie(user),
     teacher_pie: dashboardTeacherPie(user),
     current_lessons: dashboardCurrentLessons(user),
+    current_time: currentBeijing.time.slice(0, 5),
+    current_date: currentBeijing.date,
+    timezone: currentBeijing.timeZone,
     role: canonicalRole(user.role),
     can_see_money: dashboardCanSeeMoney(user),
   };
@@ -6580,18 +6638,29 @@ function studentHistoryRows(studentName) {
 
 function studentPricingRows(monthKey) {
   const lessons = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY date, teacher_name, time_slot, id");
+  const matchesByRule = new Map();
+  for (const lesson of lessons) {
+    if (!isCompletedLesson(lesson)) continue;
+    const students = splitStudents(lesson.student_names);
+    const normalizedStudentNames = normalizedStudents(lesson.student_names);
+    for (const studentName of students) {
+      const key = studentPricingRuleKey({
+        student_name: studentName,
+        grade: lesson.grade,
+        subject: lesson.subject,
+        student_names: normalizedStudentNames,
+      });
+      if (!matchesByRule.has(key)) matchesByRule.set(key, []);
+      matchesByRule.get(key).push({ ...lesson, normalized_student_names: normalizedStudentNames, student_count: students.length });
+    }
+  }
+  const pricingLookups = feePricingLookups();
   const rows = all("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
     const studentNames = normalizedStudents(row.student_names);
-    const matches = lessons.filter((lesson) => (
-      splitStudents(normalizedStudents(lesson.student_names)).includes(studentName)
-      && text(lesson.subject) === subject
-      && text(lesson.grade) === grade
-      && normalizedStudents(lesson.student_names) === studentNames
-      && isCompletedLesson(lesson)
-    ));
+    const matches = matchesByRule.get(studentPricingRuleKey(row)) || [];
     const rulePrice = num(row.custom_price);
     const mismatchCount = rulePrice > 0
       ? matches.filter((lesson) => {
@@ -6599,11 +6668,11 @@ function studentPricingRows(monthKey) {
           studentName,
           subject: lesson.subject,
           grade: lesson.grade,
-          studentCount: splitStudents(lesson.student_names).length,
+          studentCount: lesson.student_count,
           lessonId: lesson.id,
           status: deriveStatus(lesson),
-          studentNames: lesson.student_names,
-        });
+          studentNames: lesson.normalized_student_names,
+        }, pricingLookups);
         return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
       }).length
       : 0;
@@ -6626,6 +6695,31 @@ function studentPricingRows(monthKey) {
     || text(a.student_names).localeCompare(text(b.student_names), "zh-Hans-CN")
     || Number(a.id || 0) - Number(b.id || 0)
   ));
+}
+
+function studentPricingRow(monthKey, id) {
+  const row = get("SELECT * FROM student_pricing WHERE id = ?", [Number(id)]);
+  if (!row || !isCompleteStudentPricingRule(row)) return row;
+  const studentName = text(row.student_name);
+  const grade = text(row.grade);
+  const subject = text(row.subject);
+  const studentNames = normalizedStudents(row.student_names);
+  const key = studentPricingRuleKey(row);
+  const matches = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY id")
+    .filter(isCompletedLesson)
+    .map((lesson) => {
+      const students = splitStudents(lesson.student_names);
+      return { ...lesson, normalized_student_names: normalizedStudents(lesson.student_names), student_count: students.length, students };
+    })
+    .filter((lesson) => lesson.students.includes(studentName) && studentPricingRuleKey({ student_name: studentName, grade: lesson.grade, subject: lesson.subject, student_names: lesson.normalized_student_names }) === key);
+  const rulePrice = num(row.custom_price);
+  const pricingLookups = feePricingLookups();
+  const mismatchCount = rulePrice > 0 ? matches.filter((lesson) => {
+    const price = unitPriceFor({ studentName, subject: lesson.subject, grade: lesson.grade, studentCount: lesson.student_count, lessonId: lesson.id, status: deriveStatus(lesson), studentNames: lesson.normalized_student_names }, pricingLookups);
+    return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
+  }).length : 0;
+  const source = rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto");
+  return { ...row, grade, student_names: studentNames, lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"), current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length, total_lessons: matches.length, rule_source: source, price_status: studentPriceStatus(source), mismatch_lessons: mismatchCount };
 }
 
 function recomputePricing(body) {
@@ -9941,6 +10035,11 @@ function sanitizeBootstrap(data, user) {
         : canSeeTeacherSalary ? data.derived.teacher_summary : [],
     },
   };
+  if (role === "teacher") {
+    const allowedTeachers = new Set(uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]));
+    sanitized.teachers = (sanitized.teachers || []).filter((row) => allowedTeachers.has(text(row.name)));
+    sanitized.derived.teacher_summary = (sanitized.derived.teacher_summary || []).filter((row) => allowedTeachers.has(text(row.teacher_name)));
+  }
   if (!canSeeStudentMoney || role === "teacher") {
     sanitized.derived = {
       ...sanitized.derived,
@@ -12997,11 +13096,21 @@ async function handleApi(req, res, url) {
     try {
       const settings = loadFullBackupSettings(dbPath); const manager = baiduBackupManager(); const status = manager.configurationStatus();
       if (!status.authorized || !status.test_passed || !settings.remote_plaintext_acknowledged) throw Object.assign(new Error("请先完成百度配置、授权、连接测试和风险确认"), { code: "BAIDU_BACKUP_NOT_READY" });
-      const result = await backupService().create({ trigger: "remote_manual", retentionClass: "remote", createdByUserId: user.id, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs });
-      const retention = result.record.remote_status === "success" ? await backupService().applyRemoteRetention(settings.remote_retention, (record) => manager.delete(record)) : { removed: [], skipped: [], retention: settings.remote_retention };
-      writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: `百度备份 ${result.record.remote_status}`, target_type: "backup_records", target_id: String(result.record.id), result_status: result.record.remote_status === "success" ? "success" : "failure", details: { code: result.record.remote_error_safe || "", operation_logs_included: result.record.operation_logs_included } }, req);
-      return sendJson(res, { ...result, retention, records: backupService().list() }, result.record.remote_status === "success" ? 201 : 502);
+      const queued = backupService().queueRemoteManual({ createdByUserId: user.id, includeOperationLogs: settings.remote_include_operation_logs });
+      if (queued.created) startRemoteManualBackupWorker(queued.record.id);
+      const record = backupService().list(500).find((item) => Number(item.id) === Number(queued.record.id)) || queued.record;
+      writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: queued.created ? `百度备份任务已入队：${record.id}` : `复用进行中的百度备份任务：${record.id}`, target_type: "backup_records", target_id: String(record.id), details: { job_status: record.job_status, duplicate_request: !queued.created, operation_logs_included: record.operation_logs_included } }, req);
+      return sendJson(res, { ok: true, accepted: true, duplicate: !queued.created, backup_id: record.id, job_id: record.id, status: record.job_status || "queued", record }, 202);
     } catch (error) { writeOperationLog(user, { operation_type: "立即百度网盘备份", operation_content: "百度备份失败", target_type: "backup_records", target_id: "manual", result_status: "failure", details: { code: error.code || "BAIDU_BACKUP_FAILED" } }, req); return sendDataPreflightFailure(res, error, error.message || "百度备份失败", 400); }
+  }
+
+  const dataBackupJob = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/job$/);
+  if (req.method === "GET" && dataBackupJob) {
+    const service = backupService(); const database = service.database(); let row;
+    try { row = service.record(database, Number(dataBackupJob[1])); } finally { database.close(); }
+    if (!row) return sendError(res, 404, "备份任务不存在");
+    const record = service.dto(row);
+    return sendJson(res, { ok: true, job_id: record.id, backup_id: record.id, status: record.job_status || record.status, terminal: ["success", "partial_failed", "failed"].includes(record.job_status), record });
   }
 
   const dataBackupVerify = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)\/verify$/);
@@ -13691,7 +13800,42 @@ async function handleApi(req, res, url) {
     `, [payload.student_name, payload.grade, payload.subject, payload.student_names]);
     recordAuditEvent(req, user, { action: "upsert", entity_type: "student_pricing", entity_id: `${payload.student_name}|${payload.grade}|${payload.subject}|${payload.student_names}`, before: null, after: row });
     writeOperationLog(user, { operation_type: result.changes ? "新增/修改学生单价" : "修改学生单价", operation_content: `${payload.student_name} ${payload.grade} ${payload.subject} ${payload.student_names} ¥${payload.custom_price}`, target_type: "student_pricing", target_id: String(row.id) });
-    return sendJson(res, { id: Number(row.id), ok: true, warnings: pricingWarnings(row) }, 201);
+    const enriched = studentPricingRow(resolveMonthKey(url), row.id) || row;
+    return sendJson(res, { ...enriched, ok: true, warnings: pricingWarnings(row) }, 201);
+  }
+  if (req.method === "PATCH" && url.pathname === "/api/student-pricing/batch") {
+    const body = await readBody(req);
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length || items.length > 500) return sendError(res, 400, "批量保存条数必须在 1 到 500 之间");
+    const allowedFields = new Set(["student_name", "grade", "subject", "student_names", "custom_price", "notes"]);
+    const normalized = [];
+    for (const item of items) {
+      const id = Number(item?.id);
+      const changes = item?.changes && typeof item.changes === "object" ? { ...item.changes } : {};
+      if (!Number.isInteger(id) || id <= 0 || !Object.keys(changes).length || Object.keys(changes).some((key) => !allowedFields.has(key))) {
+        return sendError(res, 400, "批量保存参数无效");
+      }
+      if (Object.hasOwn(changes, "custom_price") && (!Number.isFinite(Number(changes.custom_price)) || Number(changes.custom_price) < 0)) {
+        return sendError(res, 400, "学生单价必须是大于或等于 0 的有效金额");
+      }
+      if (Object.hasOwn(changes, "student_names")) changes.student_names = normalizedStudents(changes.student_names);
+      normalized.push({ id, changes });
+    }
+    const before = normalized.map((item) => get("SELECT * FROM student_pricing WHERE id = ?", [item.id]));
+    if (before.some((row) => !row)) return sendError(res, 404, "批量保存包含不存在的学生单价规则");
+    withTransaction(() => {
+      for (const item of normalized) {
+        const fields = Object.keys(item.changes);
+        const values = fields.map((field) => item.changes[field]);
+        db.prepare(`UPDATE student_pricing SET ${fields.map((field) => `${field} = ?`).join(", ")} WHERE id = ?`).run(...values, item.id);
+      }
+    });
+    const monthKey = resolveMonthKey(url);
+    const ids = new Set(normalized.map((item) => item.id));
+    const rows = studentPricingRows(monthKey).filter((row) => ids.has(Number(row.id)));
+    recordAuditEvent(req, user, { action: "batch_update", entity_type: "student_pricing", entity_id: normalized.map((item) => item.id).join(","), before, after: rows });
+    writeOperationLog(user, { operation_type: "批量修改学生单价", operation_content: `批量更新 ${rows.length} 条学生单价规则`, target_type: "student_pricing", target_id: normalized.map((item) => item.id).join(",") });
+    return sendJson(res, { ok: true, updated: rows.length, rows });
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
   if (studentPricingMatch && req.method === "PATCH") {
@@ -13703,7 +13847,8 @@ async function handleApi(req, res, url) {
     if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);
     const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "grade", "subject", "student_names", "custom_price", "notes"], payload, "student_pricing");
     writeOperationLog(user, { operation_type: "修改学生单价", operation_content: `${row.student_name} ${row.grade} ${row.subject} ${row.student_names} ¥${row.custom_price}`, target_type: "student_pricing", target_id: String(studentPricingMatch[1]) });
-    return sendJson(res, { ...row, warnings: pricingWarnings(row) });
+    const enriched = studentPricingRow(resolveMonthKey(url), row.id) || row;
+    return sendJson(res, { ...enriched, warnings: pricingWarnings(row) });
   }
   if (studentPricingMatch && req.method === "DELETE") {
     const before = get("SELECT * FROM student_pricing WHERE id = ?", [Number(studentPricingMatch[1])]);
@@ -13753,13 +13898,15 @@ async function handleApi(req, res, url) {
     if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
     if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
     if (curRecharge === 0 && curGift === 0) return sendError(res, 400, "实际充值和赠送充值不能同时为 0");
+    const channel = normalizeRechargeChannel(body.channel, body.channel_other, { defaultWechat: true });
+    if (channel.error) return sendError(res, 400, channel.error);
     const canEditOpeningBalance = !previousDataMonth(monthKey);
     const created = withTransaction(() => {
       const result = db.prepare(`
         INSERT INTO recharge_records(
-          student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, month_key
+          student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift, recharge_date, notes, source, channel, channel_other, month_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         studentName,
         text(body.grade),
@@ -13770,6 +13917,8 @@ async function handleApi(req, res, url) {
         text(body.recharge_date),
         text(body.notes),
         text(body.source),
+        channel.channel,
+        channel.channel_other,
         monthKey,
       );
       upsertStudent(studentName, text(body.grade));
@@ -13782,7 +13931,7 @@ async function handleApi(req, res, url) {
       operation_content: `学生 ${studentName}，实际充值 ¥${curRecharge.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}，赠送 ¥${curGift.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}`,
       target_type: "recharge_records",
       target_id: String(created.row?.id || ""),
-      details: { student_name: studentName, month_key: monthKey, cur_recharge: curRecharge, cur_gift: curGift, recharge_date: text(body.recharge_date) },
+      details: { student_name: studentName, month_key: monthKey, cur_recharge: curRecharge, cur_gift: curGift, recharge_date: text(body.recharge_date), channel: channel.channel, channel_other: channel.channel_other },
     }, req);
     return sendJson(res, { ok: true, row: created.row, carry_over: created.carry_over }, 201);
   }
@@ -13804,6 +13953,12 @@ async function handleApi(req, res, url) {
     const source = body.source === undefined ? text(before.source) : text(body.source);
     const rechargeDate = body.recharge_date === undefined ? text(before.recharge_date) : text(body.recharge_date);
     const notes = body.notes === undefined ? text(before.notes) : text(body.notes);
+    const channel = normalizeRechargeChannel(
+      body.channel === undefined ? before.channel : body.channel,
+      body.channel_other === undefined ? before.channel_other : body.channel_other,
+      { allowEmpty: body.channel === undefined && !text(before.channel) },
+    );
+    if (channel.error) return sendError(res, 400, channel.error);
     if (curRecharge === 0 && curGift === 0) {
       const deleted = withTransaction(() => {
         db.prepare("DELETE FROM recharge_records WHERE id = ?").run(id);
@@ -13823,9 +13978,11 @@ async function handleApi(req, res, url) {
             recharge_date = ?,
             notes = ?,
             source = ?,
+            channel = ?,
+            channel_other = ?,
             month_key = ?
         WHERE id = ?
-      `).run(studentName, grade, curRecharge, curGift, rechargeDate, notes, source, monthKey, id);
+      `).run(studentName, grade, curRecharge, curGift, rechargeDate, notes, source, channel.channel, channel.channel_other, monthKey, id);
       upsertStudent(studentName, grade);
       const row = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
       const carryOver = [before.month_key, monthKey]
@@ -13839,7 +13996,7 @@ async function handleApi(req, res, url) {
       operation_content: `学生 ${studentName}，实际充值 ¥${curRecharge.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}，赠送 ¥${curGift.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}`,
       target_type: "recharge_records",
       target_id: String(id),
-      details: { before, after: updated.row, changed_fields: ["student_name", "month_key", "cur_recharge", "cur_gift", "recharge_date"].filter((field) => text(before[field]) !== text(updated.row[field])) },
+      details: { before, after: updated.row, changed_fields: ["student_name", "month_key", "cur_recharge", "cur_gift", "recharge_date", "channel", "channel_other"].filter((field) => text(before[field]) !== text(updated.row[field])) },
     }, req);
     return sendJson(res, { ok: true, row: updated.row, carry_over: updated.carry_over });
   }
@@ -14375,6 +14532,9 @@ const server = http.createServer(async (req, res) => {
     sendError(res, 500, error.message || "Internal server error");
   }
 });
+
+const recoveredBackupJobs = backupService().recoverInterruptedJobs();
+if (recoveredBackupJobs.length) console.warn(`Recovered interrupted backup jobs: ${recoveredBackupJobs.join(",")}`);
 
 server.listen(port, () => {
   console.log(`App version: ${APP_VERSION}`);

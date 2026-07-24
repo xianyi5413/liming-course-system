@@ -17,6 +17,8 @@ const BACKUP_COLUMNS = {
   remote_checksum_file_id: "TEXT DEFAULT ''", remote_checksum_path: "TEXT DEFAULT ''",
   remote_file_status: "TEXT DEFAULT ''", remote_checksum_status: "TEXT DEFAULT ''", remote_integrity_status: "TEXT DEFAULT ''",
   remote_updated_at: "TEXT DEFAULT ''", remote_attempt_count: "INTEGER NOT NULL DEFAULT 0", deleted_at: "TEXT DEFAULT ''", operation_logs_included: "INTEGER NOT NULL DEFAULT 1",
+  job_status: "TEXT DEFAULT ''", job_error_code: "TEXT DEFAULT ''", job_started_at: "TEXT DEFAULT ''",
+  job_updated_at: "TEXT DEFAULT ''", job_completed_at: "TEXT DEFAULT ''", job_pid: "INTEGER NOT NULL DEFAULT 0",
 };
 
 class BackupError extends Error { constructor(code, message, details = {}) { super(message); this.name = "BackupError"; this.code = code; this.details = details; } }
@@ -70,7 +72,61 @@ class BackupService {
     return Number(result.lastInsertRowid);
   }
   record(db, id) { return db.prepare("SELECT * FROM backup_records WHERE id=?").get(Number(id)); }
-  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "" }; return { ...dto, failure: backupFailureDisplay(dto) }; }
+  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "", job_status: row.job_status || "", job_error_code: row.job_error_code || "", job_started_at: row.job_started_at || "", job_updated_at: row.job_updated_at || "", job_completed_at: row.job_completed_at || "", job_pid: Number(row.job_pid || 0) }; return { ...dto, failure: backupFailureDisplay(dto) }; }
+  activeRemoteJob(db) {
+    return db.prepare("SELECT * FROM backup_records WHERE trigger='remote_manual' AND job_status IN ('queued','preflight','exporting','hashing','uploading_excel','uploading_checksum','verifying_metadata','downloading_for_verification','integrity_check') ORDER BY id DESC LIMIT 1").get();
+  }
+  queueRemoteManual(options = {}) {
+    const db = this.database();
+    try {
+      const existing = this.activeRemoteJob(db);
+      if (existing) return { created: false, record: this.dto(existing) };
+      assertDataPreflight(db);
+      this.ensureRoot();
+      const filename = fullDataFilename(options.createdAt || new Date());
+      const id = this.insertRecord(db, { ...options, trigger: "remote_manual", retentionClass: "remote", filename, remoteEnabled: true });
+      db.prepare("UPDATE backup_records SET job_status='queued',job_error_code='',job_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      return { created: true, record: this.dto(this.record(db, id)) };
+    } finally { db.close(); }
+  }
+  markJobStage(id, stage, errorCode = "", pid = undefined) {
+    const allowed = new Set(["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check", "success", "partial_failed", "failed"]);
+    const normalized = allowed.has(stage) ? stage : "failed";
+    const terminal = ["success", "partial_failed", "failed"].includes(normalized);
+    const db = this.database();
+    try {
+      const row = this.record(db, id);
+      if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
+      db.prepare(`UPDATE backup_records SET job_status=?,job_error_code=?,job_updated_at=CURRENT_TIMESTAMP,
+        job_started_at=CASE WHEN ?='exporting' AND COALESCE(job_started_at,'')='' THEN CURRENT_TIMESTAMP ELSE job_started_at END,
+        job_completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE job_completed_at END,
+        job_pid=CASE WHEN ? IS NULL THEN job_pid ELSE ? END WHERE id=?`)
+        .run(normalized, String(errorCode || "").slice(0, 100), normalized, terminal ? 1 : 0, pid === undefined ? null : Number(pid || 0), Number(pid || 0), id);
+      return this.dto(this.record(db, id));
+    } finally { db.close(); }
+  }
+  setJobPid(id, pid) {
+    const db = this.database();
+    try {
+      if (!this.record(db, id)) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
+      db.prepare("UPDATE backup_records SET job_pid=?,job_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(pid || 0), Number(id));
+      return this.dto(this.record(db, id));
+    } finally { db.close(); }
+  }
+  recoverInterruptedJobs() {
+    const db = this.database(); const recovered = [];
+    try {
+      const rows = db.prepare("SELECT * FROM backup_records WHERE job_status IN ('queued','preflight','exporting','hashing','uploading_excel','uploading_checksum','verifying_metadata','downloading_for_verification','integrity_check')").all();
+      for (const row of rows) {
+        let alive = false;
+        if (Number(row.job_pid || 0) > 0) try { process.kill(Number(row.job_pid), 0); alive = true; } catch (error) { alive = error.code === "EPERM"; }
+        if (alive) continue;
+        db.prepare("UPDATE backup_records SET job_status='failed',job_error_code='BACKUP_WORKER_INTERRUPTED',job_updated_at=CURRENT_TIMESTAMP,job_completed_at=CURRENT_TIMESTAMP,job_pid=0,status=CASE WHEN status='creating' THEN 'failed' ELSE status END,message=CASE WHEN COALESCE(message,'')='' THEN 'BACKUP_WORKER_INTERRUPTED' ELSE message END WHERE id=?").run(row.id);
+        recovered.push(Number(row.id));
+      }
+      return recovered;
+    } finally { db.close(); }
+  }
   updateRemoteResult(db, id, remote = {}, error = null) {
     const fileStatus = remote.file_status || (error ? "failed" : "success");
     const checksumStatus = remote.checksum_status || (error ? "failed" : "success");
@@ -100,10 +156,17 @@ class BackupService {
     const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false;
     try {
       if (options.scheduleKey && db.prepare("SELECT 1 FROM backup_records WHERE schedule_key=? AND status='success' LIMIT 1").get(options.scheduleKey)) throw new BackupError("BACKUP_SCHEDULE_ALREADY_SUCCESSFUL", "该计划日期已经成功备份");
-      id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
+      if (options.existingRecordId) {
+        id = Number(options.existingRecordId);
+        if (!this.record(db, id)) throw new BackupError("BACKUP_NOT_FOUND", "备份任务不存在");
+        db.prepare("UPDATE backup_records SET filename=?,status='creating',trigger=?,retention_class=? WHERE id=?").run(filename, trigger, retentionClass, id);
+      } else id = this.insertRecord(db, { ...options, trigger, retentionClass, filename });
       assertDataPreflight(db);
+      if (options.existingRecordId) this.markJobStage(id, "exporting", "", process.pid);
       staging = path.join(this.root, `.staging-${id}-${crypto.randomUUID()}`); fs.mkdirSync(staging, { mode: 0o700 });
-      const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, appGitCommit: this.appGitCommit, createdAt: options.createdAt || new Date(), includeOperationLogs: options.includeOperationLogs !== false }); verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
+      const staged = path.join(staging, filename); const stagedHash = `${staged}.sha256`; exportFullData({ dbPath: this.dbPath, outputPath: staged, appVersion: this.appVersion, appGitCommit: this.appGitCommit, createdAt: options.createdAt || new Date(), includeOperationLogs: options.includeOperationLogs !== false });
+      if (options.existingRecordId) this.markJobStage(id, "hashing", "", process.pid);
+      verifyFullData(staged); const digest = sha256File(staged); fs.writeFileSync(stagedHash, `${digest}  ${filename}\n`, { flag: "wx", mode: 0o600 }); fs.chmodSync(staged, 0o600);
       published = path.join(this.root, filename); checksumFile = `${published}.sha256`; if (fs.existsSync(published) || fs.existsSync(checksumFile)) throw new BackupError("BACKUP_TARGET_EXISTS", "备份目标已存在");
       fs.renameSync(staged, published); publishedByThisRun = true;
       try { fs.renameSync(stagedHash, checksumFile); checksumPublishedByThisRun = true; }
@@ -112,12 +175,15 @@ class BackupService {
       let row = this.record(db, id);
       if (options.remoteEnabled && this.remoteUploader) {
         db.prepare("UPDATE backup_records SET remote_status='uploading',remote_attempt_count=remote_attempt_count+1,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
-        try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published }); this.updateRemoteResult(db, id, remote); }
+        try { const remote = await this.remoteUploader({ record: this.dto(row), localPath: published, onStage: options.existingRecordId ? (stage) => this.markJobStage(id, stage, "", process.pid) : null }); this.updateRemoteResult(db, id, remote); }
         catch (error) { this.updateRemoteResult(db, id, error?.details?.remote || {}, error); }
       } else if (options.remoteEnabled) { const failure = safeBackupFailure("BAIDU_NOT_CONFIGURED", { stage: "remote" }); db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,message=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(failure.code, serializeBackupFailure(failure), id); }
-      row = this.record(db, id); return { ok: true, record: this.dto(row) };
+      row = this.record(db, id);
+      if (options.existingRecordId) this.markJobStage(id, row.remote_status === "success" ? "success" : (row.remote_status === "partial_failed" ? "partial_failed" : "failed"), row.remote_error_safe || "", 0);
+      return { ok: true, record: this.dto(this.record(db, id)) };
     } catch (error) {
       if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error, { stage: "local" })), id); } catch {}
+      if (id && options.existingRecordId) try { this.markJobStage(id, "failed", error.code || "BACKUP_JOB_FAILED", 0); } catch {}
       if (publishedByThisRun && published) try { fs.rmSync(published, { force: true }); } catch {} if (checksumPublishedByThisRun && checksumFile) try { fs.rmSync(checksumFile, { force: true }); } catch {}
       throw error;
     } finally { if (staging && inside(this.root, staging)) try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} db.close(); this.releaseLock(lock); }
@@ -198,6 +264,10 @@ class BackupService {
       const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ").get(BACKUP_FORMAT).count);
       if (row.status === "success" && validCount <= 1) throw new BackupError("BACKUP_LAST_VALID", "不能删除最后一份有效全量备份");
       try {
+        if (row.status === "failed" && !row.managed_relative_path) {
+          db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='manual_delete' WHERE id=?").run(id);
+          result.local = "deleted"; result.local_excel = "not_present"; result.local_checksum = "not_present";
+        } else {
         const filename = this.managedPath(row); const checksum = `${filename}.sha256`;
         fs.rmSync(filename); result.local_excel = "deleted";
         if (fs.existsSync(checksum)) {
@@ -206,6 +276,7 @@ class BackupService {
         }
         result.local = [result.local_excel, result.local_checksum].some((value) => ["delete_failed", "rejected_symlink"].includes(value)) ? "delete_partial" : "deleted";
         db.prepare("UPDATE backup_records SET status=?,deleted_at=CURRENT_TIMESTAMP,message=? WHERE id=?").run(result.local === "deleted" ? "deleted" : "delete_partial", result.local === "deleted" ? "manual_delete" : "BACKUP_LOCAL_DELETE_PARTIAL", id);
+        }
       }
       catch (error) { if (error.code !== "BACKUP_FILE_MISSING") throw error; db.prepare("UPDATE backup_records SET status='missing',message='BACKUP_FILE_MISSING' WHERE id=?").run(id); result.local = "missing"; result.local_excel = "missing"; }
       if ((row.remote_path || row.remote_checksum_path) && remoteDeleter) {

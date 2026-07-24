@@ -219,7 +219,34 @@ class BaiduBackupManager {
       return { ok: true, core_ok: true, cleanup_ok: cleanup.complete, cleanup, steps, warning_code: cleanup.complete ? "" : "BAIDU_TEST_CLEANUP_PARTIAL" };
     }
   }
-  async upload({ record, localPath, remoteDirectory }) { if (!this.configured()) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置"); const local = this.assertManagedBackup(localPath); const remoteBase = `${safeRemotePath(remoteDirectory)}/${path.basename(local.localPath)}`; const result = { file_id: "", path: remoteBase, checksum_file_id: "", checksum_path: `${remoteBase}.sha256`, file_status: "pending", checksum_status: "pending", integrity_status: "not_verified" }; try { const excel = await this.client.uploadFile(local.localPath, result.path); result.file_id = excel.file_id; result.path = excel.path || result.path; result.file_status = "success"; const checksum = await this.client.uploadFile(local.sidecarPath, result.checksum_path); result.checksum_file_id = checksum.file_id; result.checksum_path = checksum.path || result.checksum_path; result.checksum_status = "success"; const downloaded = await this.client.downloadFile({ fileId: result.file_id, remotePath: result.path, metadataErrorCode: "BAIDU_FILE_METADATA_FAILED", downloadErrorCode: "BAIDU_FILE_DOWNLOAD_FAILED" }); const downloadedChecksum = await this.client.downloadFile({ fileId: result.checksum_file_id, remotePath: result.checksum_path, metadataErrorCode: "BAIDU_CHECKSUM_METADATA_FAILED", downloadErrorCode: "BAIDU_CHECKSUM_DOWNLOAD_FAILED" }); verifyPayloadPair(downloaded, downloadedChecksum, path.basename(local.localPath)); result.integrity_status = "verified"; return result; } catch (error) { if (result.file_status === "pending") result.file_status = "failed"; else if (result.checksum_status === "pending") result.checksum_status = "failed"; if (result.file_status === "success" && result.checksum_status === "success") result.integrity_status = "failed"; throw new BaiduError(error.code || "BAIDU_PAIR_UPLOAD_FAILED", error.message || "百度网盘成对上传失败", { remote: result, cause_code: error.code || "BAIDU_PAIR_UPLOAD_FAILED", provider_code: String(error?.details?.provider_code || ""), http_status: Number(error?.details?.http_status || 0) }); } }
+  async upload({ record, localPath, remoteDirectory, onStage = null }) {
+    if (!this.configured()) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置");
+    const stage = (value) => { if (typeof onStage === "function") onStage(value); };
+    const local = this.assertManagedBackup(localPath);
+    const remoteBase = `${safeRemotePath(remoteDirectory)}/${path.basename(local.localPath)}`;
+    const result = { file_id: "", path: remoteBase, checksum_file_id: "", checksum_path: `${remoteBase}.sha256`, file_status: "pending", checksum_status: "pending", integrity_status: "not_verified" };
+    try {
+      stage("uploading_excel");
+      const excel = await this.client.uploadFile(local.localPath, result.path);
+      result.file_id = excel.file_id; result.path = excel.path || result.path; result.file_status = "success";
+      stage("uploading_checksum");
+      const checksum = await this.client.uploadFile(local.sidecarPath, result.checksum_path);
+      result.checksum_file_id = checksum.file_id; result.checksum_path = checksum.path || result.checksum_path; result.checksum_status = "success";
+      stage("verifying_metadata");
+      stage("downloading_for_verification");
+      const downloaded = await this.client.downloadFile({ fileId: result.file_id, remotePath: result.path, metadataErrorCode: "BAIDU_FILE_METADATA_FAILED", downloadErrorCode: "BAIDU_FILE_DOWNLOAD_FAILED" });
+      const downloadedChecksum = await this.client.downloadFile({ fileId: result.checksum_file_id, remotePath: result.checksum_path, metadataErrorCode: "BAIDU_CHECKSUM_METADATA_FAILED", downloadErrorCode: "BAIDU_CHECKSUM_DOWNLOAD_FAILED" });
+      stage("integrity_check");
+      verifyPayloadPair(downloaded, downloadedChecksum, path.basename(local.localPath));
+      result.integrity_status = "verified";
+      return result;
+    } catch (error) {
+      if (result.file_status === "pending") result.file_status = "failed";
+      else if (result.checksum_status === "pending") result.checksum_status = "failed";
+      if (result.file_status === "success" && result.checksum_status === "success") result.integrity_status = "failed";
+      throw new BaiduError(error.code || "BAIDU_PAIR_UPLOAD_FAILED", error.message || "百度网盘成对上传失败", { remote: result, cause_code: error.code || "BAIDU_PAIR_UPLOAD_FAILED", provider_code: String(error?.details?.provider_code || ""), http_status: Number(error?.details?.http_status || 0) });
+    }
+  }
   async downloadVerified(record) { if (/\.enc$/i.test(record.remote_path || "")) throw new BaiduError("BAIDU_LEGACY_ENCRYPTED_BACKUP", "旧版加密远端备份不能作为普通 Excel 下载"); if (!record.remote_path) throw new BaiduError("BAIDU_REMOTE_EXCEL_MISSING", "远端 Excel 路径缺失"); if (!record.remote_checksum_path) throw new BaiduError("BAIDU_CHECKSUM_MISSING", "远端 SHA-256 校验文件路径缺失"); if (!record.remote_file_id || !record.remote_checksum_file_id) throw new BaiduError("BAIDU_REMOTE_FILE_ID_MISSING", "该旧备份缺少百度文件ID，无法执行远端下载校验，请重新生成一份百度备份。"); const excel = await this.client.downloadFile({ fileId: record.remote_file_id, remotePath: record.remote_path, metadataErrorCode: "BAIDU_FILE_METADATA_FAILED", downloadErrorCode: "BAIDU_FILE_DOWNLOAD_FAILED" }); const checksum = await this.client.downloadFile({ fileId: record.remote_checksum_file_id, remotePath: record.remote_checksum_path, metadataErrorCode: "BAIDU_CHECKSUM_METADATA_FAILED", downloadErrorCode: "BAIDU_CHECKSUM_DOWNLOAD_FAILED" }); const verification = verifyPayloadPair(excel, checksum, path.basename(record.remote_path)); return { excel, verification }; }
   async delete(record) { const result = { excel: record.remote_path ? "pending" : "not_present", checksum: record.remote_checksum_path ? "pending" : "not_present" }; if (record.remote_path) { try { await this.client.deleteFile(record.remote_path, record.remote_file_id || ""); result.excel = "deleted"; } catch { result.excel = "delete_failed"; } } if (record.remote_checksum_path) { try { await this.client.deleteFile(record.remote_checksum_path, record.remote_checksum_file_id || ""); result.checksum = "deleted"; } catch { result.checksum = "delete_failed"; } } return result; }
 }

@@ -365,6 +365,7 @@ let rechargeStudentFilter = "";
 let rechargeGradeFilter = "";
 let rechargeDateFilter = { start: "", end: "" };
 let rechargeModalOpen = false;
+let rechargeModalDraft = null;
 let selectedRechargeIds = new Set();
 let openingBalanceFilter = { student: "", grade: "" };
 let openingBalanceModalOpen = false;
@@ -842,7 +843,10 @@ function firstAllowedView() {
 }
 
 function setActiveView(nextView) {
-  if ((nextView || "") !== view) dismissToast();
+  if ((nextView || "") !== view) {
+    closeAllFloatingOverlays();
+    dismissToast();
+  }
   const previousView = view;
   view = nextView || "";
   if (view === "teacherDetail" && previousView !== "teacherDetail") {
@@ -1115,6 +1119,19 @@ function closeSearchablePicker() {
   closeCustomSelects();
   closeOpenMultiSelectMenus();
   closeCustomDatePicker();
+}
+
+function closeAllFloatingOverlays() {
+  closeCustomSelects();
+  closeOpenMultiSelectMenus();
+  document.querySelectorAll(".floating-multi-select-menu").forEach((menu) => {
+    const owner = menu._multiSelectOwner;
+    if (owner?.isConnected) closeMultiSelectMenu(owner);
+    else menu.remove();
+  });
+  cleanupCustomSelectPortals();
+  closeCustomDatePicker();
+  closeDateRangePicker();
 }
 
 function enhanceCustomSelects() {
@@ -3409,32 +3426,49 @@ function defaultRechargeDate() {
   return monthBounds(monthKey).start;
 }
 
+const rechargeChannelOptions = [["wechat", "微信"], ["cash", "现金"], ["alipay", "支付宝"], ["other", "其他"]];
+
+function rechargeChannelLabel(row) {
+  const value = String(row?.channel || "").trim();
+  const label = rechargeChannelOptions.find(([key]) => key === value)?.[1] || "未记录";
+  if (value === "other" && row?.channel_other) return `${label}：${row.channel_other}`;
+  return label;
+}
+
 function rechargeModalMarkup() {
   if (!rechargeModalOpen) return "";
   const students = uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean));
   const grades = uniqueSorted([...gradeOrder, ...usedLessonLookupValues("grades")]);
+  const draft = rechargeModalDraft || { recharge_date: defaultRechargeDate(), cur_recharge: 0, cur_gift: 0, channel: "wechat" };
+  const editing = Boolean(draft.id);
+  const channel = String(draft.channel || "");
   return `
     <div class="modal-backdrop recharge-modal">
       <div class="modal-panel recharge-modal-panel">
         <div class="modal-head">
           <div>
-            <div class="modal-title">新增充值记录</div>
+            <div class="modal-title">${editing ? "编辑充值记录" : "新增充值记录"}</div>
             <div class="modal-subtitle">${escapeHtml(formatMonthOption(state?.settings?.month_key || activeMonth))}</div>
           </div>
           <button class="btn recharge-modal-cancel" type="button">取消</button>
         </div>
         <div class="lesson-create-form recharge-form-grid">
-          <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
-          <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
-          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(defaultRechargeDate())}"></label>
-          <label>现金充值<input id="new-recharge-cur" class="control money-input recharge-modal-field" data-field="cur_recharge" type="number" step="0.01" value="0"></label>
-          <label>赠送充值<input id="new-recharge-gift" class="control money-input recharge-modal-field" data-field="cur_gift" type="number" step="0.01" value="0"></label>
-          <label>来源 / 渠道<input id="new-recharge-source" class="control recharge-modal-field" data-field="source" placeholder="如现金、微信、支付宝"></label>
-          <label class="wide">备注<input id="new-recharge-notes" class="control recharge-modal-field" data-field="notes" placeholder="备注"></label>
+          <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: draft.student_name || "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
+          <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: draft.grade || "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
+          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(draft.recharge_date || defaultRechargeDate())}"></label>
+          <label>现金充值<input id="new-recharge-cur" class="control money-input recharge-modal-field" data-field="cur_recharge" type="number" step="0.01" value="${escapeHtml(draft.cur_recharge ?? 0)}"></label>
+          <label>赠送充值<input id="new-recharge-gift" class="control money-input recharge-modal-field" data-field="cur_gift" type="number" step="0.01" value="${escapeHtml(draft.cur_gift ?? 0)}"></label>
+          <fieldset class="recharge-channel-fieldset wide">
+            <legend>来源 / 渠道</legend>
+            <div class="recharge-channel-options">${rechargeChannelOptions.map(([value, label]) => `<label><input class="recharge-channel-radio" type="radio" name="recharge-channel" value="${value}" ${channel === value ? "checked" : ""}>${label}</label>`).join("")}</div>
+            ${editing && !channel ? `<div class="field-hint warning-text">该旧记录未保存渠道，请在保存前选择。</div>` : ""}
+          </fieldset>
+          <label class="wide recharge-channel-other" ${channel === "other" ? "" : "hidden"}>其他渠道说明<input id="new-recharge-channel-other" class="control recharge-modal-field" maxlength="100" value="${escapeHtml(channel === "other" ? (draft.channel_other || "") : "")}" placeholder="请填写具体渠道"></label>
+          <label class="wide">备注<input id="new-recharge-notes" class="control recharge-modal-field" data-field="notes" value="${escapeHtml(draft.notes || "")}" placeholder="备注"></label>
         </div>
         <div class="modal-actions">
           <button class="btn recharge-modal-cancel" type="button">取消</button>
-          <button class="btn primary add-recharge-record" type="button">保存</button>
+          <button class="btn primary add-recharge-record" type="button" data-id="${escapeHtml(draft.id || "")}">保存</button>
         </div>
       </div>
     </div>
@@ -4367,7 +4401,13 @@ function summaryMatchesFilter(row, filter = summaryFilter) {
 
 function summaryRows() {
   const rows = state.derived.student_summary || [];
-  return [...rows].sort(compareStudentGradeName);
+  const amountFields = [
+    "total_fee", "prev_actual", "prev_gift", "cur_recharge", "cur_gift",
+    "actual_consumption", "gift_consumption", "actual_balance", "gift_balance",
+  ];
+  return rows
+    .filter((row) => amountFields.some((field) => numberValue(row[field]) !== 0))
+    .sort(compareStudentGradeName);
 }
 
 function dynamicSummaryFilterOptions(rows, filter = summaryFilter) {
@@ -7875,8 +7915,8 @@ function renderFeeDetails() {
 function renderSummary() {
   const rows = summaryRows();
   const visibleRows = rows.filter((row) => summaryMatchesFilter(row));
-  const totalFee = rows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
-  const totalBalance = rows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
+  const totalFee = visibleRows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
+  const totalBalance = visibleRows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
   renderTopbar(
     `${monthLabel()} 学生费用汇总`,
     `课程费用 ${formatMoney(totalFee)}，余额合计 ${formatMoney(totalBalance)}`,
@@ -8624,20 +8664,22 @@ function renderRecharges() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th class="wide">备注</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide">备注</th><th>操作</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
-              <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}">
+              <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" data-channel="${escapeHtml(row.channel || "")}" data-channel-other="${escapeHtml(row.channel_other || "")}">
                 <td class="select-col"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
             <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
+                <td class="recharge-channel-cell" title="${escapeHtml(rechargeChannelLabel(row))}">${escapeHtml(rechargeChannelLabel(row))}</td>
                 <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
+                <td><button class="btn compact edit-recharge-record" data-id="${escapeHtml(row.id)}" type="button">编辑</button></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无充值记录</td></tr>`}
+            `).join("") || `<tr><td colspan="9" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9414,6 +9456,33 @@ function backupStatusLabel(value) {
   return labels[value] || value || "未知";
 }
 
+async function pollBackupJob(jobId) {
+  const terminal = new Set(["success", "partial_failed", "failed"]);
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    let result;
+    try { result = await request(`/api/data-center/backups/${encodeURIComponent(jobId)}/job`, { cache: false }); }
+    catch (error) { if (view === "audit") showToast(error.message || "备份任务状态读取失败", "error"); return; }
+    const index = (backupState.records || []).findIndex((row) => Number(row.id) === Number(jobId));
+    if (index >= 0) backupState.records[index] = result.record;
+    else backupState.records = [result.record, ...(backupState.records || [])];
+    if (view === "audit") render();
+    if (!terminal.has(result.status)) continue;
+    if (view === "audit") showToast(result.status === "success" ? "百度网盘备份成功" : (result.status === "partial_failed" ? "百度备份部分失败，请查看记录" : "百度网盘备份失败，请查看原因"), result.status === "success" ? "success" : "error");
+    return;
+  }
+}
+
+function backupJobStatusLabel(value) {
+  const labels = {
+    queued: "等待执行", preflight: "正在执行数据预检", exporting: "正在导出 Excel", hashing: "正在校验与计算摘要",
+    uploading_excel: "正在上传 Excel", uploading_checksum: "正在上传校验文件",
+    verifying_metadata: "正在核对远端元数据", downloading_for_verification: "正在下载远端副本校验",
+    integrity_check: "正在执行完整性校验", success: "任务成功", partial_failed: "任务部分失败", failed: "任务失败",
+  };
+  return labels[value] || "";
+}
+
 function formatFileSize(value) {
   const bytes = Number(value || 0);
   if (!Number.isFinite(bytes) || bytes <= 0) return "-";
@@ -9438,7 +9507,8 @@ function backupFailureMarkup(row = {}) {
 
 function backupLocalStatusMarkup(row = {}) {
   const label = row.status === "success" ? "本地备份成功" : row.status === "failed" ? "本地备份失败" : backupStatusLabel(row.status);
-  return `<div class="backup-local-status">${escapeHtml(label)}</div>`;
+  const jobLabel = backupJobStatusLabel(row.job_status);
+  return `<div class="backup-local-status">${escapeHtml(label)}</div>${jobLabel ? `<div class="backup-job-status" data-job-id="${escapeHtml(row.id)}">${escapeHtml(jobLabel)}</div>` : ""}`;
 }
 
 function backupDeleteLocation(row = {}) {
@@ -9648,6 +9718,7 @@ function baiduSimpleSettingsCardMarkup() {
     disabled: "自动备份未启用",
     manual: "自动备份未启用",
   }[scheduleState.reason] || "等待计划时间");
+  const activeJob = (backupState.records || []).find((row) => ["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"].includes(row.job_status));
   return `<div class="data-backup-subcard baidu-backup-card">
     <div class="section-head"><div><div class="section-title">百度网盘备份</div><div class="section-subtitle">按三步向导配置，未配置不影响服务器本地备份。</div></div>${owner ? `<button class="btn primary baidu-guide-open" type="button">${configured ? "查看配置" : "配置百度网盘"}</button>` : ""}</div>
     <div class="baidu-status-grid simple">
@@ -9662,7 +9733,7 @@ function baiduSimpleSettingsCardMarkup() {
     <div class="baidu-settings-group baidu-settings-files"><label class="filter-field baidu-remote-directory-field"><span>远端目录</span><input class="control data-backup-remote-directory" value="${escapeHtml(draft.remote_directory)}" ${owner ? "" : "readonly"}></label><label class="history-toggle baidu-plaintext-ack data-backup-checkbox-row"><input class="data-backup-remote-plaintext-ack" type="checkbox" ${draft.remote_plaintext_acknowledged ? "checked" : ""} ${owner ? "" : "disabled"}><span>我已知晓百度网盘中将保存未加密的完整备份文件</span></label><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-logs" type="checkbox" ${draft.remote_include_operation_logs ? "checked" : ""} ${owner ? "" : "disabled"}><span>百度备份中包含操作日志</span></label></div>
     <div class="baidu-settings-group baidu-settings-schedule"><label class="history-toggle data-backup-checkbox-row"><input class="data-backup-remote-enabled" type="checkbox" ${draft.remote_enabled ? "checked" : ""} ${owner ? "" : "disabled"}><span>启用百度网盘自动备份</span></label><label class="filter-field"><span>备份频率</span><select class="control data-backup-remote-frequency"><option value="manual" ${frequency === "manual" ? "selected" : ""}>仅手动</option><option value="daily" ${frequency === "daily" ? "selected" : ""}>每天</option><option value="weekly" ${frequency === "weekly" ? "selected" : ""}>每周</option><option value="monthly" ${frequency === "monthly" ? "selected" : ""}>每月</option></select></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>执行时间</span><input class="control data-backup-remote-time" type="time" value="${escapeHtml(draft.remote_time)}"></label><label class="filter-field remote-schedule-time" ${frequency === "manual" ? "hidden" : ""}><span>时区</span><select class="control data-backup-remote-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label></div>
     <div class="baidu-settings-group baidu-settings-policy"><label class="filter-field remote-weekday" ${frequency === "weekly" ? "" : "hidden"}><span>每周执行日</span><select class="control data-backup-remote-weekday">${weekdayLabels.map((label,index) => `<option value="${index + 1}" ${Number(draft.remote_weekday) === index + 1 ? "selected" : ""}>${label}</option>`).join("")}</select></label><label class="filter-field remote-monthday" ${frequency === "monthly" ? "" : "hidden"}><span>每月执行日</span><input class="control data-backup-remote-monthday" type="number" min="1" max="28" value="${Number(draft.remote_monthday)}"></label><label class="filter-field"><span>远端保留数量</span><input class="control data-backup-remote-retention" type="number" min="1" max="200" value="${Number(draft.remote_retention)}"></label><label class="filter-field"><span>失败重试次数</span><input class="control data-backup-remote-retries" type="number" min="0" max="10" value="${Number(draft.remote_retry_count)}"></label></div>
-    <div class="audit-toolbar"><button class="btn primary baidu-backup-now" type="button" ${baidu.authorized && tested && draft.remote_plaintext_acknowledged && !preflightBlocked ? "" : "disabled"} ${preflightBlocked ? 'title="请先修复数据完整性问题并重新检查"' : ""}>立即备份到百度网盘</button><button class="btn baidu-settings-save" type="button">保存百度备份设置</button>${configured ? `<button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}${backupState.baiduTestDetails ? `<button class="btn baidu-test-detail-open" type="button">查看测试详情</button>` : ""}</div>
+    <div class="audit-toolbar"><button class="btn primary baidu-backup-now" type="button" ${baidu.authorized && tested && draft.remote_plaintext_acknowledged && !preflightBlocked && !activeJob ? "" : "disabled"} ${preflightBlocked ? 'title="请先修复数据完整性问题并重新检查"' : ""}>${activeJob ? backupJobStatusLabel(activeJob.job_status) : "立即备份到百度网盘"}</button><button class="btn baidu-settings-save" type="button">保存百度备份设置</button>${configured ? `<button class="btn baidu-test" type="button" ${baidu.authorized ? "" : "disabled"}>测试连接</button>${baidu.authorized ? `<button class="btn baidu-disconnect" type="button">解除授权</button>` : ""}` : ""}${backupState.baiduTestDetails ? `<button class="btn baidu-test-detail-open" type="button">查看测试详情</button>` : ""}</div>
   </div>`;
 }
 
@@ -10644,9 +10715,9 @@ function renderStudentPricing() {
         </div>
       </div>
     ` : ""}
-    <div class="band">
+    <div class="band student-pricing-page">
       ${renderStudentPricingFilterBar(rows, visibleRows)}
-      <div class="table-wrap smooth-table-wrap">
+      <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table">
           <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
@@ -10656,7 +10727,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
                 <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.custom_price, { className: `student-pricing-field ${numberValue(row.custom_price) <= 0 ? "warning-cell" : ""}`, attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01"` })}</td>
+                <td class="currency-input-cell student-pricing-value-cell">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
                 <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
@@ -10701,7 +10772,7 @@ function renderClassGroups() {
                 <td class="text-cell center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.students_display || row.students_key || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
+                <td class="text-cell wide class-group-students-cell"><span class="class-group-student-set" tabindex="0" title="${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、"))}">${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、") || "—")}</span></td>
                 <td><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无班级候选</td></tr>`}
@@ -11958,7 +12029,7 @@ function renderTeacherSalaryRules() {
   );
   contentEl.innerHTML = `
     <div class="band">
-      <div class="filter-bar compact unified-filter-bar">
+      <div class="filter-bar compact unified-filter-bar teacher-salary-rule-toolbar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
           ${unifiedFilterField({ label: "年级", className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades })}
@@ -11973,10 +12044,12 @@ function renderTeacherSalaryRules() {
         <div class="filter-summary">
           <span>已筛选 <b>${visibleRules.length}</b> / 共 ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? `，已隐藏 ${hiddenInactiveCount} 条` : ""}</span>
         </div>
-        <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
+        <div class="teacher-salary-rule-toolbar-actions">
+          <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
+          <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
+        </div>
       </div>
       <div class="teacher-salary-rule-actions" role="toolbar" aria-label="薪资规则操作">
-        <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
         ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
@@ -13333,7 +13406,7 @@ function renderDashboard({ currentMessage = "", currentSubtitle = "" } = {}) {
           <div class="section-head">
             <div>
               <div class="section-title">正在上的课程</div>
-              <div class="section-subtitle">${escapeHtml(currentSubtitle || `共 ${(dashboard.current_lessons || []).length} 节`)}</div>
+              <div class="section-subtitle">${escapeHtml(currentSubtitle || `北京时间 ${dashboard.current_date || ""} ${dashboard.current_time || "--:--"} · 共 ${(dashboard.current_lessons || []).length} 节`)}</div>
             </div>
           </div>
           ${dashboardCurrentLessonsMarkup(dashboard.current_lessons || [], currentMessage)}
@@ -13409,7 +13482,7 @@ function applyReadonlyUi() {
     ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
     ".base-data-add", ".base-data-delete", ".color-config-save", ".color-config-reset", ".color-config-input", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
-    ".pricing-field", ".recharge-field", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
+    ".pricing-field", ".recharge-field", ".open-recharge-modal", ".edit-recharge-record", ".add-recharge-record", ".recharge-modal-field", ".recharge-channel-radio", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
     ".class-group-field", ".batch-delete-student-profiles",
     ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field", ".teacher-salary-notes-field",
     ".batch-delete-teacher-profiles",
@@ -13774,6 +13847,7 @@ function syncActiveMonthState(monthKey) {
 
 function captureCurrentScroll() {
   const mainEl = document.querySelector(".main");
+  const pricingTable = document.querySelector("#student-pricing-table-wrap");
   return {
     windowX: window.scrollX,
     windowY: window.scrollY,
@@ -13781,6 +13855,8 @@ function captureCurrentScroll() {
     mainLeft: mainEl?.scrollLeft || 0,
     contentTop: contentEl?.scrollTop || 0,
     contentLeft: contentEl?.scrollLeft || 0,
+    pricingTableTop: pricingTable?.scrollTop || 0,
+    pricingTableLeft: pricingTable?.scrollLeft || 0,
   };
 }
 
@@ -13789,6 +13865,7 @@ function restoreCurrentScroll(position = {}) {
     window.scrollTo(position.windowX || 0, position.windowY || 0);
     document.querySelector(".main")?.scrollTo?.({ top: position.mainTop || 0, left: position.mainLeft || 0 });
     contentEl?.scrollTo?.({ top: position.contentTop || 0, left: position.contentLeft || 0 });
+    document.querySelector("#student-pricing-table-wrap")?.scrollTo?.({ top: position.pricingTableTop || 0, left: position.pricingTableLeft || 0 });
   });
 }
 
@@ -14789,6 +14866,17 @@ function wireEvents() {
 
   document.querySelectorAll(".open-recharge-modal").forEach((button) => {
     button.addEventListener("click", () => {
+      rechargeModalDraft = { recharge_date: defaultRechargeDate(), cur_recharge: 0, cur_gift: 0, channel: "wechat" };
+      rechargeModalOpen = true;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".edit-recharge-record").forEach((button) => {
+    button.addEventListener("click", () => {
+      const record = rechargeRows().find((row) => Number(row.id) === Number(button.dataset.id));
+      if (!record) return alert("未找到充值记录，请刷新后重试");
+      rechargeModalDraft = { ...record, notes: record.recharge_notes || record.notes || "" };
       rechargeModalOpen = true;
       render();
     });
@@ -14797,6 +14885,7 @@ function wireEvents() {
   document.querySelectorAll(".recharge-modal-cancel").forEach((button) => {
     button.addEventListener("click", () => {
       rechargeModalOpen = false;
+      rechargeModalDraft = null;
       render();
     });
   });
@@ -14805,7 +14894,21 @@ function wireEvents() {
     modal.addEventListener("click", (event) => {
       if (event.target !== modal) return;
       rechargeModalOpen = false;
+      rechargeModalDraft = null;
       render();
+    });
+  });
+
+  document.querySelectorAll(".recharge-channel-radio").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      const other = document.querySelector(".recharge-channel-other");
+      if (!other) return;
+      const isOther = radio.checked && radio.value === "other";
+      other.hidden = !isOther;
+      if (!isOther) {
+        const input = other.querySelector("input");
+        if (input) input.value = "";
+      }
     });
   });
 
@@ -14940,21 +15043,25 @@ function wireEvents() {
 
   document.querySelectorAll(".add-recharge-record").forEach((button) => {
     button.addEventListener("click", async () => {
+      const id = Number(button.dataset.id || 0);
       const studentName = document.querySelector("#new-recharge-student")?.value.trim() || "";
       const grade = document.querySelector("#new-recharge-grade")?.value.trim() || "";
       const rechargeDate = document.querySelector("#new-recharge-date")?.value || "";
       const curRecharge = document.querySelector("#new-recharge-cur")?.value || "0";
       const curGift = document.querySelector("#new-recharge-gift")?.value || "0";
-      const source = document.querySelector("#new-recharge-source")?.value || "";
+      const channel = document.querySelector('input[name="recharge-channel"]:checked')?.value || "";
+      const channelOther = channel === "other" ? (document.querySelector("#new-recharge-channel-other")?.value.trim() || "") : "";
       const notes = document.querySelector("#new-recharge-notes")?.value || "";
       if (!studentName) return alert("请填写学生姓名");
+      if (!channel) return alert("请选择来源 / 渠道");
+      if (channel === "other" && !channelOther) return alert("选择“其他”时，请填写具体渠道");
       if (optionalNumberValue(curRecharge) === null) return alert("请填写有效的现金充值");
       if (optionalNumberValue(curGift) === null) return alert("请填写有效的赠送充值");
       if (numberValue(curRecharge) === 0 && numberValue(curGift) === 0) return alert("实际充值和赠送充值不能同时为 0");
       button.disabled = true;
       try {
-        await request("/api/recharges", {
-          method: "POST",
+        await request(id ? `/api/recharges/${encodeURIComponent(id)}` : "/api/recharges", {
+          method: id ? "PATCH" : "POST",
           body: {
             student_name: studentName,
             grade,
@@ -14962,15 +15069,18 @@ function wireEvents() {
             cur_recharge: optionalNumberValue(curRecharge) || 0,
             cur_gift: optionalNumberValue(curGift) || 0,
             recharge_date: rechargeDate,
-            source,
+            source: id ? (rechargeModalDraft?.source || "manual") : "manual",
+            channel,
+            channel_other: channelOther,
             notes,
           },
         });
         rechargeModalOpen = false;
-        await load();
+        rechargeModalDraft = null;
+        await refreshRechargesForActiveMonth();
       } catch (error) {
         button.disabled = false;
-        alert(`新增充值记录失败：${error.message}`);
+        alert(`${id ? "编辑" : "新增"}充值记录失败：${error.message}`);
       }
     });
   });
@@ -16040,7 +16150,12 @@ function wireEvents() {
   document.querySelectorAll(".baidu-test-detail-close").forEach((button) => button.addEventListener("click", () => { backupState.baiduTestDetailsOpen = false; render(); }));
   document.querySelectorAll(".baidu-backup-now").forEach((button) => button.addEventListener("click", async () => {
     markBackupDraftFromDom(); backupState.busy = true; render();
-    try { const result = await request("/api/data-center/baidu/backups", { method: "POST", body: {} }); backupState.records = result.records || backupState.records; showToast("百度网盘备份成功"); }
+    try {
+      const result = await request("/api/data-center/baidu/backups", { method: "POST", body: {} });
+      backupState.records = [result.record, ...(backupState.records || []).filter((row) => Number(row.id) !== Number(result.backup_id))];
+      showToast(result.duplicate ? "已有百度备份任务正在执行" : "百度备份任务已开始，可在记录中查看进度");
+      void pollBackupJob(result.job_id);
+    }
     catch (error) { showToast(error.message || "百度网盘备份失败", "error"); }
     finally { backupState.busy = false; render(); }
   }));
@@ -17373,6 +17488,8 @@ function wireEvents() {
           grade: row.dataset.grade || summary.grade || "",
           month_key: state.settings.month_key,
           source: row.dataset.source || "",
+          channel: row.dataset.channel || "",
+          channel_other: row.dataset.channelOther || "",
           ...payload,
         },
       }));
@@ -17501,16 +17618,35 @@ function wireEvents() {
   });
 
   document.querySelectorAll(".student-pricing-field").forEach((input) => {
-    input.addEventListener("change", () => {
+    input.addEventListener("change", async () => {
+      if (input.dataset.saving === "1") return;
       const value = input.type === "number" ? numberValue(input.value) : input.value;
       if (input.dataset.field === "custom_price" && numberValue(value) < 0) {
         alert("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。");
         return load();
       }
-      refreshAfter(() => request(`/api/student-pricing/${input.dataset.id}`, {
-        method: "PATCH",
-        body: { [input.dataset.field]: value },
-      }), () => refreshStudentPricingModule());
+      const id = Number(input.dataset.id);
+      const before = (state.student_pricing || []).find((row) => Number(row.id) === id);
+      input.dataset.saving = "1";
+      input.disabled = true;
+      try {
+        const result = await request(`/api/student-pricing/${input.dataset.id}?month=${encodeURIComponent(activeMonth)}`, {
+          method: "PATCH",
+          body: { [input.dataset.field]: value },
+        });
+        state.student_pricing = upsertById(state.student_pricing || [], result);
+        for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+        rerenderCurrentView(renderStudentPricing);
+        if (result?.warnings?.length) alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
+      } catch (error) {
+        if (before && input.isConnected) input.value = String(before[input.dataset.field] ?? "");
+        alert(error.message || "学生单价保存失败");
+      } finally {
+        if (input.isConnected) {
+          input.dataset.saving = "0";
+          input.disabled = false;
+        }
+      }
     });
   });
 
