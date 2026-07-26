@@ -11911,35 +11911,90 @@ table th,
 }
 
 .teacher-salary-rule-toolbar {
-  align-items: end;
-  gap: var(--space-3);
+  align-items: flex-end;
+  gap: 8px;
 }
 
-.teacher-salary-rule-toolbar .filter-controls,
-.teacher-salary-rule-toolbar .filter-field,
-.teacher-salary-rule-toolbar .filter-combo,
+.teacher-salary-rule-toolbar .filter-controls {
+  flex: 1 1 280px;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.teacher-salary-rule-toolbar .unified-filter-field {
+  flex: 1 1 96px;
+  min-width: 88px;
+  max-width: 120px;
+}
+
 .teacher-salary-rule-toolbar .filter-combo-input,
 .teacher-salary-rule-toolbar .control,
 .teacher-salary-rule-toolbar .btn {
   min-height: 38px;
+  height: 38px;
+}
+
+.teacher-salary-rule-toolbar > :is(.history-toggle, .filter-summary, .teacher-salary-rule-toolbar-actions) {
+  min-height: 38px;
+  align-self: flex-end;
 }
 
 .teacher-salary-rule-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  margin-left: auto;
+  gap: 6px;
+  margin-left: 0;
   white-space: nowrap;
 }
 
+.teacher-salary-rule-toolbar-actions .btn {
+  padding-inline: 6px;
+}
+
+.teacher-salary-rule-toolbar > :is(.history-toggle, .filter-summary),
+.teacher-salary-rule-toolbar-actions {
+  font-size: 12px;
+}
+
+.batch-selection-summary {
+  color: var(--muted);
+  font-size: var(--text-ui);
+  white-space: nowrap;
+}
+
+.batch-pricing-modal-panel {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.batch-pricing-result:not(:empty) {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--ink);
+  font-size: var(--text-caption);
+}
+
 @media (max-width: 760px) {
+  .teacher-salary-rule-toolbar .filter-controls {
+    flex-wrap: wrap;
+  }
+
   .teacher-salary-rule-toolbar-actions {
     width: 100%;
     margin-left: 0;
+    flex-wrap: wrap;
   }
 
   .teacher-salary-rule-toolbar-actions .btn {
     flex: 1 1 0;
+  }
+
+  .pricing-batch-actions .batch-selection-summary {
+    flex-basis: 100%;
   }
 }
 
@@ -12849,7 +12904,7 @@ body {
   white-space: nowrap;
 }
 
-/* The notes column receives remaining width and wraps long text safely. */
+/* Opening-balance rows stay single-line; only the outer table wrapper scrolls. */
 .opening-balance-table {
   min-width: 900px;
   table-layout: fixed;
@@ -12864,19 +12919,31 @@ body {
 .opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
   min-width: 280px;
   width: auto;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .opening-balance-notes-input {
   display: block;
   width: 100%;
-  min-height: 54px;
+  height: 38px;
+  min-height: 38px;
   box-sizing: border-box;
-  resize: none;
-  overflow-y: auto;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: nowrap;
+}
+
+.opening-balance-page input[type="number"],
+.opening-balance-modal input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.opening-balance-page input[type="number"]::-webkit-inner-spin-button,
+.opening-balance-page input[type="number"]::-webkit-outer-spin-button,
+.opening-balance-modal input[type="number"]::-webkit-inner-spin-button,
+.opening-balance-modal input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 @media (max-width: 640px) {
@@ -13401,7 +13468,7 @@ body {
   flex: 0 0 auto;
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 900px) {
   .dashboard-main-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-areas:
@@ -13427,18 +13494,18 @@ body {
   }
 }
 
-/* Keep the live-course card stable while only its lesson viewport scrolls. */
+/* The tallest natural side card defines the desktop row; live lessons scroll inside it. */
 .dashboard-main-grid > :is(.dashboard-current-section, .dashboard-todo-section, .dashboard-pie-section) {
-  height: auto;
-  min-height: 360px;
+  height: 100%;
+  min-height: 0;
   max-height: none;
-  overflow: visible;
+  align-self: stretch;
 }
 
 .dashboard-current-section {
-  height: 360px !important;
-  max-height: 360px !important;
-  overflow: hidden !important;
+  min-height: 0;
+  contain: size;
+  overflow: hidden;
 }
 
 .dashboard-pie-section,
@@ -13475,17 +13542,18 @@ body {
 }
 
 .class-group-students-cell {
-  max-width: 460px;
-  overflow: hidden;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .class-group-student-set {
-  display: block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  display: inline;
+  max-width: none;
+  overflow: visible;
   white-space: nowrap;
-  scrollbar-width: thin;
 }
 
 .dashboard-current-viewport {
@@ -13512,14 +13580,23 @@ body {
 
 @media (max-width: 760px) {
   .dashboard-main-grid > .dashboard-current-section {
-    height: 320px !important;
-    min-height: 320px !important;
-    max-height: 320px !important;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    contain: none;
+    overflow: visible;
   }
 
   .dashboard-main-grid > :is(.dashboard-todo-section, .dashboard-pie-section) {
     height: auto;
     min-height: 0;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .dashboard-current-viewport,
+  .dashboard-current-list {
+    height: auto;
     max-height: none;
     overflow: visible;
   }

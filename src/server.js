@@ -30,7 +30,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "2026.07.17-schedule-editing-status-order-fix";
+const APP_VERSION = process.env.APP_VERSION || "20260726-batch-pricing-backup-list-layout";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -7168,8 +7168,8 @@ function normalizeTeacherSalaryRuleInput(body, current = {}) {
   }
   const nameError = teacherNameError(teacherName, { required: true });
   if (nameError) return { error: nameError, status: 400 };
-  if (salaryPerUnit == null || salaryPerUnit < 0) {
-    return { error: "每课时薪资必须是大于或等于 0 的有效数字", status: 400 };
+  if (salaryPerUnit == null || salaryPerUnit < 0 || salaryPerUnit > 100000) {
+    return { error: "每课时薪资必须是 0 到 100000 之间的有效数字", status: 400 };
   }
   if (!Number.isFinite(unitHours) || unitHours <= 0) {
     return { error: "课时小时数必须是大于 0 的有效数字", status: 400 };
@@ -8674,7 +8674,7 @@ function normalizedOpeningBalancePayload(body) {
     grade: text(body.grade) || text(profile?.grade),
     opening_actual_balance: num(body.opening_actual_balance),
     opening_gift_balance: num(body.opening_gift_balance),
-    notes: text(body.notes),
+    notes: text(body.notes).replace(/[\r\n]+/g, " "),
   };
   if (Math.abs(payload.opening_actual_balance) > 100000) return { error: "期初现金余额超出合理范围", status: 400 };
   if (Math.abs(payload.opening_gift_balance) > 100000) return { error: "期初赠送余额超出合理范围", status: 400 };
@@ -9855,6 +9855,7 @@ function authorizeApi(user, req, url) {
   if (pageKeys.length && accessAction === "read") return true;
   if (area === "roles") return false;
   if (area === "dashboard") return method === "GET" && userHasAnyPermission(user, ["dashboard"]);
+  if (url.pathname === "/api/teacher-salary-rules/batch" && role === "teacher" && !userReadonly(user)) return true;
   return roleCan(user, area, accessAction);
 }
 
@@ -12241,6 +12242,64 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/teacher-salary-rules") {
     return sendJson(res, { rules: teacherSalaryRules() });
   }
+  if (req.method === "PATCH" && url.pathname === "/api/teacher-salary-rules/batch") {
+    const body = await readBody(req);
+    const rawIds = Array.isArray(body.ids) ? body.ids : [];
+    const ids = [...new Set(rawIds.map(Number))];
+    const salary = Number(body.salary);
+    const validMoney = Number.isFinite(salary) && salary >= 0 && salary <= 100000
+      && Math.abs(salary * 100 - Math.round(salary * 100)) < 1e-8;
+    if (!rawIds.length || ids.length > 500 || ids.some((id) => !Number.isInteger(id) || id <= 0) || !validMoney) {
+      return sendJson(res, {
+        ok: false,
+        processed: rawIds.length,
+        success: 0,
+        failed: [{ code: "INVALID_BATCH_REQUEST", message: "规则 ID 和薪资必须有效；金额范围为 0 到 100000 元，最多两位小数，单次最多 500 条" }],
+        rows: [],
+      }, 400);
+    }
+    const placeholders = ids.map(() => "?").join(",");
+    const before = all(`SELECT * FROM teacher_salary_rules WHERE id IN (${placeholders}) ORDER BY id`, ids);
+    const foundIds = new Set(before.map((row) => Number(row.id)));
+    const missing = ids.filter((id) => !foundIds.has(id));
+    if (missing.length) {
+      return sendJson(res, {
+        ok: false,
+        processed: ids.length,
+        success: 0,
+        failed: missing.map((id) => ({ id, teacher_name: "", grade: "", subject: "", code: "RULE_NOT_FOUND", message: "薪资规则不存在" })),
+        rows: [],
+      }, 404);
+    }
+    if (canonicalRole(user.role) === "teacher") {
+      const allowedTeachers = new Set(uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]));
+      const forbidden = before.filter((row) => !allowedTeachers.has(text(row.teacher_name)));
+      if (forbidden.length) {
+        return sendJson(res, {
+          ok: false,
+          processed: ids.length,
+          success: 0,
+          failed: forbidden.map((row) => ({ id: row.id, teacher_name: row.teacher_name, grade: row.grade, subject: row.subject, code: "RULE_OUT_OF_SCOPE", message: "不能修改其他老师的薪资规则" })),
+          rows: [],
+        }, 403);
+      }
+    }
+    withTransaction(() => {
+      const statement = db.prepare("UPDATE teacher_salary_rules SET salary_per_unit=?, updated_at=CURRENT_TIMESTAMP WHERE id=?");
+      for (const id of ids) statement.run(moneyRound(salary), id);
+    });
+    const rows = all(`SELECT * FROM teacher_salary_rules WHERE id IN (${placeholders}) ORDER BY id`, ids);
+    const result = { ok: true, processed: ids.length, success: rows.length, failed: [], rows };
+    recordAuditEvent(req, user, { action: "batch_update_salary", entity_type: "teacher_salary_rules", entity_id: ids.join(","), before, after: rows });
+    writeOperationLog(user, {
+      operation_type: "批量修改教师薪资",
+      operation_content: `批量更新 ${rows.length} 条薪资规则为 ¥${moneyRound(salary)}`,
+      target_type: "teacher_salary_rules",
+      target_id: ids.join(","),
+      details: { processed: ids.length, success: rows.length },
+    });
+    return sendJson(res, result);
+  }
   if (req.method === "POST" && url.pathname === "/api/teacher-salary-rules") {
     const body = await readBody(req);
     const rule = createTeacherSalaryRule(body);
@@ -13163,8 +13222,16 @@ async function handleApi(req, res, url) {
       try { before = service.record(database, backupId); } finally { database.close(); }
       if (!before) return sendError(res, 404, "备份记录不存在");
       const result = await service.deleteBackup(backupId, { remoteDeleter: (record) => baiduBackupManager().delete(record) });
-      writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `${before.filename || `备份 ${backupId}`}：本地 Excel ${result.result.local_excel}，本地 SHA-256 ${result.result.local_checksum}，百度 Excel ${result.result.remote_excel}，百度 SHA-256 ${result.result.remote_checksum}`, target_type: "backup_records", target_id: String(backupId), details: { backup_id: backupId, filename: before.filename || "", ...result.result } }, req);
-      return sendJson(res, result);
+      const cleanup = result.cleanup || {};
+      writeOperationLog(user, {
+        operation_type: "删除全量数据备份",
+        operation_content: `${before.filename || `备份 ${backupId}`}：本地 Excel ${cleanup.local_excel}，本地 SHA-256 ${cleanup.local_checksum}，百度 Excel ${cleanup.remote_excel}，百度 SHA-256 ${cleanup.remote_checksum}`,
+        target_type: "backup_records",
+        target_id: String(backupId),
+        result_status: result.deleted ? "success" : "failure",
+        details: { backup_id: backupId, filename: before.filename || "", deleted: Boolean(result.deleted), cleanup },
+      }, req);
+      return sendJson(res, result.deleted ? result : { ...result, error: "备份组件删除未完成，请根据逐组件状态重试" }, result.deleted ? 200 : 409);
     } catch (error) {
       writeOperationLog(user, { operation_type: "删除全量数据备份", operation_content: `备份 ${backupId} 删除失败`, target_type: "backup_records", target_id: String(backupId), result_status: "failure", details: { backup_id: backupId, code: error.code || "BACKUP_DELETE_FAILED" } }, req);
       return sendJson(res, { error: error.message || "删除备份失败", code: String(error.code || "BACKUP_DELETE_FAILED").slice(0, 100) }, error.code === "BACKUP_NOT_FOUND" ? 404 : 400);
@@ -13783,8 +13850,8 @@ async function handleApi(req, res, url) {
       notes: text(body.notes),
     };
     if (!payload.student_name || !payload.subject) return sendError(res, 400, "student_name and subject are required");
-    if (payload.custom_price < 0) {
-      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为未设置候选");
+    if (!Number.isFinite(payload.custom_price) || payload.custom_price < 0 || payload.custom_price > 100000) {
+      return sendError(res, 400, "学生单价必须是 0 到 100000 之间的有效金额；0 元规则仅作为未设置候选");
     }
     const result = db.prepare(`
       INSERT INTO student_pricing(student_name, grade, subject, student_names, custom_price, notes)
@@ -13805,43 +13872,57 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "PATCH" && url.pathname === "/api/student-pricing/batch") {
     const body = await readBody(req);
-    const items = Array.isArray(body.items) ? body.items : [];
-    if (!items.length || items.length > 500) return sendError(res, 400, "批量保存条数必须在 1 到 500 之间");
-    const allowedFields = new Set(["student_name", "grade", "subject", "student_names", "custom_price", "notes"]);
-    const normalized = [];
-    for (const item of items) {
-      const id = Number(item?.id);
-      const changes = item?.changes && typeof item.changes === "object" ? { ...item.changes } : {};
-      if (!Number.isInteger(id) || id <= 0 || !Object.keys(changes).length || Object.keys(changes).some((key) => !allowedFields.has(key))) {
-        return sendError(res, 400, "批量保存参数无效");
-      }
-      if (Object.hasOwn(changes, "custom_price") && (!Number.isFinite(Number(changes.custom_price)) || Number(changes.custom_price) < 0)) {
-        return sendError(res, 400, "学生单价必须是大于或等于 0 的有效金额");
-      }
-      if (Object.hasOwn(changes, "student_names")) changes.student_names = normalizedStudents(changes.student_names);
-      normalized.push({ id, changes });
+    const rawIds = Array.isArray(body.ids) ? body.ids : [];
+    const ids = [...new Set(rawIds.map(Number))];
+    const price = Number(body.price);
+    const validMoney = Number.isFinite(price) && price >= 0 && price <= 100000
+      && Math.abs(price * 100 - Math.round(price * 100)) < 1e-8;
+    if (!rawIds.length || ids.length > 500 || ids.some((id) => !Number.isInteger(id) || id <= 0) || !validMoney) {
+      return sendJson(res, {
+        ok: false,
+        processed: rawIds.length,
+        success: 0,
+        failed: [{ code: "INVALID_BATCH_REQUEST", message: "规则 ID 和单价必须有效；金额范围为 0 到 100000 元，最多两位小数，单次最多 500 条" }],
+        rows: [],
+      }, 400);
     }
-    const before = normalized.map((item) => get("SELECT * FROM student_pricing WHERE id = ?", [item.id]));
-    if (before.some((row) => !row)) return sendError(res, 404, "批量保存包含不存在的学生单价规则");
+    const placeholders = ids.map(() => "?").join(",");
+    const before = all(`SELECT * FROM student_pricing WHERE id IN (${placeholders}) ORDER BY id`, ids);
+    const foundIds = new Set(before.map((row) => Number(row.id)));
+    const missing = ids.filter((id) => !foundIds.has(id));
+    if (missing.length) {
+      return sendJson(res, {
+        ok: false,
+        processed: ids.length,
+        success: 0,
+        failed: missing.map((id) => ({ id, student_name: "", grade: "", subject: "", code: "RULE_NOT_FOUND", message: "学生单价规则不存在" })),
+        rows: [],
+      }, 404);
+    }
     withTransaction(() => {
-      for (const item of normalized) {
-        const fields = Object.keys(item.changes);
-        const values = fields.map((field) => item.changes[field]);
-        db.prepare(`UPDATE student_pricing SET ${fields.map((field) => `${field} = ?`).join(", ")} WHERE id = ?`).run(...values, item.id);
-      }
+      const statement = db.prepare("UPDATE student_pricing SET custom_price=? WHERE id=?");
+      for (const id of ids) statement.run(moneyRound(price), id);
     });
     const monthKey = resolveMonthKey(url);
-    const ids = new Set(normalized.map((item) => item.id));
-    const rows = studentPricingRows(monthKey).filter((row) => ids.has(Number(row.id)));
-    recordAuditEvent(req, user, { action: "batch_update", entity_type: "student_pricing", entity_id: normalized.map((item) => item.id).join(","), before, after: rows });
-    writeOperationLog(user, { operation_type: "批量修改学生单价", operation_content: `批量更新 ${rows.length} 条学生单价规则`, target_type: "student_pricing", target_id: normalized.map((item) => item.id).join(",") });
-    return sendJson(res, { ok: true, updated: rows.length, rows });
+    const idSet = new Set(ids);
+    const rows = studentPricingRows(monthKey).filter((row) => idSet.has(Number(row.id)));
+    const result = { ok: true, processed: ids.length, success: rows.length, failed: [], rows };
+    recordAuditEvent(req, user, { action: "batch_update_price", entity_type: "student_pricing", entity_id: ids.join(","), before, after: rows });
+    writeOperationLog(user, {
+      operation_type: "批量修改学生单价",
+      operation_content: `批量更新 ${rows.length} 条学生单价规则为 ¥${moneyRound(price)}`,
+      target_type: "student_pricing",
+      target_id: ids.join(","),
+      details: { processed: ids.length, success: rows.length },
+    });
+    return sendJson(res, result);
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
   if (studentPricingMatch && req.method === "PATCH") {
     const body = await readBody(req);
-    if (Object.prototype.hasOwnProperty.call(body, "custom_price") && num(body.custom_price) < 0) {
-      return sendError(res, 400, "学生单价必须大于或等于 0；0 元规则仅作为未设置候选");
+    if (Object.prototype.hasOwnProperty.call(body, "custom_price")
+      && (!Number.isFinite(Number(body.custom_price)) || num(body.custom_price) < 0 || num(body.custom_price) > 100000)) {
+      return sendError(res, 400, "学生单价必须是 0 到 100000 之间的有效金额；0 元规则仅作为未设置候选");
     }
     const payload = { ...body };
     if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);

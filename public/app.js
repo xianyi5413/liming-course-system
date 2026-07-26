@@ -335,6 +335,8 @@ let teacherSalaryRuleCandidateSync = { requested: false, busy: false, result: nu
 let teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
 let teacherSalaryRuleFilter = { teacher: "", grade: "", subject: "", student: "", salary_status: "" };
 let teacherSalaryRuleModalOpen = false;
+let selectedTeacherSalaryRuleIds = new Set();
+let teacherSalaryRuleBatchModalOpen = false;
 let passwordModalOpen = false;
 let userMenuOpen = false;
 let userAdminNotice = "";
@@ -375,6 +377,8 @@ let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
+let selectedStudentPricingIds = new Set();
+let studentPricingBatchModalOpen = false;
 let classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
 let classGroupHideInactiveTeachers = localStorage.getItem(CLASS_GROUP_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
 let teacherSalaryRuleHideInactiveTeachers = localStorage.getItem(TEACHER_RULE_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
@@ -599,6 +603,7 @@ function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
@@ -854,6 +859,14 @@ function setActiveView(nextView) {
     selectedTeacherSalaryLessonIds = new Set();
     teacherSalaryBatchResult = null;
     teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
+  }
+  if (view === "studentPricing" && previousView !== "studentPricing") {
+    selectedStudentPricingIds = new Set();
+    studentPricingBatchModalOpen = false;
+  }
+  if (view === "teacherSalaryRules" && previousView !== "teacherSalaryRules") {
+    selectedTeacherSalaryRuleIds = new Set();
+    teacherSalaryRuleBatchModalOpen = false;
   }
   activeNavGroup = view ? groupForView(view).key : "";
   if (activeNavGroup && navExpansionMode !== "all-collapsed") expandedNavGroups.add(activeNavGroup);
@@ -2822,7 +2835,7 @@ function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) 
   if (filter.teacher && !textContains(rule.teacher_name, filter.teacher)) return false;
   if (filter.grade && !textContains(rule.grade, filter.grade)) return false;
   if (filter.subject && !textContains(rule.subject, filter.subject)) return false;
-  if (filter.student && !textContains(rule.student_names, filter.student)) return false;
+  if (filter.student && ![rule.student_names, rule.teacher_name, rule.grade, rule.subject, rule.notes].some((value) => textContains(value, filter.student))) return false;
   if (filter.salary_status && teacherSalaryRuleSalaryStatus(rule) !== filter.salary_status) return false;
   return true;
 }
@@ -8727,7 +8740,7 @@ function renderOpeningBalances() {
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
-                <td class="opening-balance-notes-cell"><textarea class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" rows="2">${escapeHtml(row.notes)}</textarea></td>
+                <td class="opening-balance-notes-cell"><input class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" value="${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
@@ -9433,7 +9446,7 @@ function dataCenterRemoteLabel(value) {
 }
 
 function dataCenterRemotePartLabel(value) {
-  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", delete_partial: "部分删除失败", rejected_symlink: "已拒绝符号链接", missing: "文件缺失", not_present: "无记录" };
+  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", already_absent: "本来不存在", delete_failed: "删除失败", delete_partial: "部分删除失败", rejected_symlink: "已拒绝符号链接", missing: "文件缺失", not_present: "无记录" };
   return labels[value] || "未上传";
 }
 
@@ -9522,13 +9535,13 @@ function backupDeleteDialogMarkup() {
   const dialog = backupState.deleteDialog;
   if (!dialog) return "";
   const row = dialog.record || {};
-  const status = dialog.result?.result;
+  const status = dialog.result?.cleanup;
   return `<div class="modal-backdrop backup-delete-modal"><div class="modal-panel backup-delete-panel" role="dialog" aria-modal="true" aria-labelledby="backup-delete-title">
     <div class="modal-head"><div><div class="modal-title" id="backup-delete-title">确认删除这条备份吗？</div><div class="modal-subtitle">此操作无法撤销。</div></div><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button></div>
     <div class="backup-delete-summary"><div><span>文件</span><strong>${escapeHtml(row.filename || "未记录文件名")}</strong></div><div><span>位置</span><strong>${escapeHtml(backupDeleteLocation(row))}</strong></div><p>此操作会按当前规则删除对应备份文件和记录，且无法撤销。</p></div>
-    ${dialog.error ? `<div class="audit-inline-notice danger backup-delete-error">${escapeHtml(dialog.error)}</div>` : ""}
+    ${dialog.error ? `<div class="audit-inline-notice danger backup-delete-error"><strong>删除未完成</strong><span>${escapeHtml(dialog.error)}</span></div>` : ""}
     ${status ? `<dl class="backup-delete-result"><div><dt>本地 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_excel))}</dd></div><div><dt>本地 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_checksum))}</dd></div><div><dt>百度 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_excel))}</dd></div><div><dt>百度 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_checksum))}</dd></div></dl>` : ""}
-    <div class="modal-actions"><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>取消</button><button class="btn danger backup-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : "确认删除"}</button></div>
+    <div class="modal-actions"><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>取消</button><button class="btn danger backup-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : (dialog.result ? "重新删除" : "确认删除")}</button></div>
   </div></div>`;
 }
 
@@ -9546,15 +9559,14 @@ function dataCenterBackupRows() {
       <td class="backup-failure-cell">${backupFailureMarkup(row)}</td>
       <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
       <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
-      <td>${escapeHtml(row.created_by_user_id || "-")}</td>
+      <td>${escapeHtml(row.created_by_label || "历史记录")}</td>
       <td><input class="control backup-note-field" data-id="${escapeHtml(row.id)}" value="${escapeHtml(row.note || "")}" maxlength="500" ${legacy ? "disabled" : ""}></td>
-      <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
       <td class="data-center-actions">
         <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
-        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}<button class="btn backup-toggle-pinned" type="button" data-id="${escapeHtml(row.id)}" data-pinned="${row.pinned ? "1" : "0"}">${row.pinned ? "取消固定" : "固定"}</button>` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}" ${row.pinned ? "disabled title=\"固定备份受保护，请先取消固定\"" : ""}>删除</button>` : ""}`}
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="13" class="empty">暂无备份记录</td></tr>`;
+  }).join("") || `<tr><td colspan="12" class="empty">暂无备份记录</td></tr>`;
 }
 
 function importPreviewMarkup() {
@@ -9788,7 +9800,7 @@ function renderAudit() {
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
-        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
@@ -10704,6 +10716,14 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
 function renderStudentPricing() {
   const rows = [...(state.student_pricing || [])].sort(compareStudentPricingRule);
   const visibleRows = rows.filter(studentPricingMatchesFilter);
+  const activeFilterSummary = Object.entries(studentPricingFilter)
+    .filter(([, value]) => String(value || "").trim())
+    .map(([key, value]) => `${({ student: "学生", grade: "年级", subject: "科目", student_names: "学生集合", price: "价格状态", usage: "使用状态" })[key]}：${value}`)
+    .join("；") || "全部规则";
+  const visibleIds = new Set(visibleRows.map((row) => Number(row.id)));
+  selectedStudentPricingIds = new Set([...selectedStudentPricingIds].filter((id) => visibleIds.has(Number(id))));
+  const selectedVisibleCount = visibleRows.filter((row) => selectedStudentPricingIds.has(Number(row.id))).length;
+  const allVisibleSelected = visibleRows.length > 0 && selectedVisibleCount === visibleRows.length;
   const unsetRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
   renderTopbar("学生单价规则", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条规则`, historyToggleAction());
   contentEl.innerHTML = `
@@ -10717,12 +10737,18 @@ function renderStudentPricing() {
     ` : ""}
     <div class="band student-pricing-page">
       ${renderStudentPricingFilterBar(rows, visibleRows)}
+      <div class="transaction-action-row pricing-batch-actions" role="toolbar" aria-label="学生单价批量操作">
+        <span class="batch-selection-summary">已选择 <b>${selectedStudentPricingIds.size}</b> 条</span>
+        <button class="btn clear-student-pricing-selection" type="button" ${selectedStudentPricingIds.size ? "" : "disabled"}>清空选择</button>
+        <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
+      </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table">
-          <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
+                <td class="select-col"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择学生单价规则"></td>
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
@@ -10731,11 +10757,21 @@ function renderStudentPricing() {
                 <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
+    ${studentPricingBatchModalOpen ? `
+      <div class="modal-backdrop student-pricing-batch-modal">
+        <div class="modal-panel batch-pricing-modal-panel" role="dialog" aria-modal="true" aria-labelledby="student-pricing-batch-title">
+          <div class="modal-head"><div><div class="modal-title" id="student-pricing-batch-title">批量设置学生单价</div><div class="modal-subtitle">仅修改已选择 ${selectedStudentPricingIds.size} 条规则的单价，其他字段保持不变。</div><div class="modal-subtitle">当前筛选：${escapeHtml(activeFilterSummary)}</div></div></div>
+          <label class="filter-field"><span>统一单价</span><input class="control student-pricing-batch-value" type="number" min="0" max="100000" step="0.01" value="0"></label>
+          <div class="batch-pricing-result" aria-live="polite"></div>
+          <div class="modal-actions"><button class="btn close-student-pricing-batch-modal" type="button">取消</button><button class="btn primary confirm-student-pricing-batch" type="button">确认更新</button></div>
+        </div>
+      </div>
+    ` : ""}
   `;
 }
 
@@ -10772,7 +10808,7 @@ function renderClassGroups() {
                 <td class="text-cell center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide class-group-students-cell"><span class="class-group-student-set" tabindex="0" title="${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、"))}">${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、") || "—")}</span></td>
+                <td class="text-cell wide class-group-students-cell"><span class="class-group-student-set">${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、") || "—")}</span></td>
                 <td><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无班级候选</td></tr>`}
@@ -12006,6 +12042,10 @@ function renderTeacherSalaryRules() {
   const sortedRules = sortTeacherSalaryRules(rules);
   const opts = dynamicTeacherSalaryRuleFilterOptions(sortedRules);
   const visibleRules = sortedRules.filter((rule) => teacherSalaryRuleMatchesFilter(rule));
+  const visibleRuleIds = new Set(visibleRules.map((rule) => Number(rule.id)));
+  selectedTeacherSalaryRuleIds = new Set([...selectedTeacherSalaryRuleIds].filter((id) => visibleRuleIds.has(Number(id))));
+  const selectedVisibleCount = visibleRules.filter((rule) => selectedTeacherSalaryRuleIds.has(Number(rule.id))).length;
+  const allVisibleSelected = visibleRules.length > 0 && selectedVisibleCount === visibleRules.length;
   const hiddenInactiveCount = sortedRules.filter((rule) => !isActiveTeacherName(rule.teacher_name)).length;
   const modalCandidates = {
     teachers: uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean)),
@@ -12032,20 +12072,21 @@ function renderTeacherSalaryRules() {
       <div class="filter-bar compact unified-filter-bar teacher-salary-rule-toolbar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
-          ${unifiedFilterField({ label: "年级", className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades })}
-          ${unifiedFilterField({ label: "科目", className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects })}
-          ${unifiedFilterField({ label: "学生", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students })}
+          ${unifiedFilterField({ label: "搜索", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students, placeholder: "搜索学生集合" })}
           ${unifiedFilterField({ label: "价格状态", className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "全部价格状态" })}
         </div>
         <label class="history-toggle compact-toggle">
           <input class="teacher-salary-rule-hide-inactive" type="checkbox" ${teacherSalaryRuleHideInactiveTeachers ? "checked" : ""}>
-          <span>隐藏非在职老师</span>
+          <span>隐藏离职</span>
         </label>
         <div class="filter-summary">
-          <span>已筛选 <b>${visibleRules.length}</b> / 共 ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? `，已隐藏 ${hiddenInactiveCount} 条` : ""}</span>
+          <span><b>${visibleRules.length}</b> / ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? ` · 隐藏 ${hiddenInactiveCount}` : ""}</span>
         </div>
         <div class="teacher-salary-rule-toolbar-actions">
-          <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
+          <span class="batch-selection-summary">已选择 <b>${selectedTeacherSalaryRuleIds.size}</b> 条</span>
+          <button class="btn clear-teacher-salary-rule-selection" type="button" ${selectedTeacherSalaryRuleIds.size ? "" : "disabled"}>清空选择</button>
+          <button class="btn primary open-teacher-salary-rule-batch-modal" type="button" ${selectedTeacherSalaryRuleIds.size && canWriteData() ? "" : "disabled"}>批量设置薪资</button>
+          <button class="btn reset-teacher-salary-rule-filter" type="button">清筛</button>
           <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
         </div>
       </div>
@@ -12054,10 +12095,11 @@ function renderTeacherSalaryRules() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="teacher-salary-rule-table uniform-table nowrap-table">
-          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
+                <td class="select-col"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>
                 <td class="text-cell">${escapeHtml(rule.teacher_name)}</td>
                 <td class="text-cell">${renderEntityBadge("grade", rule.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
@@ -12067,7 +12109,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
                 <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无符合条件的薪资规则</td></tr>`}
+            `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -12095,6 +12137,16 @@ function renderTeacherSalaryRules() {
             <button class="btn" type="button" data-action="close-teacher-salary-rule-modal">取消</button>
             <button class="btn primary add-teacher-salary-rule" type="button">保存</button>
           </div>
+        </div>
+      </div>
+    ` : ""}
+    ${teacherSalaryRuleBatchModalOpen ? `
+      <div class="modal-backdrop teacher-salary-rule-batch-modal">
+        <div class="modal-panel batch-pricing-modal-panel" role="dialog" aria-modal="true" aria-labelledby="teacher-salary-rule-batch-title">
+          <div class="modal-head"><div><div class="modal-title" id="teacher-salary-rule-batch-title">批量设置教师薪资</div><div class="modal-subtitle">仅修改已选择 ${selectedTeacherSalaryRuleIds.size} 条规则的薪资，启用状态和其他字段保持不变。</div></div></div>
+          <label class="filter-field"><span>每2小时薪资</span><input class="control teacher-salary-rule-batch-value" type="number" min="0" max="100000" step="0.01" value="0"></label>
+          <div class="batch-pricing-result" aria-live="polite"></div>
+          <div class="modal-actions"><button class="btn close-teacher-salary-rule-batch-modal" type="button">取消</button><button class="btn primary confirm-teacher-salary-rule-batch" type="button">确认更新</button></div>
         </div>
       </div>
     ` : ""}
@@ -15974,9 +16026,23 @@ function wireEvents() {
 
   document.querySelectorAll(".backup-metadata-save").forEach((button) => {
     button.addEventListener("click", async () => {
-      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || ""; const pinned = Boolean(document.querySelector(`.backup-pinned-field[data-id="${id}"]`)?.checked);
-      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note, pinned } }); await refreshBackupData(); showToast("备份信息已保存"); }
+      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || "";
+      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note } }); await refreshBackupData(); showToast("备份信息已保存"); }
       catch (error) { showToast(error.message || "保存失败", "error"); }
+      finally { render(); }
+    });
+  });
+  document.querySelectorAll(".backup-toggle-pinned").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      try {
+        await request(`/api/data-center/backups/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: { pinned: button.dataset.pinned !== "1" },
+        });
+        await refreshBackupData();
+        showToast(button.dataset.pinned === "1" ? "已取消固定" : "备份已固定");
+      } catch (error) { showToast(error.message || "修改固定状态失败", "error"); }
       finally { render(); }
     });
   });
@@ -16078,15 +16144,11 @@ function wireEvents() {
     render();
     try {
       const result = await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
-      const statuses = result.result || {};
-      const partial = [statuses.local, statuses.remote].some((value) => ["delete_failed", "delete_partial"].includes(value));
+      backupState.records = (backupState.records || []).filter((row) => Number(row.id) !== Number(id));
+      document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.closest("tr")?.remove();
       await refreshBackupData({ tolerateFailure: true });
-      if (partial) {
-        backupState.deleteDialog = { ...dialog, busy: false, result, error: "备份仅部分删除，请查看各文件状态后处理。" };
-      } else {
-        backupState.deleteDialog = null;
-        showToast("备份删除流程已完成");
-      }
+      backupState.deleteDialog = null;
+      showToast(result.deleted ? "备份文件和记录已删除" : "删除未完成");
     } catch (error) {
       backupState.deleteDialog = { ...dialog, busy: false, error: error.message || "删除备份失败", result: error.data || null };
     }
@@ -16589,6 +16651,77 @@ function wireEvents() {
       render();
     });
   });
+
+  document.querySelectorAll(".student-pricing-select-row").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.id);
+      if (input.checked) selectedStudentPricingIds.add(id);
+      else selectedStudentPricingIds.delete(id);
+      render();
+    });
+  });
+  document.querySelectorAll(".student-pricing-select-all").forEach((input) => {
+    const visibleIds = [...document.querySelectorAll(".student-pricing-select-row")].map((item) => Number(item.dataset.id));
+    const selectedCount = visibleIds.filter((id) => selectedStudentPricingIds.has(id)).length;
+    input.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
+    input.addEventListener("change", () => {
+      for (const id of visibleIds) {
+        if (input.checked) selectedStudentPricingIds.add(id);
+        else selectedStudentPricingIds.delete(id);
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".clear-student-pricing-selection").forEach((button) => button.addEventListener("click", () => {
+    selectedStudentPricingIds = new Set();
+    render();
+  }));
+  document.querySelectorAll(".open-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    if (!selectedStudentPricingIds.size || !canWriteData()) return;
+    studentPricingBatchModalOpen = true;
+    render();
+  }));
+  document.querySelectorAll(".close-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    studentPricingBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".student-pricing-batch-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    studentPricingBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".confirm-student-pricing-batch").forEach((button) => button.addEventListener("click", async () => {
+    const value = document.querySelector(".student-pricing-batch-value")?.value ?? "";
+    const price = Number(value);
+    if (!Number.isFinite(price) || price < 0 || price > 100000 || Math.abs(price * 100 - Math.round(price * 100)) >= 1e-8) {
+      return showToast("单价须为 0 到 100000 之间且最多两位小数", "error");
+    }
+    const ids = [...selectedStudentPricingIds];
+    button.disabled = true;
+    try {
+      const result = await request(`/api/student-pricing/batch?month=${encodeURIComponent(activeMonth)}`, {
+        method: "PATCH",
+        body: { ids, price },
+      });
+      for (const row of result.rows || []) state.student_pricing = upsertById(state.student_pricing || [], row);
+      for (const row of result.rows || []) selectedStudentPricingIds.delete(Number(row.id));
+      studentPricingBatchModalOpen = false;
+      for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+      rerenderCurrentView(renderStudentPricing);
+      showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
+    } catch (error) {
+      button.disabled = false;
+      const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置单价失败" }];
+      const box = document.querySelector(".student-pricing-batch-modal .batch-pricing-result");
+      if (box) {
+        box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => {
+          const row = (state.student_pricing || []).find((candidate) => Number(candidate.id) === Number(item.id)) || {};
+          return `<div>记录 ${escapeHtml(item.id || "未知")} · 学生 ${escapeHtml(row.student_name || "未知")} · 年级 ${escapeHtml(row.grade || "未知")} · 科目 ${escapeHtml(row.subject || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`;
+        }).join("")}`;
+      }
+      showToast(error.message || "批量设置单价失败", "error");
+    }
+  }));
 
   document.querySelectorAll("input.class-group-filter-input").forEach((input) => {
     const applyClassGroupFilter = (value) => {
@@ -17544,6 +17677,77 @@ function wireEvents() {
       render();
     });
   });
+
+  document.querySelectorAll(".teacher-salary-rule-select-row").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.id);
+      if (input.checked) selectedTeacherSalaryRuleIds.add(id);
+      else selectedTeacherSalaryRuleIds.delete(id);
+      render();
+    });
+  });
+  document.querySelectorAll(".teacher-salary-rule-select-all").forEach((input) => {
+    const visibleIds = [...document.querySelectorAll(".teacher-salary-rule-select-row")].map((item) => Number(item.dataset.id));
+    const selectedCount = visibleIds.filter((id) => selectedTeacherSalaryRuleIds.has(id)).length;
+    input.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
+    input.addEventListener("change", () => {
+      for (const id of visibleIds) {
+        if (input.checked) selectedTeacherSalaryRuleIds.add(id);
+        else selectedTeacherSalaryRuleIds.delete(id);
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".clear-teacher-salary-rule-selection").forEach((button) => button.addEventListener("click", () => {
+    selectedTeacherSalaryRuleIds = new Set();
+    render();
+  }));
+  document.querySelectorAll(".open-teacher-salary-rule-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    if (!selectedTeacherSalaryRuleIds.size || !canWriteData()) return;
+    teacherSalaryRuleBatchModalOpen = true;
+    render();
+  }));
+  document.querySelectorAll(".close-teacher-salary-rule-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    teacherSalaryRuleBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".teacher-salary-rule-batch-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    teacherSalaryRuleBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".confirm-teacher-salary-rule-batch").forEach((button) => button.addEventListener("click", async () => {
+    const value = document.querySelector(".teacher-salary-rule-batch-value")?.value ?? "";
+    const salary = Number(value);
+    if (!Number.isFinite(salary) || salary < 0 || salary > 100000 || Math.abs(salary * 100 - Math.round(salary * 100)) >= 1e-8) {
+      return showToast("薪资须为 0 到 100000 之间且最多两位小数", "error");
+    }
+    const ids = [...selectedTeacherSalaryRuleIds];
+    button.disabled = true;
+    try {
+      const result = await request("/api/teacher-salary-rules/batch", {
+        method: "PATCH",
+        body: { ids, salary },
+      });
+      for (const row of result.rows || []) state.teacher_salary_rules = upsertById(state.teacher_salary_rules || [], row);
+      for (const row of result.rows || []) selectedTeacherSalaryRuleIds.delete(Number(row.id));
+      teacherSalaryRuleBatchModalOpen = false;
+      for (const key of ["teacherSummary", "summary", "finance"]) markDirty(key);
+      rerenderCurrentView(renderTeacherSalaryRules);
+      showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
+    } catch (error) {
+      button.disabled = false;
+      const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置薪资失败" }];
+      const box = document.querySelector(".teacher-salary-rule-batch-modal .batch-pricing-result");
+      if (box) {
+        box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => {
+          const row = (state.teacher_salary_rules || []).find((candidate) => Number(candidate.id) === Number(item.id)) || {};
+          return `<div>记录 ${escapeHtml(item.id || "未知")} · 教师 ${escapeHtml(row.teacher_name || "未知")} · 年级 ${escapeHtml(row.grade || "未知")} · 科目 ${escapeHtml(row.subject || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`;
+        }).join("")}`;
+      }
+      showToast(error.message || "批量设置薪资失败", "error");
+    }
+  }));
 
   document.querySelectorAll(".teacher-salary-rule-hide-inactive").forEach((input) => {
     input.addEventListener("change", () => {
