@@ -137,11 +137,42 @@ test("opening balances have no month UI and remain unchanged when the top month 
   await browser.evaluate("(() => { const select=document.querySelector('.month-select'); select.value='2026-08-01'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
   await browser.waitFor("document.querySelector('.month-select')?.value === '2026-08-01'");
   assert.equal(await browser.evaluate("document.querySelector('.opening-balance-table tbody')?.textContent.trim()"), before);
+  const rowHeightBefore = await browser.evaluate("document.querySelector('.opening-balance-row').getBoundingClientRect().height");
   await browser.evaluate(`(() => { const field=document.querySelector('.opening-balance-notes-input'); field.value='${"连续很长的备注内容".repeat(20)}'; field.dispatchEvent(new Event('input',{bubbles:true})); })()`);
-  const noteLayout = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); const cell=document.querySelector('.opening-balance-notes-cell'); const input=document.querySelector('.opening-balance-notes-input'); const style=getComputedStyle(input); return { cellWidth:cell.getBoundingClientRect().width, inputWidth:input.getBoundingClientRect().width, cellInnerWidth:cell.clientWidth, wrap:style.overflowWrap, tableWidth:table.scrollWidth, containerWidth:wrap.clientWidth, containerOverflow:getComputedStyle(wrap).overflowX }; })()`);
-  assert.ok(noteLayout.cellWidth >= 280); assert.ok(noteLayout.inputWidth <= noteLayout.cellInnerWidth + 1); assert.equal(noteLayout.wrap, "anywhere");
+  const noteLayout = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); const cell=document.querySelector('.opening-balance-notes-cell'); const input=document.querySelector('.opening-balance-notes-input'); const style=getComputedStyle(input); const row=input.closest('tr'); const number=input.closest('.opening-balance-page').querySelector('input[type="number"]'); return { tag:input.tagName, cellWidth:cell.getBoundingClientRect().width, inputWidth:input.getBoundingClientRect().width, cellInnerWidth:cell.clientWidth, whiteSpace:style.whiteSpace, rowHeight:row.getBoundingClientRect().height, appearance:getComputedStyle(number).appearance, tableWidth:table.scrollWidth, containerWidth:wrap.clientWidth, containerOverflow:getComputedStyle(wrap).overflowX }; })()`);
+  assert.ok(noteLayout.cellWidth >= 280); assert.ok(noteLayout.inputWidth <= noteLayout.cellInnerWidth + 1); assert.deepEqual({ tag: noteLayout.tag, whiteSpace: noteLayout.whiteSpace }, { tag: "INPUT", whiteSpace: "nowrap" }); assert.ok(Math.abs(noteLayout.rowHeight - rowHeightBefore) <= 1); assert.equal(noteLayout.appearance, "textfield");
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await browser.evaluate("window.dispatchEvent(new Event('resize'))");
   const narrow = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); return { scrollable:table.scrollWidth>wrap.clientWidth, overflow:getComputedStyle(wrap).overflowX, pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth }; })()`);
   assert.equal(narrow.scrollable, true); assert.match(narrow.overflow, /auto|scroll/); assert.equal(narrow.pageOverflow, false);
+  assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+}));
+
+test("class student sets render in full on one line with only the outer table wrapper scrolling", async () => withBrowser(async (browser) => {
+  await browser.login("boss", "123456");
+  await openView(browser, "students", "classGroups");
+  const desktop = await browser.evaluate(`(() => {
+    const cell=document.querySelector('.class-group-students-cell');
+    const set=cell.querySelector('.class-group-student-set');
+    return {
+      text:set.textContent,
+      whiteSpace:getComputedStyle(set).whiteSpace,
+      overflowX:getComputedStyle(set).overflowX,
+      cellOverflow:getComputedStyle(cell).overflowX,
+      complete:set.scrollWidth <= set.getBoundingClientRect().width + 1,
+      pageOverflow:document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  })()`);
+  assert.match(desktop.text, /、/);
+  assert.deepEqual({ whiteSpace: desktop.whiteSpace, overflowX: desktop.overflowX, cellOverflow: desktop.cellOverflow, complete: desktop.complete, pageOverflow: desktop.pageOverflow }, { whiteSpace: "nowrap", overflowX: "visible", cellOverflow: "visible", complete: true, pageOverflow: false });
+  await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await browser.evaluate("window.dispatchEvent(new Event('resize'))");
+  const mobile = await browser.evaluate(`(() => {
+    const table=document.querySelector('.class-group-table');
+    const wrap=table.closest('.table-wrap');
+    return { outerScrollable:table.scrollWidth>wrap.clientWidth, outerOverflow:getComputedStyle(wrap).overflowX, pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth };
+  })()`);
+  assert.equal(mobile.outerScrollable, true);
+  assert.match(mobile.outerOverflow, /auto|scroll/);
+  assert.equal(mobile.pageOverflow, false);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));

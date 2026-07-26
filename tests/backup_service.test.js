@@ -100,6 +100,28 @@ test("metadata updates preserve the backup and support note and pin", () => {
   const updated = service.updateMetadata(created.record.id, { note: "人工核验", pinned: true }); assert.equal(updated.note, "人工核验"); assert.equal(updated.pinned, 1); assert.equal(service.verify(created.record.id).status, "success");
 });
 
+test("backup DTO exposes semantic creator labels without raw account ids", () => {
+  const database = service.database();
+  let expectedOwnerLabel = "";
+  try {
+    const owner = database.prepare("SELECT id,username,display_name FROM users WHERE username='boss'").get();
+    expectedOwnerLabel = owner.display_name || owner.username;
+    const insert = database.prepare("INSERT INTO backup_records(backup_type,filename,status,backup_format,format_version,trigger,retention_class,created_by_user_id) VALUES (?,?,?,?,?,?,?,?)");
+    insert.run("manual", "creator-user.xlsx", "failed", "full_data_excel", 4, "manual", "manual", owner.id);
+    insert.run("auto", "creator-auto.xlsx", "failed", "full_data_excel", 4, "automatic", "daily", owner.id);
+    insert.run("manual", "creator-deleted.xlsx", "failed", "full_data_excel", 4, "manual", "manual", 999999);
+    insert.run("manual", "creator-history.xlsx", "failed", "full_data_excel", 4, "manual", "manual", null);
+  } finally { database.close(); }
+  const byFilename = new Map(service.list(500).map((row) => [row.filename, row]));
+  assert.equal(byFilename.get("creator-user.xlsx").created_by_label, expectedOwnerLabel);
+  assert.equal(byFilename.get("creator-user.xlsx").created_by_type, "user");
+  assert.equal(/^\d+$/.test(byFilename.get("creator-user.xlsx").created_by_label), false);
+  assert.deepEqual(
+    ["creator-auto.xlsx", "creator-deleted.xlsx", "creator-history.xlsx"].map((name) => [byFilename.get(name).created_by_label, byFilename.get(name).created_by_type]),
+    [["自动备份", "automatic"], ["已删除账号", "deleted_user"], ["历史记录", "historical"]],
+  );
+});
+
 test("manual and automatic backups record successful remote Excel and checksum pairs", async () => {
   const directory = path.join(tempRoot, "remote-success"); const database = path.join(directory, "data.sqlite"); initDatabase(database); const calls = [];
   const uploader = async ({ localPath }) => { calls.push(localPath); assert.equal(fs.existsSync(localPath), true); assert.equal(fs.existsSync(`${localPath}.sha256`), true); return { file_id: "excel-id", path: `/apps/liming/${path.basename(localPath)}`, checksum_file_id: "sha-id", checksum_path: `/apps/liming/${path.basename(localPath)}.sha256`, file_status: "success", checksum_status: "success", integrity_status: "verified" }; };
@@ -130,7 +152,8 @@ test("partial remote upload and partial pair deletion remain explicit", async ()
   assert.equal(fs.existsSync(path.join(directory, first.record.managed_relative_path)), true);
   await remoteService.create({ trigger: "manual", remoteEnabled: false, createdAt: new Date("2026-07-22T04:00:00Z") });
   const deleted = await remoteService.deleteBackup(first.record.id, { remoteDeleter: async () => ({ excel: "deleted", checksum: "delete_failed" }) });
-  assert.deepEqual({ remote: deleted.result.remote, excel: deleted.result.remote_excel, checksum: deleted.result.remote_checksum }, { remote: "delete_partial", excel: "deleted", checksum: "delete_failed" });
+  assert.equal(deleted.deleted, false);
+  assert.deepEqual({ excel: deleted.cleanup.remote_excel, checksum: deleted.cleanup.remote_checksum }, { excel: "deleted", checksum: "delete_failed" });
   assert.equal(deleted.record.remote_status, "delete_partial");
 });
 

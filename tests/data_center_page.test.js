@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260724-multi-page-backup-performance",
-      "/app.js?v=20260724-multi-page-backup-performance",
+      "/styles.css?v=20260726-batch-pricing-backup-list-layout",
+      "/app.js?v=20260726-batch-pricing-backup-list-layout",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -459,13 +459,16 @@ test("student profiles show stage conflicts, locate the editor, repair them and 
 test("backup failure reason is readable and delete uses a non-password confirmation dialog", async () => {
   const failure = serializeBackupFailure(safeBackupFailure({ code: "BACKUP_DATA_PREFLIGHT_FAILED", details: { preflight: { issue_count: 1, issues: [{ code: "STUDENT_GRADE_STAGE_OVERLAP", label: "学生年级阶段时间冲突", count: 1, records: [{ student_id: 8801, student_name: "合成学生", stage_a: "初三", start_a: "2025-09-01", end_a: "2026-08-31", stage_b: "高一", start_b: "2026-08-01", end_b: "2027-08-31", overlap_start: "2026-08-01", overlap_end: "2026-08-31" }] }] } } }));
   const prepareDatabase = (db) => {
-    db.prepare(`INSERT INTO backup_records(backup_type,filename,status,message,backup_format,format_version,trigger,retention_class,managed_relative_path,remote_status,pinned)
-      VALUES ('manual','黎明教育_全量数据_合成失败.xlsx','failed',?,'full_data_excel',4,'manual','manual','backups/full-excel/missing.xlsx','not_configured',0)`).run(failure);
+    db.prepare(`INSERT INTO backup_records(backup_type,filename,status,message,backup_format,format_version,trigger,retention_class,managed_relative_path,remote_status,pinned,created_by_user_id)
+      VALUES ('manual','黎明教育_全量数据_合成失败.xlsx','failed',?,'full_data_excel',4,'manual','manual','backups/full-excel/missing.xlsx','not_configured',0,(SELECT id FROM users WHERE username='boss'))`).run(failure);
   };
   await withBrowserScenario({ prepareDatabase }, async ({ browser, database }) => {
     await browser.login("boss", "123456"); await browser.openDataCenter(); await assertThreeRegions(browser);
     const recordText = await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent");
     assert.match(recordText, /本地备份失败/); assert.match(recordText, /合成学生的初三与高一阶段时间重叠/); assert.doesNotMatch(recordText, /undefined|Error/);
+    assert.equal(await browser.evaluate("[...document.querySelectorAll('[data-region=\"backup-records\"] thead th')].some((cell)=>cell.textContent.trim()==='固定')"), false);
+    let creatorDb = new DatabaseSync(database, { readOnly: true }); const owner = creatorDb.prepare("SELECT username,display_name FROM users WHERE username='boss'").get(); creatorDb.close();
+    assert.equal(await browser.evaluate(`document.querySelector('[data-region="backup-records"] tbody tr')?.textContent.includes(${JSON.stringify(owner.display_name || owner.username)})`), true);
     await browser.click(".backup-delete");
     await browser.waitFor("Boolean(document.querySelector('.backup-delete-modal'))");
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.backup-delete-modal input'))"), false);
@@ -477,8 +480,11 @@ test("backup failure reason is readable and delete uses a non-password confirmat
     await browser.waitFor("!document.querySelector('.backup-delete-modal')");
     assert.equal(browser.responses.filter((item) => /\/api\/data-center\/backups\/\d+$/.test(item.url) && item.status === 200).length, 1);
     db = new DatabaseSync(database, { readOnly: true });
-    assert.equal(db.prepare("SELECT status FROM backup_records WHERE filename='黎明教育_全量数据_合成失败.xlsx'").get().status, "missing");
+    assert.equal(db.prepare("SELECT status FROM backup_records WHERE filename='黎明教育_全量数据_合成失败.xlsx'").get(), undefined);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM operation_logs WHERE operation_type='删除全量数据备份'").get().count, 1); db.close();
+    assert.equal(await browser.evaluate("document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('黎明教育_全量数据_合成失败.xlsx')"), false);
+    await browser.click(".backup-refresh");
+    await browser.waitFor("!document.querySelector('[data-region=\"backup-records\"]')?.textContent.includes('黎明教育_全量数据_合成失败.xlsx')");
     assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });

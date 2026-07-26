@@ -35,16 +35,19 @@ test("Beijing results do not depend on UTC Shanghai or Tokyo host timezone", () 
 
 test("dashboard cards allow natural population growth while current lessons scroll internally", () => {
   assert.match(css, /\.dashboard-main-grid[^}]*align-items:\s*stretch/s);
-  assert.match(css, /\.dashboard-main-grid\s*>\s*:is\([^}]*height:\s*auto[^}]*overflow:\s*visible/s);
-  assert.match(css, /\.dashboard-current-section[^}]*height:\s*360px[^}]*overflow:\s*hidden/s);
+  assert.match(css, /\.dashboard-main-grid\s*>\s*:is\([^}]*height:\s*100%/s);
+  assert.match(css, /\.dashboard-current-section[^}]*min-height:\s*0[^}]*overflow:\s*hidden/s);
+  assert.doesNotMatch(css, /\.dashboard-current-section[^}]*height:\s*360px/s);
   assert.match(css, /\.dashboard-current-list[^}]*overflow-y:\s*auto/s);
 });
 
 test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.match(css, /\.student-query-detail-table[^}]*background:\s*var\(--panel\)/s);
   assert.match(css, /\.student-pricing-table\s+\.student-pricing-value-cell/);
-  assert.match(css, /\.class-group-student-set[^}]*white-space:\s*nowrap/s);
-  assert.match(css, /\.opening-balance-notes-input[^}]*resize:\s*none/s);
+  assert.match(css, /\.class-group-student-set[^}]*overflow:\s*visible[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /\.opening-balance-notes-input[^}]*white-space:\s*nowrap/s);
+  assert.match(app, /opening-balance-notes-cell"><input/);
+  assert.doesNotMatch(app, /opening-balance-notes-cell"><textarea/);
   assert.match(app, /function closeAllFloatingOverlays\(\)/);
   assert.match(app, /function setActiveView[\s\S]*closeAllFloatingOverlays\(\)/);
 });
