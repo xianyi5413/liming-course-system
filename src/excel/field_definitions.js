@@ -83,7 +83,7 @@ const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
   sheet("students", "学生档案", "students", [
     ["name", "姓名", { ...T, nullable: false }], ["grade", "当前年级", T],
     ...STUDENT_GRADE_STAGE_COLUMNS.map(([fieldKey, displayName]) => [fieldKey, displayName, { ...D, source_field: null }]),
-    ["guardian", "监护人", T], ["phone", "电话", T], ["status", "状态", { ...T, enum_values: ["在读", "暂停", "离校", "已流出", "已毕业"] }],
+    ["guardian", "监护人", T], ["phone", "电话", T], ["status", "状态", { ...T, enum_values: ["在读", "暂停", "已毕业", "已流出"] }],
     ["joined_at", "入学日期", D], ["left_at", "离校日期", D], ["notes", "备注", T],
   ], { sort_fields: ["name", "id"] }),
   sheet("teacher_travel_fees", "所有教师车费明细", "teacher_travel_fees", [
