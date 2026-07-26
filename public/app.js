@@ -2579,6 +2579,10 @@ function splitStudents(value) {
 }
 
 function studentSetInlineText(value) {
+  return studentSetNames(value).join("、") || "—";
+}
+
+function studentSetNames(value) {
   const seen = new Set();
   const names = [];
   for (const name of splitStudents(value)) {
@@ -2586,7 +2590,13 @@ function studentSetInlineText(value) {
     seen.add(name);
     names.push(name);
   }
-  return names.join("、") || "—";
+  return names;
+}
+
+function renderStudentSetBadges(value, options = {}) {
+  const names = studentSetNames(value);
+  if (!names.length) return '<span class="student-set-badges student-set-empty">—</span>';
+  return `<span class="student-set-badges">${names.map((name) => renderStudentBadge(name, options)).join("")}</span>`;
 }
 
 function optionalNumberValue(value) {
@@ -3466,7 +3476,7 @@ function rechargeChannelCellMarkup(row) {
   const editable = canWriteData();
   const label = rechargeChannelLabel(row);
   return `
-    <td class="recharge-channel-cell ${row?.channel ? "" : "is-unrecorded"}"
+    <td class="recharge-channel-cell adaptive-center ${row?.channel ? "" : "is-unrecorded"}"
         data-recharge-id="${escapeHtml(row.id)}"
         data-channel="${escapeHtml(row.channel || "")}"
         data-channel-other="${escapeHtml(row.channel_other || "")}"
@@ -3476,6 +3486,124 @@ function rechargeChannelCellMarkup(row) {
     </td>
   `;
 }
+
+const adaptiveTableTextWidthCache = new Map();
+let adaptiveTableMeasureToken = 0;
+let adaptiveTableResizeTimer = 0;
+let adaptiveTableCanvasContext = null;
+
+function adaptiveTableTextWidth(text, element) {
+  const value = String(text ?? "");
+  const style = getComputedStyle(element);
+  const font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const key = `${font}\u0000${value}`;
+  if (adaptiveTableTextWidthCache.has(key)) return adaptiveTableTextWidthCache.get(key);
+  if (!adaptiveTableCanvasContext) adaptiveTableCanvasContext = document.createElement("canvas").getContext("2d");
+  adaptiveTableCanvasContext.font = font;
+  const width = adaptiveTableCanvasContext.measureText(value).width;
+  adaptiveTableTextWidthCache.set(key, width);
+  return width;
+}
+
+function adaptiveHorizontalBox(element) {
+  const style = getComputedStyle(element);
+  return ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]
+    .reduce((sum, key) => sum + (Number.parseFloat(style[key]) || 0), 0);
+}
+
+function adaptiveStudentSetWidth(container) {
+  const badges = [...container.querySelectorAll(":scope > .student-badge")];
+  if (!badges.length) return adaptiveTableTextWidth(container.textContent.trim() || "—", container);
+  const style = getComputedStyle(container);
+  const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
+  return badges.reduce((sum, badge) => sum + badge.getBoundingClientRect().width, 0)
+    + gap * Math.max(0, badges.length - 1);
+}
+
+function adaptiveCellContentWidth(cell) {
+  const cellBox = adaptiveHorizontalBox(cell);
+  const studentSet = cell.querySelector(".student-set-badges");
+  if (studentSet) return adaptiveStudentSetWidth(studentSet) + cellBox;
+
+  const currencyDisplay = cell.querySelector(".currency-display");
+  if (currencyDisplay) {
+    const input = cell.querySelector(".currency-input");
+    const inputBox = input ? adaptiveHorizontalBox(input) : 0;
+    return Math.max(88, adaptiveTableTextWidth(currencyDisplay.textContent.trim(), currencyDisplay) + inputBox) + cellBox;
+  }
+
+  const input = cell.querySelector(":scope > .cell-input");
+  if (input) {
+    const displayValue = input.value || input.placeholder || "";
+    const affordance = input.type === "date" ? 28 : 0;
+    return Math.max(48, adaptiveTableTextWidth(displayValue, input) + adaptiveHorizontalBox(input) + affordance) + cellBox;
+  }
+
+  const inlineChildren = [...cell.children].filter((element) => !element.hidden);
+  if (inlineChildren.length) {
+    const widths = inlineChildren.map((element) => element.getBoundingClientRect().width);
+    return widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 5 + cellBox;
+  }
+  return adaptiveTableTextWidth(cell.textContent.trim(), cell) + cellBox;
+}
+
+function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
+  if (!table?.isConnected) return [];
+  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
+  const columns = [...table.querySelectorAll(":scope > colgroup > col")];
+  if (!headerCells.length || columns.length !== headerCells.length) return [];
+
+  table.classList.add("adaptive-table");
+  table.style.tableLayout = "auto";
+  table.style.width = "max-content";
+  table.style.minWidth = "0";
+  columns.forEach((column) => { column.style.width = "auto"; });
+
+  const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
+  const widths = headerCells.map((header, index) => {
+    if (header.classList.contains("select-col")) return 44;
+    let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
+    for (const row of bodyRows) {
+      const cell = row.children[index];
+      if (!cell || cell.classList.contains("empty")) continue;
+      width = Math.max(width, adaptiveCellContentWidth(cell));
+    }
+    return Math.ceil(width + 2);
+  });
+
+  const wrapper = table.closest(".table-wrap");
+  const naturalWidth = widths.reduce((sum, width) => sum + width, 0);
+  const availableWidth = wrapper?.clientWidth || naturalWidth;
+  const flexIndex = Number.isInteger(flexibleColumn)
+    ? flexibleColumn
+    : Number.parseInt(table.dataset.adaptiveFlexColumn || "", 10);
+  if (naturalWidth < availableWidth && Number.isInteger(flexIndex) && widths[flexIndex] != null) {
+    widths[flexIndex] += availableWidth - naturalWidth;
+  }
+
+  columns.forEach((column, index) => { column.style.width = `${Math.ceil(widths[index])}px`; });
+  const tableWidth = widths.reduce((sum, width) => sum + width, 0);
+  table.style.tableLayout = "fixed";
+  table.style.width = `${Math.ceil(tableWidth)}px`;
+  table.style.minWidth = "100%";
+  table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
+  return widths;
+}
+
+function scheduleAdaptiveTableColumns() {
+  const token = ++adaptiveTableMeasureToken;
+  requestAnimationFrame(() => {
+    if (token !== adaptiveTableMeasureToken) return;
+    document.querySelectorAll('table[data-adaptive-table="true"]').forEach((table) => {
+      applyAdaptiveTableColumns({ table });
+    });
+  });
+}
+
+window.addEventListener("resize", () => {
+  window.clearTimeout(adaptiveTableResizeTimer);
+  adaptiveTableResizeTimer = window.setTimeout(scheduleAdaptiveTableColumns, 120);
+}, { passive: true });
 
 function closeRechargeChannelOverlay({ restoreFocus = false } = {}) {
   const active = activeRechargeChannelOverlay;
@@ -3568,6 +3696,7 @@ async function saveRechargeChannel(active, channel, channelOther = "") {
       rowElement.dataset.channelOther = result.row.channel_other || "";
     }
     closeRechargeChannelOverlay();
+    scheduleAdaptiveTableColumns();
   } catch (error) {
     active.saving = false;
     active.cell.classList.remove("is-saving");
@@ -8914,7 +9043,7 @@ function renderRecharges() {
         <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table uniform-table nowrap-table">
+        <table class="recharge-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
           <colgroup>
             <col class="recharge-col-select"><col class="recharge-col-student"><col class="recharge-col-grade">
             <col class="recharge-col-money"><col class="recharge-col-money"><col class="recharge-col-date">
@@ -8926,14 +9055,14 @@ function renderRecharges() {
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" data-channel="${escapeHtml(row.channel || "")}" data-channel-other="${escapeHtml(row.channel_other || "")}">
-                <td class="select-col"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
-                <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
+                <td class="select-col adaptive-center"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
+                <td class="adaptive-center"><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 ${rechargeChannelCellMarkup(row)}
-                <td class="recharge-notes-cell"><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
+                <td class="recharge-notes-cell adaptive-left"><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
           </tbody>
@@ -8970,7 +9099,7 @@ function renderOpeningBalances() {
         <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table opening-balance-table uniform-table nowrap-table">
+        <table class="recharge-table opening-balance-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
           <colgroup><col class="opening-balance-col-select"><col class="opening-balance-col-student"><col class="opening-balance-col-grade"><col class="opening-balance-col-money"><col class="opening-balance-col-money"><col class="opening-balance-col-notes"></colgroup>
           <thead>
             <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
@@ -8978,12 +9107,12 @@ function renderOpeningBalances() {
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}">
-                <td class="select-col"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
-                <td class="opening-balance-notes-cell"><input class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" value="${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}"></td>
+                <td class="select-col adaptive-center"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
+                <td class="opening-balance-notes-cell adaptive-left"><input class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" value="${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
@@ -10986,19 +11115,20 @@ function renderStudentPricing() {
         <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
-        <table class="student-pricing-table uniform-table nowrap-table">
+        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+          <colgroup><col><col><col><col><col><col><col><col></colgroup>
           <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
-                <td class="select-col"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择学生单价规则"></td>
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide student-set-cell"><span class="student-set-inline">${escapeHtml(studentSetInlineText(row.student_names))}</span></td>
-                <td class="currency-input-cell student-pricing-value-cell">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
-                <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
-                <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
+                <td class="select-col adaptive-center"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择学生单价规则"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="text-cell adaptive-center">${renderSubjectBadge(row.subject)}</td>
+                <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
+                <td class="currency-input-cell student-pricing-value-cell adaptive-right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
+                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
+                <td class="adaptive-left"><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
             `).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
@@ -11025,7 +11155,7 @@ function renderClassGroups() {
   const hiddenInactiveCount = rows.filter((row) => !isActiveTeacherName(row.teacher)).length;
   renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
   contentEl.innerHTML = `
-    <div class="band">
+    <div class="band class-group-page">
       <div class="filter-bar compact unified-filter-bar class-group-filter-bar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers })}
@@ -11043,16 +11173,17 @@ function renderClassGroups() {
         </div>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="class-group-table uniform-table nowrap-table">
+        <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="3">
+          <colgroup><col><col><col><col><col></colgroup>
           <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="class-group-row" data-class-group-id="${row.id}">
-                <td class="text-cell center">${escapeHtml(row.teacher)}</td>
-                <td class="text-cell center">${renderGradeBadge(row.grade)}</td>
-                <td class="text-cell center">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide class-group-students-cell"><span class="class-group-student-set">${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、") || "—")}</span></td>
-                <td><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
+                <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
+                <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
+                <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
+                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无班级候选</td></tr>`}
           </tbody>
@@ -12311,7 +12442,7 @@ function renderTeacherSalaryRules() {
     `有效 ${effectiveCount} 条 / 待设置 ${pendingCount} 条 / 共 ${rules.length} 条`,
   );
   contentEl.innerHTML = `
-    <div class="band">
+    <div class="band teacher-salary-rule-page">
       <div class="filter-bar compact unified-filter-bar teacher-salary-rule-toolbar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
@@ -12337,20 +12468,21 @@ function renderTeacherSalaryRules() {
         ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="teacher-salary-rule-table uniform-table nowrap-table">
+        <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="8">
+          <colgroup><col><col><col><col><col><col><col><col><col></colgroup>
           <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
-                <td class="select-col"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>
-                <td class="text-cell">${escapeHtml(rule.teacher_name)}</td>
-                <td class="text-cell">${renderEntityBadge("grade", rule.grade)}</td>
-                <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
-                <td class="text-cell wide student-set-cell"><span class="student-set-inline">${escapeHtml(studentSetInlineText(rule.student_names))}</span></td>
-                <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
-                <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
-                <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
+                <td class="select-col adaptive-center"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>
+                <td class="text-cell adaptive-center">${escapeHtml(rule.teacher_name)}</td>
+                <td class="text-cell adaptive-center">${renderEntityBadge("grade", rule.grade)}</td>
+                <td class="text-cell adaptive-center">${renderEntityBadge("subject", rule.subject)}</td>
+                <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(rule.student_names, { fallbackGrade: rule.grade })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
+                <td class="text-cell adaptive-center"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
+                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
+                <td class="adaptive-left"><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
@@ -13928,6 +14060,7 @@ function render() {
   (renderers[view] || renderLessons)();
   applyReadonlyUi();
   wireEvents();
+  scheduleAdaptiveTableColumns();
   if (navigationTransitionStartedAt) {
     console.debug("[navigation-performance]", {
       view,
@@ -13952,6 +14085,7 @@ function rerenderContent(renderAction) {
   cleanupCustomSelectPortals();
   applyReadonlyUi();
   wireEvents();
+  scheduleAdaptiveTableColumns();
 }
 
 function upsertById(rows = [], row = {}) {

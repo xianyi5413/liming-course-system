@@ -38,6 +38,7 @@
     "test:backup-record-list": "node --test --test-concurrency=1 tests/backup_service.test.js tests/data_center_api.test.js tests/data_center_page.test.js",
     "test:layout-regressions": "node --test --test-concurrency=1 tests/dashboard_card.test.js tests/unified_filters.test.js tests/multi_page_regressions.test.js",
     "test:table-cell-layouts": "node --test --test-concurrency=1 tests/table_cell_layouts.test.js",
+    "test:adaptive-table-columns": "node --test --test-concurrency=1 tests/adaptive_table_columns.test.js",
     "test:recharge-channel-inline": "node --test --test-concurrency=1 tests/recharge_channel_inline.test.js",
     "test:student-balances": "node src/server.js --verify-student-balances",
     "audit:student-balances": "node src/server.js --audit-student-balances",

@@ -12015,20 +12015,6 @@ table th,
   width: 128px;
 }
 
-.recharge-page .recharge-table {
-  width: 100%;
-  min-width: 1094px;
-  table-layout: fixed;
-}
-
-.recharge-page .recharge-col-select { width: 48px; }
-.recharge-page .recharge-col-student { width: 136px; }
-.recharge-page .recharge-col-grade { width: 96px; }
-.recharge-page .recharge-col-money { width: 132px; }
-.recharge-page .recharge-col-date { width: 116px; }
-.recharge-page .recharge-col-channel { width: 152px; }
-.recharge-page .recharge-col-notes { width: auto; }
-
 .recharge-page .recharge-table :is(th, td) {
   overflow: visible;
   text-overflow: clip;
@@ -12139,48 +12125,6 @@ table th,
 .recharge-page .recharge-notes-cell,
 .recharge-page .recharge-notes-cell .cell-input {
   min-width: 0;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: nowrap;
-}
-
-.opening-balance-table {
-  width: 100%;
-  min-width: 1024px;
-}
-
-.opening-balance-col-notes {
-  width: 420px;
-}
-
-.opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
-  width: auto;
-  min-width: 360px;
-  overflow: visible;
-  text-overflow: clip;
-}
-
-.student-pricing-page .student-pricing-table,
-.teacher-salary-rule-table {
-  width: max-content;
-  min-width: 100%;
-  table-layout: auto;
-}
-
-.student-pricing-page .student-pricing-table .student-set-cell,
-.teacher-salary-rule-table .student-set-cell {
-  width: max-content;
-  min-width: max-content;
-  max-width: none;
-  overflow: visible;
-  text-align: left !important;
-  text-overflow: clip;
-  white-space: nowrap;
-}
-
-.student-set-inline {
-  display: inline;
-  max-width: none;
   overflow: visible;
   text-overflow: clip;
   white-space: nowrap;
@@ -13100,24 +13044,6 @@ body {
   white-space: nowrap;
 }
 
-/* Opening-balance rows stay single-line; only the outer table wrapper scrolls. */
-.opening-balance-table {
-  min-width: 900px;
-  table-layout: fixed;
-}
-
-.opening-balance-col-select { width: 48px; }
-.opening-balance-col-student { width: 150px; }
-.opening-balance-col-grade { width: 110px; }
-.opening-balance-col-money { width: 148px; }
-.opening-balance-col-notes { width: auto; }
-
-.opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
-  min-width: 280px;
-  width: auto;
-  white-space: nowrap;
-}
-
 .opening-balance-notes-input {
   display: block;
   width: 100%;
@@ -13737,21 +13663,6 @@ body {
   background: var(--danger-bg);
 }
 
-.class-group-students-cell {
-  width: max-content;
-  min-width: max-content;
-  max-width: none;
-  overflow: visible;
-  white-space: nowrap;
-}
-
-.class-group-student-set {
-  display: inline;
-  max-width: none;
-  overflow: visible;
-  white-space: nowrap;
-}
-
 .dashboard-current-viewport {
   display: flex;
   flex: 1 1 auto;
@@ -13889,19 +13800,185 @@ body {
   }
 }
 
-/* Keep the wider opening-balance notes contract after the legacy table block. */
-.opening-balance-table {
-  width: 100%;
-  min-width: 1120px;
+/* Five data-entry tables share content-driven column measurement and alignment.
+   Column widths are written once per render by applyAdaptiveTableColumns(). */
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) .table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: auto;
+  resize: none;
 }
 
-.opening-balance-col-notes {
-  width: 516px;
+table.adaptive-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
 }
 
+table.adaptive-table :is(th, td) {
+  box-sizing: border-box;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) table.uniform-table.adaptive-table.nowrap-table thead tr > th,
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) table.uniform-table.adaptive-table.nowrap-table thead tr > th.wide {
+  min-width: 0;
+  max-width: none;
+  text-align: center !important;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) table.uniform-table.adaptive-table td.adaptive-center {
+  text-align: center !important;
+}
+
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) table.uniform-table.adaptive-table td.adaptive-right {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+:is(
+  .recharge-page,
+  .opening-balance-page,
+  .student-pricing-page,
+  .class-group-page,
+  .teacher-salary-rule-page
+) table.uniform-table.adaptive-table td.adaptive-left {
+  text-align: left !important;
+}
+
+table.adaptive-table td.wide,
+table.adaptive-table td.adaptive-left,
+table.adaptive-table td.adaptive-right {
+  min-width: 0;
+  max-width: none;
+}
+
+table.adaptive-table .select-col {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding-right: 4px;
+  padding-left: 4px;
+  text-align: center !important;
+}
+
+table.adaptive-table .select-col input[type="checkbox"],
+table.adaptive-table .teacher-salary-rule-active {
+  display: block;
+  margin: 0 auto;
+}
+
+table.adaptive-table .adaptive-right :is(.cell-input, .currency-input) {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+table.adaptive-table .adaptive-right .currency-display {
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+table.adaptive-table .adaptive-center > :is(.entity-badge, .student-badge, .recharge-channel-value) {
+  margin-right: auto;
+  margin-left: auto;
+}
+
+table.adaptive-table .adaptive-left > .cell-input {
+  text-align: left !important;
+}
+
+table.adaptive-table .cell-input,
+table.adaptive-table .currency-input-wrap {
+  min-width: 0;
+  max-width: none;
+}
+
+table.adaptive-table .student-set-cell {
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  overflow: visible;
+  text-align: left !important;
+}
+
+.student-set-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+table.adaptive-table .student-set-badges .student-badge {
+  flex: 0 0 auto;
+  max-width: none;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.student-set-empty {
+  color: var(--muted);
+}
+
+.recharge-page .recharge-channel-cell {
+  text-align: center !important;
+}
+
+.opening-balance-table,
+.opening-balance-col-notes,
 .opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
   width: auto;
-  min-width: 360px;
+  min-width: 0;
+  max-width: none;
+}
+
+.opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell),
+.opening-balance-notes-input {
   overflow: visible;
   text-overflow: clip;
   white-space: nowrap;

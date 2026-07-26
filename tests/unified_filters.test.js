@@ -138,7 +138,8 @@ test("opening balances have no month UI and remain unchanged when the top month 
   await browser.waitFor("document.querySelector('.month-select')?.value === '2026-08-01'");
   assert.equal(await browser.evaluate("document.querySelector('.opening-balance-table tbody')?.textContent.trim()"), before);
   const rowHeightBefore = await browser.evaluate("document.querySelector('.opening-balance-row').getBoundingClientRect().height");
-  await browser.evaluate(`(() => { const field=document.querySelector('.opening-balance-notes-input'); field.value='${"连续很长的备注内容".repeat(20)}'; field.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+  await browser.evaluate(`(() => { const field=document.querySelector('.opening-balance-notes-input'); field.value='${"连续很长的备注内容".repeat(20)}'; field.dispatchEvent(new Event('input',{bubbles:true})); scheduleAdaptiveTableColumns(); })()`);
+  await browser.waitFor("document.querySelector('.opening-balance-notes-cell').getBoundingClientRect().width >= 280");
   const noteLayout = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); const cell=document.querySelector('.opening-balance-notes-cell'); const input=document.querySelector('.opening-balance-notes-input'); const style=getComputedStyle(input); const row=input.closest('tr'); const number=input.closest('.opening-balance-page').querySelector('input[type="number"]'); return { tag:input.tagName, cellWidth:cell.getBoundingClientRect().width, inputWidth:input.getBoundingClientRect().width, cellInnerWidth:cell.clientWidth, whiteSpace:style.whiteSpace, rowHeight:row.getBoundingClientRect().height, appearance:getComputedStyle(number).appearance, tableWidth:table.scrollWidth, containerWidth:wrap.clientWidth, containerOverflow:getComputedStyle(wrap).overflowX }; })()`);
   assert.ok(noteLayout.cellWidth >= 280); assert.ok(noteLayout.inputWidth <= noteLayout.cellInnerWidth + 1); assert.deepEqual({ tag: noteLayout.tag, whiteSpace: noteLayout.whiteSpace }, { tag: "INPUT", whiteSpace: "nowrap" }); assert.ok(Math.abs(noteLayout.rowHeight - rowHeightBefore) <= 1); assert.equal(noteLayout.appearance, "textfield");
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await browser.evaluate("window.dispatchEvent(new Event('resize'))");
@@ -152,9 +153,10 @@ test("class student sets render in full on one line with only the outer table wr
   await openView(browser, "students", "classGroups");
   const desktop = await browser.evaluate(`(() => {
     const cell=document.querySelector('.class-group-students-cell');
-    const set=cell.querySelector('.class-group-student-set');
+    const set=cell.querySelector('.student-set-badges');
     return {
       text:set.textContent,
+      badges:set.querySelectorAll('.student-badge').length,
       whiteSpace:getComputedStyle(set).whiteSpace,
       overflowX:getComputedStyle(set).overflowX,
       cellOverflow:getComputedStyle(cell).overflowX,
@@ -162,7 +164,7 @@ test("class student sets render in full on one line with only the outer table wr
       pageOverflow:document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   })()`);
-  assert.match(desktop.text, /、/);
+  assert.ok(desktop.badges > 1);
   assert.deepEqual({ whiteSpace: desktop.whiteSpace, overflowX: desktop.overflowX, cellOverflow: desktop.cellOverflow, complete: desktop.complete, pageOverflow: desktop.pageOverflow }, { whiteSpace: "nowrap", overflowX: "visible", cellOverflow: "visible", complete: true, pageOverflow: false });
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await browser.evaluate("window.dispatchEvent(new Event('resize'))");

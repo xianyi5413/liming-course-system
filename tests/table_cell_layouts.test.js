@@ -185,7 +185,6 @@ test("five target tables keep complete single-line cells and delegate narrow ove
       };
     })()`);
     assert.equal(layout.value, MIGRATION_NOTE);
-    assert.ok(layout.cellWidth >= 500);
     assert.equal(layout.textFits, true);
     assert.equal(layout.whiteSpace, "nowrap");
     assert.notEqual(layout.textOverflow, "ellipsis");
@@ -208,7 +207,7 @@ test("five target tables keep complete single-line cells and delegate narrow ove
     const single=byNote('单人规则');
     if (!multi||!single) return { missing:rows.map((row)=>({id:row.dataset.ruleId,note:row.querySelector('[data-field="notes"]')?.value||'',text:row.textContent})) };
     const cell=multi.querySelector('.student-set-cell');
-    const value=cell.querySelector('.student-set-inline');
+    const value=cell.querySelector('.student-set-badges');
     const style=getComputedStyle(value);
     return {
       text:value.textContent,
@@ -218,7 +217,7 @@ test("five target tables keep complete single-line cells and delegate narrow ove
         studentSetInlineText('["甲","乙","甲"]'),
         studentSetInlineText('甲，乙；甲\\n丙'),
       ],
-      badges:cell.querySelectorAll('.entity-badge,.entity-badge-list').length,
+      badges:cell.querySelectorAll('.student-badge').length,
       whiteSpace:style.whiteSpace,
       overflowX:style.overflowX,
       textOverflow:style.textOverflow,
@@ -227,10 +226,10 @@ test("five target tables keep complete single-line cells and delegate narrow ove
     };
   })()`);
   assert.equal(pricing.missing, undefined, JSON.stringify(pricing.missing || []));
-  assert.equal(pricing.text, STUDENTS.join("、"));
+  assert.equal(pricing.text, STUDENTS.join(""));
   assert.equal(pricing.empty, "—");
   assert.deepEqual(pricing.normalizedCases, ["甲、乙", "甲、乙", "甲、乙、丙"]);
-  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: 0, whiteSpace: "nowrap", overflowX: "visible", complete: true });
+  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", overflowX: "visible", complete: true });
   assert.notEqual(pricing.textOverflow, "ellipsis");
   assert.ok(pricing.heightDelta <= 1);
   await browser.click(".student-pricing-select-row");
@@ -247,11 +246,11 @@ test("five target tables keep complete single-line cells and delegate narrow ove
     const single=byNote('单人薪资规则');
     if (!multi||!single) return { missing:rows.map((row)=>({id:row.dataset.ruleId,note:row.querySelector('[data-field="notes"]')?.value||'',text:row.textContent})) };
     const cell=multi.querySelector('.student-set-cell');
-    const value=cell.querySelector('.student-set-inline');
+    const value=cell.querySelector('.student-set-badges');
     const style=getComputedStyle(value);
     return {
       text:value.textContent,
-      badges:cell.querySelectorAll('.entity-badge,.entity-badge-list').length,
+      badges:cell.querySelectorAll('.student-badge').length,
       whiteSpace:style.whiteSpace,
       overflowX:style.overflowX,
       textOverflow:style.textOverflow,
@@ -260,8 +259,8 @@ test("five target tables keep complete single-line cells and delegate narrow ove
     };
   })()`);
   assert.equal(salary.missing, undefined, JSON.stringify(salary.missing || []));
-  assert.equal(salary.text, STUDENTS.join("、"));
-  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, overflowX: salary.overflowX, complete: salary.complete }, { badges: 0, whiteSpace: "nowrap", overflowX: "visible", complete: true });
+  assert.equal(salary.text, STUDENTS.join(""));
+  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, overflowX: salary.overflowX, complete: salary.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", overflowX: "visible", complete: true });
   assert.notEqual(salary.textOverflow, "ellipsis");
   assert.ok(salary.heightDelta <= 1);
   await browser.click(".teacher-salary-rule-select-row");

@@ -44,16 +44,22 @@ test("dashboard cards allow natural population growth while current lessons scro
 test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.match(css, /\.student-query-detail-table[^}]*background:\s*var\(--panel\)/s);
   assert.match(css, /\.student-pricing-table\s+\.student-pricing-value-cell/);
-  assert.match(css, /\.class-group-student-set[^}]*overflow:\s*visible[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /\.student-set-badges[^}]*display:\s*inline-flex[^}]*flex-wrap:\s*nowrap/s);
   assert.match(css, /\.opening-balance-notes-input[^}]*white-space:\s*nowrap/s);
-  assert.match(app, /opening-balance-notes-cell"><input/);
-  assert.doesNotMatch(app, /opening-balance-notes-cell"><textarea/);
+  assert.match(app, /opening-balance-notes-cell adaptive-left"><input/);
+  assert.doesNotMatch(app, /opening-balance-notes-cell[^>]*><textarea/);
   assert.match(app, /function closeAllFloatingOverlays\(\)/);
   assert.match(app, /function setActiveView[\s\S]*closeAllFloatingOverlays\(\)/);
   assert.match(app, /function closeAllFloatingOverlays\(\)[\s\S]*closeRechargeChannelOverlay\(\)/);
+  assert.match(app, /function applyAdaptiveTableColumns\(/);
+  assert.match(app, /function scheduleAdaptiveTableColumns\(/);
+  assert.match(app, /function renderStudentSetBadges\(value, options = \{\}\)/);
   assert.match(app, /function studentSetInlineText\(value\)/);
-  assert.match(app, /student-set-inline/);
-  assert.doesNotMatch(app, /student-pricing-rule-row[\s\S]{0,900}entity-badge-list/);
+  assert.match(app, /student-pricing-rule-row[\s\S]{0,900}renderStudentSetBadges/);
+  assert.match(app, /class-group-row[\s\S]{0,900}renderStudentSetBadges/);
+  assert.match(app, /teacher-salary-rule-row[\s\S]{0,900}renderStudentSetBadges/);
+  assert.doesNotMatch(css, /516px/);
+  assert.doesNotMatch(css, /\.opening-balance-table[^}]*min-width:\s*1120px/s);
 });
 
 test("summary teacher and pricing scopes are based on raw data and selected month", () => {
