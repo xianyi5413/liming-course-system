@@ -369,6 +369,8 @@ let rechargeDateFilter = { start: "", end: "" };
 let rechargeModalOpen = false;
 let rechargeModalDraft = null;
 let selectedRechargeIds = new Set();
+let activeRechargeChannelOverlay = null;
+let rechargeChannelEventsBound = false;
 let openingBalanceFilter = { student: "", grade: "" };
 let openingBalanceModalOpen = false;
 let selectedOpeningBalanceIds = new Set();
@@ -1145,6 +1147,7 @@ function closeAllFloatingOverlays() {
   cleanupCustomSelectPortals();
   closeCustomDatePicker();
   closeDateRangePicker();
+  closeRechargeChannelOverlay();
 }
 
 function enhanceCustomSelects() {
@@ -2575,6 +2578,17 @@ function splitStudents(value) {
     .filter(Boolean);
 }
 
+function studentSetInlineText(value) {
+  const seen = new Set();
+  const names = [];
+  for (const name of splitStudents(value)) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names.join("、") || "—";
+}
+
 function optionalNumberValue(value) {
   if (value == null || (typeof value === "string" && value.trim() === "")) return null;
   const n = Number(value);
@@ -3446,6 +3460,227 @@ function rechargeChannelLabel(row) {
   const label = rechargeChannelOptions.find(([key]) => key === value)?.[1] || "未记录";
   if (value === "other" && row?.channel_other) return `${label}：${row.channel_other}`;
   return label;
+}
+
+function rechargeChannelCellMarkup(row) {
+  const editable = canWriteData();
+  const label = rechargeChannelLabel(row);
+  return `
+    <td class="recharge-channel-cell ${row?.channel ? "" : "is-unrecorded"}"
+        data-recharge-id="${escapeHtml(row.id)}"
+        data-channel="${escapeHtml(row.channel || "")}"
+        data-channel-other="${escapeHtml(row.channel_other || "")}"
+        ${editable ? 'data-channel-editable="1" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"' : 'aria-readonly="true"'}>
+      <span class="recharge-channel-value">${escapeHtml(label)}</span>
+      <span class="recharge-channel-saving" hidden aria-hidden="true"></span>
+    </td>
+  `;
+}
+
+function closeRechargeChannelOverlay({ restoreFocus = false } = {}) {
+  const active = activeRechargeChannelOverlay;
+  if (!active) {
+    document.querySelectorAll(".recharge-channel-overlay").forEach((menu) => menu.remove());
+    return;
+  }
+  const cell = active.cell;
+  active.menu?.remove();
+  if (cell?.isConnected) {
+    cell.classList.remove("is-open", "is-saving");
+    cell.setAttribute("aria-expanded", "false");
+    cell.querySelector(".recharge-channel-saving")?.setAttribute("hidden", "");
+    if (restoreFocus) cell.focus({ preventScroll: true });
+  }
+  activeRechargeChannelOverlay = null;
+}
+
+function positionRechargeChannelOverlay() {
+  const active = activeRechargeChannelOverlay;
+  if (!active?.cell?.isConnected || !active?.menu?.isConnected) {
+    closeRechargeChannelOverlay();
+    return;
+  }
+  const rect = active.cell.getBoundingClientRect();
+  const menu = active.menu;
+  const viewportGap = 8;
+  menu.style.minWidth = `${Math.max(200, Math.round(rect.width))}px`;
+  menu.style.maxWidth = `${Math.max(220, Math.min(360, window.innerWidth - viewportGap * 2))}px`;
+  menu.style.left = `${viewportGap}px`;
+  menu.style.top = `${viewportGap}px`;
+  const menuRect = menu.getBoundingClientRect();
+  const left = Math.max(viewportGap, Math.min(rect.left, window.innerWidth - menuRect.width - viewportGap));
+  const below = window.innerHeight - rect.bottom - viewportGap;
+  const above = rect.top - viewportGap;
+  const openUp = below < Math.min(220, menuRect.height) && above > below;
+  const top = openUp
+    ? Math.max(viewportGap, rect.top - menuRect.height - 6)
+    : Math.min(window.innerHeight - menuRect.height - viewportGap, rect.bottom + 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.max(viewportGap, top)}px`;
+  menu.classList.toggle("open-up", openUp);
+}
+
+function showRechargeChannelOtherEditor(active, { focus = true } = {}) {
+  if (!active?.menu) return;
+  active.menu.querySelectorAll(".recharge-channel-option").forEach((option) => {
+    const selected = option.dataset.channel === "other";
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+  const editor = active.menu.querySelector(".recharge-channel-other-editor");
+  const input = active.menu.querySelector(".recharge-channel-other-input");
+  if (editor) editor.hidden = false;
+  if (input && !input.value) input.value = active.channel === "other" ? active.channelOther : "";
+  active.menu.querySelector(".recharge-channel-error").textContent = "";
+  positionRechargeChannelOverlay();
+  if (focus) requestAnimationFrame(() => input?.focus({ preventScroll: true }));
+}
+
+async function saveRechargeChannel(active, channel, channelOther = "") {
+  if (!active || active !== activeRechargeChannelOverlay || active.saving) return;
+  const normalizedOther = channel === "other" ? String(channelOther || "").trim() : "";
+  const errorNode = active.menu.querySelector(".recharge-channel-error");
+  if (channel === "other" && !normalizedOther) {
+    errorNode.textContent = "请填写其他渠道说明";
+    active.menu.querySelector(".recharge-channel-other-input")?.focus({ preventScroll: true });
+    return;
+  }
+  active.saving = true;
+  active.cell.classList.add("is-saving");
+  active.cell.querySelector(".recharge-channel-saving")?.removeAttribute("hidden");
+  active.menu.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+  errorNode.textContent = "";
+  try {
+    const result = await request(`/api/recharges/${encodeURIComponent(active.id)}/channel`, {
+      method: "PATCH",
+      body: { channel, channel_other: normalizedOther },
+    });
+    if (!result?.row) throw new Error("渠道保存结果缺少记录");
+    state.recharges = upsertById(state.recharges || [], result.row);
+    const rowElement = active.cell.closest(".recharge-row");
+    const label = rechargeChannelLabel(result.row);
+    active.cell.dataset.channel = result.row.channel || "";
+    active.cell.dataset.channelOther = result.row.channel_other || "";
+    active.cell.classList.toggle("is-unrecorded", !result.row.channel);
+    active.cell.querySelector(".recharge-channel-value").textContent = label;
+    if (rowElement) {
+      rowElement.dataset.channel = result.row.channel || "";
+      rowElement.dataset.channelOther = result.row.channel_other || "";
+    }
+    closeRechargeChannelOverlay();
+  } catch (error) {
+    active.saving = false;
+    active.cell.classList.remove("is-saving");
+    active.cell.querySelector(".recharge-channel-saving")?.setAttribute("hidden", "");
+    active.menu.querySelectorAll("button, input").forEach((control) => { control.disabled = false; });
+    errorNode.textContent = error.message || "保存失败，请重试";
+    positionRechargeChannelOverlay();
+  }
+}
+
+function openRechargeChannelOverlay(cell) {
+  if (!cell?.isConnected || cell.dataset.channelEditable !== "1" || isReadonlyUser()) return;
+  if (activeRechargeChannelOverlay?.cell === cell) {
+    closeRechargeChannelOverlay({ restoreFocus: true });
+    return;
+  }
+  closeAllFloatingOverlays();
+  const channel = String(cell.dataset.channel || "");
+  const channelOther = String(cell.dataset.channelOther || "");
+  const menu = document.createElement("div");
+  menu.className = "custom-select-menu recharge-channel-overlay open";
+  menu.dataset.rechargeChannelOverlay = "1";
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "选择充值来源或渠道");
+  menu.innerHTML = `
+    ${rechargeChannelOptions.map(([value, label]) => `
+      <button class="custom-select-option recharge-channel-option ${channel === value ? "selected" : ""}"
+              type="button" role="option" data-channel="${escapeHtml(value)}"
+              aria-selected="${channel === value ? "true" : "false"}">${escapeHtml(label)}</button>
+    `).join("")}
+    <div class="recharge-channel-other-editor" ${channel === "other" ? "" : "hidden"}>
+      <label for="recharge-channel-other-inline">其他渠道说明</label>
+      <input id="recharge-channel-other-inline" class="control recharge-channel-other-input" maxlength="100"
+             value="${escapeHtml(channel === "other" ? channelOther : "")}" autocomplete="off">
+      <div class="recharge-channel-error" role="alert"></div>
+      <div class="recharge-channel-editor-actions">
+        <button class="btn compact recharge-channel-cancel" type="button">取消</button>
+        <button class="btn primary compact recharge-channel-save-other" type="button">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(menu);
+  cell.classList.add("is-open");
+  cell.setAttribute("aria-expanded", "true");
+  activeRechargeChannelOverlay = {
+    id: Number(cell.dataset.rechargeId),
+    cell,
+    menu,
+    channel,
+    channelOther,
+    saving: false,
+  };
+  positionRechargeChannelOverlay();
+  if (channel === "other") showRechargeChannelOtherEditor(activeRechargeChannelOverlay, { focus: false });
+  const selected = menu.querySelector(".recharge-channel-option.selected") || menu.querySelector(".recharge-channel-option");
+  requestAnimationFrame(() => selected?.focus({ preventScroll: true }));
+}
+
+function ensureRechargeChannelEvents() {
+  if (rechargeChannelEventsBound) return;
+  rechargeChannelEventsBound = true;
+  document.addEventListener("click", (event) => {
+    const option = event.target.closest(".recharge-channel-option");
+    if (option && activeRechargeChannelOverlay?.menu.contains(option)) {
+      event.preventDefault();
+      const channel = option.dataset.channel || "";
+      if (channel === "other") showRechargeChannelOtherEditor(activeRechargeChannelOverlay);
+      else saveRechargeChannel(activeRechargeChannelOverlay, channel, "");
+      return;
+    }
+    if (event.target.closest(".recharge-channel-cancel") && activeRechargeChannelOverlay) {
+      event.preventDefault();
+      closeRechargeChannelOverlay({ restoreFocus: true });
+      return;
+    }
+    if (event.target.closest(".recharge-channel-save-other") && activeRechargeChannelOverlay) {
+      event.preventDefault();
+      const value = activeRechargeChannelOverlay.menu.querySelector(".recharge-channel-other-input")?.value || "";
+      saveRechargeChannel(activeRechargeChannelOverlay, "other", value);
+      return;
+    }
+    const cell = event.target.closest(".recharge-channel-cell[data-channel-editable='1']");
+    if (cell) {
+      event.preventDefault();
+      openRechargeChannelOverlay(cell);
+      return;
+    }
+    if (activeRechargeChannelOverlay && !event.target.closest(".recharge-channel-overlay")) closeRechargeChannelOverlay();
+  });
+  document.addEventListener("keydown", (event) => {
+    const cell = event.target.closest?.(".recharge-channel-cell[data-channel-editable='1']");
+    if (cell && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      openRechargeChannelOverlay(cell);
+      return;
+    }
+    if (!activeRechargeChannelOverlay) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRechargeChannelOverlay({ restoreFocus: true });
+      return;
+    }
+    if (event.target.matches?.(".recharge-channel-other-input") && event.key === "Enter") {
+      event.preventDefault();
+      saveRechargeChannel(activeRechargeChannelOverlay, "other", event.target.value);
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (activeRechargeChannelOverlay) positionRechargeChannelOverlay();
+  });
+  window.addEventListener("scroll", () => {
+    if (activeRechargeChannelOverlay) positionRechargeChannelOverlay();
+  }, true);
 }
 
 function rechargeModalMarkup() {
@@ -7890,6 +8125,10 @@ function renderFeeDetails() {
       </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
         <table class="fee-detail-table uniform-table nowrap-table">
+          <colgroup>
+            <col class="fee-detail-col-select"><col><col><col><col><col class="fee-detail-col-time">
+            <col><col><col><col><col><col><col>
+          </colgroup>
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
@@ -8676,8 +8915,13 @@ function renderRecharges() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table">
+          <colgroup>
+            <col class="recharge-col-select"><col class="recharge-col-student"><col class="recharge-col-grade">
+            <col class="recharge-col-money"><col class="recharge-col-money"><col class="recharge-col-date">
+            <col class="recharge-col-channel"><col class="recharge-col-notes">
+          </colgroup>
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide">备注</th><th>操作</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -8687,12 +8931,11 @@ function renderRecharges() {
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
-            <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
-                <td class="recharge-channel-cell" title="${escapeHtml(rechargeChannelLabel(row))}">${escapeHtml(rechargeChannelLabel(row))}</td>
-                <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
-                <td><button class="btn compact edit-recharge-record" data-id="${escapeHtml(row.id)}" type="button">编辑</button></td>
+                <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
+                ${rechargeChannelCellMarkup(row)}
+                <td class="recharge-notes-cell"><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无充值记录</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -10752,7 +10995,7 @@ function renderStudentPricing() {
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
+                <td class="text-cell wide student-set-cell"><span class="student-set-inline">${escapeHtml(studentSetInlineText(row.student_names))}</span></td>
                 <td class="currency-input-cell student-pricing-value-cell">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
                 <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
                 <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
@@ -12103,7 +12346,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell">${escapeHtml(rule.teacher_name)}</td>
                 <td class="text-cell">${renderEntityBadge("grade", rule.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
-                <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(rule.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: rule.grade })).join("")}</span></td>
+                <td class="text-cell wide student-set-cell"><span class="student-set-inline">${escapeHtml(studentSetInlineText(rule.student_names))}</span></td>
                 <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
                 <td class="text-cell"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
                 <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
@@ -13534,7 +13777,7 @@ function applyReadonlyUi() {
     ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
     ".base-data-add", ".base-data-delete", ".color-config-save", ".color-config-reset", ".color-config-input", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
-    ".pricing-field", ".recharge-field", ".open-recharge-modal", ".edit-recharge-record", ".add-recharge-record", ".recharge-modal-field", ".recharge-channel-radio", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
+    ".pricing-field", ".recharge-field", ".open-recharge-modal", ".add-recharge-record", ".recharge-modal-field", ".recharge-channel-radio", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
     ".class-group-field", ".batch-delete-student-profiles",
     ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field", ".teacher-salary-notes-field",
     ".batch-delete-teacher-profiles",
@@ -13639,6 +13882,7 @@ function render() {
   }
   if (view !== "studentProfiles") studentGradeStageConflictModalOpen = false;
   closeSearchablePicker();
+  closeRechargeChannelOverlay();
   closeDateRangePicker();
   appEl?.classList.remove("login-mode");
   appEl?.classList.toggle("readonly-mode", isReadonlyUser());
@@ -13703,6 +13947,7 @@ function render() {
 function rerenderContent(renderAction) {
   closeSearchablePicker();
   closeDateRangePicker();
+  closeRechargeChannelOverlay();
   renderAction();
   cleanupCustomSelectPortals();
   applyReadonlyUi();
@@ -14185,6 +14430,7 @@ function bindDateRangePickerControls() {
 }
 
 function wireEvents() {
+  ensureRechargeChannelEvents();
   document.querySelectorAll(".dashboard-open-shortcut-config").forEach((button) => {
     button.addEventListener("click", () => {
       dashboardShortcutDraft = dashboardSelectedShortcutKeys();
@@ -14919,16 +15165,6 @@ function wireEvents() {
   document.querySelectorAll(".open-recharge-modal").forEach((button) => {
     button.addEventListener("click", () => {
       rechargeModalDraft = { recharge_date: defaultRechargeDate(), cur_recharge: 0, cur_gift: 0, channel: "wechat" };
-      rechargeModalOpen = true;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".edit-recharge-record").forEach((button) => {
-    button.addEventListener("click", () => {
-      const record = rechargeRows().find((row) => Number(row.id) === Number(button.dataset.id));
-      if (!record) return alert("未找到充值记录，请刷新后重试");
-      rechargeModalDraft = { ...record, notes: record.recharge_notes || record.notes || "" };
       rechargeModalOpen = true;
       render();
     });

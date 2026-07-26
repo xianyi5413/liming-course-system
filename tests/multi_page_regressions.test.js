@@ -50,6 +50,10 @@ test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.doesNotMatch(app, /opening-balance-notes-cell"><textarea/);
   assert.match(app, /function closeAllFloatingOverlays\(\)/);
   assert.match(app, /function setActiveView[\s\S]*closeAllFloatingOverlays\(\)/);
+  assert.match(app, /function closeAllFloatingOverlays\(\)[\s\S]*closeRechargeChannelOverlay\(\)/);
+  assert.match(app, /function studentSetInlineText\(value\)/);
+  assert.match(app, /student-set-inline/);
+  assert.doesNotMatch(app, /student-pricing-rule-row[\s\S]{0,900}entity-badge-list/);
 });
 
 test("summary teacher and pricing scopes are based on raw data and selected month", () => {
@@ -67,4 +71,7 @@ test("recharge modal uses structured accessible channels with legacy unknown dis
   assert.match(app, /channel === "other" && !channelOther/);
   assert.match(app, /return label;[\s\S]*未记录/);
   assert.match(server, /RECHARGE_CHANNELS = new Set\(\["wechat", "cash", "alipay", "other"\]\)/);
+  assert.match(server, /rechargeChannelMatch[\s\S]*渠道局部更新只允许提交 channel 和 channel_other/);
+  assert.doesNotMatch(app, /class="btn compact edit-recharge-record"/);
+  assert.match(app, /colspan="8" class="empty">暂无充值记录/);
 });

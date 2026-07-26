@@ -11998,6 +11998,202 @@ table th,
   }
 }
 
+/* 2026-07 table-cell pass: each wide value remains intact and only the
+   page-scoped outer table wrapper owns horizontal scrolling. */
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6) {
+  width: 128px;
+  min-width: 128px;
+  max-width: 128px;
+  overflow: visible;
+  text-align: center !important;
+  text-overflow: clip;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.fee-detail-table col.fee-detail-col-time {
+  width: 128px;
+}
+
+.recharge-page .recharge-table {
+  width: 100%;
+  min-width: 1094px;
+  table-layout: fixed;
+}
+
+.recharge-page .recharge-col-select { width: 48px; }
+.recharge-page .recharge-col-student { width: 136px; }
+.recharge-page .recharge-col-grade { width: 96px; }
+.recharge-page .recharge-col-money { width: 132px; }
+.recharge-page .recharge-col-date { width: 116px; }
+.recharge-page .recharge-col-channel { width: 152px; }
+.recharge-page .recharge-col-notes { width: auto; }
+
+.recharge-page .recharge-table :is(th, td) {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.recharge-page .recharge-channel-cell {
+  position: relative;
+  max-width: none;
+  padding: 5px 8px;
+  overflow: visible;
+  text-align: center !important;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.recharge-page .recharge-channel-cell[data-channel-editable="1"] {
+  cursor: pointer;
+}
+
+.recharge-page .recharge-channel-cell[data-channel-editable="1"]:hover,
+.recharge-page .recharge-channel-cell.is-open {
+  background: var(--surface-hover);
+}
+
+.recharge-page .recharge-channel-cell[data-channel-editable="1"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.recharge-channel-value {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--section-head);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.recharge-channel-cell.is-unrecorded .recharge-channel-value {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.recharge-channel-saving {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  vertical-align: -2px;
+  animation: spin 700ms linear infinite;
+}
+
+.recharge-channel-saving[hidden] {
+  display: none;
+}
+
+.recharge-channel-overlay {
+  width: min(320px, calc(100vw - 16px));
+  max-height: min(420px, calc(100vh - 16px));
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.recharge-channel-overlay .recharge-channel-option {
+  min-height: 38px;
+}
+
+.recharge-channel-other-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.recharge-channel-other-editor[hidden] {
+  display: none;
+}
+
+.recharge-channel-other-editor label {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 750;
+}
+
+.recharge-channel-other-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.recharge-channel-error {
+  min-height: 18px;
+  color: var(--danger);
+  font-size: var(--text-caption);
+}
+
+.recharge-channel-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.recharge-page .recharge-notes-cell,
+.recharge-page .recharge-notes-cell .cell-input {
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.opening-balance-table {
+  width: 100%;
+  min-width: 1024px;
+}
+
+.opening-balance-col-notes {
+  width: 420px;
+}
+
+.opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
+  width: auto;
+  min-width: 360px;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.student-pricing-page .student-pricing-table,
+.teacher-salary-rule-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+
+.student-pricing-page .student-pricing-table .student-set-cell,
+.teacher-salary-rule-table .student-set-cell {
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-align: left !important;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.student-set-inline {
+  display: inline;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.student-pricing-page .table-wrap,
+.recharge-page .table-wrap,
+.opening-balance-page .table-wrap,
+.fee-detail-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .teacher-rule-salary-cell {
   min-width: 180px;
   max-width: 260px;
@@ -13691,4 +13887,22 @@ body {
   .student-stage-conflict-check > .student-stage-conflict-refresh {
     align-self: flex-start;
   }
+}
+
+/* Keep the wider opening-balance notes contract after the legacy table block. */
+.opening-balance-table {
+  width: 100%;
+  min-width: 1120px;
+}
+
+.opening-balance-col-notes {
+  width: 516px;
+}
+
+.opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell) {
+  width: auto;
+  min-width: 360px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
 }

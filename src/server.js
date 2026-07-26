@@ -30,7 +30,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260726-batch-pricing-backup-list-layout";
+const APP_VERSION = process.env.APP_VERSION || "20260726-table-layout-recharge-channel";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -13939,6 +13939,7 @@ async function handleApi(req, res, url) {
   }
 
   const rechargeRecordMatch = url.pathname.match(/^\/api\/recharges\/(\d+)$/);
+  const rechargeChannelMatch = url.pathname.match(/^\/api\/recharges\/(\d+)\/channel$/);
   if (req.method === "GET" && url.pathname === "/api/recharges") {
     const monthKey = resolveMonthKey(url);
     return sendJson(res, {
@@ -14015,6 +14016,40 @@ async function handleApi(req, res, url) {
       details: { student_name: studentName, month_key: monthKey, cur_recharge: curRecharge, cur_gift: curGift, recharge_date: text(body.recharge_date), channel: channel.channel, channel_other: channel.channel_other },
     }, req);
     return sendJson(res, { ok: true, row: created.row, carry_over: created.carry_over }, 201);
+  }
+
+  if (rechargeChannelMatch && req.method === "PATCH") {
+    const id = Number(rechargeChannelMatch[1]);
+    const before = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
+    if (!before) return sendError(res, 404, "充值记录不存在");
+    const body = await readBody(req);
+    const unsupportedFields = Object.keys(body || {}).filter((key) => !["channel", "channel_other"].includes(key));
+    if (unsupportedFields.length) return sendError(res, 400, "渠道局部更新只允许提交 channel 和 channel_other");
+    const channel = normalizeRechargeChannel(body.channel, body.channel_other);
+    if (channel.error) return sendError(res, 400, channel.error);
+    db.prepare(`
+      UPDATE recharge_records
+      SET channel = ?, channel_other = ?
+      WHERE id = ?
+    `).run(channel.channel, channel.channel_other, id);
+    const row = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
+    const beforeChannel = { id, channel: text(before.channel), channel_other: text(before.channel_other) };
+    const afterChannel = { id, channel: text(row.channel), channel_other: text(row.channel_other) };
+    recordAuditEvent(req, user, {
+      action: "update_channel",
+      entity_type: "recharge_records",
+      entity_id: String(id),
+      before: beforeChannel,
+      after: afterChannel,
+    });
+    writeOperationLog(user, {
+      operation_type: "修改充值渠道",
+      operation_content: `充值记录 ${id} 的来源/渠道已更新为 ${channel.channel === "other" ? `其他：${channel.channel_other}` : channel.channel}`,
+      target_type: "recharge_records",
+      target_id: String(id),
+      details: { changed_fields: ["channel", "channel_other"], before: beforeChannel, after: afterChannel },
+    }, req);
+    return sendJson(res, { ok: true, row });
   }
 
   if (rechargeRecordMatch && req.method === "PATCH") {

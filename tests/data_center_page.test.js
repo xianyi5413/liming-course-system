@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260726-batch-pricing-backup-list-layout",
-      "/app.js?v=20260726-batch-pricing-backup-list-layout",
+      "/styles.css?v=20260726-table-layout-recharge-channel",
+      "/app.js?v=20260726-table-layout-recharge-channel",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
