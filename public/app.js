@@ -335,6 +335,8 @@ let teacherSalaryRuleCandidateSync = { requested: false, busy: false, result: nu
 let teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
 let teacherSalaryRuleFilter = { teacher: "", grade: "", subject: "", student: "", salary_status: "" };
 let teacherSalaryRuleModalOpen = false;
+let selectedTeacherSalaryRuleIds = new Set();
+let teacherSalaryRuleBatchModalOpen = false;
 let passwordModalOpen = false;
 let userMenuOpen = false;
 let userAdminNotice = "";
@@ -367,6 +369,8 @@ let rechargeDateFilter = { start: "", end: "" };
 let rechargeModalOpen = false;
 let rechargeModalDraft = null;
 let selectedRechargeIds = new Set();
+let activeRechargeChannelOverlay = null;
+let rechargeChannelEventsBound = false;
 let openingBalanceFilter = { student: "", grade: "" };
 let openingBalanceModalOpen = false;
 let selectedOpeningBalanceIds = new Set();
@@ -375,6 +379,8 @@ let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
+let selectedStudentPricingIds = new Set();
+let studentPricingBatchModalOpen = false;
 let classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
 let classGroupHideInactiveTeachers = localStorage.getItem(CLASS_GROUP_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
 let teacherSalaryRuleHideInactiveTeachers = localStorage.getItem(TEACHER_RULE_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
@@ -599,6 +605,7 @@ function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
@@ -854,6 +861,14 @@ function setActiveView(nextView) {
     selectedTeacherSalaryLessonIds = new Set();
     teacherSalaryBatchResult = null;
     teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
+  }
+  if (view === "studentPricing" && previousView !== "studentPricing") {
+    selectedStudentPricingIds = new Set();
+    studentPricingBatchModalOpen = false;
+  }
+  if (view === "teacherSalaryRules" && previousView !== "teacherSalaryRules") {
+    selectedTeacherSalaryRuleIds = new Set();
+    teacherSalaryRuleBatchModalOpen = false;
   }
   activeNavGroup = view ? groupForView(view).key : "";
   if (activeNavGroup && navExpansionMode !== "all-collapsed") expandedNavGroups.add(activeNavGroup);
@@ -1132,6 +1147,7 @@ function closeAllFloatingOverlays() {
   cleanupCustomSelectPortals();
   closeCustomDatePicker();
   closeDateRangePicker();
+  closeRechargeChannelOverlay();
 }
 
 function enhanceCustomSelects() {
@@ -2562,6 +2578,27 @@ function splitStudents(value) {
     .filter(Boolean);
 }
 
+function studentSetInlineText(value) {
+  return studentSetNames(value).join("、") || "—";
+}
+
+function studentSetNames(value) {
+  const seen = new Set();
+  const names = [];
+  for (const name of splitStudents(value)) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+function renderStudentSetBadges(value, options = {}) {
+  const names = studentSetNames(value);
+  if (!names.length) return '<span class="student-set-badges student-set-empty">—</span>';
+  return `<span class="student-set-badges">${names.map((name) => renderStudentBadge(name, options)).join("")}</span>`;
+}
+
 function optionalNumberValue(value) {
   if (value == null || (typeof value === "string" && value.trim() === "")) return null;
   const n = Number(value);
@@ -2822,7 +2859,7 @@ function teacherSalaryRuleMatchesFilter(rule, filter = teacherSalaryRuleFilter) 
   if (filter.teacher && !textContains(rule.teacher_name, filter.teacher)) return false;
   if (filter.grade && !textContains(rule.grade, filter.grade)) return false;
   if (filter.subject && !textContains(rule.subject, filter.subject)) return false;
-  if (filter.student && !textContains(rule.student_names, filter.student)) return false;
+  if (filter.student && ![rule.student_names, rule.teacher_name, rule.grade, rule.subject, rule.notes].some((value) => textContains(value, filter.student))) return false;
   if (filter.salary_status && teacherSalaryRuleSalaryStatus(rule) !== filter.salary_status) return false;
   return true;
 }
@@ -3433,6 +3470,346 @@ function rechargeChannelLabel(row) {
   const label = rechargeChannelOptions.find(([key]) => key === value)?.[1] || "未记录";
   if (value === "other" && row?.channel_other) return `${label}：${row.channel_other}`;
   return label;
+}
+
+function rechargeChannelCellMarkup(row) {
+  const editable = canWriteData();
+  const label = rechargeChannelLabel(row);
+  return `
+    <td class="recharge-channel-cell adaptive-center ${row?.channel ? "" : "is-unrecorded"}"
+        data-recharge-id="${escapeHtml(row.id)}"
+        data-channel="${escapeHtml(row.channel || "")}"
+        data-channel-other="${escapeHtml(row.channel_other || "")}"
+        ${editable ? 'data-channel-editable="1" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"' : 'aria-readonly="true"'}>
+      <span class="recharge-channel-value">${escapeHtml(label)}</span>
+      <span class="recharge-channel-saving" hidden aria-hidden="true"></span>
+    </td>
+  `;
+}
+
+const adaptiveTableTextWidthCache = new Map();
+let adaptiveTableMeasureToken = 0;
+let adaptiveTableResizeTimer = 0;
+let adaptiveTableCanvasContext = null;
+
+function adaptiveTableTextWidth(text, element) {
+  const value = String(text ?? "");
+  const style = getComputedStyle(element);
+  const font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const key = `${font}\u0000${value}`;
+  if (adaptiveTableTextWidthCache.has(key)) return adaptiveTableTextWidthCache.get(key);
+  if (!adaptiveTableCanvasContext) adaptiveTableCanvasContext = document.createElement("canvas").getContext("2d");
+  adaptiveTableCanvasContext.font = font;
+  const width = adaptiveTableCanvasContext.measureText(value).width;
+  adaptiveTableTextWidthCache.set(key, width);
+  return width;
+}
+
+function adaptiveHorizontalBox(element) {
+  const style = getComputedStyle(element);
+  return ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]
+    .reduce((sum, key) => sum + (Number.parseFloat(style[key]) || 0), 0);
+}
+
+function adaptiveStudentSetWidth(container) {
+  const badges = [...container.querySelectorAll(":scope > .student-badge")];
+  if (!badges.length) return adaptiveTableTextWidth(container.textContent.trim() || "—", container);
+  const style = getComputedStyle(container);
+  const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
+  return badges.reduce((sum, badge) => sum + badge.getBoundingClientRect().width, 0)
+    + gap * Math.max(0, badges.length - 1);
+}
+
+function adaptiveCellContentWidth(cell) {
+  const cellBox = adaptiveHorizontalBox(cell);
+  const studentSet = cell.querySelector(".student-set-badges");
+  if (studentSet) return adaptiveStudentSetWidth(studentSet) + cellBox;
+
+  const currencyDisplay = cell.querySelector(".currency-display");
+  if (currencyDisplay) {
+    const input = cell.querySelector(".currency-input");
+    const inputBox = input ? adaptiveHorizontalBox(input) : 0;
+    return Math.max(88, adaptiveTableTextWidth(currencyDisplay.textContent.trim(), currencyDisplay) + inputBox) + cellBox;
+  }
+
+  const input = cell.querySelector(":scope > .cell-input");
+  if (input) {
+    const displayValue = input.value || input.placeholder || "";
+    const affordance = input.type === "date" ? 28 : 0;
+    return Math.max(48, adaptiveTableTextWidth(displayValue, input) + adaptiveHorizontalBox(input) + affordance) + cellBox;
+  }
+
+  const inlineChildren = [...cell.children].filter((element) => !element.hidden);
+  if (inlineChildren.length) {
+    const widths = inlineChildren.map((element) => element.getBoundingClientRect().width);
+    return widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 5 + cellBox;
+  }
+  return adaptiveTableTextWidth(cell.textContent.trim(), cell) + cellBox;
+}
+
+function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
+  if (!table?.isConnected) return [];
+  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
+  const columns = [...table.querySelectorAll(":scope > colgroup > col")];
+  if (!headerCells.length || columns.length !== headerCells.length) return [];
+
+  table.classList.add("adaptive-table");
+  table.style.tableLayout = "auto";
+  table.style.width = "max-content";
+  table.style.minWidth = "0";
+  columns.forEach((column) => { column.style.width = "auto"; });
+
+  const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
+  const widths = headerCells.map((header, index) => {
+    if (header.classList.contains("select-col")) return 44;
+    let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
+    for (const row of bodyRows) {
+      const cell = row.children[index];
+      if (!cell || cell.classList.contains("empty")) continue;
+      width = Math.max(width, adaptiveCellContentWidth(cell));
+    }
+    return Math.ceil(width + 2);
+  });
+
+  const wrapper = table.closest(".table-wrap");
+  const naturalWidth = widths.reduce((sum, width) => sum + width, 0);
+  const availableWidth = wrapper?.clientWidth || naturalWidth;
+  const flexIndex = Number.isInteger(flexibleColumn)
+    ? flexibleColumn
+    : Number.parseInt(table.dataset.adaptiveFlexColumn || "", 10);
+  if (naturalWidth < availableWidth && Number.isInteger(flexIndex) && widths[flexIndex] != null) {
+    widths[flexIndex] += availableWidth - naturalWidth;
+  }
+
+  columns.forEach((column, index) => { column.style.width = `${Math.ceil(widths[index])}px`; });
+  const tableWidth = widths.reduce((sum, width) => sum + width, 0);
+  table.style.tableLayout = "fixed";
+  table.style.width = `${Math.ceil(tableWidth)}px`;
+  table.style.minWidth = "100%";
+  table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
+  return widths;
+}
+
+function scheduleAdaptiveTableColumns() {
+  const token = ++adaptiveTableMeasureToken;
+  requestAnimationFrame(() => {
+    if (token !== adaptiveTableMeasureToken) return;
+    document.querySelectorAll('table[data-adaptive-table="true"]').forEach((table) => {
+      applyAdaptiveTableColumns({ table });
+    });
+  });
+}
+
+window.addEventListener("resize", () => {
+  window.clearTimeout(adaptiveTableResizeTimer);
+  adaptiveTableResizeTimer = window.setTimeout(scheduleAdaptiveTableColumns, 120);
+}, { passive: true });
+
+function closeRechargeChannelOverlay({ restoreFocus = false } = {}) {
+  const active = activeRechargeChannelOverlay;
+  if (!active) {
+    document.querySelectorAll(".recharge-channel-overlay").forEach((menu) => menu.remove());
+    return;
+  }
+  const cell = active.cell;
+  active.menu?.remove();
+  if (cell?.isConnected) {
+    cell.classList.remove("is-open", "is-saving");
+    cell.setAttribute("aria-expanded", "false");
+    cell.querySelector(".recharge-channel-saving")?.setAttribute("hidden", "");
+    if (restoreFocus) cell.focus({ preventScroll: true });
+  }
+  activeRechargeChannelOverlay = null;
+}
+
+function positionRechargeChannelOverlay() {
+  const active = activeRechargeChannelOverlay;
+  if (!active?.cell?.isConnected || !active?.menu?.isConnected) {
+    closeRechargeChannelOverlay();
+    return;
+  }
+  const rect = active.cell.getBoundingClientRect();
+  const menu = active.menu;
+  const viewportGap = 8;
+  menu.style.minWidth = `${Math.max(200, Math.round(rect.width))}px`;
+  menu.style.maxWidth = `${Math.max(220, Math.min(360, window.innerWidth - viewportGap * 2))}px`;
+  menu.style.left = `${viewportGap}px`;
+  menu.style.top = `${viewportGap}px`;
+  const menuRect = menu.getBoundingClientRect();
+  const left = Math.max(viewportGap, Math.min(rect.left, window.innerWidth - menuRect.width - viewportGap));
+  const below = window.innerHeight - rect.bottom - viewportGap;
+  const above = rect.top - viewportGap;
+  const openUp = below < Math.min(220, menuRect.height) && above > below;
+  const top = openUp
+    ? Math.max(viewportGap, rect.top - menuRect.height - 6)
+    : Math.min(window.innerHeight - menuRect.height - viewportGap, rect.bottom + 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.max(viewportGap, top)}px`;
+  menu.classList.toggle("open-up", openUp);
+}
+
+function showRechargeChannelOtherEditor(active, { focus = true } = {}) {
+  if (!active?.menu) return;
+  active.menu.querySelectorAll(".recharge-channel-option").forEach((option) => {
+    const selected = option.dataset.channel === "other";
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+  const editor = active.menu.querySelector(".recharge-channel-other-editor");
+  const input = active.menu.querySelector(".recharge-channel-other-input");
+  if (editor) editor.hidden = false;
+  if (input && !input.value) input.value = active.channel === "other" ? active.channelOther : "";
+  active.menu.querySelector(".recharge-channel-error").textContent = "";
+  positionRechargeChannelOverlay();
+  if (focus) requestAnimationFrame(() => input?.focus({ preventScroll: true }));
+}
+
+async function saveRechargeChannel(active, channel, channelOther = "") {
+  if (!active || active !== activeRechargeChannelOverlay || active.saving) return;
+  const normalizedOther = channel === "other" ? String(channelOther || "").trim() : "";
+  const errorNode = active.menu.querySelector(".recharge-channel-error");
+  if (channel === "other" && !normalizedOther) {
+    errorNode.textContent = "请填写其他渠道说明";
+    active.menu.querySelector(".recharge-channel-other-input")?.focus({ preventScroll: true });
+    return;
+  }
+  active.saving = true;
+  active.cell.classList.add("is-saving");
+  active.cell.querySelector(".recharge-channel-saving")?.removeAttribute("hidden");
+  active.menu.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+  errorNode.textContent = "";
+  try {
+    const result = await request(`/api/recharges/${encodeURIComponent(active.id)}/channel`, {
+      method: "PATCH",
+      body: { channel, channel_other: normalizedOther },
+    });
+    if (!result?.row) throw new Error("渠道保存结果缺少记录");
+    state.recharges = upsertById(state.recharges || [], result.row);
+    const rowElement = active.cell.closest(".recharge-row");
+    const label = rechargeChannelLabel(result.row);
+    active.cell.dataset.channel = result.row.channel || "";
+    active.cell.dataset.channelOther = result.row.channel_other || "";
+    active.cell.classList.toggle("is-unrecorded", !result.row.channel);
+    active.cell.querySelector(".recharge-channel-value").textContent = label;
+    if (rowElement) {
+      rowElement.dataset.channel = result.row.channel || "";
+      rowElement.dataset.channelOther = result.row.channel_other || "";
+    }
+    closeRechargeChannelOverlay();
+    scheduleAdaptiveTableColumns();
+  } catch (error) {
+    active.saving = false;
+    active.cell.classList.remove("is-saving");
+    active.cell.querySelector(".recharge-channel-saving")?.setAttribute("hidden", "");
+    active.menu.querySelectorAll("button, input").forEach((control) => { control.disabled = false; });
+    errorNode.textContent = error.message || "保存失败，请重试";
+    positionRechargeChannelOverlay();
+  }
+}
+
+function openRechargeChannelOverlay(cell) {
+  if (!cell?.isConnected || cell.dataset.channelEditable !== "1" || isReadonlyUser()) return;
+  if (activeRechargeChannelOverlay?.cell === cell) {
+    closeRechargeChannelOverlay({ restoreFocus: true });
+    return;
+  }
+  closeAllFloatingOverlays();
+  const channel = String(cell.dataset.channel || "");
+  const channelOther = String(cell.dataset.channelOther || "");
+  const menu = document.createElement("div");
+  menu.className = "custom-select-menu recharge-channel-overlay open";
+  menu.dataset.rechargeChannelOverlay = "1";
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "选择充值来源或渠道");
+  menu.innerHTML = `
+    ${rechargeChannelOptions.map(([value, label]) => `
+      <button class="custom-select-option recharge-channel-option ${channel === value ? "selected" : ""}"
+              type="button" role="option" data-channel="${escapeHtml(value)}"
+              aria-selected="${channel === value ? "true" : "false"}">${escapeHtml(label)}</button>
+    `).join("")}
+    <div class="recharge-channel-other-editor" ${channel === "other" ? "" : "hidden"}>
+      <label for="recharge-channel-other-inline">其他渠道说明</label>
+      <input id="recharge-channel-other-inline" class="control recharge-channel-other-input" maxlength="100"
+             value="${escapeHtml(channel === "other" ? channelOther : "")}" autocomplete="off">
+      <div class="recharge-channel-error" role="alert"></div>
+      <div class="recharge-channel-editor-actions">
+        <button class="btn compact recharge-channel-cancel" type="button">取消</button>
+        <button class="btn primary compact recharge-channel-save-other" type="button">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(menu);
+  cell.classList.add("is-open");
+  cell.setAttribute("aria-expanded", "true");
+  activeRechargeChannelOverlay = {
+    id: Number(cell.dataset.rechargeId),
+    cell,
+    menu,
+    channel,
+    channelOther,
+    saving: false,
+  };
+  positionRechargeChannelOverlay();
+  if (channel === "other") showRechargeChannelOtherEditor(activeRechargeChannelOverlay, { focus: false });
+  const selected = menu.querySelector(".recharge-channel-option.selected") || menu.querySelector(".recharge-channel-option");
+  requestAnimationFrame(() => selected?.focus({ preventScroll: true }));
+}
+
+function ensureRechargeChannelEvents() {
+  if (rechargeChannelEventsBound) return;
+  rechargeChannelEventsBound = true;
+  document.addEventListener("click", (event) => {
+    const option = event.target.closest(".recharge-channel-option");
+    if (option && activeRechargeChannelOverlay?.menu.contains(option)) {
+      event.preventDefault();
+      const channel = option.dataset.channel || "";
+      if (channel === "other") showRechargeChannelOtherEditor(activeRechargeChannelOverlay);
+      else saveRechargeChannel(activeRechargeChannelOverlay, channel, "");
+      return;
+    }
+    if (event.target.closest(".recharge-channel-cancel") && activeRechargeChannelOverlay) {
+      event.preventDefault();
+      closeRechargeChannelOverlay({ restoreFocus: true });
+      return;
+    }
+    if (event.target.closest(".recharge-channel-save-other") && activeRechargeChannelOverlay) {
+      event.preventDefault();
+      const value = activeRechargeChannelOverlay.menu.querySelector(".recharge-channel-other-input")?.value || "";
+      saveRechargeChannel(activeRechargeChannelOverlay, "other", value);
+      return;
+    }
+    const cell = event.target.closest(".recharge-channel-cell[data-channel-editable='1']");
+    if (cell) {
+      event.preventDefault();
+      openRechargeChannelOverlay(cell);
+      return;
+    }
+    if (activeRechargeChannelOverlay && !event.target.closest(".recharge-channel-overlay")) closeRechargeChannelOverlay();
+  });
+  document.addEventListener("keydown", (event) => {
+    const cell = event.target.closest?.(".recharge-channel-cell[data-channel-editable='1']");
+    if (cell && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      openRechargeChannelOverlay(cell);
+      return;
+    }
+    if (!activeRechargeChannelOverlay) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRechargeChannelOverlay({ restoreFocus: true });
+      return;
+    }
+    if (event.target.matches?.(".recharge-channel-other-input") && event.key === "Enter") {
+      event.preventDefault();
+      saveRechargeChannel(activeRechargeChannelOverlay, "other", event.target.value);
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (activeRechargeChannelOverlay) positionRechargeChannelOverlay();
+  });
+  window.addEventListener("scroll", () => {
+    if (activeRechargeChannelOverlay) positionRechargeChannelOverlay();
+  }, true);
 }
 
 function rechargeModalMarkup() {
@@ -7877,6 +8254,10 @@ function renderFeeDetails() {
       </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
         <table class="fee-detail-table uniform-table nowrap-table">
+          <colgroup>
+            <col class="fee-detail-col-select"><col><col><col><col><col class="fee-detail-col-time">
+            <col><col><col><col><col><col><col>
+          </colgroup>
           <thead>
             <tr>
               <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
@@ -8662,24 +9043,28 @@ function renderRecharges() {
         <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table uniform-table nowrap-table">
+        <table class="recharge-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+          <colgroup>
+            <col class="recharge-col-select"><col class="recharge-col-student"><col class="recharge-col-grade">
+            <col class="recharge-col-money"><col class="recharge-col-money"><col class="recharge-col-date">
+            <col class="recharge-col-channel"><col class="recharge-col-notes">
+          </colgroup>
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide">备注</th><th>操作</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
           </thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" data-channel="${escapeHtml(row.channel || "")}" data-channel-other="${escapeHtml(row.channel_other || "")}">
-                <td class="select-col"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
-            <td><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
-                <td class="recharge-channel-cell" title="${escapeHtml(rechargeChannelLabel(row))}">${escapeHtml(rechargeChannelLabel(row))}</td>
-                <td><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
-                <td><button class="btn compact edit-recharge-record" data-id="${escapeHtml(row.id)}" type="button">编辑</button></td>
+                <td class="select-col adaptive-center"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
+                <td class="adaptive-center"><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
+                ${rechargeChannelCellMarkup(row)}
+                <td class="recharge-notes-cell adaptive-left"><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无充值记录</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -8714,7 +9099,7 @@ function renderOpeningBalances() {
         <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table opening-balance-table uniform-table nowrap-table">
+        <table class="recharge-table opening-balance-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
           <colgroup><col class="opening-balance-col-select"><col class="opening-balance-col-student"><col class="opening-balance-col-grade"><col class="opening-balance-col-money"><col class="opening-balance-col-money"><col class="opening-balance-col-notes"></colgroup>
           <thead>
             <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
@@ -8722,12 +9107,12 @@ function renderOpeningBalances() {
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}">
-                <td class="select-col"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
-                <td class="currency-input-cell">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
-                <td class="opening-balance-notes-cell"><textarea class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" rows="2">${escapeHtml(row.notes)}</textarea></td>
+                <td class="select-col adaptive-center"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
+                <td class="opening-balance-notes-cell adaptive-left"><input class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" value="${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}"></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
@@ -9433,7 +9818,7 @@ function dataCenterRemoteLabel(value) {
 }
 
 function dataCenterRemotePartLabel(value) {
-  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", delete_failed: "删除失败", delete_partial: "部分删除失败", rejected_symlink: "已拒绝符号链接", missing: "文件缺失", not_present: "无记录" };
+  const labels = { pending: "等待处理", success: "上传成功", failed: "上传失败", deleted: "已删除", already_absent: "本来不存在", delete_failed: "删除失败", delete_partial: "部分删除失败", rejected_symlink: "已拒绝符号链接", missing: "文件缺失", not_present: "无记录" };
   return labels[value] || "未上传";
 }
 
@@ -9522,13 +9907,13 @@ function backupDeleteDialogMarkup() {
   const dialog = backupState.deleteDialog;
   if (!dialog) return "";
   const row = dialog.record || {};
-  const status = dialog.result?.result;
+  const status = dialog.result?.cleanup;
   return `<div class="modal-backdrop backup-delete-modal"><div class="modal-panel backup-delete-panel" role="dialog" aria-modal="true" aria-labelledby="backup-delete-title">
     <div class="modal-head"><div><div class="modal-title" id="backup-delete-title">确认删除这条备份吗？</div><div class="modal-subtitle">此操作无法撤销。</div></div><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button></div>
     <div class="backup-delete-summary"><div><span>文件</span><strong>${escapeHtml(row.filename || "未记录文件名")}</strong></div><div><span>位置</span><strong>${escapeHtml(backupDeleteLocation(row))}</strong></div><p>此操作会按当前规则删除对应备份文件和记录，且无法撤销。</p></div>
-    ${dialog.error ? `<div class="audit-inline-notice danger backup-delete-error">${escapeHtml(dialog.error)}</div>` : ""}
+    ${dialog.error ? `<div class="audit-inline-notice danger backup-delete-error"><strong>删除未完成</strong><span>${escapeHtml(dialog.error)}</span></div>` : ""}
     ${status ? `<dl class="backup-delete-result"><div><dt>本地 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_excel))}</dd></div><div><dt>本地 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.local_checksum))}</dd></div><div><dt>百度 Excel</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_excel))}</dd></div><div><dt>百度 SHA-256</dt><dd>${escapeHtml(dataCenterRemotePartLabel(status.remote_checksum))}</dd></div></dl>` : ""}
-    <div class="modal-actions"><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>取消</button><button class="btn danger backup-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : "确认删除"}</button></div>
+    <div class="modal-actions"><button class="btn backup-delete-cancel" type="button" ${dialog.busy ? "disabled" : ""}>取消</button><button class="btn danger backup-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : (dialog.result ? "重新删除" : "确认删除")}</button></div>
   </div></div>`;
 }
 
@@ -9546,15 +9931,14 @@ function dataCenterBackupRows() {
       <td class="backup-failure-cell">${backupFailureMarkup(row)}</td>
       <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
       <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
-      <td>${escapeHtml(row.created_by_user_id || "-")}</td>
+      <td>${escapeHtml(row.created_by_label || "历史记录")}</td>
       <td><input class="control backup-note-field" data-id="${escapeHtml(row.id)}" value="${escapeHtml(row.note || "")}" maxlength="500" ${legacy ? "disabled" : ""}></td>
-      <td>${legacy ? "-" : `<input class="backup-pinned-field" data-id="${escapeHtml(row.id)}" type="checkbox" ${row.pinned ? "checked" : ""}>`}</td>
       <td class="data-center-actions">
         <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
-        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}">删除</button>` : ""}`}
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}<button class="btn backup-toggle-pinned" type="button" data-id="${escapeHtml(row.id)}" data-pinned="${row.pinned ? "1" : "0"}">${row.pinned ? "取消固定" : "固定"}</button>` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}" ${row.pinned ? "disabled title=\"固定备份受保护，请先取消固定\"" : ""}>删除</button>` : ""}`}
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="13" class="empty">暂无备份记录</td></tr>`;
+  }).join("") || `<tr><td colspan="12" class="empty">暂无备份记录</td></tr>`;
 }
 
 function importPreviewMarkup() {
@@ -9788,7 +10172,7 @@ function renderAudit() {
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
-        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>固定</th><th>操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
@@ -10704,6 +11088,14 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
 function renderStudentPricing() {
   const rows = [...(state.student_pricing || [])].sort(compareStudentPricingRule);
   const visibleRows = rows.filter(studentPricingMatchesFilter);
+  const activeFilterSummary = Object.entries(studentPricingFilter)
+    .filter(([, value]) => String(value || "").trim())
+    .map(([key, value]) => `${({ student: "学生", grade: "年级", subject: "科目", student_names: "学生集合", price: "价格状态", usage: "使用状态" })[key]}：${value}`)
+    .join("；") || "全部规则";
+  const visibleIds = new Set(visibleRows.map((row) => Number(row.id)));
+  selectedStudentPricingIds = new Set([...selectedStudentPricingIds].filter((id) => visibleIds.has(Number(id))));
+  const selectedVisibleCount = visibleRows.filter((row) => selectedStudentPricingIds.has(Number(row.id))).length;
+  const allVisibleSelected = visibleRows.length > 0 && selectedVisibleCount === visibleRows.length;
   const unsetRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
   renderTopbar("学生单价规则", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条规则`, historyToggleAction());
   contentEl.innerHTML = `
@@ -10717,25 +11109,42 @@ function renderStudentPricing() {
     ` : ""}
     <div class="band student-pricing-page">
       ${renderStudentPricingFilterBar(rows, visibleRows)}
+      <div class="transaction-action-row pricing-batch-actions" role="toolbar" aria-label="学生单价批量操作">
+        <span class="batch-selection-summary">已选择 <b>${selectedStudentPricingIds.size}</b> 条</span>
+        <button class="btn clear-student-pricing-selection" type="button" ${selectedStudentPricingIds.size ? "" : "disabled"}>清空选择</button>
+        <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
+      </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
-        <table class="student-pricing-table uniform-table nowrap-table">
-          <thead><tr><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+          <colgroup><col><col><col><col><col><col><col><col></colgroup>
+          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell">${renderGradeBadge(row.grade)}</td>
-                <td class="text-cell">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(row.student_names || "").map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("")}</span></td>
-                <td class="currency-input-cell student-pricing-value-cell">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
-                <td class="text-cell">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
-                <td><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
+                <td class="select-col adaptive-center"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择学生单价规则"></td>
+                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="text-cell adaptive-center">${renderSubjectBadge(row.subject)}</td>
+                <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
+                <td class="currency-input-cell student-pricing-value-cell adaptive-right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
+                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
+                <td class="adaptive-left"><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="7" class="empty">暂无学生单价规则</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
+    ${studentPricingBatchModalOpen ? `
+      <div class="modal-backdrop student-pricing-batch-modal">
+        <div class="modal-panel batch-pricing-modal-panel" role="dialog" aria-modal="true" aria-labelledby="student-pricing-batch-title">
+          <div class="modal-head"><div><div class="modal-title" id="student-pricing-batch-title">批量设置学生单价</div><div class="modal-subtitle">仅修改已选择 ${selectedStudentPricingIds.size} 条规则的单价，其他字段保持不变。</div><div class="modal-subtitle">当前筛选：${escapeHtml(activeFilterSummary)}</div></div></div>
+          <label class="filter-field"><span>统一单价</span><input class="control student-pricing-batch-value" type="number" min="0" max="100000" step="0.01" value="0"></label>
+          <div class="batch-pricing-result" aria-live="polite"></div>
+          <div class="modal-actions"><button class="btn close-student-pricing-batch-modal" type="button">取消</button><button class="btn primary confirm-student-pricing-batch" type="button">确认更新</button></div>
+        </div>
+      </div>
+    ` : ""}
   `;
 }
 
@@ -10746,7 +11155,7 @@ function renderClassGroups() {
   const hiddenInactiveCount = rows.filter((row) => !isActiveTeacherName(row.teacher)).length;
   renderTopbar("班级管理", `已筛选 ${visibleRows.length} / 共 ${rows.length} 个班级`);
   contentEl.innerHTML = `
-    <div class="band">
+    <div class="band class-group-page">
       <div class="filter-bar compact unified-filter-bar class-group-filter-bar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "class-group-filter-input", field: "teacher", value: classGroupFilter.teacher, values: opts.teachers })}
@@ -10764,16 +11173,17 @@ function renderClassGroups() {
         </div>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="class-group-table uniform-table nowrap-table">
+        <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="3">
+          <colgroup><col><col><col><col><col></colgroup>
           <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
               <tr class="class-group-row" data-class-group-id="${row.id}">
-                <td class="text-cell center">${escapeHtml(row.teacher)}</td>
-                <td class="text-cell center">${renderGradeBadge(row.grade)}</td>
-                <td class="text-cell center">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide class-group-students-cell"><span class="class-group-student-set" tabindex="0" title="${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、"))}">${escapeHtml(splitStudents(row.students_display || row.students_key || "").join("、") || "—")}</span></td>
-                <td><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
+                <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
+                <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
+                <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
+                <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
+                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
             `).join("") || `<tr><td colspan="5" class="empty">暂无班级候选</td></tr>`}
           </tbody>
@@ -12006,6 +12416,10 @@ function renderTeacherSalaryRules() {
   const sortedRules = sortTeacherSalaryRules(rules);
   const opts = dynamicTeacherSalaryRuleFilterOptions(sortedRules);
   const visibleRules = sortedRules.filter((rule) => teacherSalaryRuleMatchesFilter(rule));
+  const visibleRuleIds = new Set(visibleRules.map((rule) => Number(rule.id)));
+  selectedTeacherSalaryRuleIds = new Set([...selectedTeacherSalaryRuleIds].filter((id) => visibleRuleIds.has(Number(id))));
+  const selectedVisibleCount = visibleRules.filter((rule) => selectedTeacherSalaryRuleIds.has(Number(rule.id))).length;
+  const allVisibleSelected = visibleRules.length > 0 && selectedVisibleCount === visibleRules.length;
   const hiddenInactiveCount = sortedRules.filter((rule) => !isActiveTeacherName(rule.teacher_name)).length;
   const modalCandidates = {
     teachers: uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean)),
@@ -12028,24 +12442,25 @@ function renderTeacherSalaryRules() {
     `有效 ${effectiveCount} 条 / 待设置 ${pendingCount} 条 / 共 ${rules.length} 条`,
   );
   contentEl.innerHTML = `
-    <div class="band">
+    <div class="band teacher-salary-rule-page">
       <div class="filter-bar compact unified-filter-bar teacher-salary-rule-toolbar">
         <div class="filter-controls">
           ${unifiedFilterField({ label: "教师", className: "teacher-salary-rule-filter-input", field: "teacher", value: teacherSalaryRuleFilter.teacher, values: opts.teachers })}
-          ${unifiedFilterField({ label: "年级", className: "teacher-salary-rule-filter-input", field: "grade", value: teacherSalaryRuleFilter.grade, values: opts.grades })}
-          ${unifiedFilterField({ label: "科目", className: "teacher-salary-rule-filter-input", field: "subject", value: teacherSalaryRuleFilter.subject, values: opts.subjects })}
-          ${unifiedFilterField({ label: "学生", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students })}
+          ${unifiedFilterField({ label: "搜索", className: "teacher-salary-rule-filter-input", field: "student", value: teacherSalaryRuleFilter.student, values: opts.students, placeholder: "搜索学生集合" })}
           ${unifiedFilterField({ label: "价格状态", className: "teacher-salary-rule-filter-input", field: "salary_status", value: teacherSalaryRuleFilter.salary_status, values: opts.salaryStatuses, placeholder: "全部价格状态" })}
         </div>
         <label class="history-toggle compact-toggle">
           <input class="teacher-salary-rule-hide-inactive" type="checkbox" ${teacherSalaryRuleHideInactiveTeachers ? "checked" : ""}>
-          <span>隐藏非在职老师</span>
+          <span>隐藏离职</span>
         </label>
         <div class="filter-summary">
-          <span>已筛选 <b>${visibleRules.length}</b> / 共 ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? `，已隐藏 ${hiddenInactiveCount} 条` : ""}</span>
+          <span><b>${visibleRules.length}</b> / ${rules.length} 条${teacherSalaryRuleHideInactiveTeachers && hiddenInactiveCount ? ` · 隐藏 ${hiddenInactiveCount}` : ""}</span>
         </div>
         <div class="teacher-salary-rule-toolbar-actions">
-          <button class="btn reset-teacher-salary-rule-filter" type="button">清空筛选</button>
+          <span class="batch-selection-summary">已选择 <b>${selectedTeacherSalaryRuleIds.size}</b> 条</span>
+          <button class="btn clear-teacher-salary-rule-selection" type="button" ${selectedTeacherSalaryRuleIds.size ? "" : "disabled"}>清空选择</button>
+          <button class="btn primary open-teacher-salary-rule-batch-modal" type="button" ${selectedTeacherSalaryRuleIds.size && canWriteData() ? "" : "disabled"}>批量设置薪资</button>
+          <button class="btn reset-teacher-salary-rule-filter" type="button">清筛</button>
           <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
         </div>
       </div>
@@ -12053,21 +12468,23 @@ function renderTeacherSalaryRules() {
         ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="teacher-salary-rule-table uniform-table nowrap-table">
-          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+        <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="8">
+          <colgroup><col><col><col><col><col><col><col><col><col></colgroup>
+          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
-                <td class="text-cell">${escapeHtml(rule.teacher_name)}</td>
-                <td class="text-cell">${renderEntityBadge("grade", rule.grade)}</td>
-                <td class="text-cell">${renderEntityBadge("subject", rule.subject)}</td>
-                <td class="text-cell wide"><span class="entity-badge-list">${splitStudents(rule.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: rule.grade })).join("")}</span></td>
-                <td class="currency-input-cell">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
-                <td class="text-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
-                <td><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
+                <td class="select-col adaptive-center"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>
+                <td class="text-cell adaptive-center">${escapeHtml(rule.teacher_name)}</td>
+                <td class="text-cell adaptive-center">${renderEntityBadge("grade", rule.grade)}</td>
+                <td class="text-cell adaptive-center">${renderEntityBadge("subject", rule.subject)}</td>
+                <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(rule.student_names, { fallbackGrade: rule.grade })}</td>
+                <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
+                <td class="text-cell adaptive-center"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
+                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
+                <td class="adaptive-left"><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
               </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无符合条件的薪资规则</td></tr>`}
+            `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -12095,6 +12512,16 @@ function renderTeacherSalaryRules() {
             <button class="btn" type="button" data-action="close-teacher-salary-rule-modal">取消</button>
             <button class="btn primary add-teacher-salary-rule" type="button">保存</button>
           </div>
+        </div>
+      </div>
+    ` : ""}
+    ${teacherSalaryRuleBatchModalOpen ? `
+      <div class="modal-backdrop teacher-salary-rule-batch-modal">
+        <div class="modal-panel batch-pricing-modal-panel" role="dialog" aria-modal="true" aria-labelledby="teacher-salary-rule-batch-title">
+          <div class="modal-head"><div><div class="modal-title" id="teacher-salary-rule-batch-title">批量设置教师薪资</div><div class="modal-subtitle">仅修改已选择 ${selectedTeacherSalaryRuleIds.size} 条规则的薪资，启用状态和其他字段保持不变。</div></div></div>
+          <label class="filter-field"><span>每2小时薪资</span><input class="control teacher-salary-rule-batch-value" type="number" min="0" max="100000" step="0.01" value="0"></label>
+          <div class="batch-pricing-result" aria-live="polite"></div>
+          <div class="modal-actions"><button class="btn close-teacher-salary-rule-batch-modal" type="button">取消</button><button class="btn primary confirm-teacher-salary-rule-batch" type="button">确认更新</button></div>
         </div>
       </div>
     ` : ""}
@@ -13482,7 +13909,7 @@ function applyReadonlyUi() {
     ".user-access-open", ".user-access-save", ".import-teacher-users", ".sync-teacher-accounts", ".role-edit", ".role-delete", ".role-permission-save",
     ".base-data-add", ".base-data-delete", ".color-config-save", ".color-config-reset", ".color-config-input", ".staff-field", ".delete-staff", ".staff-modal-save",
     ".delete-staff-salary", ".staff-salary-field", ".staff-attendance-field", ".delete-expense", ".expense-field",
-    ".pricing-field", ".recharge-field", ".open-recharge-modal", ".edit-recharge-record", ".add-recharge-record", ".recharge-modal-field", ".recharge-channel-radio", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
+    ".pricing-field", ".recharge-field", ".open-recharge-modal", ".add-recharge-record", ".recharge-modal-field", ".recharge-channel-radio", ".batch-delete-recharges", ".opening-balance-field", ".batch-delete-opening-balances", ".student-pricing-field",
     ".class-group-field", ".batch-delete-student-profiles",
     ".teacher-detail-salary-field", ".apply-selected-teacher-salary-rules", ".teacher-adjustment-field", ".teacher-travel-fee-field", ".teacher-salary-notes-field",
     ".batch-delete-teacher-profiles",
@@ -13587,6 +14014,7 @@ function render() {
   }
   if (view !== "studentProfiles") studentGradeStageConflictModalOpen = false;
   closeSearchablePicker();
+  closeRechargeChannelOverlay();
   closeDateRangePicker();
   appEl?.classList.remove("login-mode");
   appEl?.classList.toggle("readonly-mode", isReadonlyUser());
@@ -13632,6 +14060,7 @@ function render() {
   (renderers[view] || renderLessons)();
   applyReadonlyUi();
   wireEvents();
+  scheduleAdaptiveTableColumns();
   if (navigationTransitionStartedAt) {
     console.debug("[navigation-performance]", {
       view,
@@ -13651,10 +14080,12 @@ function render() {
 function rerenderContent(renderAction) {
   closeSearchablePicker();
   closeDateRangePicker();
+  closeRechargeChannelOverlay();
   renderAction();
   cleanupCustomSelectPortals();
   applyReadonlyUi();
   wireEvents();
+  scheduleAdaptiveTableColumns();
 }
 
 function upsertById(rows = [], row = {}) {
@@ -14133,6 +14564,7 @@ function bindDateRangePickerControls() {
 }
 
 function wireEvents() {
+  ensureRechargeChannelEvents();
   document.querySelectorAll(".dashboard-open-shortcut-config").forEach((button) => {
     button.addEventListener("click", () => {
       dashboardShortcutDraft = dashboardSelectedShortcutKeys();
@@ -14867,16 +15299,6 @@ function wireEvents() {
   document.querySelectorAll(".open-recharge-modal").forEach((button) => {
     button.addEventListener("click", () => {
       rechargeModalDraft = { recharge_date: defaultRechargeDate(), cur_recharge: 0, cur_gift: 0, channel: "wechat" };
-      rechargeModalOpen = true;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".edit-recharge-record").forEach((button) => {
-    button.addEventListener("click", () => {
-      const record = rechargeRows().find((row) => Number(row.id) === Number(button.dataset.id));
-      if (!record) return alert("未找到充值记录，请刷新后重试");
-      rechargeModalDraft = { ...record, notes: record.recharge_notes || record.notes || "" };
       rechargeModalOpen = true;
       render();
     });
@@ -15974,9 +16396,23 @@ function wireEvents() {
 
   document.querySelectorAll(".backup-metadata-save").forEach((button) => {
     button.addEventListener("click", async () => {
-      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || ""; const pinned = Boolean(document.querySelector(`.backup-pinned-field[data-id="${id}"]`)?.checked);
-      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note, pinned } }); await refreshBackupData(); showToast("备份信息已保存"); }
+      const id = button.dataset.id; const note = document.querySelector(`.backup-note-field[data-id="${id}"]`)?.value || "";
+      try { await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "PATCH", body: { note } }); await refreshBackupData(); showToast("备份信息已保存"); }
       catch (error) { showToast(error.message || "保存失败", "error"); }
+      finally { render(); }
+    });
+  });
+  document.querySelectorAll(".backup-toggle-pinned").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      try {
+        await request(`/api/data-center/backups/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: { pinned: button.dataset.pinned !== "1" },
+        });
+        await refreshBackupData();
+        showToast(button.dataset.pinned === "1" ? "已取消固定" : "备份已固定");
+      } catch (error) { showToast(error.message || "修改固定状态失败", "error"); }
       finally { render(); }
     });
   });
@@ -16078,15 +16514,11 @@ function wireEvents() {
     render();
     try {
       const result = await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
-      const statuses = result.result || {};
-      const partial = [statuses.local, statuses.remote].some((value) => ["delete_failed", "delete_partial"].includes(value));
+      backupState.records = (backupState.records || []).filter((row) => Number(row.id) !== Number(id));
+      document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.closest("tr")?.remove();
       await refreshBackupData({ tolerateFailure: true });
-      if (partial) {
-        backupState.deleteDialog = { ...dialog, busy: false, result, error: "备份仅部分删除，请查看各文件状态后处理。" };
-      } else {
-        backupState.deleteDialog = null;
-        showToast("备份删除流程已完成");
-      }
+      backupState.deleteDialog = null;
+      showToast(result.deleted ? "备份文件和记录已删除" : "删除未完成");
     } catch (error) {
       backupState.deleteDialog = { ...dialog, busy: false, error: error.message || "删除备份失败", result: error.data || null };
     }
@@ -16589,6 +17021,77 @@ function wireEvents() {
       render();
     });
   });
+
+  document.querySelectorAll(".student-pricing-select-row").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.id);
+      if (input.checked) selectedStudentPricingIds.add(id);
+      else selectedStudentPricingIds.delete(id);
+      render();
+    });
+  });
+  document.querySelectorAll(".student-pricing-select-all").forEach((input) => {
+    const visibleIds = [...document.querySelectorAll(".student-pricing-select-row")].map((item) => Number(item.dataset.id));
+    const selectedCount = visibleIds.filter((id) => selectedStudentPricingIds.has(id)).length;
+    input.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
+    input.addEventListener("change", () => {
+      for (const id of visibleIds) {
+        if (input.checked) selectedStudentPricingIds.add(id);
+        else selectedStudentPricingIds.delete(id);
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".clear-student-pricing-selection").forEach((button) => button.addEventListener("click", () => {
+    selectedStudentPricingIds = new Set();
+    render();
+  }));
+  document.querySelectorAll(".open-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    if (!selectedStudentPricingIds.size || !canWriteData()) return;
+    studentPricingBatchModalOpen = true;
+    render();
+  }));
+  document.querySelectorAll(".close-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    studentPricingBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".student-pricing-batch-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    studentPricingBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".confirm-student-pricing-batch").forEach((button) => button.addEventListener("click", async () => {
+    const value = document.querySelector(".student-pricing-batch-value")?.value ?? "";
+    const price = Number(value);
+    if (!Number.isFinite(price) || price < 0 || price > 100000 || Math.abs(price * 100 - Math.round(price * 100)) >= 1e-8) {
+      return showToast("单价须为 0 到 100000 之间且最多两位小数", "error");
+    }
+    const ids = [...selectedStudentPricingIds];
+    button.disabled = true;
+    try {
+      const result = await request(`/api/student-pricing/batch?month=${encodeURIComponent(activeMonth)}`, {
+        method: "PATCH",
+        body: { ids, price },
+      });
+      for (const row of result.rows || []) state.student_pricing = upsertById(state.student_pricing || [], row);
+      for (const row of result.rows || []) selectedStudentPricingIds.delete(Number(row.id));
+      studentPricingBatchModalOpen = false;
+      for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+      rerenderCurrentView(renderStudentPricing);
+      showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
+    } catch (error) {
+      button.disabled = false;
+      const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置单价失败" }];
+      const box = document.querySelector(".student-pricing-batch-modal .batch-pricing-result");
+      if (box) {
+        box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => {
+          const row = (state.student_pricing || []).find((candidate) => Number(candidate.id) === Number(item.id)) || {};
+          return `<div>记录 ${escapeHtml(item.id || "未知")} · 学生 ${escapeHtml(row.student_name || "未知")} · 年级 ${escapeHtml(row.grade || "未知")} · 科目 ${escapeHtml(row.subject || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`;
+        }).join("")}`;
+      }
+      showToast(error.message || "批量设置单价失败", "error");
+    }
+  }));
 
   document.querySelectorAll("input.class-group-filter-input").forEach((input) => {
     const applyClassGroupFilter = (value) => {
@@ -17544,6 +18047,77 @@ function wireEvents() {
       render();
     });
   });
+
+  document.querySelectorAll(".teacher-salary-rule-select-row").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.id);
+      if (input.checked) selectedTeacherSalaryRuleIds.add(id);
+      else selectedTeacherSalaryRuleIds.delete(id);
+      render();
+    });
+  });
+  document.querySelectorAll(".teacher-salary-rule-select-all").forEach((input) => {
+    const visibleIds = [...document.querySelectorAll(".teacher-salary-rule-select-row")].map((item) => Number(item.dataset.id));
+    const selectedCount = visibleIds.filter((id) => selectedTeacherSalaryRuleIds.has(id)).length;
+    input.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
+    input.addEventListener("change", () => {
+      for (const id of visibleIds) {
+        if (input.checked) selectedTeacherSalaryRuleIds.add(id);
+        else selectedTeacherSalaryRuleIds.delete(id);
+      }
+      render();
+    });
+  });
+  document.querySelectorAll(".clear-teacher-salary-rule-selection").forEach((button) => button.addEventListener("click", () => {
+    selectedTeacherSalaryRuleIds = new Set();
+    render();
+  }));
+  document.querySelectorAll(".open-teacher-salary-rule-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    if (!selectedTeacherSalaryRuleIds.size || !canWriteData()) return;
+    teacherSalaryRuleBatchModalOpen = true;
+    render();
+  }));
+  document.querySelectorAll(".close-teacher-salary-rule-batch-modal").forEach((button) => button.addEventListener("click", () => {
+    teacherSalaryRuleBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".teacher-salary-rule-batch-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    teacherSalaryRuleBatchModalOpen = false;
+    render();
+  }));
+  document.querySelectorAll(".confirm-teacher-salary-rule-batch").forEach((button) => button.addEventListener("click", async () => {
+    const value = document.querySelector(".teacher-salary-rule-batch-value")?.value ?? "";
+    const salary = Number(value);
+    if (!Number.isFinite(salary) || salary < 0 || salary > 100000 || Math.abs(salary * 100 - Math.round(salary * 100)) >= 1e-8) {
+      return showToast("薪资须为 0 到 100000 之间且最多两位小数", "error");
+    }
+    const ids = [...selectedTeacherSalaryRuleIds];
+    button.disabled = true;
+    try {
+      const result = await request("/api/teacher-salary-rules/batch", {
+        method: "PATCH",
+        body: { ids, salary },
+      });
+      for (const row of result.rows || []) state.teacher_salary_rules = upsertById(state.teacher_salary_rules || [], row);
+      for (const row of result.rows || []) selectedTeacherSalaryRuleIds.delete(Number(row.id));
+      teacherSalaryRuleBatchModalOpen = false;
+      for (const key of ["teacherSummary", "summary", "finance"]) markDirty(key);
+      rerenderCurrentView(renderTeacherSalaryRules);
+      showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
+    } catch (error) {
+      button.disabled = false;
+      const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置薪资失败" }];
+      const box = document.querySelector(".teacher-salary-rule-batch-modal .batch-pricing-result");
+      if (box) {
+        box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => {
+          const row = (state.teacher_salary_rules || []).find((candidate) => Number(candidate.id) === Number(item.id)) || {};
+          return `<div>记录 ${escapeHtml(item.id || "未知")} · 教师 ${escapeHtml(row.teacher_name || "未知")} · 年级 ${escapeHtml(row.grade || "未知")} · 科目 ${escapeHtml(row.subject || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`;
+        }).join("")}`;
+      }
+      showToast(error.message || "批量设置薪资失败", "error");
+    }
+  }));
 
   document.querySelectorAll(".teacher-salary-rule-hide-inactive").forEach((input) => {
     input.addEventListener("change", () => {

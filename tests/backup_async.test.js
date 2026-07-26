@@ -50,8 +50,15 @@ test("a failed record with no managed file can be deleted without last-success p
   const db = service.database(); let id;
   try { id = Number(db.prepare("INSERT INTO backup_records(backup_type,filename,status,backup_format,format_version,trigger,retention_class,managed_relative_path,remote_status,pinned) VALUES ('manual','','failed','full_data_excel',4,'manual','manual','','failed',0)").run().lastInsertRowid); } finally { db.close(); }
   const result = await service.deleteBackup(id);
-  assert.equal(result.result.local, "deleted");
-  assert.equal(result.record.status, "deleted");
+  assert.equal(result.deleted, true);
+  assert.deepEqual(result.cleanup, {
+    local_excel: "already_absent",
+    local_checksum: "already_absent",
+    remote_excel: "already_absent",
+    remote_checksum: "already_absent",
+  });
+  const checked = service.database();
+  try { assert.equal(service.record(checked, id), undefined); } finally { checked.close(); }
 });
 
 test("web contract starts remote backup with HTTP 202 and polls by job id", () => {

@@ -110,6 +110,8 @@ async function dashboardMetrics(browser) {
       piesTop: pies.getBoundingClientRect().top, piesBottom: pies.getBoundingClientRect().bottom,
       todoOverflow: getComputedStyle(todo).overflowY,
       piesOverflow: getComputedStyle(pies).overflowY,
+      todoClipped: todo.scrollHeight > todo.clientHeight + 1,
+      piesClipped: pies.scrollHeight > pies.clientHeight + 1,
       pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   })()`);
@@ -136,13 +138,14 @@ test("dashboard live-course card is stable for zero one six and twenty lessons w
   await browser.login("boss", "123456");
   await browser.waitFor("Boolean(document.querySelector('.dashboard-current-section .dashboard-current-empty'))");
   const zero = await dashboardMetrics(browser);
-  assert.equal(zero.itemCount, 0); assert.equal(zero.height, 360); assert.equal(zero.pageOverflow, false);
+  assert.equal(zero.itemCount, 0); assert.ok(zero.height > 0); assert.equal(zero.pageOverflow, false);
+  assert.ok(Math.abs(zero.bottom - zero.todoBottom) <= 2); assert.ok(Math.abs(zero.bottom - zero.piesBottom) <= 2);
 
   addCurrentLessons(database, 1, 1);
   await browser.evaluate("invalidateRequestCache(['/api/dashboard']); refreshDashboardForActiveMonth()");
   await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 1");
   const one = await dashboardMetrics(browser);
-  assert.ok(Math.abs(one.height - zero.height) <= 1); assert.equal(one.scrollHeight <= one.clientHeight, true);
+  assert.ok(Math.abs(one.bottom - one.todoBottom) <= 2); assert.ok(Math.abs(one.bottom - one.piesBottom) <= 2); assert.equal(one.scrollHeight <= one.clientHeight, true);
   const oneLayout = await browser.evaluate(`(() => { const item=document.querySelector('.dashboard-current-item'); const nodes=[...item.querySelectorAll('.dashboard-current-top, .dashboard-current-fact, .dashboard-current-students, .entity-badge')]; const overlap=nodes.some((a,i)=>nodes.some((b,j)=>{ if(j<=i||a.contains(b)||b.contains(a)) return false; const x=a.getBoundingClientRect(),y=b.getBoundingClientRect(); return x.width>0&&y.width>0&&x.height>0&&y.height>0&&Math.min(x.right,y.right)-Math.max(x.left,y.left)>2&&Math.min(x.bottom,y.bottom)-Math.max(x.top,y.top)>2; })); return { overlap, overflow:item.scrollWidth>item.clientWidth, visibleStudents:item.querySelectorAll('.dashboard-current-students .student-badge').length, more:item.querySelector('.dashboard-current-more')?.textContent||'' }; })()`);
   assert.equal(oneLayout.overlap, false); assert.equal(oneLayout.overflow, false); assert.equal(oneLayout.visibleStudents, 5); assert.equal(oneLayout.more, "等1人");
 
@@ -155,30 +158,39 @@ test("dashboard live-course card is stable for zero one six and twenty lessons w
   await browser.evaluate("invalidateRequestCache(['/api/dashboard']); refreshDashboardForActiveMonth()");
   await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 20");
   const twenty = await dashboardMetrics(browser);
-  assert.ok(Math.abs(twenty.height - zero.height) <= 1); assert.equal(twenty.itemCount, 20);
+  assert.equal(twenty.itemCount, 20);
   assert.equal(twenty.overflowY, "auto"); assert.equal(twenty.overflowX, "hidden"); assert.ok(twenty.scrollHeight > twenty.clientHeight);
   assert.ok(Math.abs(twenty.top - twenty.todoTop) <= 1); assert.ok(Math.abs(twenty.top - twenty.piesTop) <= 1);
-  assert.notEqual(twenty.todoOverflow, "hidden"); assert.notEqual(twenty.piesOverflow, "hidden");
+  assert.ok(Math.abs(twenty.bottom - twenty.todoBottom) <= 2); assert.ok(Math.abs(twenty.bottom - twenty.piesBottom) <= 2);
+  assert.equal(twenty.todoClipped, false); assert.equal(twenty.piesClipped, false);
   const scrollResult = await browser.evaluate(`(() => { const head=document.querySelector('.dashboard-current-section .section-head'); const list=document.querySelector('.dashboard-current-list'); const before=head.getBoundingClientRect().top; list.scrollTop=list.scrollHeight; const last=list.lastElementChild.getBoundingClientRect(); const box=list.getBoundingClientRect(); return { before, after:head.getBoundingClientRect().top, scrollTop:list.scrollTop, lastVisible:last.bottom <= box.bottom + 1 && last.top >= box.top - 1 }; })()`);
   assert.equal(scrollResult.before, scrollResult.after); assert.ok(scrollResult.scrollTop > 0); assert.equal(scrollResult.lastVisible, true);
   const desktopScreenshot = await browser.send("Page.captureScreenshot", { format: "png", fromSurface: true }); assert.ok(desktopScreenshot.data.length > 1000);
 
   await browser.evaluate("renderViewTransitionSkeleton()");
   await browser.waitFor("document.querySelector('.dashboard-current-empty')?.textContent.includes('正在加载课程')");
-  const loading = await dashboardMetrics(browser); assert.equal(loading.height, 360);
+  const loading = await dashboardMetrics(browser); assert.ok(Math.abs(loading.bottom - loading.todoBottom) <= 2);
   await browser.evaluate("renderLoadFailure(new Error('合成首页故障'))");
   await browser.waitFor("document.querySelector('.dashboard-current-empty')?.textContent.includes('合成首页故障')");
-  const failed = await dashboardMetrics(browser); assert.equal(failed.height, 360); assert.deepEqual(browser.exceptions, []);
+  const failed = await dashboardMetrics(browser); assert.ok(Math.abs(failed.bottom - failed.todoBottom) <= 2); assert.deepEqual(browser.exceptions, []);
   assert.equal(browser.consoleErrors.some((message) => message.includes('合成首页故障')), true);
   browser.consoleErrors.length = 0;
   await browser.evaluate("renderDashboard(); wireEvents()");
   await browser.waitFor("document.querySelectorAll('.dashboard-current-item').length === 20");
 
+  for (const width of [1440, 1280, 1024]) {
+    await browser.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await browser.evaluate("window.dispatchEvent(new Event('resize'))");
+    const metrics = await dashboardMetrics(browser);
+    assert.ok(Math.abs(metrics.bottom - metrics.todoBottom) <= 2, `${width}: ${JSON.stringify(metrics)}`);
+    assert.ok(Math.abs(metrics.bottom - metrics.piesBottom) <= 2, `${width}: ${JSON.stringify(metrics)}`);
+  }
+
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await browser.evaluate("window.dispatchEvent(new Event('resize'))");
-  await browser.waitFor("document.querySelector('.dashboard-current-section').getBoundingClientRect().height === 320");
+  await browser.waitFor("document.querySelector('.dashboard-current-section').getBoundingClientRect().height > 0");
   const mobile = await dashboardMetrics(browser);
-  assert.equal(mobile.height, 320); assert.equal(mobile.overflowY, "auto"); assert.equal(mobile.overflowX, "hidden"); assert.ok(mobile.scrollHeight > mobile.clientHeight); assert.equal(mobile.pageOverflow, false);
+  assert.ok(mobile.height > 320); assert.equal(mobile.pageOverflow, false);
   assert.equal(await browser.evaluate("[...document.querySelectorAll('.dashboard-current-item')].every((item)=>item.scrollWidth<=item.clientWidth+1)"), true);
   const mobileScreenshot = await browser.send("Page.captureScreenshot", { format: "png", fromSurface: true }); assert.ok(mobileScreenshot.data.length > 1000);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

@@ -71,8 +71,31 @@ class BackupService {
     const result = db.prepare(`INSERT INTO backup_records(backup_type,included_months,filename,file_path,file_size,status,message,scheduled_date,backup_format,format_version,trigger,retention_class,managed_relative_path,sha256,verified_at,schedule_key,created_by_user_id,note,pinned,remote_status,operation_logs_included) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.trigger === "automatic" ? "auto" : "manual", 0, options.filename, "", 0, "creating", "", options.scheduledDate || "", BACKUP_FORMAT, FORMAT_VERSION, options.trigger, options.retentionClass, "", "", "", options.scheduleKey || "", options.createdByUserId || null, options.note || "", options.pinned ? 1 : 0, options.remoteEnabled ? "pending" : "not_configured", options.includeOperationLogs === false ? 0 : 1);
     return Number(result.lastInsertRowid);
   }
-  record(db, id) { return db.prepare("SELECT * FROM backup_records WHERE id=?").get(Number(id)); }
-  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "", job_status: row.job_status || "", job_error_code: row.job_error_code || "", job_started_at: row.job_started_at || "", job_updated_at: row.job_updated_at || "", job_completed_at: row.job_completed_at || "", job_pid: Number(row.job_pid || 0) }; return { ...dto, failure: backupFailureDisplay(dto) }; }
+  record(db, id) {
+    return db.prepare(`
+      SELECT br.*, u.id AS creator_joined_id, u.username AS creator_username,
+        u.display_name AS creator_display_name, u.status AS creator_status
+      FROM backup_records br
+      LEFT JOIN users u ON u.id = br.created_by_user_id
+      WHERE br.id=?
+    `).get(Number(id));
+  }
+  creator(row) {
+    const automatic = ["automatic", "remote_automatic"].includes(String(row.trigger || ""))
+      || String(row.backup_type || "") === "auto";
+    if (automatic) return { created_by_label: "自动备份", created_by_type: "automatic" };
+    if (row.created_by_user_id) {
+      if (!row.creator_joined_id || row.creator_status === "deleted") {
+        return { created_by_label: "已删除账号", created_by_type: "deleted_user" };
+      }
+      return {
+        created_by_label: String(row.creator_display_name || "").trim() || String(row.creator_username || "").trim() || "已删除账号",
+        created_by_type: "user",
+      };
+    }
+    return { created_by_label: "历史记录", created_by_type: "historical" };
+  }
+  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, ...this.creator(row), note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "", job_status: row.job_status || "", job_error_code: row.job_error_code || "", job_started_at: row.job_started_at || "", job_updated_at: row.job_updated_at || "", job_completed_at: row.job_completed_at || "", job_pid: Number(row.job_pid || 0) }; return { ...dto, failure: backupFailureDisplay(dto) }; }
   activeRemoteJob(db) {
     return db.prepare("SELECT * FROM backup_records WHERE trigger='remote_manual' AND job_status IN ('queued','preflight','exporting','hashing','uploading_excel','uploading_checksum','verifying_metadata','downloading_for_verification','integrity_check') ORDER BY id DESC LIMIT 1").get();
   }
@@ -149,7 +172,19 @@ class BackupService {
       return this.dto(this.record(db, id));
     } finally { db.close(); }
   }
-  list(limit = 100) { const db = this.database(); try { return db.prepare("SELECT * FROM backup_records ORDER BY backup_time DESC,id DESC LIMIT ?").all(Math.max(1, Math.min(500, Number(limit) || 100))).map((row) => this.dto(row)); } finally { db.close(); } }
+  list(limit = 100) {
+    const db = this.database();
+    try {
+      return db.prepare(`
+        SELECT br.*, u.id AS creator_joined_id, u.username AS creator_username,
+          u.display_name AS creator_display_name, u.status AS creator_status
+        FROM backup_records br
+        LEFT JOIN users u ON u.id = br.created_by_user_id
+        ORDER BY br.backup_time DESC, br.id DESC
+        LIMIT ?
+      `).all(Math.max(1, Math.min(500, Number(limit) || 100))).map((row) => this.dto(row));
+    } finally { db.close(); }
+  }
   managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
   verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error)), id); } catch {} throw error; } finally { db.close(); } }
   async create(options = {}) {
@@ -255,42 +290,80 @@ class BackupService {
     } finally { db.close(); }
   }
   async deleteBackup(id, { remoteDeleter = null } = {}) {
-    const db = this.database(); const result = { local: "not_present", local_excel: "not_present", local_checksum: "not_present", remote: "not_present", remote_excel: "not_present", remote_checksum: "not_present" };
+    const db = this.database();
+    const cleanup = {
+      local_excel: "already_absent",
+      local_checksum: "already_absent",
+      remote_excel: "already_absent",
+      remote_checksum: "already_absent",
+    };
     try {
       const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
       if (row.backup_format !== BACKUP_FORMAT) throw new BackupError("BACKUP_PATH_UNMANAGED", "旧版备份不能由新体系删除");
       if (Number(row.pinned || 0)) throw new BackupError("BACKUP_PINNED", "置顶备份受保护，请先取消置顶");
-      if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading") throw new BackupError("BACKUP_BUSY", "备份正在使用中");
+      const activeJobs = new Set(["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"]);
+      if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading" || activeJobs.has(row.job_status)) {
+        throw new BackupError("BACKUP_BUSY", "备份正在使用中");
+      }
       const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ").get(BACKUP_FORMAT).count);
       if (row.status === "success" && validCount <= 1) throw new BackupError("BACKUP_LAST_VALID", "不能删除最后一份有效全量备份");
-      try {
-        if (row.status === "failed" && !row.managed_relative_path) {
-          db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='manual_delete' WHERE id=?").run(id);
-          result.local = "deleted"; result.local_excel = "not_present"; result.local_checksum = "not_present";
+
+      if (row.managed_relative_path) {
+        if (path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份");
+        const filename = path.resolve(this.dataDir, row.managed_relative_path);
+        if (!inside(this.root, filename)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效");
+        const localTargets = [["local_excel", filename], ["local_checksum", `${filename}.sha256`]];
+        for (const [key, target] of localTargets) {
+          if (!fs.existsSync(target)) continue;
+          if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) {
+            cleanup[key] = "rejected_symlink";
+            continue;
+          }
+          try { fs.rmSync(target); cleanup[key] = "deleted"; }
+          catch { cleanup[key] = "delete_failed"; }
+        }
+      }
+
+      if (row.remote_path || row.remote_checksum_path) {
+        if (typeof remoteDeleter !== "function") {
+          if (row.remote_path) cleanup.remote_excel = "delete_failed";
+          if (row.remote_checksum_path) cleanup.remote_checksum = "delete_failed";
         } else {
-        const filename = this.managedPath(row); const checksum = `${filename}.sha256`;
-        fs.rmSync(filename); result.local_excel = "deleted";
-        if (fs.existsSync(checksum)) {
-          if (fs.lstatSync(checksum).isSymbolicLink() || !inside(this.root, fs.realpathSync(checksum))) result.local_checksum = "rejected_symlink";
-          else { try { fs.rmSync(checksum); result.local_checksum = "deleted"; } catch { result.local_checksum = "delete_failed"; } }
-        }
-        result.local = [result.local_excel, result.local_checksum].some((value) => ["delete_failed", "rejected_symlink"].includes(value)) ? "delete_partial" : "deleted";
-        db.prepare("UPDATE backup_records SET status=?,deleted_at=CURRENT_TIMESTAMP,message=? WHERE id=?").run(result.local === "deleted" ? "deleted" : "delete_partial", result.local === "deleted" ? "manual_delete" : "BACKUP_LOCAL_DELETE_PARTIAL", id);
-        }
-      }
-      catch (error) { if (error.code !== "BACKUP_FILE_MISSING") throw error; db.prepare("UPDATE backup_records SET status='missing',message='BACKUP_FILE_MISSING' WHERE id=?").run(id); result.local = "missing"; result.local_excel = "missing"; }
-      if ((row.remote_path || row.remote_checksum_path) && remoteDeleter) {
         try {
-          const remote = await remoteDeleter(this.dto(row)); result.remote_excel = remote.excel || "not_present"; result.remote_checksum = remote.checksum || "not_present";
-          const failures = [result.remote_excel, result.remote_checksum].filter((value) => value === "delete_failed").length;
-          result.remote = failures === 0 ? "deleted" : failures === 2 ? "delete_failed" : "delete_partial";
-          db.prepare("UPDATE backup_records SET remote_status=?,remote_file_status=?,remote_checksum_status=?,remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(result.remote, result.remote_excel, result.remote_checksum, failures ? "BAIDU_REMOTE_DELETE_PARTIAL" : "", id);
+            const remote = await remoteDeleter(this.dto(row));
+            cleanup.remote_excel = remote.excel === "not_present" ? "already_absent" : (remote.excel || "already_absent");
+            cleanup.remote_checksum = remote.checksum === "not_present" ? "already_absent" : (remote.checksum || "already_absent");
         } catch (error) {
-          result.remote = "delete_failed"; result.remote_excel = "delete_failed"; result.remote_checksum = row.remote_checksum_path ? "delete_failed" : "not_present";
-          db.prepare("UPDATE backup_records SET remote_status='delete_failed',remote_file_status=?,remote_checksum_status=?,remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(result.remote_excel, result.remote_checksum, safeMessage(error), id);
+            if (row.remote_path) cleanup.remote_excel = "delete_failed";
+            if (row.remote_checksum_path) cleanup.remote_checksum = "delete_failed";
+          }
         }
       }
-      return { ok: true, result, record: this.dto(this.record(db, id)) };
+
+      const completeStatuses = new Set(["deleted", "already_absent", "not_present", "missing"]);
+      const deleted = Object.values(cleanup).every((status) => completeStatuses.has(status));
+      if (deleted) {
+        db.prepare("DELETE FROM backup_records WHERE id=?").run(Number(id));
+        return { ok: true, deleted: true, backup_id: Number(id), cleanup };
+      }
+
+      const localFailed = [cleanup.local_excel, cleanup.local_checksum].some((status) => !completeStatuses.has(status));
+      const remoteFailed = [cleanup.remote_excel, cleanup.remote_checksum].some((status) => !completeStatuses.has(status));
+      db.prepare(`
+        UPDATE backup_records
+        SET status=?, message=?, remote_status=?, remote_file_status=?, remote_checksum_status=?,
+          remote_error_safe=?, remote_updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+      `).run(
+        localFailed ? "delete_partial" : row.status,
+        localFailed ? "BACKUP_LOCAL_DELETE_PARTIAL" : row.message,
+        remoteFailed ? "delete_partial" : row.remote_status,
+        cleanup.remote_excel,
+        cleanup.remote_checksum,
+        remoteFailed ? "BAIDU_REMOTE_DELETE_PARTIAL" : "",
+        Number(id),
+      );
+      return { ok: false, deleted: false, backup_id: Number(id), cleanup, record: this.dto(this.record(db, id)) };
     } finally { db.close(); }
   }
 }
