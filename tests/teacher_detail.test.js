@@ -105,7 +105,7 @@ const sourceContracts = [
   ["rule writes invalidate lesson cache", frontendSource, /teacher-salary-rules[^]*lessons-range/],
   ["teacher detail GET bypasses cache", frontendSource, /view === "teacherDetail" \? \{ cache: false \}/],
   ["batch and page share resolver", serverSource, /const resolved = resolveTeacherSalaryRuleForLesson\(lesson, rules\)/],
-  ["static resource version is current", indexSource, /20260727-matrix-screenshot-status-backup-batch/g],
+  ["static resource version is current", indexSource, /20260727-remove-screenshot-identity-summary/g],
 ];
 
 for (const [label, source, pattern] of sourceContracts) {
