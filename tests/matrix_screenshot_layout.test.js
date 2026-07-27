@@ -228,6 +228,23 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   await browser.waitFor("Boolean(document.querySelector('.notice-simple-mode .notice-card-identity-row'))");
   assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.notice-simple-mode .notice-card-identity-personal')).flexWrap"), "nowrap");
   assert.deepEqual(await browser.evaluate("courseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,type:item.send_object_type,lessons:item.lessons.length,columns:courseNoticeColumns('parent').map(([key])=>key)}))"), parentCounts);
+  for (const width of [1440, 1280, 1024, 390]) {
+    await viewport(browser, width);
+    for (const layout of ["preview", "simple"]) {
+      await browser.click(`.course-notice-layout-toggle[data-layout="${layout}"]`);
+      await browser.waitFor(`courseNoticeLayoutMode==="${layout}"`);
+      const dimensions = await browser.evaluate(`(() => {
+        const previews=[...document.querySelectorAll('.notice-shot-preview')];
+        const badges=[...document.querySelectorAll('.notice-preview-mode .entity-badge,.notice-simple-mode .entity-badge')];
+        return {
+          pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,
+          previewClipped:previews.some((node)=>node.scrollWidth<node.querySelector('.notice-shot-shell').scrollWidth),
+          invalidBadges:badges.some((node)=>node.getBoundingClientRect().width<=0||node.getBoundingClientRect().height<=0),
+        };
+      })()`);
+      assert.deepEqual(dimensions, { pageOverflow: false, previewClipped: false, invalidBadges: false });
+    }
+  }
   await browser.click('.course-notice-layout-toggle[data-layout="preview"]');
   await browser.waitFor("Boolean(document.querySelector('.notice-shot-preview .notice-shot-table'))");
   assert.equal(await browser.evaluate("document.querySelectorAll('.notice-shot-preview > .notice-shot-shell > .notice-card-identity').length"), 0);
