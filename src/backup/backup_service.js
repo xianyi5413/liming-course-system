@@ -8,6 +8,7 @@ const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = req
 
 const BACKUP_FORMAT = "full_data_excel";
 const MANAGED_SUBDIR = path.join("backups", "full-excel");
+const ACTIVE_BACKUP_JOB_STATUSES = new Set(["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"]);
 const BACKUP_COLUMNS = {
   backup_format: "TEXT DEFAULT 'legacy_core_zip'", format_version: "INTEGER DEFAULT 0", trigger: "TEXT DEFAULT ''",
   retention_class: "TEXT DEFAULT ''", managed_relative_path: "TEXT DEFAULT ''", sha256: "TEXT DEFAULT ''",
@@ -172,17 +173,35 @@ class BackupService {
       return this.dto(this.record(db, id));
     } finally { db.close(); }
   }
+  deletionPolicy(db, row, validCount = null) {
+    if (!row) return { deletable: false, code: "BACKUP_NOT_FOUND", reason: "备份记录不存在" };
+    if (row.backup_format !== BACKUP_FORMAT) return { deletable: false, code: "BACKUP_PATH_UNMANAGED", reason: "旧版备份不能由新体系删除" };
+    if (Number(row.pinned || 0)) return { deletable: false, code: "BACKUP_PINNED", reason: "固定备份受保护，请先取消固定" };
+    if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading" || ACTIVE_BACKUP_JOB_STATUSES.has(row.job_status)) {
+      return { deletable: false, code: "BACKUP_BUSY", reason: "备份正在使用中" };
+    }
+    const successful = validCount == null
+      ? Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')=''").get(BACKUP_FORMAT).count)
+      : Number(validCount);
+    if (row.status === "success" && successful <= 1) return { deletable: false, code: "BACKUP_LAST_VALID", reason: "不能删除最后一份有效全量备份" };
+    return { deletable: true, code: "", reason: "" };
+  }
   list(limit = 100) {
     const db = this.database();
     try {
-      return db.prepare(`
+      const rows = db.prepare(`
         SELECT br.*, u.id AS creator_joined_id, u.username AS creator_username,
           u.display_name AS creator_display_name, u.status AS creator_status
         FROM backup_records br
         LEFT JOIN users u ON u.id = br.created_by_user_id
         ORDER BY br.backup_time DESC, br.id DESC
         LIMIT ?
-      `).all(Math.max(1, Math.min(500, Number(limit) || 100))).map((row) => this.dto(row));
+      `).all(Math.max(1, Math.min(500, Number(limit) || 100)));
+      const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')=''").get(BACKUP_FORMAT).count);
+      return rows.map((row) => {
+        const policy = this.deletionPolicy(db, row, validCount);
+        return { ...this.dto(row), delete_allowed: policy.deletable, delete_protection_code: policy.code, delete_protection_reason: policy.reason };
+      });
     } finally { db.close(); }
   }
   managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
@@ -290,7 +309,8 @@ class BackupService {
     } finally { db.close(); }
   }
   async deleteBackup(id, { remoteDeleter = null } = {}) {
-    const db = this.database();
+    let lock = null;
+    let db = null;
     const cleanup = {
       local_excel: "already_absent",
       local_checksum: "already_absent",
@@ -298,15 +318,11 @@ class BackupService {
       remote_checksum: "already_absent",
     };
     try {
+      lock = this.acquireLock();
+      db = this.database();
       const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在");
-      if (row.backup_format !== BACKUP_FORMAT) throw new BackupError("BACKUP_PATH_UNMANAGED", "旧版备份不能由新体系删除");
-      if (Number(row.pinned || 0)) throw new BackupError("BACKUP_PINNED", "置顶备份受保护，请先取消置顶");
-      const activeJobs = new Set(["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"]);
-      if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading" || activeJobs.has(row.job_status)) {
-        throw new BackupError("BACKUP_BUSY", "备份正在使用中");
-      }
-      const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ").get(BACKUP_FORMAT).count);
-      if (row.status === "success" && validCount <= 1) throw new BackupError("BACKUP_LAST_VALID", "不能删除最后一份有效全量备份");
+      const policy = this.deletionPolicy(db, row);
+      if (!policy.deletable) throw new BackupError(policy.code, policy.reason);
 
       if (row.managed_relative_path) {
         if (path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份");
@@ -364,7 +380,9 @@ class BackupService {
         Number(id),
       );
       return { ok: false, deleted: false, backup_id: Number(id), cleanup, record: this.dto(this.record(db, id)) };
-    } finally { db.close(); }
+    } finally {
+      try { db?.close(); } finally { if (lock) this.releaseLock(lock); }
+    }
   }
 }
 

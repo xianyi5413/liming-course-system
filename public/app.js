@@ -48,7 +48,7 @@ const FIELD_TIERS = {
 
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
 const gradeSortOrder = [...gradeOrder, "已毕业"];
-const studentStatusOptions = ["在读", "离校", "已流出", "暂停", "已毕业"];
+const studentStatusOptions = ["在读", "暂停", "已毕业", "已流出"];
 const defaultCourseStatuses = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
 const DEFAULT_COURSE_STATUS_COLORS = {
   "待上": { background: "#e8f1fb", color: "#1d4f91" },
@@ -75,7 +75,6 @@ const DEFAULT_GENERIC_STATUS_COLORS = {
   "部分完成": { background: "#fff3d7", color: "#9a6200" },
   "待完成": { background: "#e8f1fb", color: "#1d4f91" },
   "暂停": { background: "#fff3d7", color: "#9a6200" },
-  "离校": { background: "#eef0f3", color: "#56606d" },
   "离职": { background: "#eef0f3", color: "#56606d" },
   "已毕业": { background: "#eee9ff", color: "#6246b5" },
   "失败": { background: "#fde9e8", color: "#b42318" },
@@ -393,7 +392,9 @@ let profileKeywordFilter = { teachers: "", students: "" };
 let profileGradeFilter = { students: "" };
 let profileStatusFilter = (() => {
   try {
-    return { teachers: "", students: "", ...JSON.parse(localStorage.getItem("liming:profile-status-filter") || "{}") };
+    const stored = { teachers: "", students: "", ...JSON.parse(localStorage.getItem("liming:profile-status-filter") || "{}") };
+    if (stored.students === "离校") stored.students = "已流出";
+    return stored;
   } catch {
     return { teachers: "", students: "" };
   }
@@ -477,6 +478,8 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   test_passed: false,
 });
 let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduSchedule: { due: false, reason: "disabled" }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null };
+let selectedBackupRecordIds = new Set();
+let backupBatchDeleteDialog = null;
 let backupDeleteEventsBound = false;
 let dashboardRange = readDashboardRange();
 let dashboardShortcutModalOpen = false;
@@ -2916,6 +2919,30 @@ function compareTeacherProfile(a = {}, b = {}) {
     || Number(a.id || 0) - Number(b.id || 0);
 }
 
+function normalizeStudentStatus(value = "") {
+  const status = String(value || "").trim();
+  return status === "离校" ? "已流出" : status;
+}
+
+function compareStudentProfile(a = {}, b = {}) {
+  const statusRank = (status) => {
+    const index = studentStatusOptions.indexOf(normalizeStudentStatus(status));
+    return index === -1 ? studentStatusOptions.length : index;
+  };
+  const gradeRank = (row) => {
+    const index = gradeOrder.indexOf(studentCurrentGrade(row));
+    return index === -1 ? gradeOrder.length : index;
+  };
+  return statusRank(a.status) - statusRank(b.status)
+    || gradeRank(a) - gradeRank(b)
+    || String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN")
+    || Number(a.id || 0) - Number(b.id || 0);
+}
+
+function sortStudentProfiles(rows = []) {
+  return [...rows].sort(compareStudentProfile);
+}
+
 function compareUserRow(a = {}, b = {}) {
   const roleRank = (role) => ({ owner: 0, boss: 0, admin: 1, academic: 2, jiaowu: 2, finance: 3 }[String(role || "")] ?? 4);
   return roleRank(a.role) - roleRank(b.role)
@@ -5123,6 +5150,8 @@ async function refreshBackupData({ logView = false, tolerateFailure = false } = 
       error: "",
       loadError: "",
     };
+    const recordIds = new Set(backupState.records.map((row) => Number(row.id)).filter(Boolean));
+    selectedBackupRecordIds = new Set([...selectedBackupRecordIds].filter((id) => recordIds.has(Number(id))));
     return true;
   } catch (error) {
     backupState = {
@@ -5556,7 +5585,7 @@ function historyToggleAction() {
   return `
     <label class="history-toggle" title="显示历史老师和学生，包括本月没有课程或充值记录的人员">
       <input class="history-toggle-input" type="checkbox" ${includeInactive ? "checked" : ""}>
-      <span>显示历史（含离校）</span>
+      <span>显示历史（含已流出）</span>
     </label>
   `;
 }
@@ -7917,7 +7946,7 @@ function weekGridLessonCard(row, conflictMap = new Map()) {
     ? `<div class="week-grid-conflicts">${conflictLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>`
     : "";
   return `
-    <div class="week-grid-card ${isAbnormal(row) ? "abnormal" : ""} ${conflictLabels.length ? "has-conflict" : ""}">
+    <div class="matrix-lesson-card week-grid-card ${isAbnormal(row) ? "abnormal" : ""} ${conflictLabels.length ? "has-conflict" : ""}">
       <div class="week-grid-course"><span class="entity-badge-list">${renderEntityBadge("grade", row.grade)}${renderEntityBadge("subject", row.subject)}${statusBadge(rowStatus(row))}</span></div>
       ${conflictBadges}
       <div class="week-grid-meta">${meta}</div>
@@ -8026,24 +8055,24 @@ function matrixDayHeader(date) {
 }
 
 function matrixDimensionCard(row, type) {
-  const meta = type === "teacher"
-    ? [
-      renderEntityBadge("grade", row.grade),
-      renderEntityBadge("subject", row.subject),
-      `<span>教室：${escapeHtml(row.classroom || "未填")}</span>`,
-      `<span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>`,
-    ]
-    : [
-      renderEntityBadge("grade", row.grade),
-      renderEntityBadge("subject", row.subject),
-      `<span>老师：${escapeHtml(row.teacher_name || "未填")}</span>`,
-      `<span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("") || "未填学生"}</span>`,
-    ];
+  const counterpartLabel = type === "teacher" ? "教室" : "老师";
+  const counterpartValue = type === "teacher" ? row.classroom : row.teacher_name;
+  const students = splitStudents(row.student_names)
+    .map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade }))
+    .join("");
   const notes = row.notes ? `<div class="matrix-dimension-note">${escapeHtml(row.notes)}</div>` : "";
   return `
-    <div class="matrix-dimension-card ${isAbnormal(row) ? "abnormal" : ""}">
-      <div class="matrix-dimension-time">${escapeHtml(row.time_slot || "未填时间")} ${statusBadge(rowStatus(row))}</div>
-      <div class="matrix-dimension-meta">${meta.filter(Boolean).join("")}</div>
+    <div class="matrix-lesson-card matrix-dimension-card ${isAbnormal(row) ? "abnormal" : ""}">
+      <div class="matrix-dimension-time">${escapeHtml(row.time_slot || "未填时间")}</div>
+      <div class="matrix-lesson-card-badges entity-badge-list">
+        ${renderEntityBadge("grade", row.grade)}
+        ${renderEntityBadge("subject", row.subject)}
+        ${statusBadge(rowStatus(row))}
+      </div>
+      <div class="matrix-dimension-meta">
+        <span>${escapeHtml(counterpartLabel)}：${escapeHtml(counterpartValue || "未填")}</span>
+        <span class="entity-badge-list">${students || "未填学生"}</span>
+      </div>
       ${notes}
     </div>
   `;
@@ -9917,11 +9946,83 @@ function backupDeleteDialogMarkup() {
   </div></div>`;
 }
 
+function backupRecordDeletePolicy(row = {}) {
+  if (!isOwnerRoleValue(auth.user?.role)) return { allowed: false, reason: "当前权限不能删除备份" };
+  if (isReadonlyUser()) return { allowed: false, reason: "当前账号为只读，不能删除备份" };
+  if (row.delete_allowed === false) return { allowed: false, reason: row.delete_protection_reason || "该备份受安全规则保护" };
+  if (row.backup_format !== "full_data_excel") return { allowed: false, reason: "旧版备份不能由新体系删除" };
+  if (Number(row.pinned || 0)) return { allowed: false, reason: "固定备份受保护，请先取消固定" };
+  const activeJobs = ["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"];
+  if (["creating", "verifying", "uploading", "restoring"].includes(row.status) || row.remote_status === "uploading" || activeJobs.includes(row.job_status)) {
+    return { allowed: false, reason: "备份正在使用中" };
+  }
+  const validRows = (backupState.records || []).filter((item) => item.backup_format === "full_data_excel" && item.status === "success" && !item.deleted_at);
+  if (row.status === "success" && validRows.length <= 1) return { allowed: false, reason: "不能删除最后一份有效全量备份" };
+  return { allowed: true, reason: "" };
+}
+
+function selectedBackupRecords() {
+  const selected = new Set([...selectedBackupRecordIds].map(Number));
+  return (backupState.records || []).filter((row) => selected.has(Number(row.id)));
+}
+
+function backupBatchDeleteToolbarMarkup() {
+  const eligible = (backupState.records || []).filter((row) => backupRecordDeletePolicy(row).allowed);
+  const selectedEligible = eligible.filter((row) => selectedBackupRecordIds.has(Number(row.id)));
+  const allSelected = eligible.length > 0 && selectedEligible.length === eligible.length;
+  const indeterminate = selectedEligible.length > 0 && !allSelected;
+  return `
+    <div class="backup-batch-toolbar">
+      <span class="backup-selected-count">已选择 <b>${selectedBackupRecordIds.size}</b> 条</span>
+      <button class="btn backup-selection-clear" type="button" ${selectedBackupRecordIds.size ? "" : "disabled"}>清除选择</button>
+      <button class="btn danger backup-batch-delete-open" type="button" ${selectedBackupRecordIds.size && !backupBatchDeleteDialog?.busy && !isReadonlyUser() ? "" : "disabled"}>批量删除</button>
+      <span class="backup-selection-hint">${indeterminate ? "当前可删除记录为半选状态" : allSelected ? "已全选当前可删除记录" : "只会选择当前可见且可删除的记录"}</span>
+    </div>
+  `;
+}
+
+function backupBatchDeleteDialogMarkup() {
+  const dialog = backupBatchDeleteDialog;
+  if (!dialog) return "";
+  const records = dialog.records || [];
+  const successful = records.filter((row) => row.status === "success").length;
+  const failed = records.filter((row) => row.status !== "success").length;
+  const local = records.filter((row) => row.managed_relative_path).length;
+  const remote = records.filter((row) => row.remote_path || row.remote_checksum_path).length;
+  const result = dialog.result;
+  const resultSummary = result
+    ? `已处理${Number(result.selected_count || 0)}条：删除${Number(result.deleted_count || 0)}条，失败${Number(result.failed_count || 0)}条，受保护${Number(result.protected_count || 0)}条。`
+    : "";
+  const detailRows = (result?.results || []).map((item) => `
+    <tr data-result-backup-id="${escapeHtml(item.backup_id ?? "")}">
+      <td>${escapeHtml(item.filename || "未找到记录")}</td>
+      <td>${escapeHtml(formatBeijingTime(item.backup_time) || item.backup_time || "-")}</td>
+      <td>${escapeHtml(item.created_by_label || "-")}</td>
+      <td>${escapeHtml(item.status === "deleted" ? "已删除" : item.status === "protected" ? "受保护" : item.status === "invalid" ? "ID无效" : "失败")}</td>
+      <td>${escapeHtml(dataCenterRemotePartLabel(item.cleanup?.local_excel))}</td>
+      <td>${escapeHtml(dataCenterRemotePartLabel(item.cleanup?.local_checksum))}</td>
+      <td>${escapeHtml(dataCenterRemotePartLabel(item.cleanup?.remote_excel))}</td>
+      <td>${escapeHtml(dataCenterRemotePartLabel(item.cleanup?.remote_checksum))}</td>
+      <td>${escapeHtml(item.reason || "—")}</td>
+    </tr>
+  `).join("");
+  return `<div class="modal-backdrop backup-batch-delete-modal"><div class="modal-panel backup-batch-delete-panel" role="dialog" aria-modal="true" aria-labelledby="backup-batch-delete-title">
+    <div class="modal-head"><div><div class="modal-title" id="backup-batch-delete-title">${result ? "批量删除结果" : "确认批量删除备份"}</div><div class="modal-subtitle">${result ? escapeHtml(resultSummary) : "普通二次确认，不需要输入密码或确认文字。"}</div></div><button class="btn backup-batch-delete-close" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button></div>
+    ${result ? "" : `<div class="backup-batch-confirm-summary"><div><span>已选择</span><strong>${records.length} 条</strong></div><div><span>成功备份</span><strong>${successful} 条</strong></div><div><span>失败备份</span><strong>${failed} 条</strong></div><div><span>本地备份</span><strong>${local} 条</strong></div><div><span>百度备份</span><strong>${remote} 条</strong></div><p>删除后将清理对应受管文件和记录；部分记录可能因固定、运行中或最后有效备份保护而无法删除。</p></div>`}
+    ${dialog.error ? `<div class="audit-inline-notice danger"><span>${escapeHtml(dialog.error)}</span></div>` : ""}
+    ${result ? `<div class="audit-inline-notice ${result.failed_count || result.protected_count ? "danger" : "neutral"} backup-batch-result-summary"><strong>${escapeHtml(resultSummary)}</strong><button class="btn backup-batch-details-toggle" type="button">${dialog.detailsOpen ? "收起详情" : "查看详情"}</button></div>` : ""}
+    ${result && dialog.detailsOpen ? `<div class="table-wrap backup-batch-result-wrap"><table class="audit-table backup-batch-result-table"><thead><tr><th>文件名</th><th>创建时间</th><th>创建账号</th><th>删除结果</th><th>本地Excel</th><th>本地SHA-256</th><th>百度Excel</th><th>百度SHA-256</th><th>安全原因</th></tr></thead><tbody>${detailRows}</tbody></table></div>` : ""}
+    <div class="modal-actions"><button class="btn backup-batch-delete-close" type="button" ${dialog.busy ? "disabled" : ""}>${result ? "完成" : "取消"}</button>${result ? "" : `<button class="btn danger backup-batch-delete-confirm" type="button" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "正在删除…" : "确认删除"}</button>`}</div>
+  </div></div>`;
+}
+
 function dataCenterBackupRows() {
   return (backupState.records || []).map((row) => {
     const legacy = row.backup_format !== "full_data_excel";
     const downloadPath = legacy ? `/api/backups/${encodeURIComponent(row.id)}/download` : `/api/data-center/backups/${encodeURIComponent(row.id)}/download`;
-    return `<tr>
+    const deletePolicy = backupRecordDeletePolicy(row);
+    return `<tr data-backup-id="${escapeHtml(row.id)}">
+      <td class="select-col backup-select-col"><input class="backup-record-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedBackupRecordIds.has(Number(row.id)) ? "checked" : ""} ${deletePolicy.allowed ? "" : `disabled title="${escapeHtml(deletePolicy.reason)}"`} aria-label="选择备份记录：${escapeHtml(row.filename || row.id)}"></td>
       <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
       <td>${escapeHtml(legacy ? "旧版业务归档" : `${row.retention_class || "全量数据"} · ${row.operation_logs_included === false ? "不含操作日志" : "包含操作日志"}`)}</td>
       <td>${escapeHtml(row.trigger || row.backup_type || "-")}</td>
@@ -9935,10 +10036,10 @@ function dataCenterBackupRows() {
       <td><input class="control backup-note-field" data-id="${escapeHtml(row.id)}" value="${escapeHtml(row.note || "")}" maxlength="500" ${legacy ? "disabled" : ""}></td>
       <td class="data-center-actions">
         <button class="btn backup-download" type="button" data-path="${escapeHtml(downloadPath)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}" ${row.status === "success" ? "" : "disabled"}>下载</button>
-        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}<button class="btn backup-toggle-pinned" type="button" data-id="${escapeHtml(row.id)}" data-pinned="${row.pinned ? "1" : "0"}">${row.pinned ? "取消固定" : "固定"}</button>` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}" ${row.pinned ? "disabled title=\"固定备份受保护，请先取消固定\"" : ""}>删除</button>` : ""}`}
+        ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}<button class="btn backup-toggle-pinned" type="button" data-id="${escapeHtml(row.id)}" data-pinned="${row.pinned ? "1" : "0"}">${row.pinned ? "取消固定" : "固定"}</button>` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}" ${deletePolicy.allowed ? "" : `disabled title="${escapeHtml(deletePolicy.reason)}"`}>删除</button>` : ""}`}
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="12" class="empty">暂无备份记录</td></tr>`;
+  }).join("") || `<tr><td colspan="13" class="empty">暂无备份记录</td></tr>`;
 }
 
 function importPreviewMarkup() {
@@ -10124,6 +10225,9 @@ function baiduSimpleSettingsCardMarkup() {
 function renderAudit() {
   const preflightBlocked = Boolean(backupState.preflight && !backupState.preflight.ok);
   const draft = backupState.draft || backupState.settings || DATA_CENTER_DEFAULT_SETTINGS;
+  const deletableBackupRows = (backupState.records || []).filter((row) => backupRecordDeletePolicy(row).allowed);
+  const selectedDeletableCount = deletableBackupRows.filter((row) => selectedBackupRecordIds.has(Number(row.id))).length;
+  const allDeletableSelected = deletableBackupRows.length > 0 && selectedDeletableCount === deletableBackupRows.length;
   renderTopbar("数据中心", "全量 Excel 导入、导出与备份", "");
   contentEl.innerHTML = `
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
@@ -10171,15 +10275,17 @@ function renderAudit() {
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
+      ${backupBatchDeleteToolbarMarkup()}
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
-        <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
+        <thead><tr><th class="select-col backup-select-col"><input class="backup-record-select-all" type="checkbox" ${allDeletableSelected ? "checked" : ""} ${deletableBackupRows.length ? "" : "disabled"} aria-label="全选当前可删除备份记录"></th><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
     </section>
     ${baiduSimpleGuideMarkup()}
     ${baiduTestDetailsMarkup()}
     ${preflightDetailsMarkup()}
-    ${backupDeleteDialogMarkup()}`;
+    ${backupDeleteDialogMarkup()}
+    ${backupBatchDeleteDialogMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -11209,15 +11315,7 @@ function profileRows(kind = profileTab) {
     ? nameRows.filter((row) => [row.phone, row.status, row.joined_at, row.left_at, row.notes].some((value) => String(value || "").toLowerCase().includes(keyword)))
     : nameRows;
   if (kind !== "students") return filtered;
-  const profileGradeOrder = [...gradeOrder, "已毕业"];
-  return [...filtered].sort((a, b) => {
-    const leftGrade = studentCurrentGrade(a);
-    const rightGrade = studentCurrentGrade(b);
-    const gradeDelta = profileGradeOrder.indexOf(leftGrade) - profileGradeOrder.indexOf(rightGrade);
-    if (profileGradeOrder.includes(leftGrade) && profileGradeOrder.includes(rightGrade) && gradeDelta) return gradeDelta;
-    if (profileGradeOrder.includes(leftGrade) !== profileGradeOrder.includes(rightGrade)) return profileGradeOrder.includes(leftGrade) ? -1 : 1;
-    return String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN");
-  });
+  return sortStudentProfiles(filtered);
 }
 
 function studentGradeStageMap(row = {}) {
@@ -12694,6 +12792,7 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
         <div class="notice-shot-head">
           <div class="notice-shot-title">${escapeHtml(title)}</div>
         </div>
+        <div class="notice-card-identity">${courseNoticeIdentityMarkup(item, mode)}</div>
         <table class="notice-shot-table">
           <thead>
             <tr>
@@ -12742,6 +12841,85 @@ function isPersonalCourseNoticeObject(item = {}) {
 
 function isMergedClassCourseNoticeObject(item = {}) {
   return item.send_object_type === "班级合并发送" || String(item.send_object_key || "").startsWith("CLASS_MERGED|");
+}
+
+function stableUniqueValues(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values.flatMap((item) => Array.isArray(item) ? item : [item])) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function courseNoticeObjectStudents(item = {}) {
+  const explicit = splitStudents(item.students || "");
+  const lessonStudents = (item.lessons || [])
+    .flatMap((lesson) => splitStudents(lesson.display_student_names || lesson.student_names || ""));
+  const students = stableUniqueValues(explicit.length ? explicit : lessonStudents);
+  if (!isPersonalCourseNoticeObject(item)) return students;
+  const objectName = String(item.send_object_name || "").replace(/个人课程$/, "").trim();
+  return [students[0] || objectName].filter(Boolean);
+}
+
+function courseNoticeObjectGrades(item = {}) {
+  return stableUniqueValues([...(item.grades || []), ...(item.lessons || []).map((lesson) => lesson.grade)])
+    .sort(compareGradeForSort);
+}
+
+function courseNoticeObjectSubjects(item = {}) {
+  return uniqueSorted([...(item.subjects || []), ...(item.lessons || []).map((lesson) => lesson.subject)]);
+}
+
+function teacherNoticeObjectNames(item = {}) {
+  const explicit = stableUniqueValues(item.teachers || []);
+  if (explicit.length) return explicit;
+  const objectName = String(item.send_object_name || "").replace(/老师课程$/, "").trim();
+  return [objectName || "未命名老师"];
+}
+
+function courseNoticeIdentityRows(item = {}, mode = "parent") {
+  const students = courseNoticeObjectStudents(item);
+  const grades = courseNoticeObjectGrades(item);
+  const subjects = courseNoticeObjectSubjects(item);
+  const studentBadges = students.map((label) => ({ type: "student", label }));
+  const gradeSubjectBadges = [
+    ...grades.map((label) => ({ type: "grade", label })),
+    ...subjects.map((label) => ({ type: "subject", label })),
+  ];
+  if (mode === "teacher") {
+    return [
+      { key: "teacher", badges: teacherNoticeObjectNames(item).map((label) => ({ type: "teacher", label })) },
+      { key: "students", badges: studentBadges },
+      { key: "grade-subject", badges: gradeSubjectBadges },
+    ];
+  }
+  if (isPersonalCourseNoticeObject(item)) {
+    return [{ key: "personal", badges: [...studentBadges.slice(0, 1), ...gradeSubjectBadges] }];
+  }
+  return [
+    { key: isMergedClassCourseNoticeObject(item) ? "merged-students" : "class-students", badges: studentBadges },
+    { key: "grade-subject", badges: gradeSubjectBadges },
+  ];
+}
+
+function courseNoticeIdentityBadgeMarkup(badge = {}, fallbackGrade = "") {
+  if (badge.type === "teacher") {
+    return `<span class="entity-badge teacher-badge">${escapeHtml(badge.label)}</span>`;
+  }
+  return renderEntityBadge(badge.type, badge.label, { fallbackGrade });
+}
+
+function courseNoticeIdentityMarkup(item = {}, mode = "parent") {
+  const fallbackGrade = courseNoticeObjectGrades(item)[0] || "";
+  return courseNoticeIdentityRows(item, mode).map((row) => `
+    <span class="notice-card-identity-row notice-card-identity-${escapeHtml(row.key)} entity-badge-list">
+      ${row.badges.map((badge) => courseNoticeIdentityBadgeMarkup(badge, fallbackGrade)).join("") || '<span class="muted-tip">未设置</span>'}
+    </span>
+  `).join("");
 }
 
 function studentCurrentGrade(row = {}) {
@@ -12823,26 +13001,8 @@ function courseNoticeTagGroup(item = {}) {
   return badges ? `<span class="notice-course-tag-group entity-badge-list">${badges}</span>` : "";
 }
 
-function courseNoticeSimpleValues(item = {}) {
-  const students = uniqueSorted([
-    ...splitStudents(item.students || ""),
-    ...(item.lessons || []).flatMap((lesson) => splitStudents(lesson.display_student_names || lesson.student_names || "")),
-  ].filter(Boolean));
-  const grades = uniqueSorted([...(item.grades || []), ...(item.lessons || []).map((lesson) => lesson.grade)].filter(Boolean));
-  const subjects = uniqueSorted([...(item.subjects || []), ...(item.lessons || []).map((lesson) => lesson.subject)].filter(Boolean));
-  return { students, grades, subjects };
-}
-
-function courseNoticeSimpleDetails(item = {}) {
-  const { students, grades, subjects } = courseNoticeSimpleValues(item);
-  const studentBadges = students.map((name) => renderEntityBadge("student", name, { fallbackGrade: grades[0] || "" })).join("");
-  const gradeBadges = grades.map((value) => renderEntityBadge("grade", value)).join("");
-  const subjectBadges = subjects.map((value) => renderEntityBadge("subject", value)).join("");
-  return `
-    <span class="notice-simple-detail-line notice-simple-students entity-badge-list">${studentBadges || '<span class="muted-tip">未设置学生</span>'}</span>
-    <span class="notice-simple-detail-line notice-simple-grades entity-badge-list">${gradeBadges || '<span class="muted-tip">未设置年级</span>'}</span>
-    <span class="notice-simple-detail-line notice-simple-subjects entity-badge-list">${subjectBadges || '<span class="muted-tip">未设置科目</span>'}</span>
-  `;
+function courseNoticeSimpleDetails(item = {}, mode = "parent") {
+  return courseNoticeIdentityMarkup(item, mode);
 }
 
 function courseNoticeSimpleAction(item = {}) {
@@ -13013,12 +13173,11 @@ function renderCourseNotice() {
 }
 
 function teacherCourseNoticeSimpleTile(item = {}) {
-  const teacherName = String(item.send_object_name || "未命名老师").replace(/老师课程$/, "老师");
   return noticeSimpleTile(item, {
     actionStore: teacherCourseNoticeSimpleActions,
-    meta: `${teacherName} · ${Number(item.lesson_count || item.lessons?.length || 0)} 节课`,
+    meta: `${Number(item.lesson_count || item.lessons?.length || 0)} 节课`,
     className: "notice-simple-tile teacher-notice-simple-tile",
-    details: courseNoticeSimpleDetails(item),
+    details: courseNoticeSimpleDetails(item, "teacher"),
   });
 }
 
@@ -13226,6 +13385,7 @@ function courseNoticeShotPalette() {
 }
 
 function courseNoticeCanvasBadgeColor(badge = {}, row = {}) {
+  if (badge.type === "teacher") return { background: cssVar("--brand-soft", "#eaf0f7"), color: cssVar("--brand", "#002147") };
   if (badge.type === "status") return getCourseStatusColor(badge.label);
   if (badge.type === "grade") return getStudentGradeColor(badge.label);
   if (badge.type === "subject") return getSubjectColor(badge.label);
@@ -13273,10 +13433,33 @@ function drawCourseNoticeCanvasBadges(ctx, badges, row, x, y, width, height) {
   ctx.restore();
 }
 
+function courseNoticeCanvasBadgeLines(ctx, badges = [], width = 0, wrap = false) {
+  if (!badges.length) return [[]];
+  if (!wrap) return [badges];
+  const lines = [];
+  let current = [];
+  let currentWidth = 0;
+  for (const badge of badges) {
+    const badgeWidth = Math.ceil(ctx.measureText(badge.label).width) + 16;
+    const nextWidth = currentWidth + (current.length ? 6 : 0) + badgeWidth;
+    if (current.length && nextWidth > Math.max(80, width - 16)) {
+      lines.push(current);
+      current = [badge];
+      currentWidth = badgeWidth;
+    } else {
+      current.push(badge);
+      currentWidth = nextWidth;
+    }
+  }
+  if (current.length) lines.push(current);
+  return lines;
+}
+
 function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   const colors = courseNoticeShotPalette();
   const columns = courseNoticeColumns(mode);
   const rows = item.lessons || [];
+  const identityRows = courseNoticeIdentityRows(item, mode);
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   const font = "16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
@@ -13286,6 +13469,7 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   const rowHeight = 44;
   const outerPadding = 30;
   const titleHeight = 54;
+  const identityRowHeight = 34;
   const colWidths = columns.map(([key, label]) => {
     const maxText = Math.max(
       ctx.measureText(label).width,
@@ -13300,11 +13484,21 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   const naturalTableWidth = colWidths.reduce((sum, value) => sum + value, 0);
   if (naturalTableWidth < minimumTableWidth) colWidths[colWidths.length - 1] += minimumTableWidth - naturalTableWidth;
   const tableWidth = colWidths.reduce((sum, value) => sum + value, 0);
+  const identityLayouts = identityRows.map((identityRow) => ({
+    ...identityRow,
+    lines: courseNoticeCanvasBadgeLines(
+      ctx,
+      identityRow.badges,
+      tableWidth,
+      identityRow.key.includes("students"),
+    ),
+  }));
+  const identityHeight = identityLayouts.reduce((sum, row) => sum + row.lines.length * identityRowHeight, 0) + 12;
   const tableHeight = rowHeight * (rows.length + 1);
   const width = tableWidth + outerPadding * 2;
-  const height = titleHeight + tableHeight + outerPadding * 2;
+  const height = titleHeight + identityHeight + tableHeight + outerPadding * 2;
   const tableX = outerPadding;
-  const tableY = outerPadding + titleHeight;
+  const tableY = outerPadding + titleHeight + identityHeight;
   const panelX = outerPadding / 2;
   const panelY = outerPadding / 2;
   const panelWidth = width - outerPadding;
@@ -13314,6 +13508,7 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   canvas.height = height * ratio;
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
+  canvas.dataset.noticeIdentity = JSON.stringify(identityRows);
   ctx.scale(ratio, ratio);
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, width, height);
@@ -13335,6 +13530,14 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(title, width / 2, panelY + titleHeight / 2 + 3);
+  ctx.font = font;
+  let identityY = outerPadding + titleHeight + 6;
+  identityLayouts.forEach((identityRow) => {
+    identityRow.lines.forEach((line) => {
+      drawCourseNoticeCanvasBadges(ctx, line, rows[0] || {}, tableX, identityY, tableWidth, identityRowHeight);
+      identityY += identityRowHeight;
+    });
+  });
   ctx.textAlign = "left";
   ctx.save();
   ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
@@ -14021,6 +14224,10 @@ function render() {
   applySidebarState();
   const previousView = lastRenderedView;
   const viewChanged = previousView && previousView !== view;
+  if (view === "audit" && previousView !== "audit") {
+    selectedBackupRecordIds.clear();
+    backupBatchDeleteDialog = null;
+  }
   if (viewChanged) dismissToast();
   const enteringTeacherSalaryRules = view === "teacherSalaryRules" && previousView !== "teacherSalaryRules";
   if (enteringTeacherSalaryRules) resetTeacherSalaryRuleCandidateSync();
@@ -14104,7 +14311,10 @@ function patchProfileState(kind, row) {
     markDirty("teacherSalary");
     return;
   }
-  state.profile_students = upsertById(state.profile_students || [], row);
+  state.profile_students = sortStudentProfiles(upsertById(state.profile_students || [], {
+    ...row,
+    status: normalizeStudentStatus(row.status),
+  }));
   for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
 }
 
@@ -15883,13 +16093,13 @@ function wireEvents() {
         .filter(Boolean);
       const sample = names.slice(0, 8).join("、");
       const suffix = names.length > 8 ? ` 等 ${names.length} 名学生` : "";
-      if (!confirm(`确认批量删除已选中的 ${ids.length} 名学生吗？\n\n${sample}${suffix}\n\n已有历史课程、充值或单价规则的学生会改为离校并保留档案。`)) return;
+      if (!confirm(`确认批量删除已选中的 ${ids.length} 名学生吗？\n\n${sample}${suffix}\n\n已有历史课程、充值或单价规则的学生会改为已流出并保留档案。`)) return;
       button.disabled = true;
       try {
         const result = await request("/api/students/batch-delete", { method: "POST", body: { ids } });
         selectedStudentProfileIds.clear();
         await load({ refreshGlobal: false });
-        const message = `已删除 ${result.deleted || 0} 条学生档案，改为离校 ${result.soft_deleted || 0} 条。`;
+        const message = `已删除 ${result.deleted || 0} 条学生档案，改为已流出 ${result.soft_deleted || 0} 条。`;
         showToast(message);
         if (result.missing?.length) alert(`${message}\n另有 ${result.missing.length} 条未找到。`);
       } catch (error) {
@@ -15932,7 +16142,17 @@ function wireEvents() {
     if (!row) return;
     bindInlineStatusPicker(select, {
       save: (status) => request(`/api/${row.dataset.kind}/${row.dataset.id}`, { method: "PATCH", body: { status } }),
-      onSaved: (result) => patchProfileState(row.dataset.kind, result),
+      onSaved: (result) => {
+        patchProfileState(row.dataset.kind, result);
+        if (row.dataset.kind === "students") {
+          const scrollTop = document.querySelector(".main")?.scrollTop || window.scrollY || 0;
+          rerenderContent(() => renderProfileDirectory("students"));
+          requestAnimationFrame(() => {
+            document.querySelector(".main")?.scrollTo?.({ top: scrollTop });
+            window.scrollTo({ top: scrollTop });
+          });
+        }
+      },
       successMessage: "档案状态已更新",
     });
   });
@@ -15955,10 +16175,10 @@ function wireEvents() {
   document.querySelectorAll(".delete-profile").forEach((button) => {
     button.addEventListener("click", () => {
       const label = button.dataset.kind === "students" ? "学生" : "老师";
-      if (!confirm(`删除${label}档案：${button.dataset.name}？已有历史记录时会改为离职/离校并保留档案。`)) return;
+      if (!confirm(`删除${label}档案：${button.dataset.name}？已有历史记录时会改为${button.dataset.kind === "students" ? "已流出" : "离职"}并保留档案。`)) return;
       refreshAfter(async () => {
         const result = await request(`/api/${button.dataset.kind}/${button.dataset.id}`, { method: "DELETE" });
-        if (result.soft_deleted) alert("存在历史记录，已改为离职/离校并保留档案。");
+        if (result.soft_deleted) alert(`存在历史记录，已改为${button.dataset.kind === "students" ? "已流出" : "离职"}并保留档案。`);
         return result;
       });
     });
@@ -16492,6 +16712,76 @@ function wireEvents() {
     catch (error) { showToast(error.message || "远端备份下载或 SHA-256 校验失败", "error"); }
   }));
 
+  const backupSelectAll = document.querySelector(".backup-record-select-all");
+  if (backupSelectAll) {
+    const eligibleRows = (backupState.records || []).filter((row) => backupRecordDeletePolicy(row).allowed);
+    const selectedCount = eligibleRows.filter((row) => selectedBackupRecordIds.has(Number(row.id))).length;
+    backupSelectAll.indeterminate = selectedCount > 0 && selectedCount < eligibleRows.length;
+    backupSelectAll.addEventListener("change", () => {
+      if (backupSelectAll.checked) eligibleRows.forEach((row) => selectedBackupRecordIds.add(Number(row.id)));
+      else eligibleRows.forEach((row) => selectedBackupRecordIds.delete(Number(row.id)));
+      render();
+    });
+  }
+  document.querySelectorAll(".backup-record-select-row").forEach((input) => input.addEventListener("change", () => {
+    const id = Number(input.dataset.id);
+    if (!id || input.disabled) return;
+    if (input.checked) selectedBackupRecordIds.add(id);
+    else selectedBackupRecordIds.delete(id);
+    render();
+  }));
+  document.querySelectorAll(".backup-selection-clear").forEach((button) => button.addEventListener("click", () => {
+    selectedBackupRecordIds.clear();
+    render();
+  }));
+  document.querySelectorAll(".backup-batch-delete-open").forEach((button) => button.addEventListener("click", () => {
+    const records = selectedBackupRecords();
+    if (!records.length || button.disabled) return;
+    backupBatchDeleteDialog = { records, busy: false, error: "", result: null, detailsOpen: false };
+    render();
+    requestAnimationFrame(() => document.querySelector(".backup-batch-delete-close")?.focus());
+  }));
+  document.querySelectorAll(".backup-batch-delete-close").forEach((button) => button.addEventListener("click", () => {
+    if (backupBatchDeleteDialog?.busy) return;
+    backupBatchDeleteDialog = null;
+    render();
+    requestAnimationFrame(() => document.querySelector(".backup-batch-delete-open")?.focus());
+  }));
+  document.querySelectorAll(".backup-batch-details-toggle").forEach((button) => button.addEventListener("click", () => {
+    if (!backupBatchDeleteDialog?.result) return;
+    backupBatchDeleteDialog = { ...backupBatchDeleteDialog, detailsOpen: !backupBatchDeleteDialog.detailsOpen };
+    render();
+  }));
+  document.querySelectorAll(".backup-batch-delete-confirm").forEach((button) => button.addEventListener("click", async () => {
+    const dialog = backupBatchDeleteDialog;
+    if (!dialog || dialog.busy) return;
+    const backupIds = dialog.records.map((row) => Number(row.id)).filter(Boolean);
+    if (!backupIds.length) return;
+    backupBatchDeleteDialog = { ...dialog, busy: true, error: "" };
+    render();
+    try {
+      const result = await request("/api/data-center/backups/batch-delete", { method: "POST", body: { backup_ids: backupIds } });
+      const deletedIds = new Set((result.results || []).filter((item) => item.status === "deleted").map((item) => Number(item.backup_id)));
+      const protectedIds = new Set((result.results || []).filter((item) => item.status === "protected").map((item) => Number(item.backup_id)));
+      deletedIds.forEach((id) => {
+        selectedBackupRecordIds.delete(id);
+        document.querySelector(`tr[data-backup-id="${selectorEscape(id)}"]`)?.remove();
+      });
+      protectedIds.forEach((id) => selectedBackupRecordIds.delete(id));
+      backupState.records = (backupState.records || []).filter((row) => !deletedIds.has(Number(row.id)));
+      backupBatchDeleteDialog = { ...dialog, busy: false, error: "", result, detailsOpen: false };
+      showToast(`已处理${result.selected_count || 0}条：删除${result.deleted_count || 0}条，失败${result.failed_count || 0}条，受保护${result.protected_count || 0}条。`, result.failed_count || result.protected_count ? "error" : "success");
+    } catch (error) {
+      backupBatchDeleteDialog = { ...dialog, busy: false, error: error.message || "批量删除备份失败", result: null };
+    }
+    render();
+  }));
+  document.querySelectorAll(".backup-batch-delete-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal || backupBatchDeleteDialog?.busy) return;
+    backupBatchDeleteDialog = null;
+    render();
+  }));
+
   document.querySelectorAll(".backup-delete").forEach((button) => button.addEventListener("click", () => {
     const record = (backupState.records || []).find((row) => Number(row.id) === Number(button.dataset.id));
     if (!record) return showToast("备份记录不存在", "error");
@@ -16514,6 +16804,7 @@ function wireEvents() {
     render();
     try {
       const result = await request(`/api/data-center/backups/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
+      selectedBackupRecordIds.delete(Number(id));
       backupState.records = (backupState.records || []).filter((row) => Number(row.id) !== Number(id));
       document.querySelector(`.backup-delete[data-id="${selectorEscape(id)}"]`)?.closest("tr")?.remove();
       await refreshBackupData({ tolerateFailure: true });
@@ -16534,7 +16825,14 @@ function wireEvents() {
   if (!backupDeleteEventsBound) {
     backupDeleteEventsBound = true;
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !backupState.deleteDialog || backupState.deleteDialog.busy) return;
+      if (event.key !== "Escape") return;
+      if (backupBatchDeleteDialog && !backupBatchDeleteDialog.busy) {
+        event.preventDefault();
+        backupBatchDeleteDialog = null;
+        render();
+        return;
+      }
+      if (!backupState.deleteDialog || backupState.deleteDialog.busy) return;
       event.preventDefault();
       const id = backupState.deleteDialog.record?.id;
       backupState.deleteDialog = null;

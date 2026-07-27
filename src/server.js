@@ -30,7 +30,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260726-adaptive-table-columns";
+const APP_VERSION = process.env.APP_VERSION || "20260727-matrix-screenshot-status-backup-batch";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -44,6 +44,13 @@ const sessions = new Map();
 const LESSON_STATUS = ["上课", "试课", "监考", "休息", "上课（未缴费）", "待定", "请假", "考试"];
 const COURSE_STATUS = ["未上", "已上", "请假", "暂停一次", "暂停一阵"];
 const STATUS = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
+const STUDENT_STATUS_VALUES = ["在读", "暂停", "已毕业", "已流出"];
+
+function normalizeStudentStatus(value = "") {
+  const status = text(value);
+  return status === "离校" ? "已流出" : status;
+}
+
 const CLASSROOMS = [
   "C1", "C2", "C3", "C4", "C5",
   "B1", "B2", "B3", "B4",
@@ -1020,6 +1027,7 @@ function initDb() {
     db.prepare("INSERT OR IGNORE INTO teacher_adjustments_monthly(teacher_name, month_key) VALUES (?, ?)").run(teacher.name, currentMonth);
   }
   migrateLegacyTeacherTravelFees();
+  migrateLegacyStudentStatuses();
   for (const row of PRICING) {
     db.prepare(`
       INSERT OR IGNORE INTO pricing_standards(grade, student_count, unit_price, description)
@@ -2665,10 +2673,11 @@ function studentProfiles() {
       current_grade: currentStudentGradeFromStages(gradeStages, row.grade),
     };
   }).sort((a, b) => (
-    ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[a.status] ?? 1)
-    - ({ 在读: 0, 暂停: 1, 离校: 2, 已流出: 3, 已毕业: 4 }[b.status] ?? 1)
+    ({ 在读: 0, 暂停: 1, 已毕业: 2, 已流出: 3 }[normalizeStudentStatus(a.status)] ?? 4)
+    - ({ 在读: 0, 暂停: 1, 已毕业: 2, 已流出: 3 }[normalizeStudentStatus(b.status)] ?? 4)
     || compareGradeName(a.current_grade || a.grade, b.current_grade || b.grade)
     || a.name.localeCompare(b.name, "zh-Hans-CN")
+    || Number(a.id || 0) - Number(b.id || 0)
   ));
 }
 
@@ -2936,6 +2945,8 @@ function createStudentProfile(body) {
   const name = text(body.name);
   if (!name) return { error: "name is required", status: 400 };
   if (get("SELECT id FROM students WHERE name = ?", [name])) return { error: "student already exists", status: 409 };
+  const status = normalizeStudentStatus(body.status || "在读");
+  if (!STUDENT_STATUS_VALUES.includes(status)) return { error: "学生状态仅支持在读、暂停、已毕业、已流出", status: 400 };
   const result = db.prepare(`
     INSERT INTO students(name, grade, phone, guardian, notes, status, joined_at, left_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2945,7 +2956,7 @@ function createStudentProfile(body) {
     text(body.phone),
     text(body.guardian),
     text(body.notes),
-    text(body.status || "在读"),
+    status,
     text(body.joined_at),
     text(body.left_at),
   );
@@ -3077,7 +3088,7 @@ function deleteStudentProfile(id) {
   const row = get("SELECT * FROM students WHERE id = ?", [Number(id)]);
   if (!row) return null;
   if (studentHasHistory(row.name)) {
-    db.prepare("UPDATE students SET status = '离校', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
+    db.prepare("UPDATE students SET status = '已流出', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
     return { deleted: false, soft_deleted: true, row: get("SELECT * FROM students WHERE id = ?", [Number(id)]) };
   }
   db.prepare("DELETE FROM students WHERE id = ?").run(Number(id));
@@ -4915,6 +4926,13 @@ function migrateLegacyTeacherTravelFees() {
   `).run(migrationKey);
 }
 
+function migrateLegacyStudentStatuses() {
+  const result = db.prepare("UPDATE students SET status = '已流出' WHERE status = '离校'").run();
+  const report = { updated: Number(result.changes || 0) };
+  console.info(`[student status migration] ${JSON.stringify(report)}`);
+  return report;
+}
+
 function normalizeRange(start, end) {
   if (!validDateKey(start) || !validDateKey(end)) return null;
   if (start > end) return null;
@@ -5815,7 +5833,7 @@ function normalizeAuditName(value) {
 }
 
 function inactiveStudentStatus(status) {
-  return ["离校", "已流出", "已毕业"].includes(text(status));
+  return ["已流出", "已毕业"].includes(normalizeStudentStatus(status));
 }
 
 function studentBalanceOpen(row) {
@@ -13213,6 +13231,116 @@ async function handleApi(req, res, url) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/data-center/backups/batch-delete") {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以批量删除完整备份");
+    const body = await readBody(req);
+    const rawIds = Array.isArray(body.backup_ids) ? body.backup_ids : [];
+    if (!rawIds.length) {
+      return sendJson(res, { error: "backup_ids 至少需要一条记录", code: "BACKUP_BATCH_EMPTY", results: [] }, 400);
+    }
+    if (rawIds.length > 100) {
+      return sendJson(res, { error: "单次最多处理100条备份记录", code: "BACKUP_BATCH_LIMIT", results: [] }, 400);
+    }
+    const seenIds = new Set();
+    const validIds = [];
+    const results = [];
+    rawIds.forEach((rawId, inputIndex) => {
+      const id = Number(rawId);
+      if (!Number.isInteger(id) || id <= 0) {
+        results.push({
+          backup_id: null,
+          input_index: inputIndex,
+          status: "invalid",
+          code: "INVALID_BACKUP_ID",
+          reason: "备份ID必须是正整数",
+          cleanup: {},
+        });
+        return;
+      }
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+      validIds.push(id);
+    });
+    const service = backupService();
+    const protectedCodes = new Set(["BACKUP_PINNED", "BACKUP_BUSY", "BACKUP_LAST_VALID", "BACKUP_ALREADY_RUNNING", "BACKUP_PATH_UNMANAGED"]);
+    for (const backupId of validIds) {
+      let before = null;
+      const database = service.database();
+      try { before = service.record(database, backupId); } finally { database.close(); }
+      const safeRecord = before ? service.dto(before) : null;
+      if (!before) {
+        results.push({
+          backup_id: backupId,
+          filename: "",
+          backup_time: "",
+          created_by_label: "",
+          status: "failed",
+          code: "BACKUP_NOT_FOUND",
+          reason: "备份记录不存在",
+          cleanup: {},
+        });
+        continue;
+      }
+      try {
+        const deleted = await service.deleteBackup(backupId, { remoteDeleter: (record) => baiduBackupManager().delete(record) });
+        results.push({
+          backup_id: backupId,
+          filename: safeRecord.filename || "",
+          backup_time: safeRecord.backup_time || "",
+          created_by_label: safeRecord.created_by_label || "",
+          status: deleted.deleted ? "deleted" : "failed",
+          code: deleted.deleted ? "" : "BACKUP_DELETE_PARTIAL",
+          reason: deleted.deleted ? "" : "备份组件删除未完成，记录已保留",
+          cleanup: deleted.cleanup || {},
+        });
+      } catch (error) {
+        const code = String(error.code || "BACKUP_DELETE_FAILED").slice(0, 100);
+        results.push({
+          backup_id: backupId,
+          filename: safeRecord.filename || "",
+          backup_time: safeRecord.backup_time || "",
+          created_by_label: safeRecord.created_by_label || "",
+          status: protectedCodes.has(code) ? "protected" : "failed",
+          code,
+          reason: protectedCodes.has(code) || code === "BACKUP_NOT_FOUND" ? (error.message || "备份受安全规则保护") : "删除备份失败",
+          cleanup: {},
+        });
+      }
+    }
+    const deletedCount = results.filter((item) => item.status === "deleted").length;
+    const protectedCount = results.filter((item) => item.status === "protected").length;
+    const failedCount = results.length - deletedCount - protectedCount;
+    const response = {
+      ok: failedCount === 0 && protectedCount === 0,
+      selected_count: results.length,
+      deleted_count: deletedCount,
+      failed_count: failedCount,
+      protected_count: protectedCount,
+      results,
+    };
+    const safeLogResults = results.map((item) => ({
+      backup_id: item.backup_id,
+      status: item.status,
+      code: item.code,
+      cleanup: item.cleanup,
+    }));
+    writeOperationLog(user, {
+      operation_type: "批量删除全量数据备份",
+      operation_content: `选择 ${response.selected_count} 条，删除 ${deletedCount} 条，失败 ${failedCount} 条，受保护 ${protectedCount} 条；ID摘要 ${validIds.slice(0, 20).join(",")}${validIds.length > 20 ? ` 等${validIds.length}条` : ""}`,
+      target_type: "backup_records",
+      target_id: validIds.slice(0, 100).join(","),
+      result_status: failedCount || protectedCount ? "failure" : "success",
+      details: {
+        selected_count: response.selected_count,
+        deleted_count: deletedCount,
+        failed_count: failedCount,
+        protected_count: protectedCount,
+        results: safeLogResults,
+      },
+    }, req);
+    return sendJson(res, response);
+  }
+
   const dataBackupDelete = url.pathname.match(/^\/api\/data-center\/backups\/(\d+)$/);
   if (req.method === "DELETE" && dataBackupDelete) {
     if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以删除完整备份");
@@ -13750,7 +13878,7 @@ async function handleApi(req, res, url) {
     });
     writeOperationLog(user, {
       operation_type: "批量删除学生档案",
-      operation_content: `批量删除学生档案 ${result.deleted || 0} 条，改为离校 ${result.soft_deleted || 0} 条：${sampleNames}${moreText}${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
+      operation_content: `批量删除学生档案 ${result.deleted || 0} 条，改为已流出 ${result.soft_deleted || 0} 条：${sampleNames}${moreText}${result.missing?.length ? `，未找到 ${result.missing.length} 条` : ""}`,
       target_type: "students",
       target_id: result.results.map((item) => item.id).join(","),
     });
@@ -13766,6 +13894,10 @@ async function handleApi(req, res, url) {
     const payload = {};
     for (const field of ["name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+      payload.status = normalizeStudentStatus(payload.status);
+      if (!STUDENT_STATUS_VALUES.includes(payload.status)) return sendError(res, 400, "学生状态仅支持在读、暂停、已毕业、已流出");
     }
     const row = auditedPatchTable(req, user, "students", "id", Number(studentIdMatch[1]), [
       "name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at",

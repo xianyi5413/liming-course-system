@@ -4848,6 +4848,40 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   min-width: 150px;
 }
 
+.data-center-backup-table .backup-select-col {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding-inline: 8px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.data-center-backup-table .backup-select-col input {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 0 auto;
+}
+
+.backup-batch-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.backup-selected-count {
+  color: var(--ink-strong);
+  font-size: var(--text-ui);
+}
+
+.backup-selection-hint {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
 .backup-filename-cell,
 .backup-failure-cell {
   max-width: 320px;
@@ -4868,6 +4902,54 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 .backup-failure-empty { color: var(--muted); }
 
 .backup-delete-panel { width: min(560px, calc(100vw - 32px)); }
+.backup-batch-delete-panel {
+  width: min(1120px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+}
+
+.backup-batch-confirm-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
+  gap: var(--space-2);
+}
+
+.backup-batch-confirm-summary > div {
+  display: grid;
+  gap: 4px;
+  padding: var(--space-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.backup-batch-confirm-summary span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.backup-batch-confirm-summary p {
+  grid-column: 1 / -1;
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+}
+
+.backup-batch-result-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.backup-batch-result-wrap {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.backup-batch-result-table {
+  width: max-content;
+  min-width: 100%;
+}
 
 .backup-delete-summary > div,
 .backup-delete-result > div {
@@ -4891,6 +4973,8 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   .backup-failure-actions { grid-template-columns: minmax(0, 1fr); }
   .backup-delete-summary > div,
   .backup-delete-result > div { grid-template-columns: minmax(0, 1fr); }
+  .backup-batch-confirm-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .backup-batch-result-summary { align-items: flex-start; flex-direction: column; }
 }
 
 .data-center-actions {
@@ -9305,6 +9389,8 @@ table th,
 }
 
 .week-grid-panel {
+  --matrix-lesson-card-width: 196px;
+  --matrix-lesson-cell-width: calc(var(--matrix-lesson-card-width) + 16px);
   overflow: visible;
 }
 
@@ -9330,6 +9416,8 @@ table th,
 }
 
 .matrix-dimension-panel {
+  --matrix-lesson-card-width: 196px;
+  --matrix-lesson-cell-width: calc(var(--matrix-lesson-card-width) + 16px);
   overflow: visible;
 }
 
@@ -9341,7 +9429,7 @@ table th,
 
 .matrix-dimension-table {
   width: max-content;
-  min-width: 100%;
+  min-width: max-content;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
@@ -9391,8 +9479,8 @@ table th,
 }
 
 .matrix-dimension-table td {
-  width: 220px;
-  min-width: 220px;
+  width: var(--matrix-lesson-cell-width);
+  min-width: var(--matrix-lesson-cell-width);
   min-height: 116px;
   height: auto;
   padding: 8px;
@@ -9400,15 +9488,16 @@ table th,
 }
 
 .matrix-dimension-table .matrix-dimension-date-head {
-  width: 220px;
-  min-width: 220px;
+  width: var(--matrix-lesson-cell-width);
+  min-width: var(--matrix-lesson-cell-width);
 }
 
-.matrix-dimension-card {
+.matrix-lesson-card {
   display: grid;
   gap: 4px;
-  min-width: 0;
-  max-width: 100%;
+  width: var(--matrix-lesson-card-width);
+  min-width: var(--matrix-lesson-card-width);
+  max-width: var(--matrix-lesson-card-width);
   margin-bottom: 6px;
   padding: 10px;
   border: 1px solid var(--line-soft);
@@ -9419,20 +9508,28 @@ table th,
   overflow: visible;
 }
 
+.matrix-lesson-card:last-child {
+  margin-bottom: 0;
+}
+
 .matrix-dimension-card.abnormal {
   border-color: var(--warning);
   background: var(--warning-bg);
 }
 
 .matrix-dimension-time {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
   color: var(--ink-strong);
   font-size: var(--text-ui);
   font-weight: 760;
+}
+
+.matrix-lesson-card-badges.entity-badge-list {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .matrix-dimension-meta {
@@ -9530,7 +9627,7 @@ table th,
 
 .week-grid-table {
   width: max-content;
-  min-width: 100%;
+  min-width: max-content;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
@@ -9607,17 +9704,6 @@ table th,
 }
 
 .week-grid-card {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  max-width: 100%;
-  margin-bottom: 6px;
-  padding: 10px;
-  border: 1px solid var(--line-soft);
-  border-left: 4px solid var(--brand);
-  border-radius: var(--radius-sm);
-  background: var(--panel-raised);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
   /* 学生名单较长时由内容自然撑高，不能裁切课程卡片。 */
   overflow: visible;
 }
@@ -9927,8 +10013,8 @@ table th,
 
 .week-grid-table thead th:not(.week-grid-time-head),
 .week-grid-table td {
-  width: 196px;
-  min-width: 196px;
+  width: var(--matrix-lesson-cell-width);
+  min-width: var(--matrix-lesson-cell-width);
 }
 
 .date-range-part.is-placeholder {
@@ -10831,6 +10917,40 @@ table th,
   overflow: visible;
   line-height: 1.35;
   white-space: normal;
+}
+
+.notice-card-identity {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--shot-line);
+  background: var(--shot-card);
+}
+
+.notice-simple-tile > .notice-card-identity-row,
+.notice-card-identity-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+}
+
+.notice-simple-tile > .notice-card-identity-personal,
+.notice-simple-tile > .notice-card-identity-grade-subject,
+.notice-simple-tile > .notice-card-identity-teacher,
+.notice-card-identity :is(.notice-card-identity-personal, .notice-card-identity-grade-subject, .notice-card-identity-teacher) {
+  flex-wrap: nowrap;
+}
+
+.teacher-badge {
+  --badge-bg: var(--brand-soft);
+  --badge-fg: var(--brand);
+  font-weight: 850;
 }
 
 .notice-simple-students .student-badge {

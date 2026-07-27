@@ -62,7 +62,9 @@ function parseTemplateRows(sheet, definition) {
   return sheet.rows.slice(1).filter((row) => row.some((value) => value !== "")).map((row, rowIndex) => {
     const result = {};
     definition.columns.forEach((column, index) => {
-      let value = row[index] ?? ""; if (["integer", "number", "amount", "boolean"].includes(column.data_type) && value !== "") { if (!Number.isFinite(Number(value))) throw new FullExcelError("FULL_EXCEL_VALUE_INVALID", `${definition.sheet_name} 第${rowIndex + 2}行字段${column.display_name}不是数字`); value = Number(value); }
+      let value = row[index] ?? "";
+      if (definition.key === "students" && column.field_key === "status" && String(value).trim() === "离校") value = "已流出";
+      if (["integer", "number", "amount", "boolean"].includes(column.data_type) && value !== "") { if (!Number.isFinite(Number(value))) throw new FullExcelError("FULL_EXCEL_VALUE_INVALID", `${definition.sheet_name} 第${rowIndex + 2}行字段${column.display_name}不是数字`); value = Number(value); }
       if (!column.nullable && value === "") throw new FullExcelError("FULL_EXCEL_REQUIRED_VALUE_MISSING", `${definition.sheet_name} 第${rowIndex + 2}行缺少${column.display_name}`); if (column.data_type === "date" && value !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(String(value))) throw new FullExcelError("FULL_EXCEL_DATE_INVALID", `${definition.sheet_name} 第${rowIndex + 2}行日期格式无效`); result[column.field_key] = value;
       if (value !== "" && column.enum_values.length && !column.enum_values.includes(String(value))) throw new FullExcelError("FULL_EXCEL_ENUM_INVALID", `${definition.sheet_name} 第${rowIndex + 2}行字段${column.display_name}取值不支持`);
     });
