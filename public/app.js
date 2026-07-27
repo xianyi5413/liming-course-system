@@ -12786,13 +12786,14 @@ function courseNoticeColumns(mode = "parent") {
 function renderCourseNoticePreview(item, mode = "parent", title = "课程通知") {
   const rows = item.lessons || [];
   const columns = courseNoticeColumns(mode);
+  const identityMarkup = courseNoticeIdentityMarkup(item, mode, { includeRecipientSummary: false });
   return `
     <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
       <div class="notice-shot-shell">
         <div class="notice-shot-head">
           <div class="notice-shot-title">${escapeHtml(title)}</div>
         </div>
-        <div class="notice-card-identity">${courseNoticeIdentityMarkup(item, mode)}</div>
+        ${identityMarkup ? `<div class="notice-card-identity">${identityMarkup}</div>` : ""}
         <table class="notice-shot-table">
           <thead>
             <tr>
@@ -12881,7 +12882,7 @@ function teacherNoticeObjectNames(item = {}) {
   return [objectName || "未命名老师"];
 }
 
-function courseNoticeIdentityRows(item = {}, mode = "parent") {
+function courseNoticeIdentityRows(item = {}, mode = "parent", { includeRecipientSummary = true } = {}) {
   const students = courseNoticeObjectStudents(item);
   const grades = courseNoticeObjectGrades(item);
   const subjects = courseNoticeObjectSubjects(item);
@@ -12891,12 +12892,12 @@ function courseNoticeIdentityRows(item = {}, mode = "parent") {
     ...subjects.map((label) => ({ type: "subject", label })),
   ];
   if (mode === "teacher") {
-    return [
-      { key: "teacher", badges: teacherNoticeObjectNames(item).map((label) => ({ type: "teacher", label })) },
-      { key: "students", badges: studentBadges },
-      { key: "grade-subject", badges: gradeSubjectBadges },
-    ];
+    const teacherRow = { key: "teacher", badges: teacherNoticeObjectNames(item).map((label) => ({ type: "teacher", label })) };
+    return includeRecipientSummary
+      ? [teacherRow, { key: "students", badges: studentBadges }, { key: "grade-subject", badges: gradeSubjectBadges }]
+      : [teacherRow];
   }
+  if (!includeRecipientSummary) return [];
   if (isPersonalCourseNoticeObject(item)) {
     return [{ key: "personal", badges: [...studentBadges.slice(0, 1), ...gradeSubjectBadges] }];
   }
@@ -12913,9 +12914,9 @@ function courseNoticeIdentityBadgeMarkup(badge = {}, fallbackGrade = "") {
   return renderEntityBadge(badge.type, badge.label, { fallbackGrade });
 }
 
-function courseNoticeIdentityMarkup(item = {}, mode = "parent") {
+function courseNoticeIdentityMarkup(item = {}, mode = "parent", options = {}) {
   const fallbackGrade = courseNoticeObjectGrades(item)[0] || "";
-  return courseNoticeIdentityRows(item, mode).map((row) => `
+  return courseNoticeIdentityRows(item, mode, options).map((row) => `
     <span class="notice-card-identity-row notice-card-identity-${escapeHtml(row.key)} entity-badge-list">
       ${row.badges.map((badge) => courseNoticeIdentityBadgeMarkup(badge, fallbackGrade)).join("") || '<span class="muted-tip">未设置</span>'}
     </span>
@@ -13455,11 +13456,15 @@ function courseNoticeCanvasBadgeLines(ctx, badges = [], width = 0, wrap = false)
   return lines;
 }
 
-function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
+function courseNoticeScreenshotLayout(mode = "parent") {
+  return mode === "teacher" ? teacherCourseNoticeLayoutMode : courseNoticeLayoutMode;
+}
+
+function courseNoticeCanvas(item, mode = "parent", title = "课程通知", { layoutMode = courseNoticeScreenshotLayout(mode) } = {}) {
   const colors = courseNoticeShotPalette();
   const columns = courseNoticeColumns(mode);
   const rows = item.lessons || [];
-  const identityRows = courseNoticeIdentityRows(item, mode);
+  const identityRows = courseNoticeIdentityRows(item, mode, { includeRecipientSummary: layoutMode === "simple" });
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   const font = "16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
@@ -13493,7 +13498,9 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
       identityRow.key.includes("students"),
     ),
   }));
-  const identityHeight = identityLayouts.reduce((sum, row) => sum + row.lines.length * identityRowHeight, 0) + 12;
+  const identityHeight = identityLayouts.length
+    ? identityLayouts.reduce((sum, row) => sum + row.lines.length * identityRowHeight, 0) + 12
+    : 0;
   const tableHeight = rowHeight * (rows.length + 1);
   const width = tableWidth + outerPadding * 2;
   const height = titleHeight + identityHeight + tableHeight + outerPadding * 2;
@@ -13509,6 +13516,7 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知") {
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
   canvas.dataset.noticeIdentity = JSON.stringify(identityRows);
+  canvas.dataset.noticeLayout = layoutMode;
   ctx.scale(ratio, ratio);
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, width, height);

@@ -11075,6 +11075,7 @@ table th,
 }
 
 .notice-shot-shell {
+  width: max-content;
   min-width: 100%;
   overflow: hidden;
   border: 1px solid var(--shot-line);
