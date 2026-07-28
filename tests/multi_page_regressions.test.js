@@ -44,10 +44,9 @@ test("dashboard cards allow natural population growth while current lessons scro
 test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.match(css, /\.student-query-detail-table[^}]*background:\s*var\(--panel\)/s);
   assert.match(css, /\.student-pricing-table\s+\.student-pricing-value-cell/);
-  assert.match(css, /\.student-set-badges[^}]*display:\s*inline-flex[^}]*flex-wrap:\s*nowrap/s);
-  assert.match(css, /\.opening-balance-notes-input[^}]*white-space:\s*nowrap/s);
-  assert.match(app, /opening-balance-notes-cell adaptive-left"><input/);
-  assert.doesNotMatch(app, /opening-balance-notes-cell[^>]*><textarea/);
+  assert.match(css, /\.student-set-badges[^}]*display:\s*flex[^}]*flex-wrap:\s*wrap/s);
+  assert.match(css, /table\.adaptive-table \.adaptive-textarea[^}]*white-space:\s*pre-wrap/s);
+  assert.match(app, /opening-balance-notes-cell adaptive-left"><textarea/);
   assert.match(app, /function closeAllFloatingOverlays\(\)/);
   assert.match(app, /function setActiveView[\s\S]*closeAllFloatingOverlays\(\)/);
   assert.match(app, /function closeAllFloatingOverlays\(\)[\s\S]*closeRechargeChannelOverlay\(\)/);
@@ -66,7 +65,9 @@ test("summary teacher and pricing scopes are based on raw data and selected mont
   for (const field of ["total_fee", "prev_actual", "prev_gift", "cur_recharge", "cur_gift", "actual_consumption", "gift_consumption", "actual_balance", "gift_balance"]) assert.match(app, new RegExp(`"${field}"`));
   assert.match(server, /SELECT DISTINCT teacher_name FROM lessons WHERE month_key = \?/);
   assert.match(server, /function studentPricingRows[\s\S]*matchesByRule/);
-  assert.match(app, /\/api\/student-pricing\/\$\{input\.dataset\.id\}[\s\S]*upsertById/);
+  assert.match(app, /function saveStudentPricingField[\s\S]*\/api\/student-pricing\/\$\{id\}[\s\S]*mergeStudentPricingResponseRow/);
+  assert.match(app, /\/api\/student-pricing-page\?month=/);
+  assert.match(server, /GET" && url\.pathname === "\/api\/student-pricing-page"/);
   assert.match(server, /PATCH" && url\.pathname === "\/api\/student-pricing\/batch"/);
 });
 

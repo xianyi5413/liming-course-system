@@ -140,15 +140,15 @@ test("opening balances have no month UI and remain unchanged when the top month 
   const rowHeightBefore = await browser.evaluate("document.querySelector('.opening-balance-row').getBoundingClientRect().height");
   await browser.evaluate(`(() => { const field=document.querySelector('.opening-balance-notes-input'); field.value='${"连续很长的备注内容".repeat(20)}'; field.dispatchEvent(new Event('input',{bubbles:true})); scheduleAdaptiveTableColumns(); })()`);
   await browser.waitFor("document.querySelector('.opening-balance-notes-cell').getBoundingClientRect().width >= 280");
-  const noteLayout = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); const cell=document.querySelector('.opening-balance-notes-cell'); const input=document.querySelector('.opening-balance-notes-input'); const style=getComputedStyle(input); const row=input.closest('tr'); const number=input.closest('.opening-balance-page').querySelector('input[type="number"]'); return { tag:input.tagName, cellWidth:cell.getBoundingClientRect().width, inputWidth:input.getBoundingClientRect().width, cellInnerWidth:cell.clientWidth, whiteSpace:style.whiteSpace, rowHeight:row.getBoundingClientRect().height, appearance:getComputedStyle(number).appearance, tableWidth:table.scrollWidth, containerWidth:wrap.clientWidth, containerOverflow:getComputedStyle(wrap).overflowX }; })()`);
-  assert.ok(noteLayout.cellWidth >= 280); assert.ok(noteLayout.inputWidth <= noteLayout.cellInnerWidth + 1); assert.deepEqual({ tag: noteLayout.tag, whiteSpace: noteLayout.whiteSpace }, { tag: "INPUT", whiteSpace: "nowrap" }); assert.ok(Math.abs(noteLayout.rowHeight - rowHeightBefore) <= 1); assert.equal(noteLayout.appearance, "textfield");
+  const noteLayout = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); const cell=document.querySelector('.opening-balance-notes-cell'); const input=document.querySelector('.opening-balance-notes-input'); const style=getComputedStyle(input); const row=input.closest('tr'); const number=input.closest('.opening-balance-page').querySelector('input[type="number"]'); return { tag:input.tagName, cellWidth:cell.getBoundingClientRect().width, inputWidth:input.getBoundingClientRect().width, inputScrollWidth:input.scrollWidth, cellInnerWidth:cell.clientWidth, whiteSpace:style.whiteSpace, rowHeight:row.getBoundingClientRect().height, appearance:getComputedStyle(number).appearance, tableWidth:table.scrollWidth, containerWidth:wrap.clientWidth, containerOverflow:getComputedStyle(wrap).overflowX }; })()`);
+  assert.ok(noteLayout.cellWidth >= 280); assert.ok(noteLayout.inputWidth <= noteLayout.cellInnerWidth + 1); assert.ok(noteLayout.inputScrollWidth <= noteLayout.inputWidth + 1); assert.deepEqual({ tag: noteLayout.tag, whiteSpace: noteLayout.whiteSpace }, { tag: "TEXTAREA", whiteSpace: "pre-wrap" }); assert.ok(noteLayout.rowHeight > rowHeightBefore); assert.equal(noteLayout.appearance, "textfield");
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await browser.evaluate("window.dispatchEvent(new Event('resize'))");
   const narrow = await browser.evaluate(`(() => { const table=document.querySelector('.opening-balance-table'); const wrap=table.closest('.table-wrap'); return { scrollable:table.scrollWidth>wrap.clientWidth, overflow:getComputedStyle(wrap).overflowX, pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth }; })()`);
   assert.equal(narrow.scrollable, true); assert.match(narrow.overflow, /auto|scroll/); assert.equal(narrow.pageOverflow, false);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));
 
-test("class student sets render in full on one line with only the outer table wrapper scrolling", async () => withBrowser(async (browser) => {
+test("class student sets wrap as whole badges with only the outer table wrapper scrolling", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
   await openView(browser, "students", "classGroups");
   const desktop = await browser.evaluate(`(() => {
@@ -165,7 +165,7 @@ test("class student sets render in full on one line with only the outer table wr
     };
   })()`);
   assert.ok(desktop.badges > 1);
-  assert.deepEqual({ whiteSpace: desktop.whiteSpace, overflowX: desktop.overflowX, cellOverflow: desktop.cellOverflow, complete: desktop.complete, pageOverflow: desktop.pageOverflow }, { whiteSpace: "nowrap", overflowX: "visible", cellOverflow: "visible", complete: true, pageOverflow: false });
+  assert.deepEqual({ whiteSpace: desktop.whiteSpace, overflowX: desktop.overflowX, cellOverflow: desktop.cellOverflow, complete: desktop.complete, pageOverflow: desktop.pageOverflow }, { whiteSpace: "normal", overflowX: "hidden", cellOverflow: "hidden", complete: true, pageOverflow: false });
   await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await browser.evaluate("window.dispatchEvent(new Event('resize'))");
   const mobile = await browser.evaluate(`(() => {

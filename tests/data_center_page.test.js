@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260727-remove-screenshot-identity-summary",
-      "/app.js?v=20260727-remove-screenshot-identity-summary",
+      "/styles.css?v=20260728-student-pricing-performance",
+      "/app.js?v=20260728-student-pricing-performance",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -691,5 +691,47 @@ test("custom Excel picker supports keyboard activation selection reselection and
     const mobile = await browser.evaluate(`(() => { const cards=[...document.querySelectorAll('.data-backup-subcard')].map((node)=>node.getBoundingClientRect()); const picker=document.querySelector('.data-file-picker').getBoundingClientRect(); return { stacked:cards[1].top>cards[0].bottom, pickerWidth:picker.width, parentWidth:document.querySelector('.data-import-file-field').getBoundingClientRect().width, overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth }; })()`);
     assert.equal(mobile.stacked, true); assert.ok(mobile.pickerWidth <= mobile.parentWidth + 1); assert.equal(mobile.overflow, false);
     assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  });
+});
+
+test("managed Excel browsers support local search, responsive read-only actions, safe errors and stale-result closure", async () => {
+  await withBrowserScenario({
+    prepareFilesystem: ({ tempRoot }) => {
+      const managed = path.join(tempRoot, "backups", "full-excel");
+      fs.mkdirSync(managed, { recursive: true });
+      fs.writeFileSync(path.join(managed, "浏览器孤立文件.xlsx"), "PK-browser");
+    },
+  }, async ({ browser }) => {
+    await browser.login("boss", "123456");
+    await browser.openDataCenter();
+    await assertThreeRegions(browser);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.managed-local-excel-open') && document.querySelector('.managed-baidu-excel-open'))"), true);
+
+    await browser.click(".managed-local-excel-open");
+    await browser.waitFor("document.querySelector('.managed-file-browser-table')?.textContent.includes('浏览器孤立文件.xlsx')");
+    assert.equal(await browser.evaluate("document.querySelector('.managed-file-browser-modal')?.textContent.includes('孤立文件')"), true);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.managed-file-browser-modal .danger, .managed-file-browser-modal [class*=delete]'))"), false);
+    await browser.evaluate("(() => { const input=document.querySelector('.managed-file-browser-query'); input.value='不存在'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
+    await browser.waitFor("document.querySelector('.managed-file-browser-table')?.textContent.includes('没有符合条件的 Excel 文件')");
+    await browser.evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await browser.waitFor("!document.querySelector('.managed-file-browser-modal')");
+
+    await browser.click(".managed-baidu-excel-open");
+    await browser.waitFor("document.querySelector('.managed-file-browser-state.danger')");
+    assert.match(await browser.evaluate("document.querySelector('.managed-file-browser-state.danger')?.textContent"), /尚未配置/);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.managed-file-browser-retry'))"), true);
+    await browser.click(".managed-file-browser-close");
+
+    await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await browser.evaluate("window.dispatchEvent(new Event('resize'))");
+    await browser.click(".managed-local-excel-open");
+    await browser.waitFor("Boolean(document.querySelector('.managed-file-browser-panel'))");
+    const mobilePanel = await browser.evaluate("(() => { const rect=document.querySelector('.managed-file-browser-panel').getBoundingClientRect(); return {left:rect.left,right:rect.right,width:rect.width,innerWidth,boxSizing:getComputedStyle(document.querySelector('.managed-file-browser-panel')).boxSizing}; })()");
+    assert.equal(mobilePanel.right <= mobilePanel.innerWidth + 1 && mobilePanel.left >= -1, true, JSON.stringify(mobilePanel));
+    await browser.evaluate("loadManagedExcelBrowser('local'); setActiveView('dashboard'); render()");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.managed-file-browser-modal'))"), false);
+    assert.deepEqual(browser.exceptions, []);
+    assert.deepEqual(browser.consoleErrors.filter((message) => !/409|Failed to load resource/.test(message)), []);
   });
 });

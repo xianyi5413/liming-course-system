@@ -174,9 +174,9 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.deepEqual(result.personal.detailedRows, []);
   assert.deepEqual(result.klass.detailedRows, []);
   assert.deepEqual(result.merged.detailedRows, []);
-  assert.deepEqual(result.teacher.detailedRows.map((row) => row.badges.map((badge) => badge.label)), [["矩阵老师"]]);
+  assert.deepEqual(result.teacher.detailedRows, []);
   assert.equal(result.personal.detailedHtml, "");
-  assert.equal(result.teacher.detailedHtml.includes("矩阵老师"), true);
+  assert.equal(result.teacher.detailedHtml, "");
   assert.doesNotMatch(result.teacher.detailedHtml, /张小明|李小红|王小强|初一|数学/);
   for (const item of Object.values(result)) {
     assert.deepEqual(item.simpleCanvasRows, item.simpleRows);
@@ -190,7 +190,7 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.equal(result.personal.simpleSize[1] - result.personal.detailedSize[1], 46);
   assert.equal(result.klass.simpleSize[1] - result.klass.detailedSize[1], 80);
   assert.equal(result.merged.simpleSize[1] - result.merged.detailedSize[1], 80);
-  assert.equal(result.teacher.simpleSize[1] - result.teacher.detailedSize[1], 68);
+  assert.equal(result.teacher.simpleSize[1] - result.teacher.detailedSize[1], 114);
 
   const parentCounts = await browser.evaluate(`courseNoticeState.data.send_objects.map((item)=>({
     key:item.send_object_key,
@@ -271,11 +271,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.equal(teacherDetailed.length, teacherCounts.length);
   for (let index = 0; index < teacherDetailed.length; index += 1) {
     assert.equal(teacherDetailed[index].title, "本周课程安排");
-    assert.deepEqual(teacherDetailed[index].order, ["notice-shot-head", "notice-card-identity", "notice-shot-table"]);
-    assert.equal(teacherDetailed[index].identityRows.length, 1);
-    assert.match(teacherDetailed[index].identityRows[0].key, /notice-card-identity-teacher/);
-    assert.match(teacherDetailed[index].identityRows[0].text, /矩阵老师/);
-    assert.doesNotMatch(teacherDetailed[index].identityRows[0].text, /张小明|李小红|王小强|初一|数学|物理/);
+    assert.deepEqual(teacherDetailed[index].order, ["notice-shot-head", "notice-shot-table"]);
+    assert.equal(teacherDetailed[index].identityRows.length, 0);
     assert.deepEqual(teacherDetailed[index].headers, ["授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生"]);
     assert.equal(teacherDetailed[index].rowCount, teacherCounts[index].lessons);
   }
@@ -287,8 +284,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('数学')"), true);
   assert.deepEqual(await browser.evaluate("teacherCourseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,lessons:item.lessons.length}))"), teacherCounts);
   await browser.click('.teacher-course-notice-layout-toggle[data-layout="preview"]');
-  await browser.waitFor("Boolean(document.querySelector('.notice-shot-preview .notice-card-identity'))");
-  assert.equal(await browser.evaluate("document.querySelectorAll('.notice-shot-preview .notice-card-identity-row').length"), teacherDetailed.length);
+  await browser.waitFor("Boolean(document.querySelector('.notice-shot-preview .notice-shot-table'))");
+  assert.equal(await browser.evaluate("document.querySelectorAll('.notice-shot-preview .notice-card-identity-row').length"), 0);
 
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
@@ -356,8 +353,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   await browser.click(".teacher-notice-copy-image");
   await browser.waitFor("window.__noticePngActions.copies.length===2");
   const teacherActions = await browser.evaluate("window.__noticePngActions");
-  assert.deepEqual(teacherActions.downloads[1].identity.map((row) => row.key), ["teacher"]);
-  assert.deepEqual(teacherActions.copies[1].identity.map((row) => row.key), ["teacher"]);
+  assert.deepEqual(teacherActions.downloads[1].identity, []);
+  assert.deepEqual(teacherActions.copies[1].identity, []);
   assert.equal(teacherActions.downloads[1].bytes > 100, true);
   assert.equal(teacherActions.copies[1].bytes > 0, true);
   assert.deepEqual(browser.exceptions, []);

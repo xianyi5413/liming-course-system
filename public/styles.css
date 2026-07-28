@@ -13921,16 +13921,22 @@ body {
   }
 }
 
-/* Five data-entry tables share content-driven column measurement and alignment.
-   Column widths are written once per render by applyAdaptiveTableColumns(). */
+/* Semantic column definitions keep short fields compact while bounded long
+   fields absorb free space and wrap. Widths are written after each render by
+   applyAdaptiveTableColumns(); only the outer table wrapper scrolls. */
 :is(
   .recharge-page,
   .opening-balance-page,
   .student-pricing-page,
   .class-group-page,
-  .teacher-salary-rule-page
+  .teacher-salary-rule-page,
+  .profile-panel,
+  .user-admin-panel
 ) .table-wrap {
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
+  contain: layout paint;
   overflow-x: auto;
   overflow-y: auto;
   resize: none;
@@ -13945,10 +13951,39 @@ table.adaptive-table {
 table.adaptive-table :is(th, td) {
   box-sizing: border-box;
   max-width: none;
-  overflow: visible;
+  overflow: hidden;
   text-overflow: clip;
   vertical-align: middle;
   white-space: nowrap;
+}
+
+:is(.profile-panel, .user-admin-panel) {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+table.adaptive-table :is(th, td).adaptive-wrap {
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
+}
+
+table.adaptive-table [data-adaptive-alignment="left"] {
+  text-align: left !important;
+}
+
+table.adaptive-table [data-adaptive-alignment="center"] {
+  text-align: center !important;
+}
+
+table.adaptive-table [data-adaptive-alignment="right"] {
+  text-align: right !important;
+}
+
+table.adaptive-table td[data-adaptive-alignment="center"] > :is(input, select, textarea) {
+  text-align: center !important;
 }
 
 :is(
@@ -14048,31 +14083,33 @@ table.adaptive-table .adaptive-left > .cell-input {
 }
 
 table.adaptive-table .cell-input,
-table.adaptive-table .currency-input-wrap {
+table.adaptive-table .currency-input-wrap,
+table.adaptive-table .multi-select-control {
+  width: 100%;
   min-width: 0;
-  max-width: none;
+  max-width: 100%;
 }
 
 table.adaptive-table .student-set-cell {
-  width: auto;
+  width: 100%;
   min-width: 0;
-  max-width: none;
-  overflow: visible;
+  max-width: 100%;
+  overflow: hidden;
   text-align: left !important;
 }
 
 .student-set-badges {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 5px;
-  width: max-content;
-  min-width: max-content;
-  max-width: none;
-  overflow: visible;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   text-overflow: clip;
   vertical-align: middle;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 table.adaptive-table .student-set-badges .student-badge {
@@ -14100,7 +14137,119 @@ table.adaptive-table .student-set-badges .student-badge {
 
 .opening-balance-table :is(.opening-balance-notes-head, .opening-balance-notes-cell),
 .opening-balance-notes-input {
-  overflow: visible;
+  overflow: hidden;
   text-overflow: clip;
+  white-space: normal;
+}
+
+table.adaptive-table .adaptive-textarea {
+  box-sizing: border-box;
+  min-height: 38px;
+  height: auto;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  resize: none;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-all !important;
+}
+
+.student-pricing-page table.adaptive-table .adaptive-textarea {
+  field-sizing: content;
+  min-height: 38px;
+  max-height: 9rem;
+  overflow-y: auto;
+}
+
+.student-pricing-render-progress {
+  min-height: 24px;
+  padding: 8px 4px 0;
+  text-align: center;
+}
+
+table.adaptive-table :is(.entity-badge, .student-badge, .status-badge) {
+  display: inline-flex;
+  max-width: 100%;
   white-space: nowrap;
+  word-break: keep-all;
+}
+
+table.adaptive-table :is(th, td).adaptive-wrap {
+  white-space: normal !important;
+}
+
+.managed-file-browser-panel {
+  box-sizing: border-box;
+  width: min(1180px, calc(100vw - 32px));
+  max-width: 1180px;
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+}
+
+.managed-file-browser-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 240px) auto;
+  gap: 12px;
+  align-items: end;
+  margin: 16px 0;
+}
+
+.managed-file-browser-table-wrap {
+  max-height: min(560px, calc(100vh - 270px));
+  overflow: auto;
+}
+
+.managed-file-browser-table {
+  min-width: 940px;
+}
+
+.managed-file-browser-table :is(th, td) {
+  vertical-align: middle;
+}
+
+.managed-file-browser-table thead th {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  background: var(--panel);
+}
+
+.managed-file-name {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.managed-file-relative-path {
+  max-width: 320px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.managed-file-browser-state {
+  display: flex;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.managed-file-browser-state.danger {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .managed-file-browser-panel {
+    width: calc(100vw - 48px);
+    max-width: calc(100vw - 48px);
+    max-height: calc(100vh - 16px);
+  }
+
+  .managed-file-browser-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .managed-file-browser-toolbar .btn {
+    width: 100%;
+  }
 }
