@@ -14154,6 +14154,19 @@ table.adaptive-table .adaptive-textarea {
   word-break: break-all !important;
 }
 
+.student-pricing-page table.adaptive-table .adaptive-textarea {
+  field-sizing: content;
+  min-height: 38px;
+  max-height: 9rem;
+  overflow-y: auto;
+}
+
+.student-pricing-render-progress {
+  min-height: 24px;
+  padding: 8px 4px 0;
+  text-align: center;
+}
+
 table.adaptive-table :is(.entity-badge, .student-badge, .status-badge) {
   display: inline-flex;
   max-width: 100%;

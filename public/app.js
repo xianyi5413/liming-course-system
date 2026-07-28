@@ -380,6 +380,15 @@ let studentPricingFilter = { student: "", grade: "", subject: "", student_names:
 let studentPricingModalOpen = false;
 let selectedStudentPricingIds = new Set();
 let studentPricingBatchModalOpen = false;
+const STUDENT_PRICING_CLIENT_CACHE_TTL_MS = 60_000;
+const STUDENT_PRICING_INITIAL_ROW_COUNT = 36;
+const STUDENT_PRICING_RENDER_BATCH_SIZE = 72;
+const studentPricingPageCache = new Map();
+let studentPricingPageRequest = null;
+let studentPricingRenderGeneration = 0;
+let studentPricingRenderHandle = 0;
+let studentPricingVisibleRows = [];
+let studentPricingDelegatedEventsBound = false;
 let classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
 let classGroupHideInactiveTeachers = localStorage.getItem(CLASS_GROUP_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
 let teacherSalaryRuleHideInactiveTeachers = localStorage.getItem(TEACHER_RULE_HIDE_INACTIVE_TEACHERS_KEY) !== "0";
@@ -643,6 +652,7 @@ async function request(path, options = {}) {
     cache: "no-store",
   };
   if (options.body !== undefined) config.body = JSON.stringify(options.body);
+  if (options.signal) config.signal = options.signal;
   const run = (async () => {
     const res = await fetch(path, config);
     const data = await res.json().catch(() => ({}));
@@ -663,6 +673,17 @@ async function request(path, options = {}) {
     if (method !== "GET") {
       clearStudentQueryCache();
       invalidateRequestCache(cacheInvalidationPrefixes(path));
+      if (String(path).startsWith("/api/student-pricing")
+        || String(path).startsWith("/api/students")
+        || String(path).startsWith("/api/lessons")
+        || String(path).startsWith("/api/pricing")
+        || String(path).startsWith("/api/fee-overrides")
+        || String(path).startsWith("/api/settings")
+        || String(path).startsWith("/api/import")
+        || String(path).startsWith("/api/data-center/import")
+        || String(path).startsWith("/api/audit/apply")) {
+        studentPricingPageCache.clear();
+      }
     }
     return data;
   })();
@@ -859,6 +880,10 @@ function setActiveView(nextView) {
   }
   const previousView = view;
   view = nextView || "";
+  if (previousView === "studentPricing" && view !== "studentPricing") {
+    cancelStudentPricingPageRequest();
+    cancelStudentPricingProgressiveRender();
+  }
   if (previousView === "audit" && view !== "audit" && backupState.fileBrowser?.open) {
     backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
   }
@@ -1606,7 +1631,7 @@ function fullBootstrapCacheKey(monthKey = activeMonth) {
 }
 
 function viewNeedsFullBootstrap(viewKey = view) {
-  return ["feeDetails", "summary", "teacherSalary", "teacherTravelFees", "studentPricing"].includes(viewKey)
+  return ["feeDetails", "summary", "teacherSalary", "teacherTravelFees"].includes(viewKey)
     || (viewKey === "pricing" && Boolean(pricingAuditModal));
 }
 
@@ -1621,7 +1646,7 @@ function viewNeedsProfileStudents(viewKey = view) {
   return [
     "lessons",
     "recharges", "openingBalances", "studentQuery", "studentProfiles",
-    "studentPricing", "teacherSalaryRules", "classGroups",
+    "teacherSalaryRules", "classGroups",
   ].includes(viewKey);
 }
 
@@ -1646,20 +1671,89 @@ function bootstrapQuery(lite = true) {
   return query ? `?${query}` : "";
 }
 
+function studentPricingPageCacheKey(monthKey = activeMonth) {
+  return `${Number(auth.user?.id || 0)}\u0001${auth.user?.role || ""}\u0001${monthKey || ""}`;
+}
+
+function prepareStudentPricingRule(row = {}) {
+  const studentNames = String(row.student_names || "");
+  return {
+    ...row,
+    id: Number(row.id),
+    custom_price: numberValue(row.custom_price),
+    current_month_lessons: Number(row.current_month_lessons || 0),
+    total_lessons: Number(row.total_lessons || 0),
+    _student_key: String(row.student_name || "").trim().toLocaleLowerCase("zh-CN"),
+    _grade_key: String(row.grade || "").trim().toLocaleLowerCase("zh-CN"),
+    _subject_key: String(row.subject || "").trim().toLocaleLowerCase("zh-CN"),
+    _student_names_key: studentNames.trim().toLocaleLowerCase("zh-CN"),
+    _students: splitStudents(studentNames),
+  };
+}
+
+function prepareStudentPricingPage(data = {}) {
+  return {
+    ...data,
+    rules: (data.rules || []).map(prepareStudentPricingRule),
+    filters: {
+      students: data.filters?.students || [],
+      grades: data.filters?.grades || [],
+      subjects: data.filters?.subjects || [],
+      student_groups: data.filters?.student_groups || [],
+    },
+  };
+}
+
+function cancelStudentPricingPageRequest() {
+  if (!studentPricingPageRequest) return;
+  studentPricingPageRequest.controller.abort();
+  studentPricingPageRequest = null;
+}
+
+async function loadStudentPricingPage({ force = false } = {}) {
+  const key = studentPricingPageCacheKey();
+  const cached = studentPricingPageCache.get(key);
+  if (!force && cached && cached.expires_at > Date.now()) return cached.data;
+  if (studentPricingPageRequest?.key === key && !force) return studentPricingPageRequest.promise;
+  cancelStudentPricingPageRequest();
+  if (force) studentPricingPageCache.delete(key);
+  const controller = new AbortController();
+  const promise = request(`/api/student-pricing-page?month=${encodeURIComponent(activeMonth)}`, {
+    cache: false,
+    signal: controller.signal,
+  }).then((data) => {
+    const prepared = prepareStudentPricingPage(data);
+    studentPricingPageCache.set(key, {
+      data: prepared,
+      expires_at: Date.now() + STUDENT_PRICING_CLIENT_CACHE_TTL_MS,
+    });
+    return prepared;
+  }).finally(() => {
+    if (studentPricingPageRequest?.controller === controller) studentPricingPageRequest = null;
+  });
+  studentPricingPageRequest = { key, controller, promise };
+  return promise;
+}
+
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
   const stillCurrent = () => loadGeneration === generation;
   const stageConflictsPromise = view === "studentProfiles" && canView("studentProfiles")
     ? refreshStudentGradeStageConflicts({ renderStatus: false, generation })
     : null;
 
-  const [teachersResult, studentsResult, teacherDetailTeachersResult] = await Promise.all([
+  const [teachersResult, studentsResult, teacherDetailTeachersResult, studentPricingResult] = await Promise.all([
     viewNeedsProfileTeachers() && view !== "teacherDetail" ? request("/api/teachers") : null,
     viewNeedsProfileStudents() && canArea("students") ? request("/api/students") : null,
     view === "teacherDetail" ? request("/api/teacher-detail/teachers", { cache: false }) : null,
+    view === "studentPricing" && canView("studentPricing") ? loadStudentPricingPage() : null,
   ]);
   if (!stillCurrent()) return false;
   if (teachersResult) state.profile_teachers = teachersResult.teachers || [];
   if (studentsResult) state.profile_students = studentsResult.students || [];
+  if (studentPricingResult) {
+    state.student_pricing = studentPricingResult.rules || [];
+    state.student_pricing_filters = studentPricingResult.filters || {};
+  }
   if (teacherDetailTeachersResult) {
     state.teacher_detail_teachers = teacherDetailTeachersResult.teachers || [];
     const candidateNames = new Set(state.teacher_detail_teachers.map((row) => row.name));
@@ -3626,33 +3720,18 @@ function resizeAdaptiveTextarea(textarea) {
   }
 }
 
-function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
-  if (!table?.isConnected) return [];
-  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
-  const columns = [...table.querySelectorAll(":scope > colgroup > col")];
-  if (!headerCells.length || columns.length !== headerCells.length) return [];
+function adaptiveTextWidthForData(value, font) {
+  const textValue = String(value ?? "");
+  const key = `${font}\u0000${textValue}`;
+  if (adaptiveTableTextWidthCache.has(key)) return adaptiveTableTextWidthCache.get(key);
+  if (!adaptiveTableCanvasContext) adaptiveTableCanvasContext = document.createElement("canvas").getContext("2d");
+  adaptiveTableCanvasContext.font = font;
+  const width = adaptiveTableCanvasContext.measureText(textValue).width;
+  adaptiveTableTextWidthCache.set(key, width);
+  return width;
+}
 
-  table.classList.add("adaptive-table");
-  table.style.tableLayout = "auto";
-  table.style.width = "max-content";
-  table.style.minWidth = "0";
-  columns.forEach((column) => { column.style.width = "auto"; });
-
-  const definitions = columns.map((column, index) => adaptiveColumnDefinition(column, headerCells[index]));
-  const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
-  const widths = headerCells.map((header, index) => {
-    const definition = definitions[index];
-    let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
-    for (const row of bodyRows) {
-      const cell = row.children[index];
-      if (!cell || cell.classList.contains("empty")) continue;
-      width = Math.max(width, adaptiveCellContentWidth(cell, definition));
-    }
-    return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
-  });
-
-  const wrapper = table.closest(".table-wrap");
-  const availableWidth = wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0);
+function distributeAdaptiveGrowth(widths, definitions, availableWidth) {
   let remaining = Math.max(0, availableWidth - widths.reduce((sum, width) => sum + width, 0));
   let growIndexes = definitions.map((definition, index) => ({ ...definition, index }))
     .filter((definition) => definition.grow > 0 && widths[definition.index] < definition.maxWidth);
@@ -3669,6 +3748,83 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     remaining -= distributed;
     growIndexes = growIndexes.filter((definition) => widths[definition.index] < definition.maxWidth - 0.5);
   }
+  return widths;
+}
+
+function applyStudentPricingAdaptiveColumns(table, columns, headerCells, definitions) {
+  const started = performance.now();
+  const style = getComputedStyle(table);
+  const font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const rows = studentPricingVisibleRows.length ? studentPricingVisibleRows : (state?.student_pricing || []);
+  const unique = (values) => [...new Set(values.map((value) => String(value || "")).filter(Boolean))];
+  const measured = (values, fallback = "—") => Math.max(
+    adaptiveTextWidthForData(fallback, font),
+    ...unique(values).map((value) => adaptiveTextWidthForData(value, font)),
+  );
+  const noteTokens = unique(rows.flatMap((row) => String(row.notes || "").split(/[\s,，、;；/|]+/).filter(Boolean)));
+  const studentLabels = unique(rows.flatMap((row) => row._students || splitStudents(row.student_names)));
+  const rawWidths = [
+    44,
+    measured(rows.map((row) => row.student_name)) + 36,
+    measured(rows.map((row) => row.grade)) + 34,
+    measured(rows.map((row) => row.subject)) + 34,
+    measured(studentLabels) + 42,
+    measured(rows.map((row) => moneyInput(row.custom_price))) + 56,
+    measured(rows.map((row) => studentPricingVisibleStatus(row))) + 34,
+    measured(noteTokens) + 38,
+  ];
+  const widths = rawWidths.map((width, index) => Math.ceil(Math.min(
+    definitions[index].maxWidth,
+    Math.max(definitions[index].minWidth, width),
+  )));
+  const wrapper = table.closest(".table-wrap");
+  distributeAdaptiveGrowth(widths, definitions, wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0));
+  columns.forEach((column, index) => {
+    column.style.width = `${Math.ceil(widths[index])}px`;
+    headerCells[index].classList.toggle("adaptive-wrap", definitions[index].wrap);
+  });
+  table.classList.add("adaptive-table");
+  table.style.tableLayout = "fixed";
+  table.style.width = `${Math.ceil(widths.reduce((sum, width) => sum + width, 0))}px`;
+  table.style.minWidth = "0";
+  table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
+  table.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
+  table.dataset.adaptiveLayoutReads = "0";
+  table.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
+  return widths;
+}
+
+function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
+  if (!table?.isConnected) return [];
+  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
+  const columns = [...table.querySelectorAll(":scope > colgroup > col")];
+  if (!headerCells.length || columns.length !== headerCells.length) return [];
+
+  table.classList.add("adaptive-table");
+  table.style.tableLayout = "auto";
+  table.style.width = "max-content";
+  table.style.minWidth = "0";
+  columns.forEach((column) => { column.style.width = "auto"; });
+
+  const definitions = columns.map((column, index) => adaptiveColumnDefinition(column, headerCells[index]));
+  if (table.dataset.adaptiveSource === "student-pricing") {
+    return applyStudentPricingAdaptiveColumns(table, columns, headerCells, definitions);
+  }
+  const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
+  const widths = headerCells.map((header, index) => {
+    const definition = definitions[index];
+    let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
+    for (const row of bodyRows) {
+      const cell = row.children[index];
+      if (!cell || cell.classList.contains("empty")) continue;
+      width = Math.max(width, adaptiveCellContentWidth(cell, definition));
+    }
+    return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
+  });
+
+  const wrapper = table.closest(".table-wrap");
+  const availableWidth = wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0);
+  distributeAdaptiveGrowth(widths, definitions, availableWidth);
 
   columns.forEach((column, index) => {
     const definition = definitions[index];
@@ -5705,6 +5861,7 @@ function renderViewTransitionSkeleton() {
   contentEl.innerHTML = `
     ${view === "studentProfiles" ? studentStageConflictBannerMarkup("loading") : ""}
     <div class="view-loading-skeleton" role="status" aria-live="polite">
+      ${view === "studentPricing" ? '<strong>正在加载学生单价规则</strong>' : ""}
       <div class="view-loading-bar wide"></div>
       <div class="view-loading-grid"><span></span><span></span><span></span></div>
       <div class="view-loading-table"></div>
@@ -5744,7 +5901,9 @@ function bindNavigationEvents() {
     setActiveView(nextView);
     renderViewTransitionSkeleton();
     try { await load({ refreshGlobal: false }); }
-    catch (error) { renderLoadFailure(error); }
+    catch (error) {
+      if (error?.name !== "AbortError") renderLoadFailure(error);
+    }
   });
 }
 
@@ -11326,10 +11485,10 @@ function pricingAuditModalMarkup() {
 function studentPricingMatchesFilter(row) {
   const filter = studentPricingFilter;
   const studentNeedle = filter.student.trim().toLowerCase();
-  if (studentNeedle && !String(row.student_name || "").toLowerCase().includes(studentNeedle)) return false;
-  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
-  if (filter.subject && !textContains(row.subject, filter.subject)) return false;
-  if (filter.student_names && !textContains(row.student_names, filter.student_names)) return false;
+  if (studentNeedle && !row._student_key.includes(studentNeedle)) return false;
+  if (filter.grade && !row._grade_key.includes(filter.grade.toLocaleLowerCase("zh-CN"))) return false;
+  if (filter.subject && !row._subject_key.includes(filter.subject.toLocaleLowerCase("zh-CN"))) return false;
+  if (filter.student_names && !row._student_names_key.includes(filter.student_names.toLocaleLowerCase("zh-CN"))) return false;
   if (filter.price && filter.price !== (studentPricingVisibleStatus(row) === "已设置" ? "set" : "unset")) return false;
   const currentLessons = numberValue(row.current_month_lessons);
   const totalLessons = numberValue(row.total_lessons);
@@ -11340,15 +11499,17 @@ function studentPricingMatchesFilter(row) {
 }
 
 function renderStudentPricingFilterBar(rows, visibleRows) {
-  const students = uniqueSorted(rows.map((row) => row.student_name));
-  const grades = uniqueSorted(rows.map((row) => row.grade));
-  const studentGroups = uniqueSorted(rows.map((row) => row.student_names));
+  const filters = state.student_pricing_filters || {};
+  const students = filters.students || uniqueSorted(rows.map((row) => row.student_name));
+  const grades = filters.grades || uniqueSorted(rows.map((row) => row.grade));
+  const subjects = filters.subjects || uniqueSorted(rows.map((row) => row.subject));
+  const studentGroups = filters.student_groups || uniqueSorted(rows.map((row) => row.student_names));
   return `
     <div class="filter-bar compact unified-filter-bar student-pricing-filter-bar">
       <div class="filter-controls">
         ${unifiedFilterField({ label: "学生", className: "student-pricing-filter-input", field: "student", value: studentPricingFilter.student, values: students })}
         ${unifiedFilterField({ label: "年级", className: "student-pricing-filter-input", field: "grade", value: studentPricingFilter.grade, values: grades })}
-        ${unifiedFilterField({ label: "科目", className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: state.lookups.subjects })}
+        ${unifiedFilterField({ label: "科目", className: "student-pricing-filter-input", field: "subject", value: studentPricingFilter.subject, values: subjects })}
         ${unifiedFilterField({ label: "学生集合", className: "student-pricing-filter-input", field: "student_names", value: studentPricingFilter.student_names, values: studentGroups, placeholder: "全部学生集合" })}
         ${unifiedFilterField({ label: "价格状态", className: "student-pricing-filter-input", field: "price", value: filterLabel(priceFilterOptions, studentPricingFilter.price), values: priceFilterOptions.map((item) => item[1]), placeholder: "全部价格状态" })}
       </div>
@@ -11360,9 +11521,66 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
   `;
 }
 
+function studentPricingRowMarkup(row) {
+  const readonly = canWriteData() ? "" : " disabled";
+  return `
+    <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
+      <td class="select-col adaptive-center" data-adaptive-alignment="center"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""}${readonly} aria-label="选择学生单价规则"></td>
+      <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+      <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderGradeBadge(row.grade)}</td>
+      <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderSubjectBadge(row.subject)}</td>
+      <td class="text-cell wide student-set-cell adaptive-left adaptive-wrap" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
+      <td class="currency-input-cell student-pricing-value-cell adaptive-right" data-adaptive-alignment="right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"${readonly}` })}</td>
+      <td class="text-cell adaptive-center student-pricing-status-cell" data-adaptive-alignment="center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
+      <td class="adaptive-left adaptive-wrap" data-adaptive-alignment="left"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft"${readonly}>${escapeHtml(row.notes)}</textarea></td>
+    </tr>
+  `;
+}
+
+function cancelStudentPricingProgressiveRender() {
+  studentPricingRenderGeneration += 1;
+  if (studentPricingRenderHandle) {
+    window.cancelIdleCallback?.(studentPricingRenderHandle);
+    window.clearTimeout(studentPricingRenderHandle);
+    studentPricingRenderHandle = 0;
+  }
+}
+
+function scheduleStudentPricingProgressiveRender(rows, startIndex) {
+  const generation = ++studentPricingRenderGeneration;
+  const schedule = (callback) => {
+    studentPricingRenderHandle = window.requestIdleCallback
+      ? window.requestIdleCallback(callback, { timeout: 80 })
+      : window.setTimeout(() => callback({ timeRemaining: () => 8 }), 0);
+  };
+  const appendBatch = () => {
+    if (generation !== studentPricingRenderGeneration || view !== "studentPricing") return;
+    const body = document.querySelector(".student-pricing-table tbody");
+    if (!body) return;
+    const end = Math.min(rows.length, startIndex + STUDENT_PRICING_RENDER_BATCH_SIZE);
+    body.insertAdjacentHTML("beforeend", rows.slice(startIndex, end).map(studentPricingRowMarkup).join(""));
+    startIndex = end;
+    const progress = document.querySelector(".student-pricing-render-progress");
+    if (progress) progress.textContent = startIndex < rows.length
+      ? `正在加载更多规则 ${startIndex} / ${rows.length}`
+      : `已加载全部 ${rows.length} 条规则`;
+    const table = document.querySelector(".student-pricing-table");
+    if (table) table.dataset.renderedRows = String(startIndex);
+    if (startIndex < rows.length) {
+      schedule(appendBatch);
+    } else if (table) {
+      table.dataset.renderComplete = "true";
+      studentPricingRenderHandle = 0;
+    }
+  };
+  if (startIndex < rows.length) schedule(appendBatch);
+}
+
 function renderStudentPricing() {
-  const rows = [...(state.student_pricing || [])].sort(compareStudentPricingRule);
+  cancelStudentPricingProgressiveRender();
+  const rows = state.student_pricing || [];
   const visibleRows = rows.filter(studentPricingMatchesFilter);
+  studentPricingVisibleRows = visibleRows;
   const activeFilterSummary = Object.entries(studentPricingFilter)
     .filter(([, value]) => String(value || "").trim())
     .map(([key, value]) => `${({ student: "学生", grade: "年级", subject: "科目", student_names: "学生集合", price: "价格状态", usage: "使用状态" })[key]}：${value}`)
@@ -11372,6 +11590,7 @@ function renderStudentPricing() {
   const selectedVisibleCount = visibleRows.filter((row) => selectedStudentPricingIds.has(Number(row.id))).length;
   const allVisibleSelected = visibleRows.length > 0 && selectedVisibleCount === visibleRows.length;
   const unsetRows = rows.filter((row) => numberValue(row.custom_price) <= 0);
+  const initialRows = visibleRows.slice(0, STUDENT_PRICING_INITIAL_ROW_COUNT);
   renderTopbar("学生单价规则", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条规则`, historyToggleAction());
   contentEl.innerHTML = `
     ${unsetRows.length ? `
@@ -11390,25 +11609,15 @@ function renderStudentPricing() {
         <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
-        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-flex-column="7" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
           <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long"></colgroup>
           <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
-            ${visibleRows.map((row) => `
-              <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
-                <td class="select-col adaptive-center"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择学生单价规则"></td>
-                <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
-                <td class="text-cell adaptive-center">${renderSubjectBadge(row.subject)}</td>
-                <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
-                <td class="currency-input-cell student-pricing-value-cell adaptive-right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
-                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
-                <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft">${escapeHtml(row.notes)}</textarea></td>
-              </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
+            ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
+      <div class="student-pricing-render-progress muted-tip" role="status" aria-live="polite">${initialRows.length < visibleRows.length ? `正在加载更多规则 ${initialRows.length} / ${visibleRows.length}` : `已加载全部 ${visibleRows.length} 条规则`}</div>
     </div>
     ${studentPricingBatchModalOpen ? `
       <div class="modal-backdrop student-pricing-batch-modal">
@@ -11421,6 +11630,8 @@ function renderStudentPricing() {
       </div>
     ` : ""}
   `;
+  updateStudentPricingSelectionUi();
+  scheduleStudentPricingProgressiveRender(visibleRows, initialRows.length);
 }
 
 function renderClassGroups() {
@@ -14613,12 +14824,9 @@ function bindUserAccountRowEvents(row) {
 }
 
 async function refreshStudentPricingModule() {
-  const params = new URLSearchParams();
-  if (activeMonth) params.set("month", activeMonth);
-  if (includeInactive) params.set("include_inactive", "1");
-  const query = params.toString() ? `?${params.toString()}` : "";
-  const data = await request(`/api/bootstrap${query}`);
-  state.student_pricing = data.student_pricing || [];
+  const data = await loadStudentPricingPage({ force: true });
+  state.student_pricing = data.rules || [];
+  state.student_pricing_filters = data.filters || {};
   for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
   rerenderContent(renderStudentPricing);
 }
@@ -14756,7 +14964,7 @@ async function refreshMonthRelatedActiveView() {
   if (view === "recharges") return refreshRechargesForActiveMonth();
   if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
   if (view === "feeDetails") return refreshDerivedForActiveMonth(renderFeeDetails);
-  if (view === "studentPricing") return refreshDerivedForActiveMonth(renderStudentPricing);
+  if (view === "studentPricing") return refreshStudentPricingModule();
   if (view === "classGroups") return refreshDerivedForActiveMonth(renderClassGroups);
   if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
   if (view === "teacherTravelFees") return refreshDerivedForActiveMonth(renderTeacherTravelFees);
@@ -14951,8 +15159,196 @@ function bindDateRangePickerControls() {
   }
 }
 
+function updateStudentPricingSelectionUi() {
+  const visibleIds = studentPricingVisibleRows.map((row) => Number(row.id));
+  const selectedCount = visibleIds.filter((id) => selectedStudentPricingIds.has(id)).length;
+  document.querySelectorAll(".student-pricing-select-row").forEach((input) => {
+    input.checked = selectedStudentPricingIds.has(Number(input.dataset.id));
+  });
+  const selectAll = document.querySelector(".student-pricing-select-all");
+  if (selectAll) {
+    selectAll.checked = visibleIds.length > 0 && selectedCount === visibleIds.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
+  }
+  const summary = document.querySelector(".batch-selection-summary b");
+  if (summary) summary.textContent = String(selectedStudentPricingIds.size);
+  const clear = document.querySelector(".clear-student-pricing-selection");
+  if (clear) clear.disabled = selectedStudentPricingIds.size === 0;
+  const batch = document.querySelector(".open-student-pricing-batch-modal");
+  if (batch) batch.disabled = selectedStudentPricingIds.size === 0 || !canWriteData();
+}
+
+function studentPricingActiveFilterSummary() {
+  return Object.entries(studentPricingFilter)
+    .filter(([, value]) => String(value || "").trim())
+    .map(([key, value]) => `${({ student: "学生", grade: "年级", subject: "科目", student_names: "学生集合", price: "价格状态", usage: "使用状态" })[key]}：${value}`)
+    .join("；") || "全部规则";
+}
+
+function closeStudentPricingBatchModal() {
+  studentPricingBatchModalOpen = false;
+  document.querySelector(".student-pricing-batch-modal")?.remove();
+}
+
+function openStudentPricingBatchModal() {
+  if (!selectedStudentPricingIds.size || !canWriteData()) return;
+  closeStudentPricingBatchModal();
+  studentPricingBatchModalOpen = true;
+  contentEl.insertAdjacentHTML("beforeend", `
+    <div class="modal-backdrop student-pricing-batch-modal">
+      <div class="modal-panel batch-pricing-modal-panel" role="dialog" aria-modal="true" aria-labelledby="student-pricing-batch-title">
+        <div class="modal-head"><div><div class="modal-title" id="student-pricing-batch-title">批量设置学生单价</div><div class="modal-subtitle">仅修改已选择 ${selectedStudentPricingIds.size} 条规则的单价，其他字段保持不变。</div><div class="modal-subtitle">当前筛选：${escapeHtml(studentPricingActiveFilterSummary())}</div></div></div>
+        <label class="filter-field"><span>统一单价</span><input class="control student-pricing-batch-value" type="number" min="0" max="100000" step="0.01" value="0"></label>
+        <div class="batch-pricing-result" aria-live="polite"></div>
+        <div class="modal-actions"><button class="btn close-student-pricing-batch-modal" type="button">取消</button><button class="btn primary confirm-student-pricing-batch" type="button">确认更新</button></div>
+      </div>
+    </div>
+  `);
+  document.querySelector(".student-pricing-batch-value")?.focus();
+}
+
+function patchStudentPricingRowDom(row) {
+  const element = document.querySelector(`.student-pricing-rule-row[data-rule-id="${Number(row.id)}"]`);
+  if (!element) return;
+  const priceInput = element.querySelector('.student-pricing-field[data-field="custom_price"]');
+  if (priceInput && document.activeElement !== priceInput) priceInput.value = moneyInput(row.custom_price);
+  const notesInput = element.querySelector('.student-pricing-field[data-field="notes"]');
+  if (notesInput && document.activeElement !== notesInput) notesInput.value = String(row.notes || "");
+  const status = element.querySelector(".student-pricing-status-cell");
+  if (status) status.innerHTML = visiblePriceStatusBadge(studentPricingVisibleStatus(row));
+}
+
+function mergeStudentPricingResponseRow(row) {
+  const prepared = prepareStudentPricingRule(row);
+  state.student_pricing = upsertById(state.student_pricing || [], prepared);
+  const visibleIndex = studentPricingVisibleRows.findIndex((item) => Number(item.id) === Number(prepared.id));
+  if (visibleIndex >= 0) studentPricingVisibleRows[visibleIndex] = { ...studentPricingVisibleRows[visibleIndex], ...prepared };
+  patchStudentPricingRowDom(prepared);
+  studentPricingPageCache.set(studentPricingPageCacheKey(), {
+    data: {
+      month_key: activeMonth,
+      rules: state.student_pricing,
+      filters: state.student_pricing_filters || {},
+      cache_status: "client-patched",
+    },
+    expires_at: Date.now() + STUDENT_PRICING_CLIENT_CACHE_TTL_MS,
+  });
+  return prepared;
+}
+
+async function saveStudentPricingField(input) {
+  if (!input || input.dataset.saving === "1") return;
+  const value = input.type === "number" ? numberValue(input.value) : input.value;
+  if (input.dataset.field === "custom_price" && numberValue(value) < 0) {
+    showToast("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。", "error");
+    return;
+  }
+  const id = Number(input.dataset.id);
+  const before = (state.student_pricing || []).find((row) => Number(row.id) === id);
+  input.dataset.saving = "1";
+  input.disabled = true;
+  try {
+    const result = await request(`/api/student-pricing/${id}?month=${encodeURIComponent(activeMonth)}`, {
+      method: "PATCH",
+      body: { [input.dataset.field]: value },
+    });
+    const row = mergeStudentPricingResponseRow(result);
+    for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+    if (input.dataset.field === "notes") scheduleAdaptiveTableColumns();
+    if (result?.warnings?.length) alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
+    showToast("学生单价已保存");
+    return row;
+  } catch (error) {
+    if (before && input.isConnected) input.value = String(before[input.dataset.field] ?? "");
+    showToast(error.message || "学生单价保存失败", "error");
+  } finally {
+    if (input.isConnected) {
+      input.dataset.saving = "0";
+      input.disabled = !canWriteData();
+    }
+  }
+}
+
+async function confirmStudentPricingBatch(button) {
+  const value = document.querySelector(".student-pricing-batch-value")?.value ?? "";
+  const price = Number(value);
+  if (!Number.isFinite(price) || price < 0 || price > 100000 || Math.abs(price * 100 - Math.round(price * 100)) >= 1e-8) {
+    return showToast("单价须为 0 到 100000 之间且最多两位小数", "error");
+  }
+  const ids = [...new Set([...selectedStudentPricingIds].map(Number).filter(Boolean))];
+  button.disabled = true;
+  try {
+    const result = await request(`/api/student-pricing/batch?month=${encodeURIComponent(activeMonth)}`, {
+      method: "PATCH",
+      body: { ids, price },
+    });
+    for (const row of result.rows || []) {
+      mergeStudentPricingResponseRow(row);
+      selectedStudentPricingIds.delete(Number(row.id));
+    }
+    closeStudentPricingBatchModal();
+    updateStudentPricingSelectionUi();
+    for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
+    showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
+  } catch (error) {
+    button.disabled = false;
+    const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置单价失败" }];
+    const box = document.querySelector(".student-pricing-batch-modal .batch-pricing-result");
+    if (box) {
+      box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => `<div>记录 ${escapeHtml(item.id || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`).join("")}`;
+    }
+    showToast(error.message || "批量设置单价失败", "error");
+  }
+}
+
+function ensureStudentPricingDelegatedEvents() {
+  if (studentPricingDelegatedEventsBound || !contentEl) return;
+  studentPricingDelegatedEventsBound = true;
+  contentEl.addEventListener("change", (event) => {
+    const rowCheckbox = event.target.closest?.(".student-pricing-select-row");
+    if (rowCheckbox) {
+      const id = Number(rowCheckbox.dataset.id);
+      if (rowCheckbox.checked) selectedStudentPricingIds.add(id);
+      else selectedStudentPricingIds.delete(id);
+      updateStudentPricingSelectionUi();
+      return;
+    }
+    const selectAll = event.target.closest?.(".student-pricing-select-all");
+    if (selectAll) {
+      for (const row of studentPricingVisibleRows) {
+        if (selectAll.checked) selectedStudentPricingIds.add(Number(row.id));
+        else selectedStudentPricingIds.delete(Number(row.id));
+      }
+      updateStudentPricingSelectionUi();
+      return;
+    }
+    const field = event.target.closest?.(".student-pricing-field");
+    if (field) saveStudentPricingField(field);
+  });
+  contentEl.addEventListener("keydown", (event) => {
+    const field = event.target.closest?.('.student-pricing-field[data-field="custom_price"]');
+    if (field && event.key === "Enter") {
+      event.preventDefault();
+      field.blur();
+    }
+  });
+  contentEl.addEventListener("click", (event) => {
+    if (event.target.closest?.(".clear-student-pricing-selection")) {
+      selectedStudentPricingIds.clear();
+      updateStudentPricingSelectionUi();
+      return;
+    }
+    if (event.target.closest?.(".open-student-pricing-batch-modal")) return openStudentPricingBatchModal();
+    if (event.target.closest?.(".close-student-pricing-batch-modal")) return closeStudentPricingBatchModal();
+    const confirmButton = event.target.closest?.(".confirm-student-pricing-batch");
+    if (confirmButton) return confirmStudentPricingBatch(confirmButton);
+    if (event.target.classList?.contains("student-pricing-batch-modal")) closeStudentPricingBatchModal();
+  });
+}
+
 function wireEvents() {
   ensureRechargeChannelEvents();
+  ensureStudentPricingDelegatedEvents();
   document.querySelectorAll(".dashboard-open-shortcut-config").forEach((button) => {
     button.addEventListener("click", () => {
       dashboardShortcutDraft = dashboardSelectedShortcutKeys();
@@ -17538,77 +17934,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".student-pricing-select-row").forEach((input) => {
-    input.addEventListener("change", () => {
-      const id = Number(input.dataset.id);
-      if (input.checked) selectedStudentPricingIds.add(id);
-      else selectedStudentPricingIds.delete(id);
-      render();
-    });
-  });
-  document.querySelectorAll(".student-pricing-select-all").forEach((input) => {
-    const visibleIds = [...document.querySelectorAll(".student-pricing-select-row")].map((item) => Number(item.dataset.id));
-    const selectedCount = visibleIds.filter((id) => selectedStudentPricingIds.has(id)).length;
-    input.indeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
-    input.addEventListener("change", () => {
-      for (const id of visibleIds) {
-        if (input.checked) selectedStudentPricingIds.add(id);
-        else selectedStudentPricingIds.delete(id);
-      }
-      render();
-    });
-  });
-  document.querySelectorAll(".clear-student-pricing-selection").forEach((button) => button.addEventListener("click", () => {
-    selectedStudentPricingIds = new Set();
-    render();
-  }));
-  document.querySelectorAll(".open-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
-    if (!selectedStudentPricingIds.size || !canWriteData()) return;
-    studentPricingBatchModalOpen = true;
-    render();
-  }));
-  document.querySelectorAll(".close-student-pricing-batch-modal").forEach((button) => button.addEventListener("click", () => {
-    studentPricingBatchModalOpen = false;
-    render();
-  }));
-  document.querySelectorAll(".student-pricing-batch-modal").forEach((modal) => modal.addEventListener("click", (event) => {
-    if (event.target !== modal) return;
-    studentPricingBatchModalOpen = false;
-    render();
-  }));
-  document.querySelectorAll(".confirm-student-pricing-batch").forEach((button) => button.addEventListener("click", async () => {
-    const value = document.querySelector(".student-pricing-batch-value")?.value ?? "";
-    const price = Number(value);
-    if (!Number.isFinite(price) || price < 0 || price > 100000 || Math.abs(price * 100 - Math.round(price * 100)) >= 1e-8) {
-      return showToast("单价须为 0 到 100000 之间且最多两位小数", "error");
-    }
-    const ids = [...selectedStudentPricingIds];
-    button.disabled = true;
-    try {
-      const result = await request(`/api/student-pricing/batch?month=${encodeURIComponent(activeMonth)}`, {
-        method: "PATCH",
-        body: { ids, price },
-      });
-      for (const row of result.rows || []) state.student_pricing = upsertById(state.student_pricing || [], row);
-      for (const row of result.rows || []) selectedStudentPricingIds.delete(Number(row.id));
-      studentPricingBatchModalOpen = false;
-      for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
-      rerenderCurrentView(renderStudentPricing);
-      showToast(`已处理 ${result.processed || ids.length} 条：成功 ${result.success || 0} 条，失败 ${(result.failed || []).length} 条。`);
-    } catch (error) {
-      button.disabled = false;
-      const failed = Array.isArray(error.data?.failed) ? error.data.failed : [{ message: error.message || "批量设置单价失败" }];
-      const box = document.querySelector(".student-pricing-batch-modal .batch-pricing-result");
-      if (box) {
-        box.innerHTML = `<strong>已处理 ${escapeHtml(error.data?.processed ?? ids.length)} 条：成功 ${escapeHtml(error.data?.success || 0)} 条，失败 ${escapeHtml(failed.length)} 条。</strong>${failed.map((item) => {
-          const row = (state.student_pricing || []).find((candidate) => Number(candidate.id) === Number(item.id)) || {};
-          return `<div>记录 ${escapeHtml(item.id || "未知")} · 学生 ${escapeHtml(row.student_name || "未知")} · 年级 ${escapeHtml(row.grade || "未知")} · 科目 ${escapeHtml(row.subject || "未知")} · 原因 ${escapeHtml(item.message || error.message || "更新失败")}</div>`;
-        }).join("")}`;
-      }
-      showToast(error.message || "批量设置单价失败", "error");
-    }
-  }));
-
   document.querySelectorAll("input.class-group-filter-input").forEach((input) => {
     const applyClassGroupFilter = (value) => {
       classGroupFilter = { ...classGroupFilter, [input.dataset.filterField]: value };
@@ -18704,39 +19029,6 @@ function wireEvents() {
         method: "PUT",
         body: payload,
       }));
-    });
-  });
-
-  document.querySelectorAll(".student-pricing-field").forEach((input) => {
-    input.addEventListener("change", async () => {
-      if (input.dataset.saving === "1") return;
-      const value = input.type === "number" ? numberValue(input.value) : input.value;
-      if (input.dataset.field === "custom_price" && numberValue(value) < 0) {
-        alert("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。");
-        return load();
-      }
-      const id = Number(input.dataset.id);
-      const before = (state.student_pricing || []).find((row) => Number(row.id) === id);
-      input.dataset.saving = "1";
-      input.disabled = true;
-      try {
-        const result = await request(`/api/student-pricing/${input.dataset.id}?month=${encodeURIComponent(activeMonth)}`, {
-          method: "PATCH",
-          body: { [input.dataset.field]: value },
-        });
-        state.student_pricing = upsertById(state.student_pricing || [], result);
-        for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
-        rerenderCurrentView(renderStudentPricing);
-        if (result?.warnings?.length) alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
-      } catch (error) {
-        if (before && input.isConnected) input.value = String(before[input.dataset.field] ?? "");
-        alert(error.message || "学生单价保存失败");
-      } finally {
-        if (input.isConnected) {
-          input.dataset.saving = "0";
-          input.disabled = false;
-        }
-      }
     });
   });
 
