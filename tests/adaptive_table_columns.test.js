@@ -243,6 +243,13 @@ test("semantic caps remain stable across filtering and 1100-row measurement stay
   await openView(browser, "students", "studentPricing", ".student-pricing-table");
   await viewport(browser, 1280);
   const fullWidths = await browser.evaluate("document.querySelector('.student-pricing-table').dataset.adaptiveWidths");
+  const pricingMeasurement = await browser.evaluate(`(() => {
+    const table=document.querySelector('.student-pricing-table');
+    return { source:table.dataset.adaptiveSource, layoutReads:Number(table.dataset.adaptiveLayoutReads), elapsed:Number(table.dataset.adaptiveMeasurementMs) };
+  })()`);
+  assert.equal(pricingMeasurement.source, "student-pricing");
+  assert.equal(pricingMeasurement.layoutReads, 0);
+  assert.ok(pricingMeasurement.elapsed < 200, JSON.stringify(pricingMeasurement));
   await browser.evaluate(`(() => { studentPricingFilter={ student:'短名', grade:'', subject:'', student_names:'', price:'', usage:'' }; render(); })()`);
   await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===1 && Boolean(document.querySelector('.student-pricing-table[data-adaptive-widths]'))");
   const filteredWidths = await browser.evaluate("document.querySelector('.student-pricing-table').dataset.adaptiveWidths");
