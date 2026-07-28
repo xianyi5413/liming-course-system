@@ -41,7 +41,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260728-adaptive-columns-auto-exit-backup-files";
+const APP_VERSION = process.env.APP_VERSION || "20260728-student-pricing-performance";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1155,6 +1155,39 @@ const derivedCaches = {
   studentBalanceThroughDate: new Map(),
   financeBase: new Map(),
 };
+const studentPricingPageCache = new Map();
+const STUDENT_PRICING_PAGE_CACHE_TTL_MS = 60_000;
+
+function studentPricingScopeKey(user) {
+  return [
+    Number(user?.id || 0),
+    canonicalRole(user?.role),
+    [...new Set(userPermissionKeys(user))].sort().join(","),
+    uniqueNames([...(user?.bound_teacher_names || []), user?.teacher_name]).join(","),
+  ].join("|");
+}
+
+function clearStudentPricingPageCache(reason = "") {
+  const count = studentPricingPageCache.size;
+  studentPricingPageCache.clear();
+  if (count && DERIVED_CACHE_DEBUG) {
+    console.info(`[perf] student pricing page cache cleared entries=${count}${reason ? ` reason=${reason}` : ""}`);
+  }
+}
+
+function studentPricingMutationInvalidatesCache(method, pathname) {
+  if (String(method).toUpperCase() === "GET") return false;
+  return pathname.startsWith("/api/student-pricing")
+    || pathname.startsWith("/api/students")
+    || pathname.startsWith("/api/student-grade-stages")
+    || pathname.startsWith("/api/lessons")
+    || pathname.startsWith("/api/pricing")
+    || pathname.startsWith("/api/fee-overrides")
+    || pathname.startsWith("/api/settings")
+    || pathname.startsWith("/api/import")
+    || pathname.startsWith("/api/data-center/import")
+    || pathname.startsWith("/api/audit/apply");
+}
 
 function cacheKey(...parts) {
   return parts.map((part) => text(part)).join("|");
@@ -1900,9 +1933,10 @@ function courseStatusValues() {
   return mergeLookupValues(STATUS, "custom_course_statuses");
 }
 
-function deriveStatus(row = {}) {
+function deriveStatus(row = {}, knownStatuses = null) {
   const current = text(row.status);
-  if (courseStatusValues().includes(current)) return current;
+  const statuses = knownStatuses || courseStatusValues();
+  if ((statuses instanceof Set ? statuses.has(current) : statuses.includes(current))) return current;
   if (row.lesson_status === "试课") return "试课";
   if (row.lesson_status === "考试") return "考试";
   if (row.lesson_status === "上课（未缴费）") return "未缴费";
@@ -2329,15 +2363,15 @@ function activeStudentPricingRuleForLesson({ studentName, grade, subject, studen
   `, [name, gradeValue, subjectValue]).find((rule) => normalizedStudents(rule.student_names) === studentNamesValue) || null;
 }
 
-function feePricingLookups() {
-  const feeOverrides = new Map(all("SELECT lesson_id, student_name, unit_price FROM fee_overrides")
+function feePricingLookups(readRows = all) {
+  const feeOverrides = new Map(readRows("SELECT lesson_id, student_name, unit_price FROM fee_overrides")
     .map((row) => [`${Number(row.lesson_id)}\u0001${text(row.student_name)}`, row]));
   const studentPricingRules = new Map();
-  for (const row of all("SELECT * FROM student_pricing WHERE custom_price > 0 ORDER BY id DESC")) {
+  for (const row of readRows("SELECT * FROM student_pricing WHERE custom_price > 0 ORDER BY id DESC")) {
     const key = studentPricingRuleKey(row);
     if (!studentPricingRules.has(key)) studentPricingRules.set(key, row);
   }
-  const pricingStandards = new Map(all("SELECT grade, student_count, unit_price FROM pricing_standards")
+  const pricingStandards = new Map(readRows("SELECT grade, student_count, unit_price FROM pricing_standards")
     .map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, row]));
   return { feeOverrides, studentPricingRules, pricingStandards };
 }
@@ -6672,13 +6706,28 @@ function studentHistoryRows(studentName) {
   return rows.sort((a, b) => b.month_key.localeCompare(a.month_key));
 }
 
-function studentPricingRows(monthKey) {
-  const lessons = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY date, teacher_name, time_slot, id");
+function studentPricingRows(monthKey, metrics = null) {
+  const readRows = (sql, params = []) => {
+    if (metrics) metrics.sql_queries += 1;
+    return all(sql, params);
+  };
+  const lessons = readRows("SELECT id, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, teacher_name, time_slot, id");
   const matchesByRule = new Map();
+  if (metrics) metrics.sql_queries += 1;
+  const knownStatuses = new Set(courseStatusValues());
+  const parsedStudentSets = new Map();
+  const parseStudentSet = (value) => {
+    const raw = text(value);
+    if (parsedStudentSets.has(raw)) return parsedStudentSets.get(raw);
+    const normalized = normalizedStudents(raw);
+    const parsed = { normalized, students: splitStudents(normalized) };
+    parsedStudentSets.set(raw, parsed);
+    return parsed;
+  };
   for (const lesson of lessons) {
-    if (!isCompletedLesson(lesson)) continue;
-    const students = splitStudents(lesson.student_names);
-    const normalizedStudentNames = normalizedStudents(lesson.student_names);
+    const effectiveStatus = deriveStatus(lesson, knownStatuses);
+    if (effectiveStatus !== "已上") continue;
+    const { students, normalized: normalizedStudentNames } = parseStudentSet(lesson.student_names);
     for (const studentName of students) {
       const key = studentPricingRuleKey({
         student_name: studentName,
@@ -6687,11 +6736,11 @@ function studentPricingRows(monthKey) {
         student_names: normalizedStudentNames,
       });
       if (!matchesByRule.has(key)) matchesByRule.set(key, []);
-      matchesByRule.get(key).push({ ...lesson, normalized_student_names: normalizedStudentNames, student_count: students.length });
+      matchesByRule.get(key).push({ ...lesson, effective_status: effectiveStatus, normalized_student_names: normalizedStudentNames, student_count: students.length });
     }
   }
-  const pricingLookups = feePricingLookups();
-  const rows = all("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).map((row) => {
+  const pricingLookups = feePricingLookups(readRows);
+  const rows = readRows("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
@@ -6706,7 +6755,7 @@ function studentPricingRows(monthKey) {
           grade: lesson.grade,
           studentCount: lesson.student_count,
           lessonId: lesson.id,
-          status: deriveStatus(lesson),
+          status: lesson.effective_status,
           studentNames: lesson.normalized_student_names,
         }, pricingLookups);
         return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
@@ -6731,6 +6780,52 @@ function studentPricingRows(monthKey) {
     || text(a.student_names).localeCompare(text(b.student_names), "zh-Hans-CN")
     || Number(a.id || 0) - Number(b.id || 0)
   ));
+}
+
+function studentPricingPagePayload(monthKey, user) {
+  const key = `${monthKey}|${studentPricingScopeKey(user)}`;
+  const cached = studentPricingPageCache.get(key);
+  if (cached && cached.expires_at > Date.now()) {
+    const payload = structuredClone(cached.payload);
+    if (payload.diagnostics) payload.diagnostics.sql_query_count = 0;
+    return { ...payload, cache_status: "hit" };
+  }
+  const started = performance.now();
+  const metrics = { sql_queries: 0 };
+  const rules = studentPricingRows(monthKey, metrics).map((row) => ({
+    id: Number(row.id),
+    student_name: text(row.student_name),
+    grade: text(row.grade),
+    subject: text(row.subject),
+    student_names: text(row.student_names),
+    custom_price: moneyRound(row.custom_price),
+    price_status: row.price_status === "已设置" ? "已设置" : "未设置",
+    notes: text(row.notes),
+    current_month_lessons: Number(row.current_month_lessons || 0),
+    total_lessons: Number(row.total_lessons || 0),
+  }));
+  const payload = {
+    month_key: monthKey,
+    rules,
+    filters: {
+      students: uniqueNames(rules.map((row) => row.student_name)).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
+      grades: [...new Set(rules.map((row) => row.grade).filter(Boolean))].sort(compareGradeName),
+      subjects: [...new Set(rules.map((row) => row.subject).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
+      student_groups: [...new Set(rules.map((row) => row.student_names).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
+    },
+    generated_ms: Math.round((performance.now() - started) * 10) / 10,
+    ...(process.env.STUDENT_PRICING_PERF_DIAGNOSTICS === "1" ? {
+      diagnostics: {
+        sql_query_count: metrics.sql_queries,
+        cache_scope_hash: crypto.createHash("sha256").update(studentPricingScopeKey(user)).digest("hex").slice(0, 12),
+      },
+    } : {}),
+  };
+  studentPricingPageCache.set(key, {
+    expires_at: Date.now() + STUDENT_PRICING_PAGE_CACHE_TTL_MS,
+    payload: structuredClone(payload),
+  });
+  return { ...payload, cache_status: "miss" };
 }
 
 function studentPricingRow(monthKey, id) {
@@ -9845,6 +9940,7 @@ function apiPagePermissionKeys(req, url) {
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
   if (p.startsWith("/api/class-groups")) return ["classGroups"];
   if (p.startsWith("/api/student-grade-stages")) return ["studentProfiles"];
+  if (p.startsWith("/api/student-pricing")) return ["studentPricing"];
   if (p === "/api/students/batch-delete") return ["studentProfiles"];
   if (p.startsWith("/api/course-notice")) return ["courseNotice"];
   if (p.startsWith("/api/teacher-course-notice")) return ["teacherCourseNotice"];
@@ -12201,6 +12297,12 @@ async function handleApi(req, res, url) {
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
   if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
+  if (studentPricingMutationInvalidatesCache(req.method, url.pathname)) {
+    clearStudentPricingPageCache(`${req.method} ${url.pathname}`);
+    res.once("finish", () => {
+      if (res.statusCode < 400) clearStudentPricingPageCache(`${req.method} ${url.pathname} completed`);
+    });
+  }
 
   if (req.method === "GET" && url.pathname === "/api/roles") {
     return sendJson(res, {
@@ -12695,6 +12797,10 @@ async function handleApi(req, res, url) {
       ? buildBootstrapLite(monthKey, includeInactiveRows)
       : bootstrap(monthKey, includeInactiveRows);
     return sendJson(res, sanitizeBootstrap(payload, user));
+  }
+  if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
+    const monthKey = resolveMonthKey(url);
+    return sendJson(res, studentPricingPagePayload(monthKey, user));
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
     const viewKey = prefilterViewFromUrl(url, "lessons");
