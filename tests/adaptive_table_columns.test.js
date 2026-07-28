@@ -123,19 +123,22 @@ async function inspectTable(browser, selector) {
     const rows=[...table.tBodies[0].rows].filter((row)=>!row.querySelector('.empty'));
     const cells=rows.flatMap((row)=>[...row.cells]);
     const widths=(table.dataset.adaptiveWidths||'').split(',').map(Number);
+    const config=JSON.parse(table.dataset.adaptiveColumnConfig||'[]');
     const canvas=document.createElement('canvas');
     const context=canvas.getContext('2d');
     const headerFits=headers.every((cell)=>{
       const style=getComputedStyle(cell);
       context.font=style.font;
       const padding=(parseFloat(style.paddingLeft)||0)+(parseFloat(style.paddingRight)||0);
+      if (cell.classList.contains('adaptive-wrap')) return cell.scrollWidth<=cell.clientWidth+1;
       return cell.getBoundingClientRect().width+1>=context.measureText(cell.textContent.trim()).width+padding;
     });
-    const cellFits=cells.every((cell)=>{
+    const cellFitsDetails=cells.map((cell)=>{
       const input=cell.querySelector(':scope > .cell-input');
       const set=cell.querySelector('.student-set-badges');
       if (set) return set.getBoundingClientRect().right<=cell.getBoundingClientRect().right+1;
       if (input) {
+        if (cell.classList.contains('adaptive-wrap')) return input.scrollWidth<=input.clientWidth+1&&input.clientWidth<=cell.clientWidth+1;
         const style=getComputedStyle(input);
         context.font=style.font;
         const padding=(parseFloat(style.paddingLeft)||0)+(parseFloat(style.paddingRight)||0);
@@ -144,12 +147,15 @@ async function inspectTable(browser, selector) {
       }
       return cell.scrollWidth<=cell.clientWidth+1;
     });
+    const cellFits=cellFitsDetails.every(Boolean);
     return {
       widths,
+      config,
       tableWidth:table.getBoundingClientRect().width,
       wrapperWidth:wrapper.clientWidth,
       headerFits,
       cellFits,
+      cellFailures:cellFitsDetails.map((ok,index)=>ok?null:{index,html:cells[index].outerHTML.slice(0,240),cell:[cells[index].clientWidth,cells[index].scrollWidth],input:cells[index].querySelector(':scope > .cell-input')?[cells[index].querySelector(':scope > .cell-input').clientWidth,cells[index].querySelector(':scope > .cell-input').scrollWidth]:null}).filter(Boolean),
       headers:headers.map((cell)=>{const style=getComputedStyle(cell);return {textAlign:style.textAlign,verticalAlign:style.verticalAlign,whiteSpace:style.whiteSpace};}),
       cells:rows[0]?[...rows[0].cells].map((cell)=>{const style=getComputedStyle(cell);return {textAlign:style.textAlign,whiteSpace:style.whiteSpace,overflowX:style.overflowX,textOverflow:style.textOverflow,resize:style.resize};}):[],
       badges:table.querySelectorAll('.student-set-badges .student-badge').length,
@@ -161,11 +167,12 @@ async function inspectTable(browser, selector) {
       outerScrollable:table.scrollWidth>wrapper.clientWidth,
       outerOverflow:getComputedStyle(wrapper).overflowX,
       pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,
+      overflowSources:[...document.querySelectorAll('body *')].map((node)=>({node,rect:node.getBoundingClientRect()})).filter((item)=>item.rect.right>document.documentElement.clientWidth+1).sort((a,b)=>b.rect.right-a.rect.right).slice(0,8).map((item)=>({tag:item.node.tagName,className:item.node.className,right:item.rect.right,width:item.rect.width,scrollWidth:item.node.scrollWidth,clientWidth:item.node.clientWidth})),
     };
   })()`);
 }
 
-test("five real tables use shared content-driven widths, field alignment and unified student badges", async () => withBrowser(async (browser) => {
+test("semantic columns cover data-entry, teacher-profile and account tables at every target viewport", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
   const pages = [
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "right", "right", "center", "center", "left"]],
@@ -173,6 +180,8 @@ test("five real tables use shared content-driven widths, field alignment and uni
     ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "left", "right", "center", "center", "left"]],
+    ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "left"]],
+    ["settings", "userAdmin", ".user-table:not(.role-table)", ["center", "center", "center", "left", "center", "center", "center"]],
   ];
   const results = {};
   for (const [group, view, selector, alignments] of pages) {
@@ -183,13 +192,15 @@ test("five real tables use shared content-driven widths, field alignment and uni
       const layout = await inspectTable(browser, selector);
       results[view][width] = layout.widths;
       assert.equal(layout.widths.length, alignments.length, `${view}/${width}: colgroup`);
+      assert.equal(layout.config.length, alignments.length, `${view}/${width}: semantic config`);
+      assert.equal(layout.widths.every((value, index) => value >= layout.config[index].minWidth && value <= layout.config[index].maxWidth + 1), true, `${view}/${width}: semantic bounds`);
       assert.equal(layout.headerFits, true, `${view}/${width}: header fit`);
-      assert.equal(layout.cellFits, true, `${view}/${width}: cell fit`);
-      assert.equal(layout.headers.every((item) => item.textAlign === "center" && item.verticalAlign === "middle" && item.whiteSpace === "nowrap"), true, `${view}/${width}: headers ${JSON.stringify(layout.headers)}`);
+      assert.equal(layout.cellFits, true, `${view}/${width}: cell fit ${JSON.stringify(layout.cellFailures)}`);
+      assert.equal(layout.headers.every((item, index) => item.textAlign === "center" && item.verticalAlign === "middle" && item.whiteSpace === (layout.config[index].wrap ? "normal" : "nowrap")), true, `${view}/${width}: headers ${JSON.stringify(layout.headers)}`);
       assert.deepEqual(layout.cells.map((item) => item.textAlign), alignments, `${view}/${width}: body alignment`);
-      assert.equal(layout.cells.every((item) => item.whiteSpace === "nowrap" && !/auto|scroll/.test(item.overflowX) && item.textOverflow !== "ellipsis" && item.resize === "none"), true, `${view}/${width}: cell overflow`);
-      assert.equal(layout.badgeRows.every((item) => item.whiteSpace === "nowrap" && item.flexWrap === "nowrap" && item.complete), true, `${view}/${width}: badge rows`);
-      assert.equal(layout.pageOverflow, false, `${view}/${width}: body overflow`);
+      assert.equal(layout.cells.every((item, index) => item.whiteSpace === (layout.config[index].wrap ? "normal" : "nowrap") && !/auto|scroll/.test(item.overflowX) && item.textOverflow !== "ellipsis" && item.resize === "none"), true, `${view}/${width}: cell overflow`);
+      assert.equal(layout.badgeRows.every((item) => item.whiteSpace === "normal" && item.flexWrap === "wrap" && item.complete), true, `${view}/${width}: badge rows`);
+      assert.equal(layout.pageOverflow, false, `${view}/${width}: body overflow ${JSON.stringify(layout.overflowSources)}`);
       if (width === 390) {
         assert.equal(layout.outerScrollable, true, `${view}: outer scroll`);
         assert.match(layout.outerOverflow, /auto|scroll/, `${view}: wrapper overflow`);
@@ -202,6 +213,13 @@ test("five real tables use shared content-driven widths, field alignment and uni
   assert.ok(results.studentPricing[1440][4] > results.studentPricing[1440][2], "student badges must drive the set column");
   assert.ok(results.classGroups[1440][3] > results.classGroups[1440][2], "class badges must drive the set column");
   assert.ok(results.teacherSalaryRules[1440][4] > results.teacherSalaryRules[1440][2], "salary badges must drive the set column");
+  assert.ok(results.teacherProfiles[1440][6] > results.teacherProfiles[1440][2], "teacher notes must be the bounded flexible column");
+  assert.ok(results.userAdmin[1440][3] > results.userAdmin[1440][2], "bound teachers must be the bounded flexible column");
+
+  await browser.click('.user-admin-tab[data-tab="roles"]');
+  await browser.waitFor("Boolean(document.querySelector('.role-table[data-adaptive-widths]'))");
+  const roleLayout = await inspectTable(browser, ".role-table");
+  assert.deepEqual(roleLayout.config.map((column) => column.type), ["name", "status", "action", "action"]);
 
   await openView(browser, "students", "recharges", ".recharge-table:not(.opening-balance-table)");
   await viewport(browser, 390);
@@ -220,7 +238,7 @@ test("five real tables use shared content-driven widths, field alignment and uni
   assert.deepEqual(browser.consoleErrors, []);
 }));
 
-test("filtered widths shrink and restore, and 1100-row measurement stays linear and responsive", async () => withBrowser(async (browser) => {
+test("semantic caps remain stable across filtering and 1100-row measurement stays linear and responsive", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
   await openView(browser, "students", "studentPricing", ".student-pricing-table");
   await viewport(browser, 1280);
@@ -230,8 +248,10 @@ test("filtered widths shrink and restore, and 1100-row measurement stays linear 
   const filteredWidths = await browser.evaluate("document.querySelector('.student-pricing-table').dataset.adaptiveWidths");
   const full = fullWidths.split(",").map(Number);
   const filtered = filteredWidths.split(",").map(Number);
-  assert.ok(filtered[1] < full[1], "student column should shrink after filtering");
-  assert.ok(filtered[4] < full[4], "student set column should shrink after filtering");
+  const config = await browser.evaluate("JSON.parse(document.querySelector('.student-pricing-table').dataset.adaptiveColumnConfig)");
+  assert.equal(filtered[1] >= config[1].minWidth && filtered[1] <= config[1].maxWidth, true);
+  assert.equal(filtered[4] >= config[4].minWidth && filtered[4] <= config[4].maxWidth, true);
+  assert.equal(full[4] <= config[4].maxWidth, true, "student set column is capped instead of following the longest row");
   await browser.evaluate("(() => { studentPricingFilter={ student:'', grade:'', subject:'', student_names:'', price:'', usage:'' }; render(); })()");
   await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.adaptiveWidths===${JSON.stringify(fullWidths)}`);
 

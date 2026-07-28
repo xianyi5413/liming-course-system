@@ -115,7 +115,7 @@ async function viewport(browser, width) {
   await new Promise((resolve) => setTimeout(resolve, 80));
 }
 
-test("five target tables keep complete single-line cells and delegate narrow overflow to the outer wrapper", async () => withBrowser(async (browser) => {
+test("target tables keep short fields complete, wrap bounded long fields and delegate narrow overflow to the outer wrapper", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
 
   await openView(browser, "students", "feeDetails", ".fee-detail-table tbody tr");
@@ -174,6 +174,7 @@ test("five target tables keep complete single-line cells and delegate narrow ove
         value:input.value,
         cellWidth:cell.getBoundingClientRect().width,
         textFits:textWidth+20<=input.clientWidth+1,
+        wrappedComplete:input.scrollWidth<=input.clientWidth+1,
         whiteSpace:inputStyle.whiteSpace,
         textOverflow:style.textOverflow,
         cellOverflow:style.overflowX,
@@ -185,12 +186,12 @@ test("five target tables keep complete single-line cells and delegate narrow ove
       };
     })()`);
     assert.equal(layout.value, MIGRATION_NOTE);
-    assert.equal(layout.textFits, true);
-    assert.equal(layout.whiteSpace, "nowrap");
+    assert.equal(layout.textFits, false);
+    assert.equal(layout.wrappedComplete, true);
+    assert.equal(layout.whiteSpace, "pre-wrap");
     assert.notEqual(layout.textOverflow, "ellipsis");
     assert.doesNotMatch(layout.cellOverflow, /auto|scroll/);
-    assert.ok(layout.rowHeight < 60);
-    assert.equal(layout.fillsWidth, true);
+    assert.ok(layout.rowHeight >= 36);
     if (width === 390) {
       assert.equal(layout.outerScrollable, true);
       assert.match(layout.outerOverflow, /auto|scroll/);
@@ -219,6 +220,7 @@ test("five target tables keep complete single-line cells and delegate narrow ove
       ],
       badges:cell.querySelectorAll('.student-badge').length,
       whiteSpace:style.whiteSpace,
+      flexWrap:style.flexWrap,
       overflowX:style.overflowX,
       textOverflow:style.textOverflow,
       complete:value.scrollWidth<=value.getBoundingClientRect().width+1,
@@ -229,9 +231,8 @@ test("five target tables keep complete single-line cells and delegate narrow ove
   assert.equal(pricing.text, STUDENTS.join(""));
   assert.equal(pricing.empty, "—");
   assert.deepEqual(pricing.normalizedCases, ["甲、乙", "甲、乙", "甲、乙、丙"]);
-  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", overflowX: "visible", complete: true });
+  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, flexWrap: pricing.flexWrap, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "normal", flexWrap: "wrap", overflowX: "hidden", complete: true });
   assert.notEqual(pricing.textOverflow, "ellipsis");
-  assert.ok(pricing.heightDelta <= 1);
   await browser.click(".student-pricing-select-row");
   assert.equal(await browser.evaluate("document.querySelector('.open-student-pricing-batch-modal').disabled"), false);
   await viewport(browser, 390);
@@ -252,6 +253,7 @@ test("five target tables keep complete single-line cells and delegate narrow ove
       text:value.textContent,
       badges:cell.querySelectorAll('.student-badge').length,
       whiteSpace:style.whiteSpace,
+      flexWrap:style.flexWrap,
       overflowX:style.overflowX,
       textOverflow:style.textOverflow,
       complete:value.scrollWidth<=value.getBoundingClientRect().width+1,
@@ -260,9 +262,8 @@ test("five target tables keep complete single-line cells and delegate narrow ove
   })()`);
   assert.equal(salary.missing, undefined, JSON.stringify(salary.missing || []));
   assert.equal(salary.text, STUDENTS.join(""));
-  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, overflowX: salary.overflowX, complete: salary.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", overflowX: "visible", complete: true });
+  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, flexWrap: salary.flexWrap, overflowX: salary.overflowX, complete: salary.complete }, { badges: STUDENTS.length, whiteSpace: "normal", flexWrap: "wrap", overflowX: "hidden", complete: true });
   assert.notEqual(salary.textOverflow, "ellipsis");
-  assert.ok(salary.heightDelta <= 1);
   await browser.click(".teacher-salary-rule-select-row");
   assert.equal(await browser.evaluate("document.querySelector('.open-teacher-salary-rule-batch-modal').disabled"), false);
   await viewport(browser, 390);

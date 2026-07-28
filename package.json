@@ -39,6 +39,8 @@
     "test:layout-regressions": "node --test --test-concurrency=1 tests/dashboard_card.test.js tests/unified_filters.test.js tests/multi_page_regressions.test.js",
     "test:table-cell-layouts": "node --test --test-concurrency=1 tests/table_cell_layouts.test.js",
     "test:adaptive-table-columns": "node --test --test-concurrency=1 tests/adaptive_table_columns.test.js",
+    "test:auto-exit-dates": "node --test --test-concurrency=1 tests/auto_exit_dates.test.js",
+    "test:backup-file-browser": "node --test --test-concurrency=1 tests/backup_file_browser.test.js",
     "test:recharge-channel-inline": "node --test --test-concurrency=1 tests/recharge_channel_inline.test.js",
     "test:matrix-screenshot-layout": "node --test --test-concurrency=1 tests/matrix_screenshot_layout.test.js",
     "test:student-status-ordering": "node --test --test-concurrency=1 tests/student_status_ordering.test.js",
