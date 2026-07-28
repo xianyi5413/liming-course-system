@@ -204,6 +204,19 @@ class BackupService {
       });
     } finally { db.close(); }
   }
+  listForFileBrowser(limit = 5000) {
+    const db = this.database();
+    try {
+      return db.prepare(`
+        SELECT br.*, u.id AS creator_joined_id, u.username AS creator_username,
+          u.display_name AS creator_display_name, u.status AS creator_status
+        FROM backup_records br
+        LEFT JOIN users u ON u.id = br.created_by_user_id
+        ORDER BY br.backup_time DESC, br.id DESC
+        LIMIT ?
+      `).all(Math.max(1, Math.min(5000, Number(limit) || 5000))).map((row) => this.dto(row));
+    } finally { db.close(); }
+  }
   managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
   verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error)), id); } catch {} throw error; } finally { db.close(); } }
   async create(options = {}) {

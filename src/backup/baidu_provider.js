@@ -101,6 +101,37 @@ class BaiduClient {
   async uploadRequest(operation) { let lastError; for (let attempt = 1; attempt <= 3; attempt += 1) { try { return await operation(); } catch (error) { lastError = error; if (attempt === 3) throw error; await this.sleep(attempt * 250); } } throw lastError; }
   async testConnection() { const accessToken = await this.accessToken(); const url = new URL(`${this.endpoints.xpan}/nas`); url.search = new URLSearchParams({ method: "uinfo", access_token: accessToken }); await this.apiJson(url); return { ok: true }; }
   async createDirectory(remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const url = new URL(`${this.endpoints.xpan}/file`); url.search = new URLSearchParams({ method: "create", access_token: accessToken }); await this.apiJson(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size: 0, isdir: 1, rtype: 3, block_list: [] }) }); return { ok: true, path: target }; }
+  async listDirectory(remotePath, { start = 0, limit = 100 } = {}) {
+    const accessToken = await this.accessToken();
+    const target = safeRemotePath(remotePath);
+    const safeStart = Math.max(0, Number(start) || 0);
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+    const url = new URL(`${this.endpoints.xpan}/file`);
+    url.search = new URLSearchParams({
+      method: "list",
+      access_token: accessToken,
+      dir: target,
+      start: String(safeStart),
+      limit: String(safeLimit),
+      order: "time",
+      desc: "1",
+      web: "0",
+      folder: "0",
+    });
+    let data;
+    try {
+      data = await this.apiJson(url, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    } catch (error) {
+      if (error instanceof BaiduError) throw error;
+      throw new BaiduError("BAIDU_LIST_NETWORK_FAILED", "百度文件列表网络请求失败");
+    }
+    const list = Array.isArray(data.list) ? data.list : [];
+    return {
+      list,
+      has_more: Boolean(Number(data.has_more || 0)),
+      next_start: safeStart + list.length,
+    };
+  }
   async uploadFile(localPath, remotePath) { const accessToken = await this.accessToken(); const target = safeRemotePath(remotePath); const size = fs.statSync(localPath).size; const blocks = fileBlocks(localPath); const preUrl = new URL(`${this.endpoints.xpan}/file`); preUrl.search = new URLSearchParams({ method: "precreate", access_token: accessToken }); const pre = await this.uploadRequest(() => this.apiJson(preUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size, isdir: 0, autoinit: 1, rtype: 3, block_list: blocks }) })); const uploadId = pre.uploadid; if (!uploadId) throw new BaiduError("BAIDU_UPLOAD_PRECREATE_FAILED", "百度网盘上传预创建失败"); const fd = fs.openSync(localPath, "r"); const buffer = Buffer.allocUnsafe(BLOCK_SIZE); try { for (let index = 0; index < blocks.length; index += 1) { const length = fs.readSync(fd, buffer, 0, buffer.length, index * BLOCK_SIZE); const form = new FormData(); form.append("file", new Blob([buffer.subarray(0, length)]), path.posix.basename(target)); const uploadUrl = new URL(this.endpoints.upload); uploadUrl.search = new URLSearchParams({ method: "upload", access_token: accessToken, type: "tmpfile", path: target, uploadid: uploadId, partseq: String(index) }); await this.uploadRequest(() => this.apiJson(uploadUrl, { method: "POST", body: form })); } } finally { fs.closeSync(fd); } const createUrl = new URL(`${this.endpoints.xpan}/file`); createUrl.search = new URLSearchParams({ method: "create", access_token: accessToken }); const result = await this.uploadRequest(() => this.apiJson(createUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: formBody({ path: target, size, isdir: 0, rtype: 3, uploadid: uploadId, block_list: blocks }) })); return { file_id: remoteFileId(result.fs_id), path: target }; }
   async metadataByFileId(fileId, { errorCode = "BAIDU_FILE_METADATA_FAILED", allowMissing = false } = {}) {
     const id = remoteFileId(fileId, "BAIDU_REMOTE_FILE_ID_MISSING");
@@ -169,6 +200,44 @@ class BaiduBackupManager {
   beginAuthorization() { if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用和回调地址配置"); const state = crypto.randomBytes(32).toString("hex"); this.states.set(state, Date.now() + 10 * 60_000); return { authorization_url: this.client.authorizationUrl(state), state_expires_in: 600 }; }
   async finishAuthorization(code, state) { const expiry = this.states.get(String(state)); this.states.delete(String(state)); if (!expiry || expiry < Date.now()) throw new BaiduError("BAIDU_OAUTH_STATE_INVALID", "百度授权 state 无效或已过期"); await this.client.exchangeCode(String(code)); return { ok: true, status: this.status() }; }
   disconnect() { this.tokenStore.clear(); return { ok: true, status: this.status() }; }
+  async listManagedExcel(remoteDirectory, { cursor = "", limit = 100 } = {}) {
+    const configuration = this.configurationStatus();
+    if (!configuration.oauth_configured) throw new BaiduError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置");
+    if (!configuration.authorized) {
+      throw new BaiduError(
+        configuration.authorization_status === "expired" ? "BAIDU_AUTHORIZATION_EXPIRED" : "BAIDU_AUTHORIZATION_REQUIRED",
+        configuration.authorization_status === "expired" ? "百度网盘授权已过期" : "百度网盘尚未授权",
+      );
+    }
+    const root = safeRemotePath(remoteDirectory);
+    if (cursor && !/^\d+$/.test(String(cursor))) throw new BaiduError("BAIDU_LIST_CURSOR_INVALID", "百度文件分页游标无效");
+    const page = await this.client.listDirectory(root, { start: Number(cursor || 0), limit });
+    const sidecars = new Set(page.list
+      .map((item) => String(item.path || ""))
+      .filter((remotePath) => remotePath.startsWith(`${root}/`) && /\.xlsx\.sha256$/i.test(remotePath)));
+    const items = page.list.flatMap((item) => {
+      const remotePath = String(item.path || "");
+      if (!remotePath.startsWith(`${root}/`) || Number(item.isdir || 0) !== 0 || !/\.xlsx$/i.test(remotePath)) return [];
+      const relativePath = remotePath.slice(root.length + 1);
+      if (!relativePath || relativePath.split("/").includes("..")) return [];
+      return [{
+        filename: path.posix.basename(remotePath),
+        relative_path: relativePath,
+        size: Math.max(0, Number(item.size || 0)),
+        modified_at: Number(item.server_mtime || item.local_mtime || 0)
+          ? new Date(Number(item.server_mtime || item.local_mtime) * 1000).toISOString()
+          : "",
+        checksum_status: sidecars.has(`${remotePath}.sha256`) ? "present" : "missing",
+        fs_id: /^\d+$/.test(String(item.fs_id || "")) ? String(item.fs_id) : "",
+      }];
+    });
+    return {
+      root_status: "available",
+      items,
+      has_more: page.has_more,
+      next_cursor: page.has_more ? String(page.next_start) : "",
+    };
+  }
   assertManagedBackup(localPath) { const resolved = path.resolve(localPath); if (!inside(this.managedRoot, resolved) || !/\.xlsx$/i.test(resolved) || !fs.existsSync(resolved)) throw new BaiduError("BAIDU_LOCAL_BACKUP_INVALID", "只能上传受管目录中的 Excel 备份"); if (fs.lstatSync(resolved).isSymbolicLink() || !inside(this.managedRoot, fs.realpathSync(resolved))) throw new BaiduError("BAIDU_LOCAL_BACKUP_INVALID", "受管 Excel 备份路径无效"); verifyFullData(resolved); const sidecar = `${resolved}.sha256`; if (!fs.existsSync(sidecar)) throw new BaiduError("BAIDU_CHECKSUM_MISSING", "本地 SHA-256 校验文件缺失"); const expected = parseChecksum(fs.readFileSync(sidecar, "utf8"), path.basename(resolved)); const actual = sha256File(resolved); if (actual !== expected) throw new BaiduError("BAIDU_LOCAL_SHA256_MISMATCH", "本地 Excel 与 SHA-256 校验文件不匹配"); return { localPath: resolved, sidecarPath: sidecar, digest: actual }; }
   async testConnection(remoteDirectory = "/apps/liming-course-system") {
     if (!this.configured()) throw new BaiduError("BAIDU_CONFIGURATION_INCOMPLETE", "请先完成百度应用和回调地址配置");

@@ -477,7 +477,7 @@ const DATA_CENTER_DEFAULT_BAIDU = Object.freeze({
   last_test_result: "not_tested",
   test_passed: false,
 });
-let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduSchedule: { due: false, reason: "disabled" }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null };
+let backupState = { settings: { ...DATA_CENTER_DEFAULT_SETTINGS }, draft: { ...DATA_CENTER_DEFAULT_SETTINGS }, draftDirty: false, exportIncludeOperationLogs: true, baidu: { ...DATA_CENTER_DEFAULT_BAIDU }, baiduSchedule: { due: false, reason: "disabled" }, baiduConfigEditing: false, baiduTestDetails: null, baiduTestDetailsOpen: false, preflight: null, preflightDetails: null, preflightDetailsOpen: false, preflightDetailsLoading: false, preflightDetailsError: "", records: [], busy: false, error: "", loadError: "", importFile: null, importPreview: null, importMode: "initialize", showBaiduGuide: false, deleteDialog: null, fileBrowser: { open: false, source: "local", loading: false, error: "", items: [], query: "", sort: "modified_desc", cursor: "", hasMore: false, generation: 0 } };
 let selectedBackupRecordIds = new Set();
 let backupBatchDeleteDialog = null;
 let backupDeleteEventsBound = false;
@@ -859,6 +859,9 @@ function setActiveView(nextView) {
   }
   const previousView = view;
   view = nextView || "";
+  if (previousView === "audit" && view !== "audit" && backupState.fileBrowser?.open) {
+    backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
+  }
   if (view === "teacherDetail" && previousView !== "teacherDetail") {
     selectedTeacherDetail = "";
     selectedTeacherSalaryLessonIds = new Set();
@@ -3541,13 +3544,48 @@ function adaptiveHorizontalBox(element) {
 function adaptiveStudentSetWidth(container) {
   const badges = [...container.querySelectorAll(":scope > .student-badge")];
   if (!badges.length) return adaptiveTableTextWidth(container.textContent.trim() || "—", container);
-  const style = getComputedStyle(container);
-  const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
-  return badges.reduce((sum, badge) => sum + badge.getBoundingClientRect().width, 0)
-    + gap * Math.max(0, badges.length - 1);
+  return Math.max(...badges.map((badge) => badge.getBoundingClientRect().width));
 }
 
-function adaptiveCellContentWidth(cell) {
+function adaptiveColumnDefinition(column, header) {
+  const type = column.dataset.columnType || "short";
+  const presets = {
+    select: { minWidth: 44, maxWidth: 44, grow: 0, wrap: false, alignment: "center" },
+    short: { minWidth: 76, maxWidth: 180, grow: 0, wrap: false, alignment: "center" },
+    name: { minWidth: 96, maxWidth: 190, grow: 0, wrap: false, alignment: "center" },
+    phone: { minWidth: 132, maxWidth: 210, grow: 0, wrap: false, alignment: "center" },
+    status: { minWidth: 92, maxWidth: 150, grow: 0, wrap: false, alignment: "center" },
+    date: { minWidth: 132, maxWidth: 156, grow: 0, wrap: false, alignment: "center" },
+    money: { minWidth: 128, maxWidth: 168, grow: 0, wrap: false, alignment: "right" },
+    action: { minWidth: 92, maxWidth: 250, grow: 0, wrap: false, alignment: "center" },
+    account: { minWidth: 132, maxWidth: 220, grow: 0, wrap: false, alignment: "center" },
+    long: { minWidth: 160, maxWidth: 360, grow: 1, wrap: true, alignment: "left" },
+    students: { minWidth: 220, maxWidth: 480, grow: 2, wrap: true, alignment: "left" },
+    permissions: { minWidth: 220, maxWidth: 420, grow: 1, wrap: true, alignment: "left" },
+  };
+  const preset = presets[type] || presets.short;
+  const numeric = (key, fallback) => {
+    const value = Number(column.dataset[key]);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  return {
+    type,
+    minWidth: numeric("minWidth", preset.minWidth),
+    maxWidth: numeric("maxWidth", preset.maxWidth),
+    grow: numeric("grow", preset.grow),
+    wrap: column.dataset.wrap === "" ? true : column.dataset.wrap == null ? preset.wrap : column.dataset.wrap === "true",
+    alignment: column.dataset.alignment || preset.alignment,
+    header,
+  };
+}
+
+function adaptiveWrappedTextWidth(value, element) {
+  const tokens = String(value || "").split(/[\s,，、;；/|]+/).filter(Boolean);
+  if (!tokens.length) return adaptiveTableTextWidth(value, element);
+  return Math.max(...tokens.map((token) => adaptiveTableTextWidth(token, element)));
+}
+
+function adaptiveCellContentWidth(cell, definition) {
   const cellBox = adaptiveHorizontalBox(cell);
   const studentSet = cell.querySelector(".student-set-badges");
   if (studentSet) return adaptiveStudentSetWidth(studentSet) + cellBox;
@@ -3563,15 +3601,29 @@ function adaptiveCellContentWidth(cell) {
   if (input) {
     const displayValue = input.value || input.placeholder || "";
     const affordance = input.type === "date" ? 28 : 0;
-    return Math.max(48, adaptiveTableTextWidth(displayValue, input) + adaptiveHorizontalBox(input) + affordance) + cellBox;
+    const measured = definition.wrap
+      ? adaptiveWrappedTextWidth(displayValue, input)
+      : adaptiveTableTextWidth(displayValue, input);
+    return Math.max(48, measured + adaptiveHorizontalBox(input) + affordance) + cellBox;
   }
 
+  if (definition.wrap) return adaptiveWrappedTextWidth(cell.textContent.trim(), cell) + cellBox;
   const inlineChildren = [...cell.children].filter((element) => !element.hidden);
   if (inlineChildren.length) {
     const widths = inlineChildren.map((element) => element.getBoundingClientRect().width);
     return widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 5 + cellBox;
   }
   return adaptiveTableTextWidth(cell.textContent.trim(), cell) + cellBox;
+}
+
+function resizeAdaptiveTextarea(textarea) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.max(38, textarea.scrollHeight)}px`;
+  if (textarea.dataset.adaptiveTextareaBound !== "1") {
+    textarea.dataset.adaptiveTextareaBound = "1";
+    textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea));
+  }
 }
 
 function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
@@ -3586,34 +3638,54 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   table.style.minWidth = "0";
   columns.forEach((column) => { column.style.width = "auto"; });
 
+  const definitions = columns.map((column, index) => adaptiveColumnDefinition(column, headerCells[index]));
   const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
   const widths = headerCells.map((header, index) => {
-    if (header.classList.contains("select-col")) return 44;
+    const definition = definitions[index];
     let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
     for (const row of bodyRows) {
       const cell = row.children[index];
       if (!cell || cell.classList.contains("empty")) continue;
-      width = Math.max(width, adaptiveCellContentWidth(cell));
+      width = Math.max(width, adaptiveCellContentWidth(cell, definition));
     }
-    return Math.ceil(width + 2);
+    return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
   });
 
   const wrapper = table.closest(".table-wrap");
-  const naturalWidth = widths.reduce((sum, width) => sum + width, 0);
-  const availableWidth = wrapper?.clientWidth || naturalWidth;
-  const flexIndex = Number.isInteger(flexibleColumn)
-    ? flexibleColumn
-    : Number.parseInt(table.dataset.adaptiveFlexColumn || "", 10);
-  if (naturalWidth < availableWidth && Number.isInteger(flexIndex) && widths[flexIndex] != null) {
-    widths[flexIndex] += availableWidth - naturalWidth;
+  const availableWidth = wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0);
+  let remaining = Math.max(0, availableWidth - widths.reduce((sum, width) => sum + width, 0));
+  let growIndexes = definitions.map((definition, index) => ({ ...definition, index }))
+    .filter((definition) => definition.grow > 0 && widths[definition.index] < definition.maxWidth);
+  while (remaining > 0.5 && growIndexes.length) {
+    const growTotal = growIndexes.reduce((sum, definition) => sum + definition.grow, 0);
+    let distributed = 0;
+    for (const definition of growIndexes) {
+      const share = remaining * (definition.grow / growTotal);
+      const addition = Math.min(share, definition.maxWidth - widths[definition.index]);
+      widths[definition.index] += addition;
+      distributed += addition;
+    }
+    if (distributed < 0.5) break;
+    remaining -= distributed;
+    growIndexes = growIndexes.filter((definition) => widths[definition.index] < definition.maxWidth - 0.5);
   }
 
-  columns.forEach((column, index) => { column.style.width = `${Math.ceil(widths[index])}px`; });
+  columns.forEach((column, index) => {
+    const definition = definitions[index];
+    column.style.width = `${Math.ceil(widths[index])}px`;
+    headerCells[index].classList.toggle("adaptive-wrap", definition.wrap);
+    bodyRows.map((row) => row.children[index]).filter(Boolean).forEach((cell) => {
+      cell.classList.toggle("adaptive-wrap", definition.wrap);
+      cell.dataset.adaptiveAlignment = definition.alignment;
+    });
+  });
   const tableWidth = widths.reduce((sum, width) => sum + width, 0);
   table.style.tableLayout = "fixed";
   table.style.width = `${Math.ceil(tableWidth)}px`;
-  table.style.minWidth = "100%";
+  table.style.minWidth = "0";
   table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
+  table.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
+  table.querySelectorAll("textarea.adaptive-textarea").forEach(resizeAdaptiveTextarea);
   return widths;
 }
 
@@ -9074,9 +9146,9 @@ function renderRecharges() {
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
           <colgroup>
-            <col class="recharge-col-select"><col class="recharge-col-student"><col class="recharge-col-grade">
-            <col class="recharge-col-money"><col class="recharge-col-money"><col class="recharge-col-date">
-            <col class="recharge-col-channel"><col class="recharge-col-notes">
+            <col class="recharge-col-select" data-column-type="select"><col class="recharge-col-student" data-column-type="name"><col class="recharge-col-grade" data-column-type="short" data-max-width="120">
+            <col class="recharge-col-money" data-column-type="money"><col class="recharge-col-money" data-column-type="money"><col class="recharge-col-date" data-column-type="date">
+            <col class="recharge-col-channel" data-column-type="long" data-min-width="128" data-max-width="260" data-grow="0.5" data-alignment="center"><col class="recharge-col-notes" data-column-type="long">
           </colgroup>
           <thead>
             <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
@@ -9091,7 +9163,7 @@ function renderRecharges() {
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_gift, { className: "recharge-field", attrs: `data-field="cur_gift"` })}</td>
                 <td class="adaptive-center"><input class="cell-input recharge-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(row.recharge_date)}"></td>
                 ${rechargeChannelCellMarkup(row)}
-                <td class="recharge-notes-cell adaptive-left"><input class="cell-input recharge-field wide" data-field="notes" value="${escapeHtml(row.recharge_notes)}"></td>
+                <td class="recharge-notes-cell adaptive-left"><textarea class="cell-input adaptive-textarea recharge-field wide" data-field="notes" rows="1" wrap="soft">${escapeHtml(row.recharge_notes)}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
           </tbody>
@@ -9129,7 +9201,7 @@ function renderOpeningBalances() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="recharge-table opening-balance-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
-          <colgroup><col class="opening-balance-col-select"><col class="opening-balance-col-student"><col class="opening-balance-col-grade"><col class="opening-balance-col-money"><col class="opening-balance-col-money"><col class="opening-balance-col-notes"></colgroup>
+          <colgroup><col class="opening-balance-col-select" data-column-type="select"><col class="opening-balance-col-student" data-column-type="name"><col class="opening-balance-col-grade" data-column-type="short" data-max-width="120"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-notes" data-column-type="long"></colgroup>
           <thead>
             <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
           </thead>
@@ -9141,7 +9213,7 @@ function renderOpeningBalances() {
                 <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
-                <td class="opening-balance-notes-cell adaptive-left"><input class="cell-input wide opening-balance-field opening-balance-notes-input" data-field="notes" value="${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}"></td>
+                <td class="opening-balance-notes-cell adaptive-left"><textarea class="cell-input adaptive-textarea wide opening-balance-field opening-balance-notes-input" data-field="notes" rows="1" wrap="soft">${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
           </tbody>
@@ -10222,6 +10294,101 @@ function baiduSimpleSettingsCardMarkup() {
   </div>`;
 }
 
+function managedExcelBrowserVisibleItems() {
+  const browser = backupState.fileBrowser || {};
+  const query = String(browser.query || "").trim().toLowerCase();
+  const items = (browser.items || []).filter((item) => !query
+    || [item.filename, item.relative_path, item.backup_record?.created_by_label]
+      .some((value) => String(value || "").toLowerCase().includes(query)));
+  const sizeSort = String(browser.sort || "").startsWith("size_");
+  const direction = String(browser.sort || "").endsWith("_asc") ? 1 : -1;
+  return items.sort((left, right) => direction * (sizeSort
+    ? Number(left.size || 0) - Number(right.size || 0)
+    : String(left.modified_at || "").localeCompare(String(right.modified_at || "")))
+    || String(left.filename || "").localeCompare(String(right.filename || ""), "zh-CN"));
+}
+
+function managedExcelBrowserMarkup() {
+  const browser = backupState.fileBrowser;
+  if (!browser?.open) return "";
+  const local = browser.source === "local";
+  const title = local ? "本地托管 Excel 文件" : "百度网盘托管 Excel 文件";
+  const items = managedExcelBrowserVisibleItems();
+  const body = browser.error
+    ? `<div class="managed-file-browser-state danger"><span>${escapeHtml(browser.error)}</span><button class="btn managed-file-browser-retry" type="button">重试</button></div>`
+    : browser.loading && !(browser.items || []).length
+      ? `<div class="managed-file-browser-state">正在读取文件列表…</div>`
+      : `<div class="table-wrap managed-file-browser-table-wrap"><table class="uniform-table managed-file-browser-table">
+          <thead><tr><th>文件名</th><th>相对路径</th><th>大小</th><th>修改时间</th>${local ? "" : "<th>fs_id</th>"}<th>校验文件</th><th>备份记录</th><th>创建账号</th><th>文件状态</th>${local ? "<th>操作</th>" : ""}</tr></thead>
+          <tbody>${items.map((item) => `<tr>
+            <td class="managed-file-name">${escapeHtml(item.filename)}</td>
+            <td class="managed-file-relative-path">${escapeHtml(item.relative_path)}</td>
+            <td class="right">${escapeHtml(formatFileSize(item.size))}</td>
+            <td>${escapeHtml(item.modified_at || "—")}</td>
+            ${local ? "" : `<td class="managed-file-id">${escapeHtml(item.fs_id || "—")}</td>`}
+            <td><span class="status-badge ${item.checksum_status === "present" ? "success" : "warning"}">${item.checksum_status === "present" ? "已找到" : "缺失"}</span></td>
+            <td>${item.backup_record ? `#${Number(item.backup_record.id)} · ${escapeHtml(item.backup_record.status || "—")}` : '<span class="status-badge warning">孤立文件</span>'}</td>
+            <td>${escapeHtml(item.backup_record?.created_by_label || "—")}</td>
+            <td>${local ? (item.local_file_status === "recorded" ? "已关联" : "孤立文件") : (item.remote_file_status === "recorded" ? "已关联" : "远端孤立文件")}</td>
+            ${local ? `<td><a class="btn managed-file-download" href="/api/data-center/files/local-excel/download?path=${encodeURIComponent(item.relative_path)}" download>下载</a></td>` : ""}
+          </tr>`).join("") || `<tr><td class="empty" colspan="${local ? 9 : 9}">没有符合条件的 Excel 文件</td></tr>`}</tbody>
+        </table></div>`;
+  return `<div class="modal-backdrop managed-file-browser-modal">
+    <div class="modal-panel managed-file-browser-panel" role="dialog" aria-modal="true" aria-labelledby="managed-file-browser-title">
+      <div class="modal-head"><div><div class="modal-title" id="managed-file-browser-title">${title}</div><div class="modal-subtitle">${local ? "仅浏览服务器受管备份目录中的 .xlsx 文件" : "当前仅展示百度应用受管目录中的Excel文件"}；此窗口不提供删除操作，也不会显示绝对路径、Token、Secret 或下载直链。</div></div><button class="btn managed-file-browser-close" type="button">关闭</button></div>
+      <div class="managed-file-browser-toolbar">
+        <label class="filter-field"><span>搜索</span><input class="control managed-file-browser-query" value="${escapeHtml(browser.query || "")}" placeholder="文件名、相对路径或创建账号"></label>
+        <label class="filter-field"><span>排序</span><select class="control managed-file-browser-sort"><option value="modified_desc" ${browser.sort === "modified_desc" ? "selected" : ""}>修改时间从新到旧</option><option value="modified_asc" ${browser.sort === "modified_asc" ? "selected" : ""}>修改时间从旧到新</option><option value="size_desc" ${browser.sort === "size_desc" ? "selected" : ""}>文件大小从大到小</option><option value="size_asc" ${browser.sort === "size_asc" ? "selected" : ""}>文件大小从小到大</option></select></label>
+        <button class="btn managed-file-browser-refresh" type="button" ${browser.loading ? "disabled" : ""}>刷新</button>
+      </div>
+      ${body}
+      ${!local && browser.hasMore && !browser.error ? `<div class="modal-actions"><button class="btn managed-file-browser-more" type="button" ${browser.loading ? "disabled" : ""}>${browser.loading ? "正在加载…" : "加载更多"}</button></div>` : ""}
+    </div>
+  </div>`;
+}
+
+async function loadManagedExcelBrowser(source, { append = false } = {}) {
+  const previous = backupState.fileBrowser || {};
+  const generation = Number(previous.generation || 0) + 1;
+  const cursor = append ? previous.cursor || "" : "";
+  backupState.fileBrowser = {
+    ...previous,
+    open: true,
+    source,
+    loading: true,
+    error: "",
+    items: append ? previous.items || [] : [],
+    cursor,
+    hasMore: append ? previous.hasMore : false,
+    generation,
+  };
+  render();
+  try {
+    const endpoint = source === "local"
+      ? "/api/data-center/files/local-excel"
+      : `/api/data-center/files/baidu-excel?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const result = await request(endpoint);
+    if (backupState.fileBrowser?.generation !== generation
+      || backupState.fileBrowser?.source !== source
+      || !backupState.fileBrowser?.open
+      || view !== "audit") return;
+    const combined = append ? [...(previous.items || []), ...(result.items || [])] : result.items || [];
+    const byPath = new Map(combined.map((item) => [item.relative_path, item]));
+    backupState.fileBrowser = {
+      ...backupState.fileBrowser,
+      loading: false,
+      error: "",
+      items: [...byPath.values()],
+      cursor: result.next_cursor || "",
+      hasMore: Boolean(result.has_more),
+    };
+  } catch (error) {
+    if (backupState.fileBrowser?.generation !== generation) return;
+    backupState.fileBrowser = { ...backupState.fileBrowser, loading: false, error: error.message || "文件列表读取失败" };
+  }
+  render();
+}
+
 function renderAudit() {
   const preflightBlocked = Boolean(backupState.preflight && !backupState.preflight.ok);
   const draft = backupState.draft || backupState.settings || DATA_CENTER_DEFAULT_SETTINGS;
@@ -10274,7 +10441,7 @@ function renderAudit() {
       </div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
-      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><button class="btn backup-refresh" type="button">刷新</button></div>
+      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><div class="audit-toolbar"><button class="btn managed-local-excel-open" type="button">查看本地Excel文件</button><button class="btn managed-baidu-excel-open" type="button">查看百度Excel文件</button><button class="btn backup-refresh" type="button">刷新</button></div></div>
       ${backupBatchDeleteToolbarMarkup()}
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
         <thead><tr><th class="select-col backup-select-col"><input class="backup-record-select-all" type="checkbox" ${allDeletableSelected ? "checked" : ""} ${deletableBackupRows.length ? "" : "disabled"} aria-label="全选当前可删除备份记录"></th><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
@@ -10285,7 +10452,8 @@ function renderAudit() {
     ${baiduTestDetailsMarkup()}
     ${preflightDetailsMarkup()}
     ${backupDeleteDialogMarkup()}
-    ${backupBatchDeleteDialogMarkup()}`;
+    ${backupBatchDeleteDialogMarkup()}
+    ${managedExcelBrowserMarkup()}`;
 }
 
 function roleSelectOptions(value) {
@@ -10366,15 +10534,15 @@ function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()
   return `
     <div class="band user-admin-panel">
       <div class="table-wrap">
-        <table class="user-table uniform-table nowrap-table">
+        <table class="user-table uniform-table nowrap-table" data-adaptive-table="true">
           <colgroup>
-            <col class="user-col-username">
-            <col class="user-col-display-name">
-            <col class="user-col-role">
-            <col class="user-col-teachers">
-            <col class="user-col-status">
-            <col class="user-col-password">
-            <col class="user-col-delete">
+            <col class="user-col-username" data-column-type="account">
+            <col class="user-col-display-name" data-column-type="name">
+            <col class="user-col-role" data-column-type="status">
+            <col class="user-col-teachers" data-column-type="permissions">
+            <col class="user-col-status" data-column-type="status">
+            <col class="user-col-password" data-column-type="action" data-min-width="210">
+            <col class="user-col-delete" data-column-type="action">
           </colgroup>
           <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
           <tbody class="user-account-table-body">
@@ -10749,7 +10917,8 @@ function renderRoleManagementPanel() {
   return `
     <div class="band user-admin-panel role-admin-panel">
       <div class="table-wrap">
-        <table class="user-table role-table uniform-table nowrap-table">
+        <table class="user-table role-table uniform-table nowrap-table" data-adaptive-table="true">
+          <colgroup><col data-column-type="name"><col data-column-type="status"><col data-column-type="action"><col data-column-type="action"></colgroup>
           <thead><tr><th>角色名称</th><th>是否只读</th><th>编辑</th><th>删除</th></tr></thead>
           <tbody>
             ${roles.map((role) => `
@@ -11222,7 +11391,7 @@ function renderStudentPricing() {
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
-          <colgroup><col><col><col><col><col><col><col><col></colgroup>
+          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long"></colgroup>
           <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -11234,7 +11403,7 @@ function renderStudentPricing() {
                 <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
                 <td class="currency-input-cell student-pricing-value-cell adaptive-right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"` })}</td>
                 <td class="text-cell adaptive-center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
-                <td class="adaptive-left"><input class="cell-input wide student-pricing-field" data-id="${row.id}" data-field="notes" value="${escapeHtml(row.notes)}"></td>
+                <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft">${escapeHtml(row.notes)}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
@@ -11280,7 +11449,7 @@ function renderClassGroups() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="3">
-          <colgroup><col><col><col><col><col></colgroup>
+          <colgroup><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="long"></colgroup>
           <thead><tr><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
             ${visibleRows.map((row) => `
@@ -11699,7 +11868,8 @@ function renderProfileDirectory(kind = profileTab) {
   const statusValues = isTeacher ? ["在职", "离职", "暂停"] : studentStatusOptions;
   renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
-    <table class="profile-table teacher-profile-table uniform-table nowrap-table">
+    <table class="profile-table teacher-profile-table uniform-table nowrap-table" data-adaptive-table="true">
+      <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long"></colgroup>
       <thead><tr><th class="select-col"><input class="teacher-profile-select-all" type="checkbox" ${allVisibleTeachersSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前老师档案"></th><th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${rows.map((row) => `
@@ -11710,7 +11880,7 @@ function renderProfileDirectory(kind = profileTab) {
             <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在职")}">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
           <td><input class="cell-input profile-field" data-date-kind="single" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
           <td><input class="cell-input profile-field" data-date-kind="single" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
-            <td class="profile-notes-col"><input class="cell-input wide profile-field" data-field="notes" value="${escapeHtml(row.notes || "")}"></td>
+            <td class="profile-notes-col"><textarea class="cell-input adaptive-textarea wide profile-field" data-field="notes" rows="1" wrap="soft">${escapeHtml(row.notes || "")}</textarea></td>
           </tr>
         `).join("") || `<tr><td colspan="7" class="empty">暂无老师档案</td></tr>`}
       </tbody>
@@ -12567,7 +12737,7 @@ function renderTeacherSalaryRules() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="8">
-          <colgroup><col><col><col><col><col><col><col><col><col></colgroup>
+          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status"><col data-column-type="status"><col data-column-type="long"></colgroup>
           <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
@@ -12580,7 +12750,7 @@ function renderTeacherSalaryRules() {
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
                 <td class="text-cell adaptive-center"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
                 <td class="text-cell adaptive-center">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
-                <td class="adaptive-left"><input class="cell-input wide teacher-salary-rule-field" data-field="notes" value="${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}"></td>
+                <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide teacher-salary-rule-field" data-field="notes" rows="1" wrap="soft">${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
@@ -12895,7 +13065,7 @@ function courseNoticeIdentityRows(item = {}, mode = "parent", { includeRecipient
     const teacherRow = { key: "teacher", badges: teacherNoticeObjectNames(item).map((label) => ({ type: "teacher", label })) };
     return includeRecipientSummary
       ? [teacherRow, { key: "students", badges: studentBadges }, { key: "grade-subject", badges: gradeSubjectBadges }]
-      : [teacherRow];
+      : [];
   }
   if (!includeRecipientSummary) return [];
   if (isPersonalCourseNoticeObject(item)) {
@@ -14358,7 +14528,7 @@ function bindInlineStatusPicker(select, { save, onSaved, successMessage = "状�
       select.dataset.originalValue = savedValue;
       syncInlineStatusPicker(select, savedValue);
       if (typeof onSaved === "function") await onSaved(result);
-      showToast(successMessage);
+      showToast(typeof successMessage === "function" ? successMessage(result) : successMessage);
     } catch (error) {
       syncInlineStatusPicker(select, previousValue);
       showToast(error.message || "状态更新失败，已恢复原值", "error");
@@ -16152,16 +16322,20 @@ function wireEvents() {
       save: (status) => request(`/api/${row.dataset.kind}/${row.dataset.id}`, { method: "PATCH", body: { status } }),
       onSaved: (result) => {
         patchProfileState(row.dataset.kind, result);
-        if (row.dataset.kind === "students") {
-          const scrollTop = document.querySelector(".main")?.scrollTop || window.scrollY || 0;
-          rerenderContent(() => renderProfileDirectory("students"));
-          requestAnimationFrame(() => {
-            document.querySelector(".main")?.scrollTo?.({ top: scrollTop });
-            window.scrollTo({ top: scrollTop });
-          });
-        }
+        const scrollTop = document.querySelector(".main")?.scrollTop || window.scrollY || 0;
+        rerenderContent(() => renderProfileDirectory(row.dataset.kind));
+        requestAnimationFrame(() => {
+          document.querySelector(".main")?.scrollTo?.({ top: scrollTop });
+          window.scrollTo({ top: scrollTop });
+        });
       },
-      successMessage: "档案状态已更新",
+      successMessage: (result) => {
+        const resolved = result?.exit_date_resolution;
+        if (!resolved) return "档案状态已更新";
+        return resolved.found
+          ? `档案状态已更新，离开日期已按最后一节课程自动填写为 ${resolved.date}`
+          : "档案状态已更新；未找到课程记录，未自动填写离开日期";
+      },
     });
   });
 
@@ -16650,6 +16824,36 @@ function wireEvents() {
     render();
   }));
 
+  document.querySelectorAll(".managed-local-excel-open").forEach((button) => button.addEventListener("click", () => {
+    loadManagedExcelBrowser("local");
+  }));
+  document.querySelectorAll(".managed-baidu-excel-open").forEach((button) => button.addEventListener("click", () => {
+    loadManagedExcelBrowser("baidu");
+  }));
+  document.querySelectorAll(".managed-file-browser-close").forEach((button) => button.addEventListener("click", () => {
+    backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
+    render();
+  }));
+  document.querySelectorAll(".managed-file-browser-modal").forEach((modal) => modal.addEventListener("click", (event) => {
+    if (event.target !== modal) return;
+    backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
+    render();
+  }));
+  document.querySelectorAll(".managed-file-browser-refresh, .managed-file-browser-retry").forEach((button) => button.addEventListener("click", () => {
+    loadManagedExcelBrowser(backupState.fileBrowser.source);
+  }));
+  document.querySelectorAll(".managed-file-browser-more").forEach((button) => button.addEventListener("click", () => {
+    loadManagedExcelBrowser("baidu", { append: true });
+  }));
+  document.querySelectorAll(".managed-file-browser-query").forEach((input) => input.addEventListener("change", () => {
+    backupState.fileBrowser = { ...backupState.fileBrowser, query: input.value };
+    render();
+  }));
+  document.querySelectorAll(".managed-file-browser-sort").forEach((select) => select.addEventListener("change", () => {
+    backupState.fileBrowser = { ...backupState.fileBrowser, sort: select.value };
+    render();
+  }));
+
   document.querySelectorAll(".data-center-reload").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true;
     await refreshBackupData({ tolerateFailure: true });
@@ -16834,6 +17038,12 @@ function wireEvents() {
     backupDeleteEventsBound = true;
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (backupState.fileBrowser?.open) {
+        event.preventDefault();
+        backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
+        render();
+        return;
+      }
       if (backupBatchDeleteDialog && !backupBatchDeleteDialog.busy) {
         event.preventDefault();
         backupBatchDeleteDialog = null;

@@ -8,6 +8,11 @@ const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
+const {
+  ManagedFileBrowserError,
+  listManagedLocalExcel,
+  resolveManagedLocalExcel,
+} = require("./backup/file_browser");
 const { loadBackupSettings: loadFullBackupSettings, saveBackupSettings: saveFullBackupSettings, remoteDueState, startBackupScheduler } = require("./backup/scheduler");
 const { BaiduBackupManager, safeRemotePath } = require("./backup/baidu_provider");
 const { DataPreflightError, findStudentGradeStageConflicts, normalizeBusinessMonth, runDataPreflight, validMonth } = require("./backup/data_preflight");
@@ -24,13 +29,19 @@ const {
   teacherSalaryRuleActivation,
   teacherSalaryRuleDateState,
 } = require("./domain/teacher_salary_rule");
+const {
+  STUDENT_EXIT_STATUSES,
+  backfillBlankExitDates,
+  resolveStudentExitDate,
+  resolveTeacherExitDate,
+} = require("./domain/exit_dates");
 
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260727-remove-screenshot-identity-summary";
+const APP_VERSION = process.env.APP_VERSION || "20260728-adaptive-columns-auto-exit-backup-files";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1028,6 +1039,8 @@ function initDb() {
   }
   migrateLegacyTeacherTravelFees();
   migrateLegacyStudentStatuses();
+  const exitDateBackfill = backfillBlankExitDates(db);
+  console.info(`[exit date backfill] ${JSON.stringify(exitDateBackfill)}`);
   for (const row of PRICING) {
     db.prepare(`
       INSERT OR IGNORE INTO pricing_standards(grade, student_count, unit_price, description)
@@ -3060,10 +3073,13 @@ function deleteTeacherProfile(id) {
   return withTransaction(() => {
     const disabledAccounts = disableTeacherAccountsByName(row.name);
     if (teacherHasHistory(row.name)) {
-      db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
+      const exitDateResolution = resolveTeacherExitDate(db, row.name);
+      db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?")
+        .run(exitDateResolution.found ? exitDateResolution.date : "", Number(id));
       return {
         deleted: false,
         soft_deleted: true,
+        exit_date_resolution: exitDateResolution,
         row: get("SELECT * FROM teachers WHERE id = ?", [Number(id)]),
         disabled_accounts_before: disabledAccounts.before,
         disabled_accounts: disabledAccounts.after,
@@ -3088,8 +3104,10 @@ function deleteStudentProfile(id) {
   const row = get("SELECT * FROM students WHERE id = ?", [Number(id)]);
   if (!row) return null;
   if (studentHasHistory(row.name)) {
-    db.prepare("UPDATE students SET status = '已流出', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
-    return { deleted: false, soft_deleted: true, row: get("SELECT * FROM students WHERE id = ?", [Number(id)]) };
+    const exitDateResolution = resolveStudentExitDate(db, row.name);
+    db.prepare("UPDATE students SET status = '已流出', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?")
+      .run(exitDateResolution.found ? exitDateResolution.date : "", Number(id));
+    return { deleted: false, soft_deleted: true, exit_date_resolution: exitDateResolution, row: get("SELECT * FROM students WHERE id = ?", [Number(id)]) };
   }
   db.prepare("DELETE FROM students WHERE id = ?").run(Number(id));
   return { deleted: true, soft_deleted: false };
@@ -8608,10 +8626,13 @@ function deleteTeacherProfileCore(id) {
   if (!row) return null;
   const disabledAccounts = disableTeacherAccountsByName(row.name);
   if (teacherHasHistory(row.name)) {
-    db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?").run(todayKey(), Number(id));
+    const exitDateResolution = resolveTeacherExitDate(db, row.name);
+    db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?")
+      .run(exitDateResolution.found ? exitDateResolution.date : "", Number(id));
     return {
       deleted: false,
       soft_deleted: true,
+      exit_date_resolution: exitDateResolution,
       row: get("SELECT * FROM teachers WHERE id = ?", [Number(id)]),
       disabled_accounts_before: disabledAccounts.before,
       disabled_accounts: disabledAccounts.after,
@@ -13113,6 +13134,70 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/data-center/files/local-excel") {
+    try {
+      const service = backupService();
+      const result = await listManagedLocalExcel({ dataDir, records: service.listForFileBrowser() });
+      return sendJson(res, result);
+    } catch (error) {
+      return sendJson(res, {
+        error: error.message || "本地 Excel 文件列表读取失败",
+        code: String(error.code || "MANAGED_FILE_LIST_FAILED").slice(0, 100),
+      }, error instanceof ManagedFileBrowserError ? 400 : 500);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/files/local-excel/download") {
+    try {
+      const file = await resolveManagedLocalExcel(dataDir, url.searchParams.get("path") || "");
+      writeOperationLog(user, {
+        operation_type: "下载本地托管Excel",
+        operation_content: `下载 ${file.filename}`,
+        target_type: "managed_excel_file",
+        target_id: file.relative_path,
+        details: { relative_path: file.relative_path },
+      }, req);
+      return sendFileDownload(res, file.absolute_path, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", file.filename);
+    } catch (error) {
+      return sendJson(res, {
+        error: error.message || "本地 Excel 文件下载失败",
+        code: String(error.code || "MANAGED_FILE_DOWNLOAD_FAILED").slice(0, 100),
+      }, error.code === "MANAGED_FILE_NOT_FOUND" ? 404 : 400);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-center/files/baidu-excel") {
+    try {
+      const settings = loadFullBackupSettings(dbPath);
+      const result = await baiduBackupManager().listManagedExcel(settings.remote_directory, {
+        cursor: url.searchParams.get("cursor") || "",
+        limit: Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 100)),
+      });
+      const records = backupService().listForFileBrowser();
+      const root = safeRemotePath(settings.remote_directory);
+      const items = result.items.map((item) => {
+        const remotePath = `${root}/${item.relative_path}`;
+        const record = records.find((candidate) => candidate.remote_path === remotePath) || null;
+        return {
+          ...item,
+          remote_file_status: record ? "recorded" : "orphan",
+          backup_record: record ? {
+            id: Number(record.id),
+            status: String(record.remote_status || record.status || ""),
+            backup_time: String(record.backup_time || ""),
+            created_by_label: String(record.created_by_label || ""),
+          } : null,
+        };
+      });
+      return sendJson(res, { ...result, items });
+    } catch (error) {
+      return sendJson(res, {
+        error: error.message || "百度 Excel 文件列表读取失败",
+        code: String(error.code || "BAIDU_FILE_LIST_FAILED").slice(0, 100),
+      }, ["BAIDU_NOT_CONFIGURED", "BAIDU_AUTHORIZATION_REQUIRED", "BAIDU_AUTHORIZATION_EXPIRED"].includes(error.code) ? 409 : 400);
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/data-center") {
     cleanupPendingDataImports();
     const service = backupService();
@@ -13838,6 +13923,11 @@ async function handleApi(req, res, url) {
     for (const field of ["name", "phone", "notes", "status", "joined_at", "left_at"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) payload[field] = text(body[field]);
     }
+    let exitDateResolution = null;
+    if (payload.status === "离职" && text(current.status) !== "离职") {
+      exitDateResolution = resolveTeacherExitDate(db, payload.name || current.name);
+      payload.left_at = exitDateResolution.found ? exitDateResolution.date : "";
+    }
     const after = auditedPatchTable(req, user, "teachers", "id", Number(teacherIdMatch[1]), ["name", "phone", "notes", "status", "joined_at", "left_at"], payload, "teachers");
     const changed = (field) => Object.prototype.hasOwnProperty.call(payload, field) && text(current[field]) !== text(after[field]);
     const operationType = changed("status")
@@ -13847,8 +13937,8 @@ async function handleApi(req, res, url) {
         : changed("joined_at")
           ? (text(current.joined_at) ? "修改教师入职日期" : "补齐教师入职日期")
           : "修改教师档案";
-    writeOperationLog(user, { operation_type: operationType, operation_content: teacherOperationText(after), target_type: "teachers", target_id: String(teacherIdMatch[1]), details: { before: current, after, changed_fields: Object.keys(payload).filter(changed) } }, req);
-    return sendJson(res, after);
+    writeOperationLog(user, { operation_type: operationType, operation_content: teacherOperationText(after), target_type: "teachers", target_id: String(teacherIdMatch[1]), details: { before: current, after, changed_fields: Object.keys(payload).filter(changed), exit_date_resolution: exitDateResolution } }, req);
+    return sendJson(res, { ...after, ...(exitDateResolution ? { exit_date_resolution: exitDateResolution } : {}) });
   }
   if (teacherIdMatch && req.method === "DELETE") {
     const before = get("SELECT * FROM teachers WHERE id = ?", [Number(teacherIdMatch[1])]);
@@ -13899,6 +13989,11 @@ async function handleApi(req, res, url) {
       payload.status = normalizeStudentStatus(payload.status);
       if (!STUDENT_STATUS_VALUES.includes(payload.status)) return sendError(res, 400, "学生状态仅支持在读、暂停、已毕业、已流出");
     }
+    let exitDateResolution = null;
+    if (STUDENT_EXIT_STATUSES.has(payload.status) && text(current.status) !== payload.status) {
+      exitDateResolution = resolveStudentExitDate(db, payload.name || current.name);
+      payload.left_at = exitDateResolution.found ? exitDateResolution.date : "";
+    }
     const row = auditedPatchTable(req, user, "students", "id", Number(studentIdMatch[1]), [
       "name", "grade", "phone", "guardian", "notes", "status", "joined_at", "left_at",
     ], payload, "students");
@@ -13910,8 +14005,8 @@ async function handleApi(req, res, url) {
         : changed("joined_at")
           ? (text(current.joined_at) ? "修改学生入学日期" : "补齐学生入学日期")
           : "修改学生档案";
-    writeOperationLog(user, { operation_type: operationType, operation_content: studentOperationText(row), target_type: "students", target_id: String(studentIdMatch[1]), details: { before: current, after: row, changed_fields: Object.keys(payload).filter(changed) } }, req);
-    return sendJson(res, { ...row, warnings: studentWarnings(row.name, row.grade) });
+    writeOperationLog(user, { operation_type: operationType, operation_content: studentOperationText(row), target_type: "students", target_id: String(studentIdMatch[1]), details: { before: current, after: row, changed_fields: Object.keys(payload).filter(changed), exit_date_resolution: exitDateResolution } }, req);
+    return sendJson(res, { ...row, warnings: studentWarnings(row.name, row.grade), ...(exitDateResolution ? { exit_date_resolution: exitDateResolution } : {}) });
   }
   if (studentIdMatch && req.method === "DELETE") {
     const before = get("SELECT * FROM students WHERE id = ?", [Number(studentIdMatch[1])]);
