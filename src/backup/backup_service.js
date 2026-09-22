@@ -264,29 +264,49 @@ class BackupService {
       return this.dto(this.record(db, id));
     } finally { db.close(); }
   }
+  cleanupLocalFiles(row) {
+    const result = { local_excel: "already_absent", local_checksum: "already_absent" };
+    if (!row.managed_relative_path) return result;
+    if (path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份");
+    const filename = path.resolve(this.dataDir, row.managed_relative_path);
+    if (!inside(this.root, filename)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效");
+    for (const [key, target] of [["local_excel", filename], ["local_checksum", `${filename}.sha256`]]) {
+      let info;
+      try { info = fs.lstatSync(target); } catch (error) { if (error.code === "ENOENT") continue; result[key] = "delete_failed"; continue; }
+      if (info.isSymbolicLink() || !info.isFile() || !inside(this.root, fs.realpathSync(target))) { result[key] = "rejected_symlink"; continue; }
+      try { fs.rmSync(target); result[key] = "deleted"; } catch { result[key] = "delete_failed"; }
+    }
+    return result;
+  }
   applyRetention(policy = {}) {
     const limits = { daily: Math.max(1, Number(policy.daily || 14)), monthly: Math.max(1, Number(policy.monthly || 12)), manual: Math.max(1, Number(policy.manual || 20)) };
-    const db = this.database(); const removed = []; const skipped = [];
+    const lock = this.acquireLock();
+    let db;
+    const removed = []; const skipped = [];
     try {
-      const successful = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')='' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
-      const candidates = [];
-      for (const retentionClass of ["daily", "monthly", "manual"]) {
-        const rows = successful.filter((row) => row.retention_class === retentionClass && !Number(row.pinned || 0));
-        candidates.push(...rows.slice(limits[retentionClass]));
-      }
-      const remainingIds = new Set(successful.map((row) => Number(row.id)));
+      db = this.database();
+      const successful = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND status IN ('success','delete_partial') AND COALESCE(deleted_at,'')='' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
+      const eligible = successful.filter(row => !Number(row.pinned || 0) && row.verified_at && !ACTIVE_BACKUP_JOB_STATUSES.has(row.job_status) && row.remote_status !== "uploading");
+      const candidates = ["daily", "monthly", "manual"].flatMap(kind => eligible.filter(row => (row.retention_class === "remote" ? "manual" : row.retention_class) === kind).slice(limits[kind]));
+      let remaining = successful.filter(row => row.status === "success").length;
       for (const row of candidates) {
-        if (remainingIds.size <= 1) { skipped.push({ id: row.id, reason: "last_valid_backup" }); continue; }
-        if (!row.verified_at) { skipped.push({ id: row.id, reason: "not_verified" }); continue; }
+        if (row.status === "success" && remaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_backup" }); continue; }
         try {
-          const filename = this.managedPath(row); const checksum = `${filename}.sha256`;
-          fs.rmSync(filename); if (fs.existsSync(checksum)) fs.rmSync(checksum);
-          db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='retention_cleanup' WHERE id=?").run(row.id);
-          remainingIds.delete(Number(row.id)); removed.push({ id: row.id, bytes: Number(row.file_size || 0), reason: `${row.retention_class}_limit` });
+          const cleanup = this.cleanupLocalFiles(row);
+          if (!Object.values(cleanup).every(value => ["deleted", "already_absent"].includes(value))) {
+            db.prepare("UPDATE backup_records SET status='delete_partial',message='BACKUP_LOCAL_DELETE_PARTIAL' WHERE id=?").run(row.id);
+            if (row.status === "success") remaining -= 1;
+            skipped.push({ id: row.id, reason: "BACKUP_LOCAL_DELETE_PARTIAL" }); continue;
+          }
+          const hasRemote = (row.remote_path || row.remote_checksum_path) && row.remote_status !== "deleted";
+          if (hasRemote) db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='retention_cleanup' WHERE id=?").run(row.id);
+          else db.prepare("DELETE FROM backup_records WHERE id=?").run(row.id);
+          if (row.status === "success") remaining -= 1;
+          removed.push({ id: row.id, bytes: Number(row.file_size || 0), reason: `${row.retention_class}_limit` });
         } catch (error) { skipped.push({ id: row.id, reason: safeMessage(error) }); }
       }
       return { removed, skipped, policy: limits };
-    } finally { db.close(); }
+    } finally { try { db?.close(); } finally { this.releaseLock(lock); } }
   }
   async retryRemote(id, remoteDirectory) {
     if (!this.remoteUploader) throw new BackupError("BAIDU_NOT_CONFIGURED", "百度网盘尚未配置"); const db = this.database();
@@ -301,25 +321,30 @@ class BackupService {
   async applyRemoteRetention(limit = 20, remoteDeleter = null) {
     const keep = Math.max(1, Math.min(200, Number(limit) || 20));
     if (typeof remoteDeleter !== "function") throw new BackupError("BAIDU_REMOTE_DELETE_UNAVAILABLE", "百度网盘删除能力不可用");
-    const db = this.database(); const removed = []; const skipped = [];
+    const lock = this.acquireLock();
+    let db; const removed = []; const skipped = [];
     try {
-      const allRows = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND remote_status='success' AND COALESCE(remote_path,'')<>'' ORDER BY remote_updated_at DESC,id DESC").all(BACKUP_FORMAT);
+      db = this.database();
+      const allRows = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND remote_status IN ('success','delete_partial') AND COALESCE(remote_path,'')<>'' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
       const rows = allRows.filter((row) => !/\.enc$/i.test(row.remote_path || ""));
       for (const row of allRows.filter((item) => /\.enc$/i.test(item.remote_path || ""))) skipped.push({ id: row.id, reason: "legacy_encrypted" });
       for (const row of rows.filter((item) => Number(item.pinned || 0))) skipped.push({ id: row.id, reason: "pinned" });
-      const candidates = rows.filter((row) => !Number(row.pinned || 0)).reverse();
+      const candidates = rows.filter((row) => !Number(row.pinned || 0) && !ACTIVE_BACKUP_JOB_STATUSES.has(row.job_status) && !["creating", "verifying", "uploading", "restoring"].includes(row.status)).reverse();
       let remaining = rows.length;
+      let validRemaining = rows.filter(row => row.remote_status === "success").length;
       for (const row of candidates) {
         if (remaining <= keep) break;
-        if (remaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_remote_backup" }); continue; }
-        const result = await remoteDeleter(this.dto(row));
+        if (row.remote_status === "success" && validRemaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_remote_backup" }); continue; }
+        let result;
+        try { result = await remoteDeleter(this.dto(row)); } catch (error) { skipped.push({ id: row.id, reason: safeMessage(error) }); continue; }
         const complete = [result.excel, result.checksum].every((value) => ["deleted", "not_present"].includes(value));
         db.prepare("UPDATE backup_records SET remote_status=?,remote_file_status=?,remote_checksum_status=?,remote_error_safe=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?")
           .run(complete ? "deleted" : "delete_partial", result.excel, result.checksum, complete ? "" : "BAIDU_REMOTE_DELETE_PARTIAL", row.id);
-        if (complete) { remaining -= 1; removed.push({ id: row.id }); } else skipped.push({ id: row.id, reason: "BAIDU_REMOTE_DELETE_PARTIAL" });
+        if (row.remote_status === "success") validRemaining -= 1;
+        if (complete) { remaining -= 1; if (row.status === "deleted") db.prepare("DELETE FROM backup_records WHERE id=?").run(row.id); removed.push({ id: row.id }); } else skipped.push({ id: row.id, reason: "BAIDU_REMOTE_DELETE_PARTIAL" });
       }
       return { removed, skipped, retention: keep };
-    } finally { db.close(); }
+    } finally { try { db?.close(); } finally { this.releaseLock(lock); } }
   }
   async deleteBackup(id, { remoteDeleter = null } = {}) {
     let lock = null;
@@ -337,21 +362,7 @@ class BackupService {
       const policy = this.deletionPolicy(db, row);
       if (!policy.deletable) throw new BackupError(policy.code, policy.reason);
 
-      if (row.managed_relative_path) {
-        if (path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份");
-        const filename = path.resolve(this.dataDir, row.managed_relative_path);
-        if (!inside(this.root, filename)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效");
-        const localTargets = [["local_excel", filename], ["local_checksum", `${filename}.sha256`]];
-        for (const [key, target] of localTargets) {
-          if (!fs.existsSync(target)) continue;
-          if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) {
-            cleanup[key] = "rejected_symlink";
-            continue;
-          }
-          try { fs.rmSync(target); cleanup[key] = "deleted"; }
-          catch { cleanup[key] = "delete_failed"; }
-        }
-      }
+      Object.assign(cleanup, this.cleanupLocalFiles(row));
 
       if (row.remote_path || row.remote_checksum_path) {
         if (typeof remoteDeleter !== "function") {

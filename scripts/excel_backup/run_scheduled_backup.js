@@ -18,7 +18,8 @@ async function main() {
       : (await service.create({ trigger: "remote_automatic", retentionClass: "remote", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs })).record;
     if (record.remote_status !== "success") throw Object.assign(new Error("百度网盘上传或远端校验失败"), { code: record.remote_error_safe || "BAIDU_REMOTE_BACKUP_FAILED" });
     const retention = await service.applyRemoteRetention(settings.remote_retention, (item) => remote.delete(item));
-    process.stdout.write(`${JSON.stringify({ ok: true, kind, backup_id: record.id, schedule_key: scheduleKey, retention })}\n`);
+    const localRetention = service.applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
+    process.stdout.write(`${JSON.stringify({ ok: true, kind, backup_id: record.id, schedule_key: scheduleKey, retention, localRetention })}\n`);
     return;
   }
   const result = await service.create({ trigger: "automatic", retentionClass: "daily", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: false, includeOperationLogs: settings.local_include_operation_logs });

@@ -195,3 +195,15 @@ test("remote retention deletes Excel and checksum as pairs, skips pinned and enc
   assert.ok(result.removed.length >= 1); assert.equal(calls.every(([excel, checksum]) => checksum === `${excel}.sha256`), true); assert.equal(calls.some(([excel]) => /\.enc$/i.test(excel)), false); assert.ok(result.skipped.some((item) => item.reason === "pinned"));
   const checked = remoteService.database(); assert.ok(checked.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE remote_status='success'").get().count >= 1); assert.equal(checked.prepare("SELECT remote_status FROM backup_records WHERE filename='pinned.xlsx'").get().remote_status, "success"); checked.close();
 });
+
+
+test("remote retention never counts a partial or busy copy as permission to delete the last success", async () => {
+  const directory = path.join(tempRoot, "remote-last-valid"); const database = path.join(directory, "data.sqlite"); initDatabase(database);
+  const service = new BackupService({ dbPath: database, dataDir: directory }); const db = service.database();
+  const insert = db.prepare("INSERT INTO backup_records(filename,status,backup_format,remote_status,remote_path,job_status) VALUES (?,'success','full_data_excel',?,?,?)");
+  insert.run("valid.xlsx", "success", "/apps/test/valid.xlsx", "");
+  insert.run("partial.xlsx", "delete_partial", "/apps/test/partial.xlsx", "");
+  insert.run("busy.xlsx", "delete_partial", "/apps/test/busy.xlsx", "queued"); db.close();
+  const calls = []; const result = await service.applyRemoteRetention(1, async row => { calls.push(row.filename); return { excel: "deleted", checksum: "not_present" }; });
+  assert.deepEqual(calls, ["partial.xlsx"]); assert.ok(result.skipped.some(row => row.reason === "last_valid_remote_backup"));
+});

@@ -98,7 +98,7 @@ after(async () => {
     server.kill("SIGTERM");
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
   }
-  if (tempRoot) fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  if (tempRoot) await fs.promises.rm(tempRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
 });
 
 test("student batch price deduplicates ids and changes only custom_price", async () => {
@@ -252,6 +252,10 @@ test("real Chromium batch selection, indeterminate state, modal update and 390px
     assert.deepEqual(browser.consoleErrors, []);
   } finally {
     await browser.close();
-    if (chrome.child.exitCode == null) chrome.child.kill("SIGTERM");
+    if (chrome.child.exitCode == null) {
+      const exited = new Promise(resolve => chrome.child.once("exit", resolve));
+      chrome.child.kill("SIGTERM");
+      await exited;
+    }
   }
 });

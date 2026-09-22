@@ -14186,6 +14186,35 @@ table.adaptive-table :is(th, td).adaptive-wrap {
   overflow: auto;
 }
 
+/* 2026-09-22: content-sized navigation and page-scoped table layout. */
+#app:not(.login-mode):not(.sidebar-collapsed) {
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+#app:not(.sidebar-collapsed) .sidebar { width: max-content; min-width: 0; padding-inline: 10px; }
+#app:not(.sidebar-collapsed) .nav-label { white-space: nowrap; }
+.brand-mark { padding: 0; border: 0; flex: 0 0 34px; width: 34px; height: 34px; background: transparent; }
+.brand-mark img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 5px; }
+#app.sidebar-collapsed .brand-mark { cursor: pointer; }
+#app.sidebar-collapsed .brand-mark:hover { outline: 2px solid var(--brand-border); }
+#app.sidebar-collapsed :is(.sidebar-toggle, #nav-expand-toggle) { display: none !important; }
+.lesson-table .col-type { min-width: 110px; width: 110px; }
+.teacher-profile-serial { text-align: center; font-variant-numeric: tabular-nums; }
+.student-query-controls .filter-bar { display: flex; flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: 10px; }
+.student-query-controls .student-query-student { display: flex; flex: 0 1 auto; align-items: center; gap: 8px; white-space: nowrap; }
+.student-query-controls .filter-combo { width: 170px; flex: 0 1 170px; }
+.student-query-controls .date-range-picker { flex: 0 1 280px; width: 280px; margin-left: 0; }
+.student-query-controls .segmented { flex: 0 0 auto; margin-left: 0; }
+.student-summary-scroll { max-height: calc(100dvh - 240px); overflow: auto; position: relative; }
+.student-summary-scroll .student-summary-table { border-collapse: separate; border-spacing: 0; }
+.student-summary-scroll .student-summary-table thead th { position: sticky; top: 0; z-index: 3; background: var(--table-head); }
+@media (max-width: 640px) {
+  #app:not(.login-mode):not(.sidebar-collapsed) { grid-template-columns: minmax(0, 1fr); }
+  #app:not(.sidebar-collapsed) .sidebar { width: auto; }
+  .student-query-controls .filter-bar > * { max-width: 100%; min-width: 0; }
+  .student-query-controls .student-query-student { flex-wrap: wrap; }
+  .student-summary-scroll { max-height: calc(100dvh - 280px); }
+}
+
 .managed-file-browser-toolbar {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(180px, 240px) auto;

@@ -1,3 +1,4 @@
+const { migrateCourseTypes, defaultCourseType } = require("../domain/course_type");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -47,6 +48,8 @@ const SETTING_LABELS = Object.freeze({
   custom_subjects: "自定义科目",
   custom_time_slots: "常用时间",
   custom_course_statuses: "自定义课程状态",
+  custom_course_types_junior: "初中课程类型",
+  custom_course_types_senior: "高中课程类型",
   course_status_colors: "课程状态配色",
   course_subject_colors: "科目配色",
   student_grade_colors: "学生年级配色",
@@ -452,6 +455,7 @@ function restoreFullData({ dbPath, inputPath }) {
   try {
     ensureSchemaCompatible(db); db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
+      migrateCourseTypes(db, { backfill: false });
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         db.exec(`DELETE FROM ${definition.source_table}`);
@@ -459,7 +463,7 @@ function restoreFullData({ dbPath, inputPath }) {
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => a.restore_order - b.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         const available = new Set(tableColumns(db, definition.source_table));
-        for (const row of verified.data[definition.source_table]) { const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
+        for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
       }
       if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, integrity_check: "ok", foreign_key_violation_count: 0 };
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }

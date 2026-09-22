@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const net = require("node:net");
+const { freePort } = require("./helpers/chrome_cdp");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -60,7 +60,6 @@ function snapshot(db) {
 }
 function rebuiltWorkbook(mutator) { const parsed = parseWorkbook(fs.readFileSync(backupPath)); const sheets = parsed.sheets.map((sheet) => ({ name: sheet.name, state: sheet.state, rows: sheet.rows.map((row) => [...row]) })); mutator(sheets); return createWorkbook(sheets); }
 function legacyUnsafeWorkbook() { const safe = createWorkbook(Array.from({ length: 33 }, (_, index) => ({ name: index === 32 ? "审计事件" : `旧表${index + 1}`, rows: [["字段"], ["ok"]] }))); const entries = readZip(safe); entries.set("xl/worksheets/sheet33.xml", Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="G1" t="inlineStr"><is><t>操作后JSON</t></is></c></row><row r="2"><c r="G2" t="inlineStr"><is><t>${"x".repeat(32767)}</t></is></c></row></sheetData></worksheet>`)); return zipStore([...entries].map(([name, data]) => ({ name, data }))); }
-async function freePort() { return await new Promise((resolve) => { const server = net.createServer(); server.listen(0, "127.0.0.1", () => { const port = server.address().port; server.close(() => resolve(port)); }); }); }
 
 before(() => {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liming-full-excel-v4-")); sourcePath = path.join(tempRoot, "source A", "source.sqlite"); targetPath = path.join(tempRoot, "target B", "target.sqlite"); backupPath = path.join(tempRoot, "output with space", "黎明教育_全量数据_20260720_150000.xlsx");
@@ -149,4 +148,21 @@ test("excluded diagnostic audit events are not restored", () => { const db = new
 test("CLI export verify and restore work with spaces and Unicode paths", () => { const output = path.join(tempRoot, "CLI 空格", "全量.xlsx"); const target = path.join(tempRoot, "CLI 目标", "target.sqlite"); initDatabase(target); emptyManagedData(target); const run = (script, args) => spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", script), ...args], { cwd: root, encoding: "utf8" }); assert.equal(run("export_full_excel.js", ["--db", sourcePath, "--output", output]).status, 0); assert.equal(run("verify_full_excel.js", ["--input", output]).status, 0); assert.equal(run("restore_full_excel.js", ["--db", target, "--input", output, "--confirm", "OVERWRITE"]).status, 0); });
 test("synthetic v4 acceptance fixture uses the global opening-balance schema", () => { const output = path.join(tempRoot, "acceptance fixture", "黎明教育_全量数据_合成验收_v4.xlsx"); const result = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/create_acceptance_fixture.js"), "--output", output], { cwd: root, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); const fixture = verifyFullData(output); assert.equal(fixture.version, 4); assert.equal(fixture.data.student_opening_balances.length, 1); assert.equal(Object.prototype.hasOwnProperty.call(fixture.data.student_opening_balances[0], "month_key"), false); });
 test("full-data filename is Windows-safe", () => assert.doesNotMatch(path.basename(backupPath), /[<>:"/\\|?*]/));
-test("restored account can log in with its original password", async () => { const port = await freePort(); const child = spawn(process.execPath, [serverScript], { cwd: root, env: { ...process.env, DATA_DIR: path.dirname(targetPath), DB_PATH: targetPath, PORT: String(port), SESSION_COOKIE_SECURE: "0" }, stdio: "ignore" }); try { for (let i = 0; i < 100; i += 1) { try { if ((await fetch(`http://127.0.0.1:${port}/api/version`)).ok) break; } catch {} await new Promise((resolve) => setTimeout(resolve, 50)); } const response = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "restore_user", password: "restore-pass" }) }); assert.equal(response.status, 200); } finally { child.kill(); await new Promise((resolve) => child.once("exit", resolve)); } });
+test("restored account can log in with its original password", async () => {
+  const port = await freePort(); let stderr = "";
+  const child = spawn(process.execPath, [serverScript], { cwd: root, env: { ...process.env, DATA_DIR: path.dirname(targetPath), DB_PATH: targetPath, PORT: String(port), SESSION_COOKIE_SECURE: "0" }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  child.stderr.on("data", chunk => { stderr += String(chunk); });
+  try {
+    let ready = false;
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline && child.exitCode == null) {
+      try { if ((await fetch(`http://127.0.0.1:${port}/api/version`, { signal: AbortSignal.timeout(1000) })).ok) { ready = true; break; } } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(ready, `restored test server did not start: ${stderr}`);
+    const response = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "restore_user", password: "restore-pass" }) });
+    assert.equal(response.status, 200);
+  } finally {
+    if (child.exitCode == null) { const exited = new Promise(resolve => child.once("exit", resolve)); child.kill(); await exited; }
+  }
+});

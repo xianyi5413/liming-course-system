@@ -178,9 +178,9 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "right", "right", "center", "center", "left"]],
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "right", "right", "left"]],
     ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
-    ["students", "classGroups", ".class-group-table", ["center", "center", "center", "left", "left"]],
+    ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "left", "right", "center", "center", "left"]],
-    ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "left"]],
+    ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],
     ["settings", "userAdmin", ".user-table:not(.role-table)", ["center", "center", "center", "left", "center", "center", "center"]],
   ];
   const results = {};
@@ -211,9 +211,9 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   assert.ok(results.recharges[1440][6] > results.recharges[1440][2], "long custom channel must drive its column");
   assert.ok(results.openingBalances[1440][5] > results.openingBalances[1440][2], "long opening note must drive its column");
   assert.ok(results.studentPricing[1440][4] > results.studentPricing[1440][2], "student badges must drive the set column");
-  assert.ok(results.classGroups[1440][3] > results.classGroups[1440][2], "class badges must drive the set column");
+  assert.ok(results.classGroups[1440][4] > results.classGroups[1440][2], "class badges must drive the set column");
   assert.ok(results.teacherSalaryRules[1440][4] > results.teacherSalaryRules[1440][2], "salary badges must drive the set column");
-  assert.ok(results.teacherProfiles[1440][6] > results.teacherProfiles[1440][2], "teacher notes must be the bounded flexible column");
+  assert.ok(results.teacherProfiles[1440][7] > results.teacherProfiles[1440][2], "teacher notes must be the bounded flexible column");
   assert.ok(results.userAdmin[1440][3] > results.userAdmin[1440][2], "bound teachers must be the bounded flexible column");
 
   await browser.click('.user-admin-tab[data-tab="roles"]');
