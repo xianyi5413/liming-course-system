@@ -9,7 +9,8 @@ async function freePort() {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const port = server.address().port;
-      server.close((error) => error ? reject(error) : resolve(port));
+      // Keep synthetic HTTP servers outside browser/fetch restricted port ranges.
+      server.close((error) => error ? reject(error) : resolve(port >= 20000 ? port : freePort()));
     });
   });
 }

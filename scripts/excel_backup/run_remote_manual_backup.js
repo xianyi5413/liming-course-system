@@ -32,6 +32,7 @@ async function main() {
     includeOperationLogs: Number(record.operation_logs_included ?? 1) === 1,
   });
   if (result.record.remote_status === "success") await service.applyRemoteRetention(settings.remote_retention, (item) => remote.delete(item));
+  service.applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
   if (result.record.job_status !== "success") process.exitCode = 1;
 }
 

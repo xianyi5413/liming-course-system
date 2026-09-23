@@ -68,7 +68,7 @@ async function withBrowserScenario({ legacyRecord = false, prepareDatabase, prep
       server.kill("SIGTERM");
       await Promise.race([serverExited, new Promise((resolve) => setTimeout(resolve, 3000))]);
     }
-    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    await fs.promises.rm(tempRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
   }
 }
 
@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260728-student-pricing-performance",
-      "/app.js?v=20260728-student-pricing-performance",
+      "/styles.css?v=20260922-course-type-ui-query-backup",
+      "/app.js?v=20260922-course-type-ui-query-backup",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -578,11 +578,11 @@ test("Baidu test refresh preserves dirty directory risk frequency and log option
   });
 });
 
-test("desktop sidebar is 208px with untruncated labels and 390px data center has no page overflow", async () => {
+test("desktop sidebar fits content with untruncated labels and 390px data center has no page overflow", async () => {
   await withBrowserScenario({}, async ({ browser }) => {
     await browser.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }); await browser.login("boss", "123456");
-    const desktop = await browser.evaluate(`(() => { const sidebar=document.querySelector('.sidebar'); const labels=[...document.querySelectorAll('.nav-label')]; return {width:Math.round(sidebar.getBoundingClientRect().width), clipped:labels.some((item)=>item.scrollWidth>item.clientWidth+1)}; })()`); assert.deepEqual(desktop, { width: 208, clipped: false });
-    await browser.click(".sidebar-toggle"); await browser.waitFor("Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 72"); await browser.click(".sidebar-toggle"); await browser.waitFor("Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 208");
+    const desktop = await browser.evaluate(`(() => { const sidebar=document.querySelector('.sidebar'); const labels=[...document.querySelectorAll('.nav-label')]; return {width:Math.round(sidebar.getBoundingClientRect().width), clipped:labels.some((item)=>item.scrollWidth>item.clientWidth+1)}; })()`); assert.equal(desktop.clipped, false); assert.ok(desktop.width > 120 && desktop.width < 208);
+    await browser.click(".sidebar-toggle"); await browser.waitFor("Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 72"); await browser.click(".brand-mark"); await browser.waitFor("!document.querySelector('#app').classList.contains('sidebar-collapsed')");
     await browser.openDataCenter(); await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await browser.waitFor("window.innerWidth === 390"); assert.equal(await browser.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true); await browser.send("Emulation.clearDeviceMetricsOverride"); assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
   });
 });

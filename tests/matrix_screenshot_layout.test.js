@@ -52,6 +52,7 @@ async function withBrowser(action) {
   try {
     await waitForServer(server, port, () => stderr);
     chrome = await launchChrome(path.join(tempRoot, "chrome-profile"));
+    await chrome.session.send("Page.addScriptToEvaluateOnNewDocument", { source: `const RealDate=Date; globalThis.Date=class extends RealDate { constructor(...args){ super(...(args.length?args:["2026-07-27T12:00:00+08:00"])); } static now(){return new RealDate("2026-07-27T12:00:00+08:00").getTime();} };` });
     await chrome.session.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
     await action(chrome.session);
   } finally {

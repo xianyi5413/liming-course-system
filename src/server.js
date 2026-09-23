@@ -1,3 +1,4 @@
+const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseTypes } = require("./domain/course_type");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -41,7 +42,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260728-student-pricing-performance";
+const APP_VERSION = process.env.APP_VERSION || "20260922-course-type-ui-query-backup";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1052,6 +1053,7 @@ function initDb() {
   seedDefaultRolesAndPermissions();
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
   lastTimeSlotMigrationReport = migrateHistoricalTimeSlots();
+  console.info(`[course types migration] ${JSON.stringify(migrateCourseTypes(db))}`);
 }
 
 if (!readOnlyBalanceCli) initDb();
@@ -6589,6 +6591,7 @@ function studentStatementData(studentName, range) {
       monthRows.push({
         month_key: monthKey,
         lesson_count: num(monthAccount.lesson_count),
+        subject_counts: Object.fromEntries(["数学", "英语", "物理", "化学"].map(subject => [subject, effectiveDetails.filter(row => row.subject === subject).length])),
         total_fee: num(monthAccount.total_fee),
         cur_recharge: num(monthAccount.cur_recharge),
         cur_gift: num(monthAccount.cur_gift),
@@ -6977,6 +6980,8 @@ function applyStudentPricingRulesToDetails(items) {
 
 function bootstrapLookups(currentLessonLookups = usedLessonLookups()) {
   return {
+    course_type_grades: COURSE_TYPE_GRADES,
+    course_types: { junior: courseTypeOptions("初一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))), senior: courseTypeOptions("高一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))) },
     lesson_status: LESSON_STATUS,
     course_status: COURSE_STATUS,
     status: currentLessonLookups.statuses || [],
@@ -7099,9 +7104,10 @@ function classGroupLookupKey(row = {}) {
 
 function syncClassGroupsFromSources() {
   const upsert = db.prepare(`
-    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display, course_type)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(teacher, grade, subject, students_key) DO UPDATE SET
+      course_type = CASE WHEN TRIM(COALESCE(class_groups.course_type,''))='' THEN excluded.course_type ELSE class_groups.course_type END,
       students_display = CASE
         WHEN TRIM(COALESCE(class_groups.students_display, '')) = '' THEN excluded.students_display
         ELSE class_groups.students_display
@@ -7114,11 +7120,11 @@ function syncClassGroupsFromSources() {
     const key = classGroupLookupKey(identity);
     if (seen.has(key)) return;
     seen.add(key);
-    upsert.run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display);
+    upsert.run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display, text(row.course_type) || defaultCourseType(identity.grade, identity.students_key));
   };
   withTransaction(() => {
     all(`
-      SELECT teacher_name, grade, subject, student_names
+      SELECT teacher_name, grade, subject, student_names, course_type
       FROM lessons
       WHERE TRIM(COALESCE(teacher_name, '')) <> ''
         AND TRIM(COALESCE(grade, '')) <> ''
@@ -7172,7 +7178,9 @@ function updateClassGroupName(body = {}) {
   if (id) {
     const before = get("SELECT * FROM class_groups WHERE id = ?", [id]);
     if (!before) return { error: "班级不存在", status: 404 };
-    db.prepare("UPDATE class_groups SET class_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(className, id);
+    let courseType;
+    try { courseType = resolveCourseType({ ...before, ...body }, before); } catch (error) { return { error: error.message, status: 400 }; }
+    db.prepare("UPDATE class_groups SET class_name = ?, course_type=?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(Object.hasOwn(body, "class_name") ? className : before.class_name, courseType, id);
     return { before, after: get("SELECT * FROM class_groups WHERE id = ?", [id]) };
   }
   const identity = classGroupIdentity(body);
@@ -7183,14 +7191,17 @@ function updateClassGroupName(body = {}) {
     SELECT * FROM class_groups
     WHERE teacher = ? AND grade = ? AND subject = ? AND students_key = ?
   `, [identity.teacher, identity.grade, identity.subject, identity.students_key]);
+  let courseType;
+  try { courseType = resolveCourseType({ ...identity, ...body, course_type: body.course_type ?? before?.course_type }, before); } catch (error) { return { error: error.message, status: 400 }; }
   db.prepare(`
-    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display, class_name, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO class_groups(teacher, grade, subject, students_key, students_display, class_name, course_type, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(teacher, grade, subject, students_key) DO UPDATE SET
       students_display = excluded.students_display,
       class_name = excluded.class_name,
+      course_type = excluded.course_type,
       updated_at = CURRENT_TIMESTAMP
-  `).run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display, className);
+  `).run(identity.teacher, identity.grade, identity.subject, identity.students_key, identity.students_display, className, courseType);
   const after = get(`
     SELECT * FROM class_groups
     WHERE teacher = ? AND grade = ? AND subject = ? AND students_key = ?
@@ -11966,6 +11977,16 @@ function patchTable(table, idField, idValue, allowedFields, data) {
   db.prepare(`UPDATE ${table} SET ${assignments} WHERE ${idField} = ?`).run(...params, idValue);
 }
 
+function resolveCourseType(data, current = null) {
+  const value = text(data.course_type);
+  if (value && (!current || value !== text(current.course_type)) && !courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))).includes(value)) {
+    throw Object.assign(new Error("课程类型不属于当前年级的候选范围"), { status: 400 });
+  }
+  if (value) return value;
+  const group = tableExists("class_groups") ? get("SELECT course_type FROM class_groups WHERE teacher=? AND grade=? AND subject=? AND students_key=?", [text(data.teacher_name), text(data.grade), text(data.subject), normalizedStudents(data.student_names)]) : null;
+  return text(group?.course_type) || defaultCourseType(data.grade, data.student_names || data.students_key);
+}
+
 function insertLesson(data, options = {}) {
   const normalizedInput = normalizeLessonPersistenceInput(data);
   if (normalizedInput.error) throw new Error(normalizedInput.error);
@@ -11974,13 +11995,14 @@ function insertLesson(data, options = {}) {
   const status = deriveStatus(data);
   const legacy = legacyStatusFields(status);
   const salary = resolvedTeacherSalaryForLesson(data, options);
+  const courseType = resolveCourseType(data, options.preserveCourseType ? data : null);
   const result = db.prepare(`
     INSERT INTO lessons(
       teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
       student_names, notes, course_status, status, teacher_salary, teacher_salary_source,
-      teacher_salary_rule_id, month_key, sort_order
+      teacher_salary_rule_id, month_key, sort_order, course_type
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     text(data.teacher_name),
     text(data.date || monthKey),
@@ -11998,6 +12020,7 @@ function insertLesson(data, options = {}) {
     salary.teacher_salary_rule_id,
     text(monthKey),
     num(data.sort_order),
+    courseType,
   );
   const lesson = get("SELECT * FROM lessons WHERE id = ?", [Number(result.lastInsertRowid)]);
   return salary.warning ? { ...lesson, teacher_salary_warning: salary.warning } : lesson;
@@ -12129,6 +12152,7 @@ function copyLessons(body) {
         lesson_status: resetStatus ? "上课" : src.lesson_status,
         time_slot: src.time_slot,
         classroom: src.classroom,
+        course_type: src.course_type,
         grade: src.grade,
         subject: src.subject,
         student_names: src.student_names,
@@ -12137,7 +12161,7 @@ function copyLessons(body) {
         status: resetStatus ? "待上" : src.status,
         month_key: monthKeyFromDate(pair.target_date),
         sort_order: sortOrder,
-      }));
+      }, { preserveCourseType: true }));
     }
     return { created: created.length, lessons: created };
   });
@@ -12176,10 +12200,11 @@ function createLessonsBatch(rows) {
       if (!validDateKey(text(item.date))) {
         return { error: `目标日期无效：${text(item.date) || "空"}`, status: 400 };
       }
+      const source = item.source_id ? get("SELECT course_type FROM lessons WHERE id = ?", [Number(item.source_id)]) : null;
       created.push(insertLesson({
         ...item,
         month_key: text(item.month_key) || monthKeyFromDate(item.date) || getSetting("month_key"),
-      }));
+      }, { preserveCourseType: Boolean(source && source.course_type === item.course_type) }));
     }
     return { ok: true, created: created.length, lessons: created };
   });
@@ -13352,6 +13377,7 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
     try {
       const settings = loadFullBackupSettings(dbPath); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: false, includeOperationLogs: settings.local_include_operation_logs });
+      result.retention = backupService().applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
       return sendJson(res, { ...result, records: backupService().list() }, 201);
     } catch (error) {
@@ -13744,6 +13770,7 @@ async function handleApi(req, res, url) {
     const studentName = decodeURIComponent(studentStatementMatch[1]);
     const range = studentStatementRangeFromUrl(url);
     if (!range) return sendError(res, 400, "start/end must be YYYY-MM-DD and start must be before end");
+    if (url.searchParams.get("refresh") === "1") clearDerivedCache("student statement refresh");
     const report = studentStatementData(studentName, range);
     if (!report) return sendJson(res, { student_name: studentName, range, summary: null, details: [], month_rows: [], recharges: [] });
     return sendJson(res, report);
@@ -13827,6 +13854,13 @@ async function handleApi(req, res, url) {
       const normalized = normalizeCustomTimeSlotSetting(body.custom_time_slots);
       if (normalized.error) return sendError(res, 400, normalized.error);
       body.custom_time_slots = normalized.serialized;
+    }
+    for (const key of ["custom_course_types_junior", "custom_course_types_senior"]) {
+      if (!Object.hasOwn(body, key)) continue;
+      let values;
+      try { values = typeof body[key] === "string" ? JSON.parse(body[key]) : body[key]; } catch { return sendError(res, 400, "课程类型配置必须是数组"); }
+      if (!Array.isArray(values) || values.length > 100 || values.some(value => typeof value !== "string" || !value.trim() || value.trim().length > 40)) return sendError(res, 400, "课程类型须为最多100个非空名称，每项不超过40字");
+      body[key] = JSON.stringify([...new Set(values.map(value => value.trim()))]);
     }
     const changedKeys = Object.keys(body).filter((key) => key !== "month_key");
     const beforeSettings = Object.fromEntries(changedKeys.map((key) => [key, getSetting(key)]));
@@ -13938,6 +13972,8 @@ async function handleApi(req, res, url) {
     }
     const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
     const payload = { ...incoming, updated_at: new Date().toISOString() };
+    try { payload.course_type = resolveCourseType({ ...current, ...incoming }, current); }
+    catch (error) { return sendError(res, 400, error.message); }
     delete payload.teacher_salary_source;
     delete payload.teacher_salary_rule_id;
     delete payload.allow_conflicts;
@@ -13972,7 +14008,7 @@ async function handleApi(req, res, url) {
     auditedPatchTable(req, user, "lessons", "id", Number(lessonMatch[1]), [
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
       "student_names", "notes", "course_status", "status", "teacher_salary", "teacher_salary_source",
-      "teacher_salary_rule_id", "month_key", "sort_order", "updated_at",
+      "teacher_salary_rule_id", "month_key", "sort_order", "updated_at", "course_type",
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     const studentNamesChanged = Object.prototype.hasOwnProperty.call(incoming, "student_names") && text(current.student_names) !== text(updated.student_names);
@@ -14569,6 +14605,7 @@ function serveStatic(req, res, url) {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
   }[ext] || "application/octet-stream";
   const body = fs.readFileSync(filePath);
   const headers = {
@@ -14978,7 +15015,7 @@ const server = http.createServer(async (req, res) => {
     return serveStatic(req, res, url);
   } catch (error) {
     console.error(error);
-    sendError(res, 500, error.message || "Internal server error");
+    sendError(res, error.status || 500, error.message || "Internal server error");
   }
 });
 
