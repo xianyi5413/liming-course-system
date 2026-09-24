@@ -171,7 +171,7 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.doesNotMatch(result.personal.simpleHtml, /李小红|王小强/);
   assert.deepEqual(result.klass.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["张小明", "李小红", "王小强"], ["初一", "数学"]]);
   assert.deepEqual(result.merged.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["张小明", "李小红", "王小强"], ["初一", "初二", "数学", "物理"]]);
-  assert.deepEqual(result.teacher.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["矩阵老师"], ["张小明", "李小红", "王小强"], ["初一", "数学"]]);
+  assert.deepEqual(result.teacher.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["矩阵老师"], ["初一"]]);
   assert.deepEqual(result.personal.detailedRows, []);
   assert.deepEqual(result.klass.detailedRows, []);
   assert.deepEqual(result.merged.detailedRows, []);
@@ -180,18 +180,14 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.equal(result.teacher.detailedHtml, "");
   assert.doesNotMatch(result.teacher.detailedHtml, /张小明|李小红|王小强|初一|数学/);
   for (const item of Object.values(result)) {
-    assert.deepEqual(item.simpleCanvasRows, item.simpleRows);
+    assert.deepEqual(item.simpleCanvasRows, item.detailedRows);
     assert.deepEqual(item.detailedCanvasRows, item.detailedRows);
     assert.equal(item.simplePng, true);
     assert.equal(item.detailedPng, true);
     assert.equal(item.simpleSize.every((value) => value > 0), true);
     assert.equal(item.detailedSize.every((value) => value > 0), true);
-    assert.equal(item.detailedSize[1] < item.simpleSize[1], true);
+    assert.deepEqual(item.simpleSize, item.detailedSize);
   }
-  assert.equal(result.personal.simpleSize[1] - result.personal.detailedSize[1], 46);
-  assert.equal(result.klass.simpleSize[1] - result.klass.detailedSize[1], 80);
-  assert.equal(result.merged.simpleSize[1] - result.merged.detailedSize[1], 80);
-  assert.equal(result.teacher.simpleSize[1] - result.teacher.detailedSize[1], 114);
 
   const parentCounts = await browser.evaluate(`courseNoticeState.data.send_objects.map((item)=>({
     key:item.send_object_key,
@@ -226,8 +222,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   }
 
   await browser.click('.course-notice-layout-toggle[data-layout="simple"]');
-  await browser.waitFor("Boolean(document.querySelector('.notice-simple-mode .notice-card-identity-row'))");
-  assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.notice-simple-mode .notice-card-identity-personal')).flexWrap"), "nowrap");
+  await browser.waitFor("Boolean(document.querySelector('.notice-simple-mode .notice-task-title'))");
+  assert.equal(await browser.evaluate("document.querySelectorAll('.notice-simple-mode img,.notice-simple-mode table').length"), 0);
   assert.deepEqual(await browser.evaluate("courseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,type:item.send_object_type,lessons:item.lessons.length,columns:courseNoticeColumns('parent').map(([key])=>key)}))"), parentCounts);
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
@@ -278,11 +274,11 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
     assert.equal(teacherDetailed[index].rowCount, teacherCounts[index].lessons);
   }
   await browser.click('.teacher-course-notice-layout-toggle[data-layout="simple"]');
-  await browser.waitFor("Boolean(document.querySelector('.teacher-notice-simple-tile .notice-card-identity-row'))");
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile .notice-card-identity-row')?.textContent.includes('矩阵老师')"), true);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('张小明')"), true);
+  await browser.waitFor("Boolean(document.querySelector('.teacher-notice-simple-tile'))");
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('矩阵老师')"), true);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('张小明')"), false);
   assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('初一')"), true);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('数学')"), true);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('数学')"), false);
   assert.deepEqual(await browser.evaluate("teacherCourseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,lessons:item.lessons.length}))"), teacherCounts);
   await browser.click('.teacher-course-notice-layout-toggle[data-layout="preview"]');
   await browser.waitFor("Boolean(document.querySelector('.notice-shot-preview .notice-shot-table'))");
@@ -316,7 +312,7 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
     const originalToBlob=HTMLCanvasElement.prototype.toBlob;
     HTMLCanvasElement.prototype.toDataURL=function(...args){
       const value=originalToDataURL.apply(this,args);
-      window.__noticePngActions.downloads.push({layout:this.dataset.noticeLayout,identity:JSON.parse(this.dataset.noticeIdentity||'[]'),width:this.width,height:this.height,prefix:value.slice(0,22),bytes:value.length});
+      window.__lastNoticeCanvas={layout:this.dataset.noticeLayout,identity:JSON.parse(this.dataset.noticeIdentity||'[]'),width:this.width,height:this.height,prefix:value.slice(0,22),bytes:value.length};
       return value;
     };
     HTMLCanvasElement.prototype.toBlob=function(callback,...args){
@@ -325,7 +321,7 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
         callback(blob);
       },...args);
     };
-    HTMLAnchorElement.prototype.click=function(){window.__noticeDownload={name:this.download,prefix:this.href.slice(0,22),bytes:this.href.length};};
+    HTMLAnchorElement.prototype.click=function(){window.__noticePngActions.downloads.push(window.__lastNoticeCanvas);window.__noticeDownload={name:this.download,prefix:this.href.slice(0,22),bytes:this.href.length};};
     Object.defineProperty(window,'ClipboardItem',{configurable:true,value:class{constructor(items){this.items=items;}}});
     Object.defineProperty(navigator,'clipboard',{configurable:true,value:{write:async(items)=>{window.__noticeClipboardItems=items.length;},writeText:async()=>{}}});
   })()`);

@@ -128,7 +128,9 @@ test("student and teacher rule pages share only set or unset visible price statu
   await browser.waitFor("document.querySelectorAll('.teacher-salary-rule-row').length === 3");
   assert.deepEqual((await browser.evaluate("[...document.querySelectorAll('.teacher-salary-rule-table .visible-price-status')].map((node)=>node.textContent.trim())")).reduce((counts, value) => ({ ...counts, [value]: (counts[value] || 0) + 1 }), {}), { 已设置: 2, 未设置: 1 });
   const visibleText = await browser.evaluate("document.querySelector('.teacher-salary-rule-table').closest('.band').textContent");
-  assert.doesNotMatch(visibleText, /已停用|是否启用|enabled|disabled|\btrue\b|\bfalse\b/);
+  assert.doesNotMatch(visibleText, /是否启用|enabled|disabled|\btrue\b|\bfalse\b/);
+  assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-salary-rule-table .rule-activation').length"), 3);
+  assert.equal(await browser.evaluate("[...document.querySelectorAll('.teacher-salary-rule-table thead th')].some((node) => node.textContent.trim() === '启用')"), false);
   assert.deepEqual(await browser.evaluate(`(() => { const input=document.querySelector('input.teacher-salary-rule-filter-input[data-filter-field="salary_status"]'); return [...input.closest('.multi-select').querySelectorAll('.multi-select-option')].map((node)=>node.dataset.value); })()`), ["已设置", "未设置"]);
   assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-table .visible-price-status, .teacher-salary-rule-table .visible-price-status').length >= 3"), true);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

@@ -175,9 +175,9 @@ test('Chromium: logo, sidebar, teacher serials, query model, refresh and sticky 
     const filteredSerials = await browser.evaluate(`(() => { profileNameFilter.teachers='合成老师乙'; renderProfileDirectory('teachers'); const serials=[...document.querySelectorAll('.teacher-profile-serial')].map(x=>x.textContent); profileNameFilter.teachers=''; return serials; })()`);
     assert.deepEqual(filteredSerials, ['1']);
     await browser.evaluate("(async () => { activeMonth='2026-07-01'; scheduleMode=true; setActiveView('lessons'); lessonFilter.start_date='2026-07-01'; lessonFilter.end_date='2026-07-31'; await load({refreshGlobal:false}); })()");
-    await browser.waitFor("Boolean(document.querySelector('.lesson-field[data-field=course_type]'))");
+    await browser.waitFor("Boolean(document.querySelector('[data-lesson-edit-trigger][data-field=course_type]'))");
     const requestStart = browser.responses.length;
-    const changed = await browser.evaluate(`(async () => { const select=document.querySelector('.lesson-field[data-field=course_type]'); select.value='1V2'; await handleLessonFieldChange(select); return {id:select.dataset.id,value:select.value}; })()`);
+    const changed = await browser.evaluate(`(async () => { const trigger=document.querySelector('[data-lesson-edit-trigger][data-field=course_type]'); openScheduleInlinePicker(trigger); const select=activeScheduleInlinePicker.select; select.value='1V2'; await handleLessonFieldChange(select); const result={id:select.dataset.id,value:state.lessons.find(row=>String(row.id)===select.dataset.id).course_type}; closeScheduleInlinePicker(); return result; })()`);
     assert.equal(changed.value, '1V2');
     assert.equal(browser.responses.slice(requestStart).some(row => row.url.includes('/api/bootstrap')), false);
     const saved = new DatabaseSync(dbPath); assert.equal(saved.prepare('SELECT course_type FROM lessons WHERE id=?').get(Number(changed.id)).course_type, '1V2'); saved.close();

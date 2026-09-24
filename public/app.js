@@ -884,6 +884,7 @@ function setActiveView(nextView) {
     closeAllFloatingOverlays();
     dismissToast();
   }
+  if (nextView !== view) backupCleanupDialog = null;
   const previousView = view;
   view = nextView || "";
   if (previousView === "studentPricing" && view !== "studentPricing") {
@@ -3469,7 +3470,7 @@ function financePresetRange(preset) {
 }
 
 function defaultLessonFilter() {
-  return { month_key: "", teacher: "", teacher_names: [], student: "", student_names: [], start_date: "", end_date: "", status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: false };
+  return { month_key: "", teacher: "", teacher_names: [], student: "", student_names: [], start_date: "", end_date: "", status: "", classroom: "", time_slot: "", grade: "", subject: "", query: "", date_preset_initialized: false };
 }
 
 function readLessonFilter() {
@@ -3641,12 +3642,6 @@ function adaptiveHorizontalBox(element) {
     .reduce((sum, key) => sum + (Number.parseFloat(style[key]) || 0), 0);
 }
 
-function adaptiveStudentSetWidth(container) {
-  const badges = [...container.querySelectorAll(":scope > .student-badge")];
-  if (!badges.length) return adaptiveTableTextWidth(container.textContent.trim() || "—", container);
-  return Math.max(...badges.map((badge) => badge.getBoundingClientRect().width));
-}
-
 function adaptiveColumnDefinition(column, header) {
   const type = column.dataset.columnType || "short";
   const presets = {
@@ -3679,41 +3674,19 @@ function adaptiveColumnDefinition(column, header) {
   };
 }
 
-function adaptiveWrappedTextWidth(value, element) {
-  const tokens = String(value || "").split(/[\s,，、;；/|]+/).filter(Boolean);
-  if (!tokens.length) return adaptiveTableTextWidth(value, element);
-  return Math.max(...tokens.map((token) => adaptiveTableTextWidth(token, element)));
-}
-
-function adaptiveCellContentWidth(cell, definition) {
-  const cellBox = adaptiveHorizontalBox(cell);
+function adaptiveCellContentWidth(cell, definition, font) {
+  const measure = value => adaptiveTextWidthForData(value, font);
+  const wrapWidth = value => Math.max(0, ...String(value || "").split(/[\s,，、;；/|]+/).map(measure));
   const studentSet = cell.querySelector(".student-set-badges");
-  if (studentSet) return adaptiveStudentSetWidth(studentSet) + cellBox;
-
-  const currencyDisplay = cell.querySelector(".currency-display");
-  if (currencyDisplay) {
-    const input = cell.querySelector(".currency-input");
-    const inputBox = input ? adaptiveHorizontalBox(input) : 0;
-    return Math.max(88, adaptiveTableTextWidth(currencyDisplay.textContent.trim(), currencyDisplay) + inputBox) + cellBox;
-  }
-
+  if (studentSet) return Math.max(0, ...[...studentSet.querySelectorAll(".student-badge")].map(badge => measure(badge.textContent.trim()))) + 44;
+  const currency = cell.querySelector(".currency-display");
+  if (currency) return measure(currency.textContent.trim()) + 56;
   const input = cell.querySelector(":scope > .cell-input");
-  if (input) {
-    const displayValue = input.value || input.placeholder || "";
-    const affordance = input.type === "date" ? 28 : 0;
-    const measured = definition.wrap
-      ? adaptiveWrappedTextWidth(displayValue, input)
-      : adaptiveTableTextWidth(displayValue, input);
-    return Math.max(48, measured + adaptiveHorizontalBox(input) + affordance) + cellBox;
-  }
-
-  if (definition.wrap) return adaptiveWrappedTextWidth(cell.textContent.trim(), cell) + cellBox;
-  const inlineChildren = [...cell.children].filter((element) => !element.hidden);
-  if (inlineChildren.length) {
-    const widths = inlineChildren.map((element) => element.getBoundingClientRect().width);
-    return widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 5 + cellBox;
-  }
-  return adaptiveTableTextWidth(cell.textContent.trim(), cell) + cellBox;
+  if (input) return (definition.wrap ? wrapWidth(input.value || input.placeholder) : measure(input.value || input.placeholder || "")) + (input.type === "date" ? 52 : 36);
+  const custom = cell.querySelector(".custom-select-value");
+  if (custom) return measure(custom.textContent.trim()) + 48;
+  const value = cell.textContent.trim();
+  return (definition.wrap ? wrapWidth(value) : measure(value)) + (cell.querySelector(".entity-badge") ? 42 : 28);
 }
 
 function resizeAdaptiveTextarea(textarea) {
@@ -3816,14 +3789,17 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   if (table.dataset.adaptiveSource === "student-pricing") {
     return applyStudentPricingAdaptiveColumns(table, columns, headerCells, definitions);
   }
+  const started = performance.now();
   const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
+  const tableStyle = getComputedStyle(table);
+  const measureFont = tableStyle.font || `${tableStyle.fontWeight} ${tableStyle.fontSize} ${tableStyle.fontFamily}`;
   const widths = headerCells.map((header, index) => {
     const definition = definitions[index];
     let width = adaptiveTableTextWidth(header.textContent.trim(), header) + adaptiveHorizontalBox(header);
     for (const row of bodyRows) {
       const cell = row.children[index];
       if (!cell || cell.classList.contains("empty")) continue;
-      width = Math.max(width, adaptiveCellContentWidth(cell, definition));
+      width = Math.max(width, adaptiveCellContentWidth(cell, definition, measureFont));
     }
     return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
   });
@@ -3847,7 +3823,15 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   table.style.minWidth = "0";
   table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
   table.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
-  table.querySelectorAll("textarea.adaptive-textarea").forEach(resizeAdaptiveTextarea);
+  table.dataset.adaptiveLayoutReads = "0";
+  table.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
+  const textareas = [...table.querySelectorAll("textarea.adaptive-textarea")];
+  textareas.forEach(textarea => { textarea.style.height = "auto"; });
+  const heights = textareas.map(textarea => Math.max(table.classList.contains("teacher-profile-table") ? 32 : 38, textarea.scrollHeight));
+  textareas.forEach((textarea, index) => {
+    textarea.style.height = `${heights[index]}px`;
+    if (textarea.dataset.adaptiveTextareaBound !== "1") { textarea.dataset.adaptiveTextareaBound = "1"; textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea)); }
+  });
   return widths;
 }
 
@@ -4330,7 +4314,7 @@ async function loadLessonRangeOnly() {
 function resetLessonFilter() {
   const range = currentWeekRange();
   const monthKey = lessonFilter.month_key || state?.settings?.month_key || activeMonth;
-  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", student_names: [], start_date: range.start, end_date: range.end, status: "", classroom: "", grade: "", subject: "", query: "", date_preset_initialized: true };
+  lessonFilter = { month_key: monthKey, teacher: "", teacher_names: [], student: "", student_names: [], start_date: range.start, end_date: range.end, status: "", classroom: "", time_slot: "", grade: "", subject: "", query: "", date_preset_initialized: true };
   saveLessonFilter();
 }
 
@@ -4405,6 +4389,7 @@ function dynamicLessonFilterOptions(rows, filter, options = {}) {
     teachers: uniqueSorted(lessonRowsForOption(rows, filter, "teacher", options).map((row) => row.teacher_name)),
     students: uniqueSorted(lessonRowsForOption(rows, filter, "student", options).flatMap((row) => splitStudents(row.student_names))),
     statuses: uniqueSorted(lessonRowsForOption(rows, filter, "status", options).map((row) => rowStatus(row))),
+    times: uniqueSorted(lessonRowsForOption(rows, filter, "time_slot", options).map(row => row.time_slot)),
     classrooms: uniqueSorted(lessonRowsForOption(rows, filter, "classroom", options).map((row) => row.classroom)),
     grades: uniqueSorted(lessonRowsForOption(rows, filter, "grade", options).map((row) => row.grade)),
     subjects: uniqueSorted(lessonRowsForOption(rows, filter, "subject", options).map((row) => row.subject)),
@@ -4422,6 +4407,7 @@ function lessonMatchesFilter(row, filter, options = {}) {
     const needle = filter.student.toLowerCase();
     if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
   }
+  if (filter.time_slot && String(row.time_slot || "") !== filter.time_slot) return false;
   if (filter.classroom && !textContains(row.classroom, filter.classroom)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
@@ -4889,6 +4875,7 @@ function renderLessonFilterBar({ rows, filteredRows, compact = false }) {
     </label>
   ` : "";
   const fullFilters = compact ? "" : `
+    <label class="filter-field"><span>时间</span>${multiSelectControl({ className: "lesson-filter-input lesson-filter-select", field: "time_slot", selected: lessonFilter.time_slot, values: opts.times, placeholder: "全部时间", clearLabel: "全部时间", searchable: true, searchPlaceholder: "搜索时间", multiple: false, emptyText: "暂无匹配结果" })}</label>
     <label class="filter-field">
       <span>教室</span>
       ${multiSelectControl({ className: "lesson-filter-input lesson-filter-select", field: "classroom", selected: lessonFilter.classroom, values: opts.classrooms, placeholder: "全部教室", clearLabel: "全部教室", searchable: true, searchPlaceholder: "搜索教室", multiple: false, emptyText: "暂无匹配结果" })}
@@ -5172,13 +5159,20 @@ function renderStudentBadge(student, options = {}) {
   return `<${tag} class="entity-badge student-badge ${removable ? "student-badge-removable" : ""}"${removable ? ' type="button"' : ""}${attrs}${badgeColorStyle(getStudentGradeColor(grade))}><span>${escapeHtml(name)}</span>${removable ? '<span class="student-badge-remove" aria-hidden="true">×</span>' : ""}</${tag}>`;
 }
 
+function renderMissingField(label) { return `<span class="muted-tip missing-field">未填${escapeHtml(label)}</span>`; }
+function renderLessonStudentBadges(row = {}) {
+  return splitStudents(row.student_names).map(name => renderStudentBadge(name, { fallbackGrade: row.grade })).join("") || renderMissingField("学生");
+}
+
 function renderGradeBadge(grade, className = "") {
-  const label = String(grade || "").trim() || "未填年级";
+  const label = String(grade || "").trim();
+  if (!label) return renderMissingField("年级");
   return `<span class="entity-badge grade-badge ${className}"${badgeColorStyle(getStudentGradeColor(label))}>${escapeHtml(label)}</span>`;
 }
 
 function renderSubjectBadge(subject, className = "") {
-  const label = String(subject || "").trim() || "未填科目";
+  const label = String(subject || "").trim();
+  if (!label) return renderMissingField("科目");
   return `<span class="entity-badge subject-badge ${className}"${badgeColorStyle(getSubjectColor(label))}>${escapeHtml(label)}</span>`;
 }
 
@@ -6262,7 +6256,9 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
       alert(error.message);
     }
   } else {
-    /* ── A 档：只更新当前单元格，不重绘整行/整表 ────────────────── */
+    /* A 档的展示与状态同步；不依赖学生字段触发行重绘。 */
+    const display = input.closest("td")?.querySelector(".lesson-inline-picker");
+    if (display) display.innerHTML = lessonInlinePickerDisplay({ ...previousLesson, [field]: value }, field);
     try {
       const result = await request(`/api/lessons/${lessonId}`, {
         method: "PATCH",
@@ -6271,9 +6267,10 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
 
       /* [A档] 写入 state */
       patchLessonInState(result);
-      if (field === "course_type" || field === "grade") {
-        const typeSelect = input.closest("tr")?.querySelector('[data-field="course_type"]');
-        if (typeSelect) rebuildLessonCreateSelect(typeSelect, courseTypeSelectOptions(result.grade, result.course_type));
+      if (display) display.innerHTML = lessonInlinePickerDisplay(result, field);
+      if (field === "grade") {
+        const typeDisplay = input.closest("tr")?.querySelector('[data-field="course_type"] .lesson-inline-picker');
+        if (typeDisplay) typeDisplay.innerHTML = lessonInlinePickerDisplay(result, "course_type");
       }
 
       /* [约束5] 展示 warnings */
@@ -6281,6 +6278,7 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
         applyLessonWarnings(lessonId, result.warnings);
       }
     } catch (error) {
+      if (display) display.innerHTML = lessonInlinePickerDisplay(previousLesson, field);
       /* [A档] 失败回滚 DOM 值 */
       input.value = previousLesson[field] ?? "";
       alert(error.message);
@@ -6311,6 +6309,7 @@ function lessonInlinePickerCell(row, field, tdClass = "") {
     status: "状态",
     time_slot: "时间",
     classroom: "教室",
+    course_type: "类型",
     grade: "年级",
     subject: "科目",
   }[field] || "课程字段";
@@ -6325,6 +6324,7 @@ function lessonInlinePickerCell(row, field, tdClass = "") {
 function scheduleInlinePickerOptions(row = {}, field = "") {
   const current = row[field] || "";
   const manualLabel = lessonManualLabel(field);
+  if (field === "course_type") return courseTypeSelectOptions(row.grade, current);
   if (field === "time_slot" || field === "classroom") {
     return lessonCandidateSelectOptions({
       field,
@@ -6362,12 +6362,17 @@ function openScheduleInlinePicker(trigger) {
   const row = (state.lessons || []).find((item) => String(item.id) === String(trigger.dataset.lessonId));
   const field = trigger.dataset.field || "";
   if (!row || !field) return;
+  openInlineCustomPicker(trigger, { id: row.id, field, choices: scheduleInlinePickerOptions(row, field), onChange: handleLessonFieldChange });
+}
+
+function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
+  if (!trigger || isReadonlyUser()) return;
   closeScheduleInlinePicker();
   const select = document.createElement("select");
   select.className = `schedule-inline-picker-native ${field === "status" ? "status-select" : ""}`;
-  select.dataset.id = String(row.id);
+  select.dataset.id = String(id);
   select.dataset.field = field;
-  select.innerHTML = scheduleInlinePickerOptions(row, field);
+  select.innerHTML = choices;
   trigger.appendChild(select);
   enhanceCustomSelects();
   const wrapper = select.nextElementSibling?.matches?.(".custom-select") ? select.nextElementSibling : null;
@@ -6380,7 +6385,7 @@ function openScheduleInlinePicker(trigger) {
   activeScheduleInlinePicker = { select, wrapper, menu, trigger };
   trigger.setAttribute("aria-expanded", "true");
   select.addEventListener("change", () => {
-    Promise.resolve(handleLessonFieldChange(select)).finally(() => closeScheduleInlinePicker());
+    Promise.resolve(onChange(select)).finally(() => closeScheduleInlinePicker());
   }, { once: true });
   openCustomSelect(wrapper);
 }
@@ -6416,6 +6421,10 @@ function applyLessonTableStudentColumnWidth(width = measureVisibleStudentColumnW
   document.querySelector(".lesson-table")?.style.setProperty("--lesson-student-column-width", `${width}px`);
 }
 
+function validCourseTypeForGrade(grade, current = "") {
+  return (state?.lookups?.course_types?.[state?.lookups?.course_type_grades?.[grade]] || []).includes(current) ? current : "";
+}
+
 function courseTypeSelectOptions(grade, current = "") {
   const scope = state?.lookups?.course_type_grades?.[grade];
   const values = state?.lookups?.course_types?.[scope] || [];
@@ -6434,7 +6443,7 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
     `<td class="readonly col-status">${renderCourseStatusBadge(rowStatus(row))}</td>`,
     `<td class="readonly col-grade">${renderGradeBadge(row.grade)}</td>`,
     `<td class="readonly col-subject">${renderSubjectBadge(row.subject)}</td>`,
-    `<td class="readonly col-students"><div class="lesson-student-badges">${splitStudents(row.student_names).map((name) => renderStudentBadge(name, { fallbackGrade: row.grade })).join("") || '<span class="muted-tip">未填学生</span>'}</div></td>`,
+    `<td class="readonly col-students"><div class="lesson-student-badges">${renderLessonStudentBadges(row)}</div></td>`,
     lessonTextCell("col-note", row.notes),
     lessonTextCell("col-index narrow", String(cumulative), { title: String(cumulative) }),
   ].join("");
@@ -6448,7 +6457,7 @@ function lessonEditCells(row, visibleIndex, cumulative) {
       <td class="readonly col-weekday">${escapeHtml(weekdayCn(row.date))}</td>
       ${lessonInlinePickerCell(row, "time_slot", "col-time")}
       ${lessonInlinePickerCell(row, "classroom", "col-room")}
-      <td class="col-type"><select class="cell-select lesson-field" data-id="${row.id}" data-field="course_type">${courseTypeSelectOptions(row.grade, row.course_type)}</select></td>
+      ${lessonInlinePickerCell(row, "course_type", "col-type")}
       ${lessonInlinePickerCell(row, "status", "col-status")}
       ${lessonInlinePickerCell(row, "grade", "col-grade")}
       ${lessonInlinePickerCell(row, "subject", "col-subject")}
@@ -7632,7 +7641,7 @@ function lessonStudentPickerMarkup({
   const candidateNames = optionValuesWithCurrent(values, selectedNames, true);
   return `
     <span class="multi-select schedule-student-popover ${escapeHtml(className)}" data-placeholder="选择学生" data-student-fallback-grade="${escapeHtml(fallbackGrade)}">
-      <button class="multi-select-toggle lesson-schedule-student-field ${escapeHtml(toggleClass)}" type="button" aria-expanded="false" aria-label="编辑学生" title="编辑学生"><span class="lesson-student-badges schedule-student-badges">${selectedNames.map((name) => renderStudentBadge(name, { fallbackGrade })).join("") || '<span class="muted-tip">未填学生</span>'}</span></button>
+      <button class="multi-select-toggle lesson-schedule-student-field ${escapeHtml(toggleClass)}" type="button" aria-expanded="false" aria-label="编辑学生" title="编辑学生"><span class="lesson-student-badges schedule-student-badges">${selectedNames.map((name) => renderStudentBadge(name, { fallbackGrade })).join("") || renderMissingField("学生")}</span></button>
       <input class="multi-select-value ${escapeHtml(hiddenClass)}" ${hiddenAttrs} type="hidden" value="${escapeHtml(selectedNames.join("\n"))}">
       <span class="multi-select-menu schedule-student-menu" role="dialog" aria-label="学生选择">
         <div class="lesson-student-picker-header">
@@ -8433,6 +8442,7 @@ function renderMatrixDateFilter() {
     <div class="filter-bar compact matrix-date-filter">
       <label>日期范围</label>
       ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}
+      <div class="matrix-tabs-region">${renderMatrixViewTabs()}</div>
       <button class="btn matrix-range-reset" type="button">重置</button>
     </div>
   `;
@@ -8452,7 +8462,6 @@ function renderWeekMatrix() {
   );
   contentEl.innerHTML = `
     <div class="matrix-date-region">${renderMatrixDateFilter()}</div>
-    <div class="matrix-tabs-region">${renderMatrixViewTabs()}</div>
     <div class="matrix-filter-region">${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}</div>
     <div class="matrix-view-region">${renderMatrixScheduleView(rows, range, conflicts)}</div>
   `;
@@ -8536,10 +8545,10 @@ function renderFeeDetails() {
         <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
       </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
-        <table class="fee-detail-table uniform-table nowrap-table">
+        <table class="fee-detail-table uniform-table nowrap-table" data-adaptive-table="true">
           <colgroup>
-            <col class="fee-detail-col-select"><col><col><col><col><col class="fee-detail-col-time">
-            <col><col><col><col><col><col><col>
+            <col class="fee-detail-col-select" data-column-type="select"><col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
+            <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
           </colgroup>
           <thead>
             <tr>
@@ -9286,9 +9295,9 @@ function rechargeAnalysisMarkup(rows = []) {
       </div>
       <div class="recharge-analysis-grid">
         ${cards.map(([label, value, type]) => `
-          <div class="recharge-analysis-card ${numberValue(value) < 0 ? "is-negative" : ""}">
-            <span>${escapeHtml(label)}</span>
-            <strong>${type === "money" ? escapeHtml(formatMoney(value)) : Number(value || 0).toLocaleString("zh-CN")}</strong>
+          <div class="metric recharge-analysis-card ${numberValue(value) < 0 ? "is-negative" : ""}">
+            <span class="metric-label">${escapeHtml(label)}</span>
+            <strong class="metric-value">${type === "money" ? escapeHtml(formatMoney(value)) : Number(value || 0).toLocaleString("zh-CN")}</strong>
           </div>
         `).join("")}
       </div>
@@ -9584,8 +9593,12 @@ function studentStatementDateRange(report = studentStatementReport()) {
   return { start: range.start || "", end: range.end || "" };
 }
 
+function studentStatementHasGift(summary = {}) {
+  return [summary.opening_gift_balance, summary.cur_gift, summary.closing_gift_balance ?? summary.gift_balance].some(value => numberValue(value) !== 0);
+}
+
 function studentStatementMetricCards(summary = {}, { parent = false } = {}) {
-  const hideGift = parent && [summary.opening_gift_balance, summary.cur_gift, summary.closing_gift_balance ?? summary.gift_balance].every(value => numberValue(value) === 0);
+  const hideGift = parent && !studentStatementHasGift(summary);
   return [
     { label: "有效上课次数", value: String(summary.lesson_count || 0) },
     { label: "课程费用", value: formatMoney(summary.total_fee || 0) },
@@ -9598,9 +9611,9 @@ function studentStatementMetricCards(summary = {}, { parent = false } = {}) {
   ].filter(card => !hideGift || !card.label.includes("赠送"));
 }
 
-function drawShotMetricCards(ctx, colors, cards, x, y, width) {
+function drawShotMetricCards(ctx, colors, cards, x, y, width, columns = cards.length) {
   const gap = 12;
-  const cardWidth = (width - gap * (cards.length - 1)) / cards.length;
+  const cardWidth = (width - gap * (columns - 1)) / columns;
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   cards.forEach((card, index) => {
@@ -9695,8 +9708,8 @@ function studentStatementCanvas(report = studentStatementReport()) {
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
   drawStudentStatementHeader(ctx, colors, report?.student_name || selectedStudent || "未选择学生", dateRange, width);
   const metricCards = studentStatementMetricCards(summary, { parent: true });
-  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), contentX, 142, contentWidth);
-  drawShotMetricCards(ctx, colors, metricCards.slice(4), contentX, 238, contentWidth);
+  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), contentX, 142, contentWidth, 4);
+  drawShotMetricCards(ctx, colors, metricCards.slice(4), contentX, 238, contentWidth, 4);
   let y = 342;
   drawShotSectionTitle(ctx, colors, "月份汇总", contentX, y, contentWidth);
   y += 18;
@@ -9923,11 +9936,11 @@ function studentQueryMonthColumns(report, { parent = false } = {}) {
   const subjects = ["数学", "英语", "物理", "化学"].filter(subject => (report?.month_rows || []).some(row => Number(row.subject_counts?.[subject]) > 0));
   return [
     { label: "月份", value: row => formatMonthOption(row.month_key) },
-    { label: "有效课次", value: row => row.lesson_count || 0 },
-    ...subjects.map(subject => ({ label: subject, value: row => row.subject_counts?.[subject] || 0 })),
+    { label: "有效课次", value: row => row.lesson_count || 0, align: "center" },
+    ...subjects.map(subject => ({ label: subject, value: row => row.subject_counts?.[subject] || 0, align: "center" })),
     { label: "当月课费", value: row => formatMoney(row.total_fee), align: "right" },
     { label: "现金充值", value: row => formatMoney(row.cur_recharge), align: "right" },
-    ...(!parent ? [{ label: "赠送充值", value: row => formatMoney(row.cur_gift), align: "right" }] : []),
+    ...(!parent || studentStatementHasGift(report?.summary) ? [{ label: "赠送充值", value: row => formatMoney(row.cur_gift), align: "right" }] : []),
     ...(parent ? [
       { label: "月末现金", value: row => formatMoney(row.actual_balance), align: "right", negative: row => numberValue(row.actual_balance) < 0 },
       { label: "月末赠送", value: row => formatMoney(row.gift_balance), align: "right" },
@@ -9937,7 +9950,7 @@ function studentQueryMonthColumns(report, { parent = false } = {}) {
 
 function studentQueryMonthRowsMarkup(report = studentStatementReport()) {
   const columns = studentQueryMonthColumns(report);
-  return (report?.month_rows || []).map(row => `<tr>${columns.map(column => `<td class="text-cell ${column.align === "right" ? "right" : ""}">${escapeHtml(column.value(row))}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${columns.length}" class="empty">暂无期间明细</td></tr>`;
+  return (report?.month_rows || []).map(row => `<tr>${columns.map(column => `<td class="text-cell ${column.align === "right" ? "right" : column.align === "center" ? "center" : ""}">${escapeHtml(column.value(row))}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${columns.length}" class="empty">暂无期间明细</td></tr>`;
 }
 
 function studentQueryDetailRowsMarkup(report = studentStatementReport()) {
@@ -10150,6 +10163,22 @@ function backupDeleteLocation(row = {}) {
   if (row.managed_relative_path || !["missing", "deleted"].includes(row.status)) locations.push("服务器本地");
   if (row.remote_path || row.remote_checksum_path) locations.push("百度网盘");
   return locations.join(" / ") || "备份记录";
+}
+
+let backupCleanupDialog = null;
+function backupCleanupMarkup() {
+  const dialog = backupCleanupDialog; if (!dialog) return "";
+  const preview = dialog.preview, summary = preview?.summary || {};
+  const entries = dialog.result?.results || preview?.entries || [];
+  return `<div class="modal-backdrop backup-cleanup-modal"><div class="modal-panel managed-file-browser-panel" role="dialog" aria-modal="true" aria-label="删除多余文件预览">
+    <div class="modal-head"><div class="modal-title">删除多余文件${dialog.result ? "结果" : "预览"}</div></div>
+    <p>${dialog.busy ? "正在扫描或清理，请稍候…" : "先核对以下服务端扫描结果，再确认删除。固定、运行中、最后有效副本和未知历史文件受保护。"}</p>
+    ${dialog.error ? `<p class="danger">${escapeHtml(dialog.error)}</p>` : ""}
+    ${preview ? `<p>本地 ${summary.local_files} 个文件（${formatFileSize(summary.local_bytes)}），百度 ${summary.remote_files} 个文件（${summary.remote_bytes == null ? "空间未知" : formatFileSize(summary.remote_bytes)}）；关联 ${summary.backups} 条备份，孤立 ${summary.orphan_files} 个文件。</p>${preview.warnings.map(w => `<p class="muted-tip">${escapeHtml(w)}</p>`).join("")}` : ""}
+    ${dialog.result ? `<p>实际删除 ${dialog.result.deleted_files} 个，失败/跳过 ${dialog.result.failed_files} 个；本地释放 ${formatFileSize(dialog.result.local_bytes)}，百度释放 ${formatFileSize(dialog.result.remote_bytes)}。</p>` : ""}
+    <div class="table-wrap managed-file-browser-table-wrap"><table class="uniform-table managed-file-browser-table"><thead><tr><th>来源</th><th>文件</th><th>备份</th><th>类型</th><th>时间</th><th>大小</th><th>原因/结果</th></tr></thead><tbody>${entries.flatMap(entry => entry.files.map(file => `<tr><td>${file.source === "local" ? "本地" : "百度"}</td><td>${escapeHtml(file.relative_path)}</td><td>${entry.backup_id || "无记录"}</td><td>${escapeHtml(entry.backup_type || entry.kind)}</td><td>${escapeHtml(file.created_at || "未知")}</td><td>${file.size == null ? "未知" : formatFileSize(file.size)}</td><td>${escapeHtml(file.status || entry.reason || "已完成")}${entry.reason && file.status ? ` · ${escapeHtml(entry.reason)}` : ""}</td></tr>`)).join("") || '<tr><td colspan="7">没有已确认可清理的文件</td></tr>'}</tbody></table></div>
+    <div class="modal-actions"><button class="btn backup-cleanup-close" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button>${!dialog.result ? `<button class="btn danger backup-cleanup-confirm" type="button" ${dialog.busy || !preview?.entries.length ? "disabled" : ""}>确认删除</button>` : ""}</div>
+  </div></div>`;
 }
 
 function backupDeleteDialogMarkup() {
@@ -10590,7 +10619,7 @@ function renderAudit() {
       </div>
     </section>
     <section class="band audit-panel data-center-section" data-region="backup-records">
-      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><div class="audit-toolbar"><button class="btn managed-local-excel-open" type="button">查看本地Excel文件</button><button class="btn managed-baidu-excel-open" type="button">查看百度Excel文件</button><button class="btn backup-refresh" type="button">刷新</button></div></div>
+      <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><div class="audit-toolbar"><button class="btn managed-local-excel-open" type="button">查看本地Excel文件</button><button class="btn managed-baidu-excel-open" type="button">查看百度Excel文件</button>${isOwnerRoleValue(auth.user?.role) && !isReadonlyUser() ? '<button class="btn backup-cleanup-open" type="button">删除多余文件</button>' : ""}<button class="btn backup-refresh" type="button">刷新</button></div></div>
       ${backupBatchDeleteToolbarMarkup()}
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
         <thead><tr><th class="select-col backup-select-col"><input class="backup-record-select-all" type="checkbox" ${allDeletableSelected ? "checked" : ""} ${deletableBackupRows.length ? "" : "disabled"} aria-label="全选当前可删除备份记录"></th><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
@@ -10600,6 +10629,7 @@ function renderAudit() {
     ${baiduSimpleGuideMarkup()}
     ${baiduTestDetailsMarkup()}
     ${preflightDetailsMarkup()}
+    ${backupCleanupMarkup()}
     ${backupDeleteDialogMarkup()}
     ${backupBatchDeleteDialogMarkup()}
     ${managedExcelBrowserMarkup()}`;
@@ -11601,7 +11631,7 @@ function renderStudentPricing() {
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-flex-column="7" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
-          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-max-width="640"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long" data-max-width="1200"></colgroup>
+          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-max-width="640"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long" data-max-width="480"></colgroup>
           <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
@@ -11660,7 +11690,7 @@ function renderClassGroups() {
                 <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
-                <td class="adaptive-center"><select class="cell-select class-group-field" data-id="${row.id}" data-field="course_type">${courseTypeSelectOptions(row.grade, row.course_type)}</select></td>
+                <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"><span class="lesson-inline-picker">${escapeHtml(row.course_type || "按人数默认")}</span></td>
                 <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
                 <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
@@ -12074,7 +12104,7 @@ function renderProfileDirectory(kind = profileTab) {
   renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
     <table class="profile-table teacher-profile-table uniform-table nowrap-table" data-adaptive-table="true">
-      <colgroup><col data-column-type="select"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long" data-max-width="1200"></colgroup>
+      <colgroup><col data-column-type="select"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long" data-max-width="480"></colgroup>
       <thead><tr><th class="select-col"><input class="teacher-profile-select-all" type="checkbox" ${allVisibleTeachersSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前老师档案"></th><th>序号</th><th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${rows.map((row, index) => `
@@ -12942,9 +12972,9 @@ function renderTeacherSalaryRules() {
         ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="8">
-          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status"><col data-column-type="status"><col data-column-type="long"></colgroup>
-          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>启用</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+        <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status" data-max-width="180"><col data-column-type="long"></colgroup>
+          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
@@ -12954,11 +12984,10 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell adaptive-center">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(rule.student_names, { fallbackGrade: rule.grade })}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell adaptive-center"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"></td>
-                <td class="text-cell adaptive-center">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</td>
+                <td class="text-cell adaptive-center rule-status-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}<label class="rule-activation"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"><span>${teacherSalaryRuleEnabled(rule) ? "参与匹配" : "已停用"}</span></label></td>
                 <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide teacher-salary-rule-field" data-field="notes" rows="1" wrap="soft">${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}</textarea></td>
               </tr>
-            `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
+            `).join("") || `<tr><td colspan="8" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -13159,9 +13188,13 @@ function courseNoticeColumns(mode = "parent") {
   return columns;
 }
 
+function buildCourseNoticeScreenshotModel(item, mode = "parent", title = mode === "teacher" ? "本周课程安排" : "课程通知") {
+  const columns = courseNoticeColumns(mode), rows = item.lessons || [];
+  return { title, columns, rows, lessonCount: Number(item.lesson_count ?? rows.length), cells: rows.map(row => columns.map(([key]) => courseNoticeCellValue(row, key))) };
+}
+
 function renderCourseNoticePreview(item, mode = "parent", title = "课程通知") {
-  const rows = item.lessons || [];
-  const columns = courseNoticeColumns(mode);
+  const { rows, columns } = buildCourseNoticeScreenshotModel(item, mode, title);
   const identityMarkup = courseNoticeIdentityMarkup(item, mode, { includeRecipientSummary: false });
   return `
     <div class="notice-shot-preview" data-shot-key="${escapeHtml(item.send_object_key)}">
@@ -13270,7 +13303,7 @@ function courseNoticeIdentityRows(item = {}, mode = "parent", { includeRecipient
   if (mode === "teacher") {
     const teacherRow = { key: "teacher", badges: teacherNoticeObjectNames(item).map((label) => ({ type: "teacher", label })) };
     return includeRecipientSummary
-      ? [teacherRow, { key: "students", badges: studentBadges }, { key: "grade-subject", badges: gradeSubjectBadges }]
+      ? [teacherRow, { key: "grade-subject", badges: grades.map(label => ({ type: "grade", label })) }]
       : [];
   }
   if (!includeRecipientSummary) return [];
@@ -13340,7 +13373,7 @@ function groupedCourseNoticeObjects(items = []) {
 function noticeSimpleAction(item = {}, actionStore = {}) {
   const key = item.send_object_key || "";
   if (!actionStore[key]) {
-    actionStore[key] = { next: item.completed ? "message" : "image", done: Boolean(item.completed) };
+    actionStore[key] = { image: Boolean(item.completed), message: Boolean(item.completed), done: Boolean(item.completed), busy: false };
   }
   return actionStore[key];
 }
@@ -13348,7 +13381,7 @@ function noticeSimpleAction(item = {}, actionStore = {}) {
 function noticeSimpleStatus(item = {}, actionStore = {}) {
   const action = noticeSimpleAction(item, actionStore);
   if (item.completed || action.done) return "已完成";
-  return action.next === "message" ? "待复制文案" : "待复制截图";
+  return action.image ? "图片已复制" : action.message ? "文案已复制" : "未完成";
 }
 
 function noticeSimpleTile(item = {}, {
@@ -13360,11 +13393,12 @@ function noticeSimpleTile(item = {}, {
   const action = noticeSimpleAction(item, actionStore);
   const done = Boolean(item.completed || action.done);
   return `
-    <button class="${escapeHtml(className)} ${done ? "done" : ""}" type="button" data-send-key="${escapeHtml(item.send_object_key)}">
+    <article class="${escapeHtml(className)} ${done ? "done" : ""}" data-send-key="${escapeHtml(item.send_object_key)}" data-notice-mode="${className.includes("teacher") ? "teacher" : "parent"}">
       ${details}
       <span class="notice-simple-state">${escapeHtml(noticeSimpleStatus(item, actionStore))}</span>
       <span class="notice-simple-meta">${escapeHtml(meta || `${Number(item.lesson_count || item.lessons?.length || 0)} 节课`)}</span>
-    </button>
+      <div class="notice-task-actions"><button class="btn notice-task-copy" type="button" data-action="image" ${action.busy ? "disabled" : ""}>${action.image ? "重新复制图片" : "复制图片"}</button><button class="btn notice-task-copy" type="button" data-action="message" ${action.busy ? "disabled" : ""}>${action.message ? "重新复制文案" : "复制文案"}</button></div>
+    </article>
   `;
 }
 
@@ -13378,8 +13412,39 @@ function courseNoticeTagGroup(item = {}) {
   return badges ? `<span class="notice-course-tag-group entity-badge-list">${badges}</span>` : "";
 }
 
+function drawCourseNoticePanel(ctx, colors, width, height, outerPadding, titleHeight, title, truncate = false) {
+  const panelX = outerPadding / 2, panelY = outerPadding / 2;
+  const panelWidth = width - outerPadding, panelHeight = height - outerPadding;
+  ctx.save();
+  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillStyle = colors.panel;
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.restore();
+  ctx.strokeStyle = colors.line;
+  ctx.strokeRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.fillStyle = colors.brand;
+  ctx.fillRect(panelX, panelY, panelWidth, 5);
+  ctx.fillStyle = colors.brandPale;
+  ctx.fillRect(panelX + 1, panelY + 5, panelWidth - 2, titleHeight - 6);
+  ctx.fillStyle = colors.brandDark;
+  ctx.font = "900 24px Microsoft YaHei, PingFang SC, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  if (truncate) shotText(ctx, title, width / 2, panelY + titleHeight / 2 + 3, width - 2 * outerPadding);
+  else ctx.fillText(title, width / 2, panelY + titleHeight / 2 + 3);
+}
+function courseNoticeSimpleModel(item = {}, mode = "parent") {
+  return {
+    title: mode === "teacher" ? teacherNoticeObjectNames(item).join("、") : (item.send_object_name || courseNoticeObjectStudents(item).join("、")),
+    lines: mode === "teacher" ? [courseNoticeObjectGrades(item).join("、") || "未填年级"] : [[...courseNoticeObjectGrades(item), ...courseNoticeObjectSubjects(item)].join(" · ")],
+    count: Number(item.lesson_count ?? item.lessons?.length ?? 0),
+  };
+}
 function courseNoticeSimpleDetails(item = {}, mode = "parent") {
-  return courseNoticeIdentityMarkup(item, mode);
+  const model = courseNoticeSimpleModel(item, mode);
+  return `<strong class="notice-task-title" title="${escapeHtml(model.title)}">${escapeHtml(model.title)}</strong><span class="notice-task-description">${escapeHtml(model.lines.join(" · "))}</span>`;
 }
 
 function courseNoticeSimpleAction(item = {}) {
@@ -13832,15 +13897,11 @@ function courseNoticeCanvasBadgeLines(ctx, badges = [], width = 0, wrap = false)
   return lines;
 }
 
-function courseNoticeScreenshotLayout(mode = "parent") {
-  return mode === "teacher" ? teacherCourseNoticeLayoutMode : courseNoticeLayoutMode;
-}
-
-function courseNoticeCanvas(item, mode = "parent", title = "课程通知", { layoutMode = courseNoticeScreenshotLayout(mode) } = {}) {
+function courseNoticeCanvas(item, mode = "parent", title = mode === "teacher" ? "本周课程安排" : "课程通知") {
+  const model = buildCourseNoticeScreenshotModel(item, mode, title);
   const colors = courseNoticeShotPalette();
-  const columns = courseNoticeColumns(mode);
-  const rows = item.lessons || [];
-  const identityRows = courseNoticeIdentityRows(item, mode, { includeRecipientSummary: layoutMode === "simple" });
+  const { columns, rows } = model;
+  const identityRows = [];
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   const font = "16px Microsoft YaHei, PingFang SC, Arial, sans-serif";
@@ -13882,38 +13943,18 @@ function courseNoticeCanvas(item, mode = "parent", title = "课程通知", { lay
   const height = titleHeight + identityHeight + tableHeight + outerPadding * 2;
   const tableX = outerPadding;
   const tableY = outerPadding + titleHeight + identityHeight;
-  const panelX = outerPadding / 2;
-  const panelY = outerPadding / 2;
-  const panelWidth = width - outerPadding;
-  const panelHeight = height - outerPadding;
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = width * ratio;
   canvas.height = height * ratio;
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
   canvas.dataset.noticeIdentity = JSON.stringify(identityRows);
-  canvas.dataset.noticeLayout = layoutMode;
+  canvas.dataset.noticeLayout = "preview";
+  canvas.dataset.noticeModel = JSON.stringify(model);
   ctx.scale(ratio, ratio);
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, width, height);
-  ctx.save();
-  ctx.shadowColor = "rgba(16, 32, 51, 0.08)";
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetY = 4;
-  ctx.fillStyle = colors.panel;
-  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
-  ctx.restore();
-  ctx.strokeStyle = colors.line;
-  ctx.strokeRect(panelX, panelY, panelWidth, panelHeight);
-  ctx.fillStyle = colors.brand;
-  ctx.fillRect(panelX, panelY, panelWidth, 5);
-  ctx.fillStyle = colors.brandPale;
-  ctx.fillRect(panelX + 1, panelY + 5, panelWidth - 2, titleHeight - 6);
-  ctx.fillStyle = colors.brandDark;
-  ctx.font = "900 24px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(title, width / 2, panelY + titleHeight / 2 + 3);
+  drawCourseNoticePanel(ctx, colors, width, height, outerPadding, titleHeight, title);
   ctx.font = font;
   let identityY = outerPadding + titleHeight + 6;
   identityLayouts.forEach((identityRow) => {
@@ -14006,7 +14047,7 @@ async function completeCourseNoticeItem(item, endpoint = "/api/course-notice/com
   item.completed_count = item.lesson_count;
 }
 
-async function copyCourseNoticeImage(item, mode = "parent", title = "课程通知", endpoint = "/api/course-notice/complete", onCompleted = null) {
+async function copyCourseNoticeImage(item, mode = "parent", title = "课程通知", endpoint = "/api/course-notice/complete", onCompleted = null, markComplete = true) {
   const canvas = courseNoticeCanvas(item, mode, title);
   const blob = await canvasBlob(canvas);
   if (!navigator.clipboard?.write || !window.ClipboardItem) {
@@ -14014,13 +14055,14 @@ async function copyCourseNoticeImage(item, mode = "parent", title = "课程通�
     throw new Error("当前浏览器不支持直接复制图片，已改为下载图片");
   }
   await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-  await completeCourseNoticeItem(item, endpoint);
+  if (markComplete) await completeCourseNoticeItem(item, endpoint);
   logClientOperation(mode === "teacher" ? "teacher_notice_copy_image" : "parent_notice_copy_image", {
     content: `复制${mode === "teacher" ? "老师" : "家长"}课程截图：${item.send_object_name || "课程安排"}`,
     target_type: mode === "teacher" ? "teacher_course_notice" : "course_notice",
     target_id: item.send_object_key || "",
     details: { object_name: item.send_object_name || "", lesson_count: item.lesson_count || item.lessons?.length || 0 },
   });
+  if (!markComplete) { showToast("图片已复制"); return; }
   showToast(`${item.send_object_name} 已完成`);
   if (typeof onCompleted === "function") onCompleted(item);
   else render();
@@ -14100,31 +14142,37 @@ function bindTeacherCourseNoticeContentEvents(root = document) {
     });
   });
 
-  root.querySelectorAll(".teacher-notice-simple-tile").forEach((button) => {
-    if (button.dataset.noticeBound === "1") return;
+  bindNoticeTaskEvents(root, "teacher");
+}
+
+async function performNoticeTask(item, mode, kind) {
+  const store = mode === "teacher" ? teacherCourseNoticeSimpleActions : courseNoticeSimpleActions;
+  const action = noticeSimpleAction(item, store);
+  if (action.busy) return;
+  action.busy = true;
+  try {
+    const endpoint = mode === "teacher" ? "/api/teacher-course-notice/complete" : "/api/course-notice/complete";
+    if (kind === "image") await copyCourseNoticeImage(item, mode, mode === "teacher" ? "本周课程安排" : "课程通知", endpoint, null, false);
+    else {
+      await navigator.clipboard.writeText(mode === "teacher" ? teacherCourseNoticeFullMessage(item) : courseNoticeFullMessage(item));
+      showToast("文案已复制");
+    }
+    action[kind] = true;
+    if (action.image && action.message && !action.done) { await completeCourseNoticeItem(item, endpoint); action.done = true; }
+  } finally { action.busy = false; }
+}
+function bindNoticeTaskEvents(root, mode) {
+  root.querySelectorAll(`.notice-simple-tile[data-notice-mode="${mode}"] .notice-task-copy`).forEach(button => {
+    if (button.dataset.noticeBound) return;
     button.dataset.noticeBound = "1";
     button.addEventListener("click", async () => {
-      const item = findTeacherCourseNoticeObject(button.dataset.sendKey);
+      const tile = button.closest(".notice-simple-tile");
+      const item = mode === "teacher" ? findTeacherCourseNoticeObject(tile.dataset.sendKey) : findCourseNoticeObject(tile.dataset.sendKey);
       if (!item) return;
-      const action = noticeSimpleAction(item, teacherCourseNoticeSimpleActions);
-      button.disabled = true;
-      try {
-        if (action.next === "message") {
-          await navigator.clipboard.writeText(teacherCourseNoticeFullMessage(item));
-          action.done = true;
-          action.next = "image";
-          showToast("文案已复制");
-        } else {
-          await copyCourseNoticeImage(item, "teacher", "本周课程安排", "/api/teacher-course-notice/complete", updateTeacherCourseNoticeModeOnly);
-          action.next = "message";
-          action.done = true;
-        }
-        updateTeacherCourseNoticeModeOnly();
-      } catch (error) {
-        showToast(error.message || "操作失败", "error");
-      } finally {
-        button.disabled = false;
-      }
+      tile.querySelectorAll("button").forEach(control => { control.disabled = true; });
+      try { await performNoticeTask(item, mode, button.dataset.action); }
+      catch (error) { showToast(error.message || "复制失败，请重试", "error"); }
+      finally { if (mode === "teacher") updateTeacherCourseNoticeModeOnly(); else render(); }
     });
   });
 }
@@ -15355,14 +15403,36 @@ function classGroupCreateMarkup() {
 }
 
 function wireEvents() {
+  document.querySelector(".backup-cleanup-open")?.addEventListener("click", async () => {
+    const dialog = { busy: true }; backupCleanupDialog = dialog; rerenderContent(renderAudit);
+    try { dialog.preview = await request("/api/data-center/cleanup/preview", { method: "POST", body: {} }); }
+    catch (error) { dialog.error = error.message; }
+    finally { dialog.busy = false; if (view === "audit" && backupCleanupDialog === dialog) rerenderContent(renderAudit); }
+  });
+  document.querySelector(".backup-cleanup-close")?.addEventListener("click", () => { backupCleanupDialog = null; rerenderContent(renderAudit); });
+  document.querySelector(".backup-cleanup-confirm")?.addEventListener("click", async () => {
+    const dialog = backupCleanupDialog; if (!dialog?.preview || dialog.busy) return;
+    dialog.busy = true; rerenderContent(renderAudit);
+    try {
+      dialog.result = await request("/api/data-center/cleanup/execute", { method: "POST", body: { preview_id: dialog.preview.preview_id, confirmed: true } });
+      await refreshBackupData();
+      backupState.fileBrowser = { ...backupState.fileBrowser, items: [], generation: backupState.fileBrowser.generation + 1 };
+      if (backupState.fileBrowser.open) await loadManagedExcelBrowser(backupState.fileBrowser.source);
+    } catch (error) { dialog.error = error.message; }
+    finally { dialog.busy = false; if (view === "audit" && backupCleanupDialog === dialog) rerenderContent(renderAudit); }
+  });
+  document.querySelectorAll(".lesson-table,.fee-detail-table,.recharge-table,.student-history-table,.student-pricing-table,.class-group-table,.student-profile-table,.teacher-salary-table,.teacher-detail-table,.teacher-salary-rule-table,.teacher-profile-table,.student-summary-table").forEach(table => {
+    table.classList.add("business-sticky-table");
+    table.closest(".table-wrap")?.classList.add("business-table-scroll");
+  });
   document.querySelector('.conflict-edit-field[data-field="grade"]')?.addEventListener("change", event => {
     const type = event.target.closest(".lesson-conflict-edit-modal")?.querySelector('[data-field="course_type"]');
-    if (type) rebuildLessonCreateSelect(type, courseTypeSelectOptions(event.target.value));
+    if (type) rebuildLessonCreateSelect(type, courseTypeSelectOptions(event.target.value, validCourseTypeForGrade(event.target.value, type.value)));
   });
   document.querySelector(".new-class-group")?.addEventListener("click", () => { classGroupCreateOpen = true; rerenderContent(renderClassGroups); });
   document.querySelector(".close-class-group-create")?.addEventListener("click", () => { classGroupCreateOpen = false; rerenderContent(renderClassGroups); });
   document.querySelector('.class-group-create-form [name="grade"]')?.addEventListener("change", event => {
-    rebuildLessonCreateSelect(event.target.form.elements.course_type, courseTypeSelectOptions(event.target.value));
+    rebuildLessonCreateSelect(event.target.form.elements.course_type, courseTypeSelectOptions(event.target.value, validCourseTypeForGrade(event.target.value, event.target.form.elements.course_type.value)));
   });
   document.querySelector(".class-group-create-form")?.addEventListener("submit", async event => {
     event.preventDefault();
@@ -17993,6 +18063,23 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".class-group-type-cell").forEach(cell => {
+    const open = () => {
+      const row = (state.class_groups || []).find(item => String(item.id) === cell.dataset.id);
+      if (!row) return;
+      openInlineCustomPicker(cell, { id: row.id, field: "course_type", choices: courseTypeSelectOptions(row.grade, row.course_type), onChange: async input => {
+        try {
+          const result = await request(`/api/class-groups/${row.id}`, { method: "PATCH", body: { course_type: input.value } });
+          Object.assign(row, result.row);
+          cell.querySelector(".lesson-inline-picker").textContent = row.course_type || "按人数默认";
+          scheduleAdaptiveTableColumns(); showToast("班级已保存");
+        } catch (error) { showToast(error.message || "类型保存失败", "error"); }
+      } });
+    };
+    cell.addEventListener("click", event => { if (!event.target.closest(".custom-select")) open(); });
+    cell.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); open(); } });
+  });
+
   document.querySelectorAll(".class-group-field").forEach((input) => {
     input.addEventListener("change", async () => {
       const id = Number(input.dataset.id);
@@ -18646,7 +18733,7 @@ function wireEvents() {
       }
       if (field === "grade") {
         const types = modal.querySelector('[data-field="course_type"]');
-        if (types) rebuildLessonCreateSelect(types, courseTypeSelectOptions(input.value));
+        if (types) rebuildLessonCreateSelect(types, courseTypeSelectOptions(input.value, validCourseTypeForGrade(input.value, types.value)));
       }
       if (field === "date") {
         lessonCreateConflictRows = [];
@@ -19408,31 +19495,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".notice-simple-tile").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const item = findCourseNoticeObject(button.dataset.sendKey);
-      if (!item) return;
-      const action = courseNoticeSimpleAction(item);
-      button.disabled = true;
-      try {
-        if (action.next === "message") {
-          await navigator.clipboard.writeText(courseNoticeFullMessage(item));
-          action.done = true;
-          action.next = "image";
-          showToast("文案已复制");
-          render();
-        } else {
-          await copyCourseNoticeImage(item);
-          action.next = "message";
-          render();
-        }
-      } catch (error) {
-        showToast(error.message || "操作失败", "error");
-      } finally {
-        button.disabled = false;
-      }
-    });
-  });
+  bindNoticeTaskEvents(document, "parent");
 
   document.querySelectorAll(".notice-copy-image").forEach((button) => {
     button.addEventListener("click", async () => {

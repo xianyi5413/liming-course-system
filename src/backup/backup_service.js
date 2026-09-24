@@ -8,7 +8,7 @@ const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = req
 
 const BACKUP_FORMAT = "full_data_excel";
 const MANAGED_SUBDIR = path.join("backups", "full-excel");
-const ACTIVE_BACKUP_JOB_STATUSES = new Set(["queued", "preflight", "exporting", "hashing", "uploading_excel", "uploading_checksum", "verifying_metadata", "downloading_for_verification", "integrity_check"]);
+const { ACTIVE_BACKUP_JOB_STATUSES, localRetentionSelection, remoteRetentionSelection } = require("./retention");
 const BACKUP_COLUMNS = {
   backup_format: "TEXT DEFAULT 'legacy_core_zip'", format_version: "INTEGER DEFAULT 0", trigger: "TEXT DEFAULT ''",
   retention_class: "TEXT DEFAULT ''", managed_relative_path: "TEXT DEFAULT ''", sha256: "TEXT DEFAULT ''",
@@ -279,15 +279,12 @@ class BackupService {
     return result;
   }
   applyRetention(policy = {}) {
-    const limits = { daily: Math.max(1, Number(policy.daily || 14)), monthly: Math.max(1, Number(policy.monthly || 12)), manual: Math.max(1, Number(policy.manual || 20)) };
     const lock = this.acquireLock();
     let db;
     const removed = []; const skipped = [];
     try {
       db = this.database();
-      const successful = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND status IN ('success','delete_partial') AND COALESCE(deleted_at,'')='' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
-      const eligible = successful.filter(row => !Number(row.pinned || 0) && row.verified_at && !ACTIVE_BACKUP_JOB_STATUSES.has(row.job_status) && row.remote_status !== "uploading");
-      const candidates = ["daily", "monthly", "manual"].flatMap(kind => eligible.filter(row => (row.retention_class === "remote" ? "manual" : row.retention_class) === kind).slice(limits[kind]));
+      const { limits, successful, candidates } = localRetentionSelection(db.prepare("SELECT * FROM backup_records").all(), policy);
       let remaining = successful.filter(row => row.status === "success").length;
       for (const row of candidates) {
         if (row.status === "success" && remaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_backup" }); continue; }
@@ -325,11 +322,10 @@ class BackupService {
     let db; const removed = []; const skipped = [];
     try {
       db = this.database();
-      const allRows = db.prepare("SELECT * FROM backup_records WHERE backup_format=? AND remote_status IN ('success','delete_partial') AND COALESCE(remote_path,'')<>'' ORDER BY backup_time DESC,id DESC").all(BACKUP_FORMAT);
-      const rows = allRows.filter((row) => !/\.enc$/i.test(row.remote_path || ""));
+      const { allRows, rows, candidates } = remoteRetentionSelection(db.prepare("SELECT * FROM backup_records").all(), keep);
       for (const row of allRows.filter((item) => /\.enc$/i.test(item.remote_path || ""))) skipped.push({ id: row.id, reason: "legacy_encrypted" });
       for (const row of rows.filter((item) => Number(item.pinned || 0))) skipped.push({ id: row.id, reason: "pinned" });
-      const candidates = rows.filter((row) => !Number(row.pinned || 0) && !ACTIVE_BACKUP_JOB_STATUSES.has(row.job_status) && !["creating", "verifying", "uploading", "restoring"].includes(row.status)).reverse();
+
       let remaining = rows.length;
       let validRemaining = rows.filter(row => row.remote_status === "success").length;
       for (const row of candidates) {
@@ -346,7 +342,7 @@ class BackupService {
       return { removed, skipped, retention: keep };
     } finally { try { db?.close(); } finally { this.releaseLock(lock); } }
   }
-  async deleteBackup(id, { remoteDeleter = null } = {}) {
+  async deleteBackup(id, { remoteDeleter = null, beforeDelete = null } = {}) {
     let lock = null;
     let db = null;
     const cleanup = {
@@ -362,6 +358,7 @@ class BackupService {
       const policy = this.deletionPolicy(db, row);
       if (!policy.deletable) throw new BackupError(policy.code, policy.reason);
 
+      if (beforeDelete) await beforeDelete(db, row);
       Object.assign(cleanup, this.cleanupLocalFiles(row));
 
       if (row.remote_path || row.remote_checksum_path) {

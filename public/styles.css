@@ -7888,7 +7888,7 @@ table th,
 .fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
 .fee-detail-table:not(.student-query-detail-table) td:nth-child(13),
 .student-query-detail-table td:nth-child(11),
-.student-history-table td:nth-child(n + 3),
+.student-history-table td:nth-child(n + 3):not(.center),
 .recharge-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table:not(.opening-balance-table) td:nth-child(5),
 .opening-balance-table td:nth-child(5),
@@ -14282,3 +14282,43 @@ table.adaptive-table :is(th, td).adaptive-wrap {
     width: 100%;
   }
 }
+
+/* Shared business-table scrolling; no per-cell observers or scroll handlers. */
+.business-table-scroll { max-height: calc(100dvh - 230px); overflow: auto; position: relative; }
+.business-sticky-table { border-collapse: separate; border-spacing: 0; }
+.business-sticky-table thead th { position: sticky; top: 0; z-index: 3; background: var(--table-head); }
+.course-table.lesson-table.is-browsing td.col-students .lesson-student-badges { display: flex; width: 100%; justify-content: flex-start; text-align: left; flex-wrap: wrap; white-space: normal; }
+.student-history-table td.center { text-align: center; vertical-align: middle; }
+.class-group-table .custom-select-control { min-width: 0; width: 100%; }
+.notice-simple-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 280px)); justify-content: start; gap: 12px; }
+.notice-simple-tile { width: 280px; max-width: 100%; height: 188px; min-height: 0; padding: 14px; box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; align-items: stretch; gap: 6px; border-radius: var(--radius); text-align: left; cursor: default; }
+.notice-simple-meta { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media print { .business-table-scroll { max-height: none; overflow: visible; } .business-sticky-table thead th { position: static; } }
+
+/* Shared scrolling and bounded task/table layout. */
+.matrix-view-region .week-grid-scroll { max-height: calc(100dvh - 230px); overflow: auto; position: relative; }
+.matrix-view-region :is(.week-grid, .matrix-dimension-table) { border-collapse: separate; border-spacing: 0; }
+.matrix-view-region .week-grid-scroll thead th { position: sticky; top: 0; z-index: 4; background: var(--table-head); }
+.matrix-view-region .week-grid-scroll thead th:first-child { z-index: 5; }
+.matrix-view-region .matrix-dimension-entity { z-index: 2; }
+.matrix-date-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.matrix-date-filter .matrix-view-tabs { margin: 0; display: flex; gap: 4px; }
+.matrix-view-tab { min-width: 84px; min-height: 34px; }
+.matrix-range-reset { margin-left: auto; }
+.notice-task-title, .notice-task-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notice-task-title { font-size: var(--text-body); }
+.notice-task-description { color: var(--muted); }
+.notice-task-actions { display: flex; gap: 6px; margin-top: auto; }
+.notice-task-actions .btn { flex: 1; min-width: 0; padding: 6px; font-size: var(--text-caption); }
+.notice-simple-tile.done { background: color-mix(in srgb, #24804b 8%, var(--panel)); border-color: color-mix(in srgb, #24804b 35%, var(--line)); }
+.class-group-type-cell { cursor: pointer; position: relative; }
+.class-group-type-cell:hover, .class-group-type-cell:focus-visible { background: var(--surface-hover); outline: 1px solid var(--brand-border); outline-offset: -1px; }
+.class-group-type-cell .schedule-inline-picker-native, .class-group-type-cell .schedule-inline-picker-anchor { position: absolute; opacity: 0; pointer-events: none; inset: 0; width: 100%; height: 100%; }
+.rule-activation { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: var(--text-caption); color: var(--muted); margin-top: 4px; }
+.recharge-page .recharge-analysis-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--space-3); }
+.recharge-page .recharge-analysis-card { padding: var(--space-3); min-height: 84px; align-content: center; background: var(--panel); }
+.recharge-page .recharge-analysis-card strong { font-size: 1.45rem; font-variant-numeric: tabular-nums; }
+.recharge-page .recharge-analysis-card.is-negative strong { color: var(--manual-fg); }
+.teacher-profile-table.adaptive-table tbody td { padding-top: 4px; padding-bottom: 4px; }
+.teacher-profile-table.adaptive-table .cell-input { min-height: 32px; padding-top: 5px; padding-bottom: 5px; line-height: 20px; }
+@media print { .matrix-view-region .week-grid-scroll { max-height: none; overflow: visible; } .matrix-view-region .week-grid-scroll thead th { position: static; } }

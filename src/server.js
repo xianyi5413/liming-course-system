@@ -8,6 +8,7 @@ const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
+const { BackupCleanupService } = require("./backup/cleanup_service");
 const { BackupService, ensureBackupColumns } = require("./backup/backup_service");
 const {
   ManagedFileBrowserError,
@@ -42,7 +43,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260922-course-type-ui-query-backup";
+const APP_VERSION = process.env.APP_VERSION || "20260924-ui-consistency-screenshot-table-fixes";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1059,6 +1060,11 @@ function initDb() {
 if (!readOnlyBalanceCli) initDb();
 
 let backupServiceInstance = null;
+let backupCleanupInstance = null;
+function backupCleanupService() {
+  if (!backupCleanupInstance) backupCleanupInstance = new BackupCleanupService({ service: backupService(), settings: () => loadFullBackupSettings(dbPath), remote: baiduBackupManager() });
+  return backupCleanupInstance;
+}
 let baiduBackupManagerInstance = null;
 const pendingDataImports = new Map();
 let dataImportMaintenance = false;
@@ -11978,7 +11984,8 @@ function patchTable(table, idField, idValue, allowedFields, data) {
 }
 
 function resolveCourseType(data, current = null) {
-  const value = text(data.course_type);
+  const changedGrade = current && text(current.grade) !== text(data.grade);
+  const value = changedGrade && !courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))).includes(text(data.course_type)) ? "" : text(data.course_type);
   if (value && (!current || value !== text(current.course_type)) && !courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))).includes(value)) {
     throw Object.assign(new Error("课程类型不属于当前年级的候选范围"), { status: 400 });
   }
@@ -13263,6 +13270,20 @@ async function handleApi(req, res, url) {
     const settings = loadFullBackupSettings(dbPath);
     const remote = baiduBackupManager().configurationStatus();
     return sendJson(res, { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory });
+  }
+
+  if (req.method === "POST" && ["/api/data-center/cleanup/preview", "/api/data-center/cleanup/execute"].includes(url.pathname)) {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以清理多余备份文件");
+    const body = await readBody(req);
+    const execute = url.pathname.endsWith("/execute");
+    try {
+      const result = execute ? await backupCleanupService().execute(user.id, body.preview_id, body.confirmed === true) : await backupCleanupService().scan(user.id);
+      const summary = execute ? { scanned_files: result.scanned_files, deleted_files: result.deleted_files, failed_files: result.failed_files, local_bytes: result.local_bytes, remote_bytes: result.remote_bytes, orphan_files: result.orphan_files, backup_ids: result.results.map(row => row.backup_id).filter(Boolean), ok: result.ok } : result.summary;
+      writeOperationLog(user, { operation_type: execute ? "清理多余备份文件" : "扫描多余备份文件", operation_content: execute ? `删除${result.deleted_files}个文件，失败${result.failed_files}个` : `预览${result.summary.local_files + result.summary.remote_files}个可清理文件`, target_type: "backup_cleanup", result_status: execute && !result.ok ? "failure" : "success", details: summary }, req);
+      return sendJson(res, result);
+    } catch (error) {
+      return sendJson(res, { error: "清理未完成，请重新扫描或稍后重试", code: /^[A-Z0-9_]+$/.test(error.code || "") ? error.code : "CLEANUP_FAILED" }, 409);
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/data-center/files/local-excel") {
