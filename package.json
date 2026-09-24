@@ -4,6 +4,7 @@
   "private": true,
   "description": "黎明教育课程管理系统本地 MVP",
   "scripts": {
+    "test:ui-consistency-workflow": "node --test --test-concurrency=1 tests/ui_consistency_workflow.test.js",
     "test:backup-cleanup": "node --test --test-concurrency=1 tests/backup_cleanup.test.js",
     "test:table-screenshot-cleanup-ui": "node --test --test-concurrency=1 tests/table_screenshot_cleanup_ui.test.js",
     "start": "node src/server.js",

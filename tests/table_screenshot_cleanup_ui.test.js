@@ -72,7 +72,7 @@ test('inline picker immediately paints grade/subject independently, types share 
     await browser.evaluate(`scheduleMode=false;lessonFilter.start_date='2026-07-01';lessonFilter.end_date='2026-07-31';render();`);
     assert.equal(await browser.evaluate(`getComputedStyle(document.querySelector('.lesson-student-badges')).justifyContent`),'flex-start');
     await browser.evaluate(`(async()=>{setActiveView('classGroups');await load({refreshGlobal:false});})()`);
-    assert.equal(await browser.evaluate(`!!document.querySelector('.class-group-field[data-field="course_type"] + .custom-select')`),true);
+    assert.equal(await browser.evaluate(`!!document.querySelector('.class-group-type-cell .lesson-inline-picker')`),true);
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
   });
 });
@@ -92,25 +92,27 @@ test('all business headers stick in their own scroll containers and stay aligned
     await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
     for(const [page,selector] of pages){
       await browser.evaluate(`(async()=>{setActiveView(${JSON.stringify(page)});activeMonth='2026-07-01';selectedTeacherDetail='合成老师';selectedStudent='合成学生';studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-31'};await load({refreshGlobal:false});})()`);
-      const result=await browser.evaluate(`(async()=>{const tables=[...document.querySelectorAll(${JSON.stringify(selector)})];const result=[];for(const table of tables){const wrap=table.closest('.table-wrap'),headers=[...table.querySelectorAll('thead th')],body=table.tBodies[0];for(let i=0;i<60;i++){const row=body.insertRow();for(let j=0;j<headers.length;j++)row.insertCell().textContent='1';}wrap.scrollTop=200;wrap.scrollLeft=100;await new Promise(requestAnimationFrame);result.push({sticky:headers.every(h=>getComputedStyle(h).position==='sticky'),scroll:wrap.scrollTop,offset:Math.abs(headers[0].getBoundingClientRect().top-wrap.getBoundingClientRect().top),aligned:headers.every((h,i)=>Math.abs(h.getBoundingClientRect().left-body.rows[body.rows.length-1].cells[i].getBoundingClientRect().left)<2)});}return {tables:result,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
+      // Entry candidate synchronization replaces the table after load() resolves.
+      if(page==='teacherSalaryRules') await browser.waitFor('teacherSalaryRuleCandidateSync.requested && !teacherSalaryRuleCandidateSync.busy');
+      const result=await browser.evaluate(`(async()=>{await new Promise(requestAnimationFrame);const tables=[...document.querySelectorAll(${JSON.stringify(selector)})];const result=[];for(const table of tables){const wrap=table.closest('.table-wrap'),headers=[...table.querySelectorAll('thead th')],body=table.tBodies[0];for(let i=0;i<60;i++){const row=body.insertRow();for(let j=0;j<headers.length;j++)row.insertCell().textContent='1';}wrap.scrollTop=200;wrap.scrollLeft=100;await new Promise(requestAnimationFrame);result.push({sticky:headers.every(h=>getComputedStyle(h).position==='sticky'),scroll:wrap.scrollTop,offset:Math.abs(headers[0].getBoundingClientRect().top-wrap.getBoundingClientRect().top),aligned:headers.every((h,i)=>Math.abs(h.getBoundingClientRect().left-body.rows[body.rows.length-1].cells[i].getBoundingClientRect().left)<2)});}return {tables:result,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
       assert.ok(result.tables.length,`${page}/${width} missing`);assert.equal(result.overflow,false,`${page}/${width} overflow`);
-      for(const table of result.tables){assert.equal(table.sticky,true,`${page}/${width}`);assert.ok(table.scroll>0,`${page}/${width}`);assert.ok(table.offset<3,JSON.stringify({page,width,...table}));assert.equal(table.aligned,true,`${page}/${width}`);}
+      for(const table of result.tables){assert.equal(table.sticky,true,`${page}/${width} sticky: ${JSON.stringify(table)}`);assert.ok(table.scroll>0,`${page}/${width}`);assert.ok(table.offset<3,JSON.stringify({page,width,...table}));assert.equal(table.aligned,true,`${page}/${width} alignment: ${JSON.stringify(table)}`);}
     }
   }
   assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
 }));
-test('simple screenshot preview is the exported fixed PNG, teacher summaries omit students, query metrics never stretch', async () => browserRun(async browser => {
+test('task cards omit full previews, both modes export the same PNG, query metrics never stretch', async () => browserRun(async browser => {
   const result=await browser.evaluate(`(()=>{
     const lesson={teacher_name:'合成老师',grade:'高一',subject:'数学',student_names:'学生甲、学生乙',date:'2026-07-01'};
     const small={teachers:['合成老师'],students:['学生甲'],grades:['高一'],subjects:['数学'],lessons:[lesson],lesson_count:1};
     const large={...small,students:Array.from({length:100},(_,i)=>'合成学生'+i),lessons:Array(100).fill(lesson),lesson_count:100};
     const shots=[];for(const mode of ['parent','teacher'])for(const item of [small,large]){
-      const canvas=courseNoticeCanvas(item,mode,'',{layoutMode:'simple'}),div=document.createElement('div');div.innerHTML=courseNoticeSimpleDetails(item,mode);shots.push({mode,width:parseFloat(canvas.style.width),height:parseFloat(canvas.style.height),same:div.querySelector('img').src===canvas.toDataURL(),model:courseNoticeSimpleModel(item,mode)});
+      const canvas=courseNoticeCanvas(item,mode,'',{layoutMode:'simple'}),div=document.createElement('div');div.innerHTML=courseNoticeSimpleDetails(item,mode);shots.push({mode,width:parseFloat(canvas.style.width),height:parseFloat(canvas.style.height),same:!div.querySelector('img,table') && canvas.toDataURL()===courseNoticeCanvas(item,mode,'',{layoutMode:'preview'}).toDataURL(),model:courseNoticeSimpleModel(item,mode)});
     }
     const ctx=document.createElement('canvas').getContext('2d'),widths=[],original=shotRoundRect;shotRoundRect=(ctx,x,y,w,...args)=>{widths.push(w);return original(ctx,x,y,w,...args);};const cards=studentStatementMetricCards({}, {parent:true});drawShotMetricCards(ctx,courseNoticeShotPalette(),cards.slice(0,4),0,0,1000,4);drawShotMetricCards(ctx,courseNoticeShotPalette(),cards.slice(4),0,100,1000,4);shotRoundRect=original;
     return {shots,widths,columns:studentQueryMonthColumns({month_rows:[{subject_counts:{数学:2}}]}).map(c=>({label:c.label,align:c.align}))};
   })()`);
-  for(const shot of result.shots){assert.equal(shot.width,360);assert.equal(shot.height,224);assert.equal(shot.same,true);if(shot.mode==='teacher'){assert.doesNotMatch(JSON.stringify(shot.model),/学生|数学/);assert.ok(shot.model.lines.includes('高一'));assert.match(shot.model.lines[1],/节课/);}}
+  for(const shot of result.shots){assert.ok(shot.width>0);assert.ok(shot.height>0);assert.equal(shot.same,true);if(shot.mode==='teacher'){assert.doesNotMatch(JSON.stringify(shot.model),/学生|数学/);assert.ok(shot.model.lines.includes('高一'));assert.ok(shot.model.count>0);}}
   assert.equal(result.widths.length,5);assert.ok(result.widths.every(w=>w===result.widths[0]));assert.equal(result.columns.find(c=>c.label==='数学').align,'center');assert.equal(result.columns.find(c=>c.label==='当月课费').align,'right');
   await browser.evaluate(`(async()=>{setActiveView('audit');await load({refreshGlobal:false});})()`);await browser.click('.backup-cleanup-open');await browser.waitFor(`!!document.querySelector('.backup-cleanup-modal') && !backupCleanupDialog.busy`);
   assert.ok(await browser.evaluate(`!!backupCleanupDialog.preview`));assert.equal(await browser.evaluate(`!!backupCleanupDialog.result`),false);await browser.click('.backup-cleanup-close');

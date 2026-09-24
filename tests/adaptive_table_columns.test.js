@@ -179,7 +179,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "right", "right", "left"]],
     ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "left", "left"]],
-    ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "left", "right", "center", "center", "left"]],
+    ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],
     ["settings", "userAdmin", ".user-table:not(.role-table)", ["center", "center", "center", "left", "center", "center", "center"]],
   ];

@@ -180,13 +180,13 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   assert.equal(result.teacher.detailedHtml, "");
   assert.doesNotMatch(result.teacher.detailedHtml, /张小明|李小红|王小强|初一|数学/);
   for (const item of Object.values(result)) {
-    assert.deepEqual(item.simpleCanvasRows, item.simpleRows);
+    assert.deepEqual(item.simpleCanvasRows, item.detailedRows);
     assert.deepEqual(item.detailedCanvasRows, item.detailedRows);
     assert.equal(item.simplePng, true);
     assert.equal(item.detailedPng, true);
     assert.equal(item.simpleSize.every((value) => value > 0), true);
     assert.equal(item.detailedSize.every((value) => value > 0), true);
-    assert.deepEqual(item.simpleSize, [360, 224]);
+    assert.deepEqual(item.simpleSize, item.detailedSize);
   }
 
   const parentCounts = await browser.evaluate(`courseNoticeState.data.send_objects.map((item)=>({
@@ -222,8 +222,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   }
 
   await browser.click('.course-notice-layout-toggle[data-layout="simple"]');
-  await browser.waitFor("Boolean(document.querySelector('.notice-simple-mode .notice-simple-image'))");
-  assert.equal(await browser.evaluate("document.querySelector('.notice-simple-mode .notice-simple-image').getAttribute('width')"), "360");
+  await browser.waitFor("Boolean(document.querySelector('.notice-simple-mode .notice-task-title'))");
+  assert.equal(await browser.evaluate("document.querySelectorAll('.notice-simple-mode img,.notice-simple-mode table').length"), 0);
   assert.deepEqual(await browser.evaluate("courseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,type:item.send_object_type,lessons:item.lessons.length,columns:courseNoticeColumns('parent').map(([key])=>key)}))"), parentCounts);
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
@@ -274,11 +274,11 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
     assert.equal(teacherDetailed[index].rowCount, teacherCounts[index].lessons);
   }
   await browser.click('.teacher-course-notice-layout-toggle[data-layout="simple"]');
-  await browser.waitFor("Boolean(document.querySelector('.teacher-notice-simple-tile .notice-simple-image'))");
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile .notice-simple-image')?.alt.includes('矩阵老师')"), true);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile .notice-simple-image')?.alt.includes('张小明')"), false);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile .notice-simple-image')?.alt.includes('初一')"), true);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile .notice-simple-image')?.alt.includes('数学')"), false);
+  await browser.waitFor("Boolean(document.querySelector('.teacher-notice-simple-tile'))");
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('矩阵老师')"), true);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('张小明')"), false);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('初一')"), true);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-notice-simple-tile')?.textContent.includes('数学')"), false);
   assert.deepEqual(await browser.evaluate("teacherCourseNoticeState.data.send_objects.map((item)=>({key:item.send_object_key,lessons:item.lessons.length}))"), teacherCounts);
   await browser.click('.teacher-course-notice-layout-toggle[data-layout="preview"]');
   await browser.waitFor("Boolean(document.querySelector('.notice-shot-preview .notice-shot-table'))");
