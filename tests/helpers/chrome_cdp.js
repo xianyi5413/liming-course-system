@@ -44,6 +44,12 @@ class CdpSession {
     this.stageConflictResult = null;
     this.stageConflictDelayOnce = 0;
     socket.addEventListener("message", (event) => this.onMessage(event));
+    const rejectPending = () => {
+      for (const pending of this.pending.values()) pending.reject(new Error("CDP_CONNECTION_CLOSED"));
+      this.pending.clear();
+    };
+    socket.addEventListener("close", rejectPending);
+    socket.addEventListener("error", rejectPending);
   }
 
   onMessage(event) {
@@ -99,11 +105,19 @@ class CdpSession {
     }
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = 30000) {
+    if (this.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("CDP_CONNECTION_CLOSED"));
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      const finish = (callback, value) => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        callback(value);
+      };
+      const timer = setTimeout(() => finish(reject, new Error(`CDP_COMMAND_TIMEOUT: ${method}`)), timeoutMs);
+      this.pending.set(id, { resolve: value => finish(resolve, value), reject: error => finish(reject, error) });
+      try { this.socket.send(JSON.stringify({ id, method, params })); }
+      catch (error) { finish(reject, error); }
     });
   }
 
@@ -207,4 +221,4 @@ async function launchChrome(profileDirectory) {
   return { child, session };
 }
 
-module.exports = { freePort, launchChrome };
+module.exports = { freePort, launchChrome, CdpSession };

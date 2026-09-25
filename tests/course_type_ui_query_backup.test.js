@@ -182,9 +182,8 @@ test('Chromium: logo, sidebar, teacher serials, query model, refresh and sticky 
     assert.equal(browser.responses.slice(requestStart).some(row => row.url.includes('/api/bootstrap')), false);
     const saved = new DatabaseSync(dbPath); assert.equal(saved.prepare('SELECT course_type FROM lessons WHERE id=?').get(Number(changed.id)).course_type, '1V2'); saved.close();
     await browser.evaluate("(async () => { setActiveView('classGroups'); await load({refreshGlobal:false}); })()");
-    await browser.click('.new-class-group');
-    assert.equal(await browser.evaluate(`(() => { const grade=document.querySelector('.class-group-create-form [name=grade]'); grade.value='初一'; grade.dispatchEvent(new Event('change',{bubbles:true})); const values=[...grade.form.elements.course_type.options].map(x=>x.value); return values.includes('初中特训')&&!values.includes('高中特训'); })()`), true);
-    await browser.click('.close-class-group-create');
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('.new-class-group'))"), false);
+    assert.equal(await browser.evaluate("!!document.querySelector('.class-group-type-cell')"), true);
     await browser.evaluate("(async () => { setActiveView('studentQuery'); selectedStudent='合成学生'; studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-08-31'}; await load({refreshGlobal:false}); })()");
     await browser.waitFor("Boolean(document.querySelector('.refresh-student-query'))");
     const model = await browser.evaluate(`(() => { const report=studentStatementReport(); return { columns:studentQueryMonthColumns(report).map(x=>x.label), parent:studentQueryMonthColumns(report,{parent:true}).map(x=>x.label), zero:studentStatementMetricCards({}, {parent:true}).map(x=>x.label), gift:studentStatementMetricCards({cur_gift:1},{parent:true}).length, image:studentStatementCanvas(report).toDataURL().length }; })()`);

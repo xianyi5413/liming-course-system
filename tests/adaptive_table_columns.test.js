@@ -175,13 +175,13 @@ async function inspectTable(browser, selector) {
 test("semantic columns cover data-entry, teacher-profile and account tables at every target viewport", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
   const pages = [
-    ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "right", "right", "center", "center", "left"]],
-    ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "right", "right", "left"]],
-    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
-    ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "left", "left"]],
-    ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "left", "right", "center", "left"]],
+    ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "center", "right", "right", "center", "center", "left"]],
+    ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "center", "right", "right", "left"]],
+    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
+    ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "center", "left", "left"]],
+    ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],
-    ["settings", "userAdmin", ".user-table:not(.role-table)", ["center", "center", "center", "left", "center", "center", "center"]],
+    ["settings", "userAdmin", ".user-table:not(.role-table)", ["center", "center", "center", "center", "left", "center", "center", "center"]],
   ];
   const results = {};
   for (const [group, view, selector, alignments] of pages) {
@@ -208,13 +208,13 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
     }
   }
 
-  assert.ok(results.recharges[1440][6] > results.recharges[1440][2], "long custom channel must drive its column");
-  assert.ok(results.openingBalances[1440][5] > results.openingBalances[1440][2], "long opening note must drive its column");
-  assert.ok(results.studentPricing[1440][4] > results.studentPricing[1440][2], "student badges must drive the set column");
-  assert.ok(results.classGroups[1440][4] > results.classGroups[1440][2], "class badges must drive the set column");
-  assert.ok(results.teacherSalaryRules[1440][4] > results.teacherSalaryRules[1440][2], "salary badges must drive the set column");
+  assert.ok(results.recharges[1440][7] > results.recharges[1440][3], "long custom channel must drive its column");
+  assert.ok(results.openingBalances[1440][6] > results.openingBalances[1440][3], "long opening note must drive its column");
+  assert.ok(results.studentPricing[1440][5] > results.studentPricing[1440][3], "student badges must drive the set column");
+  assert.ok(results.classGroups[1440][5] > results.classGroups[1440][3], "class badges must drive the set column");
+  assert.ok(results.teacherSalaryRules[1440][5] > results.teacherSalaryRules[1440][3], "salary badges must drive the set column");
   assert.ok(results.teacherProfiles[1440][7] > results.teacherProfiles[1440][2], "teacher notes must be the bounded flexible column");
-  assert.ok(results.userAdmin[1440][3] > results.userAdmin[1440][2], "bound teachers must be the bounded flexible column");
+  assert.ok(results.userAdmin[1440][4] > results.userAdmin[1440][3], "bound teachers must be the bounded flexible column");
 
   await browser.click('.user-admin-tab[data-tab="roles"]');
   await browser.waitFor("Boolean(document.querySelector('.role-table[data-adaptive-widths]'))");
@@ -256,9 +256,9 @@ test("semantic caps remain stable across filtering and 1100-row measurement stay
   const full = fullWidths.split(",").map(Number);
   const filtered = filteredWidths.split(",").map(Number);
   const config = await browser.evaluate("JSON.parse(document.querySelector('.student-pricing-table').dataset.adaptiveColumnConfig)");
-  assert.equal(filtered[1] >= config[1].minWidth && filtered[1] <= config[1].maxWidth, true);
-  assert.equal(filtered[4] >= config[4].minWidth && filtered[4] <= config[4].maxWidth, true);
-  assert.equal(full[4] <= config[4].maxWidth, true, "student set column is capped instead of following the longest row");
+  assert.equal(filtered[2] >= config[2].minWidth && filtered[2] <= config[2].maxWidth, true);
+  assert.equal(filtered[5] >= config[5].minWidth && filtered[5] <= config[5].maxWidth, true);
+  assert.equal(full[5] <= config[5].maxWidth, true, "student set column is capped instead of following the longest row");
   await browser.evaluate("(() => { studentPricingFilter={ student:'', grade:'', subject:'', student_names:'', price:'', usage:'' }; render(); })()");
   await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.adaptiveWidths===${JSON.stringify(fullWidths)}`);
 

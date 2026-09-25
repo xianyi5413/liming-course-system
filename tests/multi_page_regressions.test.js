@@ -80,5 +80,5 @@ test("recharge modal uses structured accessible channels with legacy unknown dis
   assert.match(server, /RECHARGE_CHANNELS = new Set\(\["wechat", "cash", "alipay", "other"\]\)/);
   assert.match(server, /rechargeChannelMatch[\s\S]*渠道局部更新只允许提交 channel 和 channel_other/);
   assert.doesNotMatch(app, /class="btn compact edit-recharge-record"/);
-  assert.match(app, /colspan="8" class="empty">暂无充值记录/);
+  assert.match(app, /colspan="9" class="empty">暂无充值记录/);
 });

@@ -3642,9 +3642,18 @@ function adaptiveHorizontalBox(element) {
     .reduce((sum, key) => sum + (Number.parseFloat(style[key]) || 0), 0);
 }
 
+// Display order only: offsets support pagination and progressive batches, never record identity.
+function rowIndexValue(index, offset = 0) { return offset + index + 1; }
+function renderRowIndex(index, offset = 0, className = "") {
+  return `<td class="row-index adaptive-center ${className}">${rowIndexValue(index, offset)}</td>`;
+}
+function rowIndexHeader() { return '<th class="row-index" scope="col">序号</th>'; }
+function rowIndexColumn() { return '<col class="row-index-column" data-column-type="index">'; }
+
 function adaptiveColumnDefinition(column, header) {
   const type = column.dataset.columnType || "short";
   const presets = {
+    index: { minWidth: 48, maxWidth: 56, grow: 0, wrap: false, alignment: "center" },
     select: { minWidth: 44, maxWidth: 44, grow: 0, wrap: false, alignment: "center" },
     short: { minWidth: 76, maxWidth: 180, grow: 0, wrap: false, alignment: "center" },
     name: { minWidth: 96, maxWidth: 190, grow: 0, wrap: false, alignment: "center" },
@@ -3692,7 +3701,7 @@ function adaptiveCellContentWidth(cell, definition, font) {
 function resizeAdaptiveTextarea(textarea) {
   if (!textarea) return;
   textarea.style.height = "auto";
-  textarea.style.height = `${Math.max(38, textarea.scrollHeight)}px`;
+  textarea.style.height = `${Math.max(textarea.closest(".compact-rows, .teacher-profile-table") ? 32 : 38, textarea.scrollHeight)}px`;
   if (textarea.dataset.adaptiveTextareaBound !== "1") {
     textarea.dataset.adaptiveTextareaBound = "1";
     textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea));
@@ -3744,6 +3753,7 @@ function applyStudentPricingAdaptiveColumns(table, columns, headerCells, definit
   const studentLabels = unique(rows.flatMap((row) => row._students || splitStudents(row.student_names)));
   const rawWidths = [
     44,
+    adaptiveTextWidthForData(String(Math.max(1, rows.length)), font) + 20,
     measured(rows.map((row) => row.student_name)) + 36,
     measured(rows.map((row) => row.grade)) + 34,
     measured(rows.map((row) => row.subject)) + 34,
@@ -3827,7 +3837,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   table.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
   const textareas = [...table.querySelectorAll("textarea.adaptive-textarea")];
   textareas.forEach(textarea => { textarea.style.height = "auto"; });
-  const heights = textareas.map(textarea => Math.max(table.classList.contains("teacher-profile-table") ? 32 : 38, textarea.scrollHeight));
+  const heights = textareas.map(textarea => Math.max(table.matches(".compact-rows, .teacher-profile-table") ? 32 : 38, textarea.scrollHeight));
   textareas.forEach((textarea, index) => {
     textarea.style.height = `${heights[index]}px`;
     if (textarea.dataset.adaptiveTextareaBound !== "1") { textarea.dataset.adaptiveTextareaBound = "1"; textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea)); }
@@ -8545,24 +8555,24 @@ function renderFeeDetails() {
         <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
       </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
-        <table class="fee-detail-table uniform-table nowrap-table" data-adaptive-table="true">
+        <table class="fee-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true">
           <colgroup>
-            <col class="fee-detail-col-select" data-column-type="select"><col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
+            <col class="fee-detail-col-select" data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
             <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
           </colgroup>
           <thead>
             <tr>
-              <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>
+              <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>${rowIndexHeader()}
               <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
-            ${visibleRows.map((row) => {
+            ${visibleRows.map((row, index) => {
               const canApply = canApplyStudentPricingRule(row);
               const key = feeDetailKey(row);
               return `
               <tr class="${detailRowClass(row)}">
-                <td class="select-col"><input class="fee-detail-select-row" type="checkbox" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" ${selectedFeeDetailKeys.has(key) ? "checked" : ""} ${canApply ? "" : "disabled"} title="${escapeHtml(feeDetailSelectTitle(row))}"></td>
+                <td class="select-col"><input class="fee-detail-select-row" type="checkbox" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" ${selectedFeeDetailKeys.has(key) ? "checked" : ""} ${canApply ? "" : "disabled"} title="${escapeHtml(feeDetailSelectTitle(row))}"></td>${renderRowIndex(index)}
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell">${escapeHtml(row.date)}</td>
@@ -8572,12 +8582,12 @@ function renderFeeDetails() {
                 <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
-                <td class="text-cell">${escapeHtml(row.notes)}</td>
+                <td class="text-cell content-wrap">${escapeHtml(row.notes)}</td>
                 ${editablePriceCell(row)}
                 <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
               </tr>
             `;
-            }).join("") || `<tr><td colspan="13" class="empty">暂无费用明细</td></tr>`}
+            }).join("") || `<tr><td colspan="14" class="empty">暂无费用明细</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -8599,12 +8609,13 @@ function renderSummary() {
       ${renderSummaryFilterBar(rows, visibleRows)}
       <div class="table-wrap smooth-table-wrap student-summary-scroll">
         <table class="student-summary-table uniform-table nowrap-table">
+          <colgroup>${rowIndexColumn()}${Array(12).fill("<col>").join("")}</colgroup>
           <thead>
-            <tr><th>学生姓名</th><th>年级</th><th>上课次数</th><th>课程总费用</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送充值</th><th>本月实际消费</th><th>本月赠送消费</th><th>本月实际余额</th><th>本月赠送余额</th></tr>
+            <tr>${rowIndexHeader()}<th>学生姓名</th><th>年级</th><th>上课次数</th><th>课程总费用</th><th>上月实际结转</th><th>上月赠送结转</th><th>本月实际充值</th><th>本月赠送充值</th><th>本月实际消费</th><th>本月赠送消费</th><th>本月实际余额</th><th>本月赠送余额</th></tr>
           </thead>
           <tbody>
-            ${visibleRows.map((row) => `
-                <tr class="summary-master-row">
+            ${visibleRows.map((row, index) => `
+                <tr class="summary-master-row">${renderRowIndex(index)}
                   <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                   <td class="text-cell grade-cell">${renderGradeBadge(row.grade)}</td>
                   <td class="text-cell">${Math.round(numberValue(row.lesson_count))}</td>
@@ -8618,7 +8629,7 @@ function renderSummary() {
                   <td class="text-cell right ${numberValue(row.actual_balance) < 0 ? "negative" : ""}">${formatMoney(row.actual_balance)}</td>
                   <td class="text-cell right ${numberValue(row.gift_balance) < 0 ? "negative" : ""}">${formatMoney(row.gift_balance)}</td>
                 </tr>
-              `).join("") || `<tr><td colspan="12" class="empty">暂无学生费用汇总</td></tr>`}
+              `).join("") || `<tr><td colspan="13" class="empty">暂无学生费用汇总</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9335,19 +9346,19 @@ function renderRecharges() {
         <button class="btn primary open-recharge-modal" type="button">+ 新增充值记录</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
+        <table class="recharge-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="8">
           <colgroup>
-            <col class="recharge-col-select" data-column-type="select"><col class="recharge-col-student" data-column-type="name"><col class="recharge-col-grade" data-column-type="short" data-max-width="120">
+            <col class="recharge-col-select" data-column-type="select">${rowIndexColumn()}<col class="recharge-col-student" data-column-type="name"><col class="recharge-col-grade" data-column-type="short" data-max-width="120">
             <col class="recharge-col-money" data-column-type="money"><col class="recharge-col-money" data-column-type="money"><col class="recharge-col-date" data-column-type="date">
             <col class="recharge-col-channel" data-column-type="long" data-min-width="128" data-max-width="260" data-grow="0.5" data-alignment="center"><col class="recharge-col-notes" data-column-type="long">
           </colgroup>
           <thead>
-            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th><th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
+            <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th>${rowIndexHeader()}<th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
           </thead>
           <tbody>
-            ${visibleRows.map((row) => `
+            ${visibleRows.map((row, index) => `
               <tr class="recharge-row" data-id="${escapeHtml(row.id)}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}" data-source="${escapeHtml(row.source || "")}" data-channel="${escapeHtml(row.channel || "")}" data-channel-other="${escapeHtml(row.channel_other || "")}">
-                <td class="select-col adaptive-center"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>
+                <td class="select-col adaptive-center"><input class="recharge-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedRechargeIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择充值记录"></td>${renderRowIndex(index)}
                 <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })} ${rechargeSourceTag(rechargeSource(row))}</td>
                 <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.cur_recharge, { className: "recharge-field", attrs: `data-field="cur_recharge"` })}</td>
@@ -9356,7 +9367,7 @@ function renderRecharges() {
                 ${rechargeChannelCellMarkup(row)}
                 <td class="recharge-notes-cell adaptive-left"><textarea class="cell-input adaptive-textarea recharge-field wide" data-field="notes" rows="1" wrap="soft">${escapeHtml(row.recharge_notes)}</textarea></td>
               </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无充值记录</td></tr>`}
+            `).join("") || `<tr><td colspan="9" class="empty">暂无充值记录</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9391,22 +9402,22 @@ function renderOpeningBalances() {
         <button class="btn export-opening-balance-excel" type="button">导出 Excel</button>
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="recharge-table opening-balance-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
-          <colgroup><col class="opening-balance-col-select" data-column-type="select"><col class="opening-balance-col-student" data-column-type="name"><col class="opening-balance-col-grade" data-column-type="short" data-max-width="120"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-notes" data-column-type="long"></colgroup>
+        <table class="recharge-table opening-balance-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="6">
+          <colgroup><col class="opening-balance-col-select" data-column-type="select">${rowIndexColumn()}<col class="opening-balance-col-student" data-column-type="name"><col class="opening-balance-col-grade" data-column-type="short" data-max-width="120"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-money" data-column-type="money"><col class="opening-balance-col-notes" data-column-type="long"></colgroup>
           <thead>
-            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th><th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
+            <tr><th class="select-col"><input class="opening-balance-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前期初余额"></th>${rowIndexHeader()}<th>学生姓名</th><th>年级</th><th>期初实际余额</th><th>期初赠送余额</th><th class="wide opening-balance-notes-head">备注</th></tr>
           </thead>
           <tbody>
-            ${visibleRows.map((row) => `
+            ${visibleRows.map((row, index) => `
               <tr class="opening-balance-row" data-id="${row.id}" data-student-name="${escapeHtml(row.student_name)}" data-grade="${escapeHtml(row.grade)}">
-                <td class="select-col adaptive-center"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>
+                <td class="select-col adaptive-center"><input class="opening-balance-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedOpeningBalanceIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择期初余额记录"></td>${renderRowIndex(index)}
                 <td class="text-cell adaptive-center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_actual_balance, { className: "opening-balance-field", attrs: `data-field="opening_actual_balance"` })}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(row.opening_gift_balance, { className: "opening-balance-field", attrs: `data-field="opening_gift_balance"` })}</td>
                 <td class="opening-balance-notes-cell adaptive-left"><textarea class="cell-input adaptive-textarea wide opening-balance-field opening-balance-notes-input" data-field="notes" rows="1" wrap="soft">${escapeHtml(String(row.notes || "").replace(/[\r\n]+/g, " "))}</textarea></td>
               </tr>
-            `).join("") || `<tr><td colspan="6" class="empty">暂无期初余额</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无期初余额</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -9955,11 +9966,11 @@ function studentQueryMonthRowsMarkup(report = studentStatementReport()) {
 
 function studentQueryDetailRowsMarkup(report = studentStatementReport()) {
   const details = selectedStudent ? (report.details || []) : [];
-  return details.map((row) => `
+  return details.map((row, index) => `
     <tr class="${detailRowClass(row)}">
-      <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(row.weekday)}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${renderGradeBadge(row.grade)}</td><td class="text-cell">${renderSubjectBadge(row.subject)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>${readonlyPriceCell(row)}
+      ${renderRowIndex(index)}<td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td><td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${escapeHtml(row.weekday)}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${renderGradeBadge(row.grade)}</td><td class="text-cell">${renderSubjectBadge(row.subject)}</td><td class="text-cell">${escapeHtml(row.notes)}</td>${readonlyPriceCell(row)}
     </tr>
-  `).join("") || `<tr><td colspan="11" class="empty">暂无课程明细</td></tr>`;
+  `).join("") || `<tr><td colspan="12" class="empty">暂无课程明细</td></tr>`;
 }
 
 function studentQueryResultsMarkup(report = studentStatementReport()) {
@@ -9975,8 +9986,9 @@ function studentQueryResultsMarkup(report = studentStatementReport()) {
       <div class="band">
         <div class="table-wrap smooth-table-wrap">
           <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table">
+            <colgroup>${rowIndexColumn()}${Array(11).fill("<col>").join("")}</colgroup>
             <thead>
-              <tr><th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
+              <tr>${rowIndexHeader()}<th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
             </thead>
             <tbody id="student-query-detail-tbody" data-student-query-detail-body>${studentQueryDetailRowsMarkup(report)}</tbody>
           </table>
@@ -10679,7 +10691,7 @@ function userTeacherValues() {
   return uniqueSorted((state.profile_teachers || []).map((row) => row.name).filter(Boolean));
 }
 
-function userAccountRowMarkup(user, teacherValues = userTeacherValues()) {
+function userAccountRowMarkup(user, teacherValues = userTeacherValues(), index = 0) {
   const teacherNames = normalizeNameList(user.bound_teacher_names || user.teacher_names || user.teacher_name);
   const ownerAccount = isOwnerRoleValue(user.role);
   const isSelf = Number(auth.user?.id) === Number(user.id);
@@ -10688,7 +10700,7 @@ function userAccountRowMarkup(user, teacherValues = userTeacherValues()) {
   const isPreflightTarget = Number(userAdminFocusId) === Number(user.id);
   return `
     <tr class="user-row ${isPreflightTarget ? "preflight-target" : ""}" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}">
-      <td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
+      ${renderRowIndex(index)}<td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
       <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
       <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
       <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
@@ -10714,7 +10726,7 @@ function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()
     <div class="band user-admin-panel">
       <div class="table-wrap">
         <table class="user-table uniform-table nowrap-table" data-adaptive-table="true">
-          <colgroup>
+          <colgroup>${rowIndexColumn()}
             <col class="user-col-username" data-column-type="account">
             <col class="user-col-display-name" data-column-type="name">
             <col class="user-col-role" data-column-type="status">
@@ -10723,9 +10735,9 @@ function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()
             <col class="user-col-password" data-column-type="action" data-min-width="210">
             <col class="user-col-delete" data-column-type="action">
           </colgroup>
-          <thead><tr><th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
+          <thead><tr>${rowIndexHeader()}<th>账号</th><th>显示姓名</th><th>角色</th><th>绑定老师</th><th>状态</th><th>重置密码</th><th>删除</th></tr></thead>
           <tbody class="user-account-table-body">
-            ${users.map((user) => userAccountRowMarkup(user, teacherValues)).join("") || `<tr><td colspan="7" class="empty">暂无账号</td></tr>`}
+            ${users.map((user, index) => userAccountRowMarkup(user, teacherValues, index)).join("") || `<tr><td colspan="8" class="empty">暂无账号</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -10858,6 +10870,9 @@ function insertUserAccountRow(user) {
     return rowIndex > createdIndex;
   });
   tableBody.insertBefore(nextRow, laterRow || null);
+  // Only account insertion needs local display renumbering; pricing batches never use this path.
+  tableBody.querySelectorAll(".user-row > .row-index").forEach((cell, index) => { cell.textContent = rowIndexValue(index); });
+  scheduleAdaptiveTableColumns();
   applyReadonlyUi();
   enhanceCustomSelects();
   bindMultiSelectControl(nextRow.querySelector(".multi-select"));
@@ -11542,12 +11557,12 @@ function renderStudentPricingFilterBar(rows, visibleRows) {
   `;
 }
 
-function studentPricingRowMarkup(row) {
+function studentPricingRowMarkup(row, index = 0) {
   const readonly = canWriteData() ? "" : " disabled";
   return `
     <tr class="student-pricing-rule-row" data-rule-id="${row.id}">
       <td class="select-col adaptive-center" data-adaptive-alignment="center"><input class="student-pricing-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentPricingIds.has(Number(row.id)) ? "checked" : ""}${readonly} aria-label="选择学生单价规则"></td>
-      <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
+      ${renderRowIndex(index)}<td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
       <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderGradeBadge(row.grade)}</td>
       <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderSubjectBadge(row.subject)}</td>
       <td class="text-cell wide student-set-cell adaptive-left adaptive-wrap" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
@@ -11579,7 +11594,7 @@ function scheduleStudentPricingProgressiveRender(rows, startIndex) {
     const body = document.querySelector(".student-pricing-table tbody");
     if (!body) return;
     const end = Math.min(rows.length, startIndex + STUDENT_PRICING_RENDER_BATCH_SIZE);
-    body.insertAdjacentHTML("beforeend", rows.slice(startIndex, end).map(studentPricingRowMarkup).join(""));
+    body.insertAdjacentHTML("beforeend", rows.slice(startIndex, end).map((row, index) => studentPricingRowMarkup(row, startIndex + index)).join(""));
     startIndex = end;
     const progress = document.querySelector(".student-pricing-render-progress");
     if (progress) progress.textContent = startIndex < rows.length
@@ -11630,11 +11645,11 @@ function renderStudentPricing() {
         <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
-        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-flex-column="7" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
-          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-max-width="640"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long" data-max-width="480"></colgroup>
-          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th><th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+        <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-flex-column="8" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
+          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-max-width="640"><col data-column-type="money"><col data-column-type="status"><col data-column-type="long" data-max-width="480"></colgroup>
+          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th>${rowIndexHeader()}<th>学生</th><th>年级</th><th>科目</th><th>学生集合</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
-            ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="8" class="empty">暂无学生单价规则</td></tr>`}
+            ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="9" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -11679,14 +11694,13 @@ function renderClassGroups() {
           <button class="btn reset-class-group-filter" type="button">清空筛选</button>
         </div>
       </div>
-      ${canWriteData() ? `<div class="profile-actions"><button class="btn primary new-class-group" type="button">新增班级</button></div>` : ""}
       <div class="table-wrap smooth-table-wrap">
-        <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="4">
-          <colgroup><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="130"><col data-column-type="students"><col data-column-type="long"></colgroup>
-          <thead><tr><th>老师</th><th>年级</th><th>科目</th><th>类型</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
+        <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
+          <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="130"><col data-column-type="students"><col data-column-type="long"></colgroup>
+          <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
-            ${visibleRows.map((row) => `
-              <tr class="class-group-row" data-class-group-id="${row.id}">
+            ${visibleRows.map((row, index) => `
+              <tr class="class-group-row" data-class-group-id="${row.id}">${renderRowIndex(index)}
                 <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
@@ -11694,7 +11708,7 @@ function renderClassGroups() {
                 <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
                 <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
               </tr>
-            `).join("") || `<tr><td colspan="6" class="empty">暂无班级候选</td></tr>`}
+            `).join("") || `<tr><td colspan="7" class="empty">暂无班级候选</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -11982,14 +11996,14 @@ async function saveStudentGradeStageModal(button) {
   }
 }
 
-function studentProfileTableRowMarkup(row) {
+function studentProfileTableRowMarkup(row, index = 0) {
   const currentGrade = studentCurrentGrade(row);
   const conflicts = studentStageConflictsFor(row.id);
   const conflictMarker = conflicts.length ? `<button class="student-stage-conflict-marker" type="button" data-student-id="${escapeHtml(row.id)}" data-stage="${escapeHtml(conflicts[0].stage_a)}" title="${escapeHtml(studentStageConflictSummary(conflicts[0]))}">阶段冲突${conflicts.length > 1 ? ` ${conflicts.length}` : ""}</button>` : "";
   return `
     <tr class="profile-row student-profile-main-row" data-kind="students" data-id="${row.id}" title="点击查看年级阶段">
       <td class="select-col"><input class="student-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedStudentProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择学生档案"></td>
-      <td class="student-name-cell"><div class="student-name-with-conflict">${renderStudentBadge(row.name, { grade: currentGrade })}${conflictMarker}</div></td>
+      ${renderRowIndex(index)}<td class="student-name-cell"><div class="student-name-with-conflict">${renderStudentBadge(row.name, { grade: currentGrade })}${conflictMarker}</div></td>
       <td class="text-cell center current-grade-cell">${renderGradeBadge(currentGrade)}</td>
       <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
       <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
@@ -12104,13 +12118,13 @@ function renderProfileDirectory(kind = profileTab) {
   renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
     <table class="profile-table teacher-profile-table uniform-table nowrap-table" data-adaptive-table="true">
-      <colgroup><col data-column-type="select"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long" data-max-width="480"></colgroup>
-      <thead><tr><th class="select-col"><input class="teacher-profile-select-all" type="checkbox" ${allVisibleTeachersSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前老师档案"></th><th>序号</th><th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
+      <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long" data-max-width="480"></colgroup>
+      <thead><tr><th class="select-col"><input class="teacher-profile-select-all" type="checkbox" ${allVisibleTeachersSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前老师档案"></th>${rowIndexHeader()}<th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${rows.map((row, index) => `
           <tr class="profile-row" data-kind="teachers" data-id="${row.id}">
             <td class="select-col"><input class="teacher-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedTeacherProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择老师档案"></td>
-            <td class="teacher-profile-serial">${index + 1}</td>
+            ${renderRowIndex(index, 0, "teacher-profile-serial")}
             <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
             <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
             <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在职")}">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
@@ -12125,7 +12139,7 @@ function renderProfileDirectory(kind = profileTab) {
   const studentTable = `
     <table class="profile-table student-profile-table uniform-table nowrap-table">
       <colgroup>
-        <col class="student-profile-col-select">
+        <col class="student-profile-col-select">${rowIndexColumn()}
         <col class="student-profile-col-name">
         <col class="student-profile-col-grade">
         <col class="student-profile-col-guardian">
@@ -12135,9 +12149,9 @@ function renderProfileDirectory(kind = profileTab) {
         <col class="student-profile-col-date">
         <col class="student-profile-col-notes">
       </colgroup>
-      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th><th class="student-name-head">姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
+      <thead><tr><th class="select-col"><input class="student-profile-select-all" type="checkbox" ${allVisibleStudentsSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前学生档案"></th>${rowIndexHeader()}<th class="student-name-head">姓名</th><th>当前年级</th><th>监护人</th><th>电话</th><th>状态</th><th>入学日期</th><th>离校日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
-        ${studentProfileTableRows(rows) || `<tr><td colspan="9" class="empty">暂无学生档案</td></tr>`}
+        ${studentProfileTableRows(rows) || `<tr><td colspan="10" class="empty">暂无学生档案</td></tr>`}
       </tbody>
     </table>
   `;
@@ -12802,8 +12816,9 @@ function renderTeacherSalary() {
     <div class="band">
       <div class="table-wrap">
         <table class="teacher-salary-table uniform-table nowrap-table">
+          <colgroup>${rowIndexColumn()}${Array(weeks.length + 5).fill("<col>").join("")}</colgroup>
           <thead>
-            <tr>
+            <tr>${rowIndexHeader()}
               <th>教师姓名</th>
               <th>上课课时数</th>
               <th>课时合计</th>
@@ -12813,8 +12828,8 @@ function renderTeacherSalary() {
             </tr>
           </thead>
           <tbody>
-            ${rows.map((row) => `
-              <tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
+            ${rows.map((row, index) => `
+              <tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell right">${row.lesson_count}</td>
                 <td class="text-cell right">${formatMoney(row.salary_total)}</td>
@@ -12824,7 +12839,7 @@ function renderTeacherSalary() {
               </tr>
             `).join("")}
             <tr>
-              <td class="text-cell"><b>合计</b></td>
+              <td class="row-index"></td><td class="text-cell"><b>合计</b></td>
               <td class="text-cell right"><b>${lessonTotal}</b></td>
               <td class="text-cell right"><b>${formatMoney(classSalaryTotal)}</b></td>
               ${weeks.map((week) => `<td class="text-cell right"><b>${formatMoney(rows.reduce((sum, row) => sum + teacherTravelAmount(row, week), 0))}</b></td>`).join("")}
@@ -12864,16 +12879,17 @@ function renderTeacherTravelFees() {
     <div class="band">
       <div class="table-wrap">
         <table class="teacher-salary-table teacher-travel-table uniform-table nowrap-table">
+          <colgroup>${rowIndexColumn()}${Array(weeks.length + 2).fill("<col>").join("")}</colgroup>
           <thead>
-            <tr>
+            <tr>${rowIndexHeader()}
               <th>教师姓名</th>
               ${weeks.map((week) => `<th>${teacherTravelHeaderMarkup(week)}</th>`).join("")}
               <th>合计</th>
             </tr>
           </thead>
           <tbody>
-            ${rows.map((row) => `
-              <tr class="teacher-travel-fee-row" data-teacher-name="${escapeHtml(row.teacher_name)}">
+            ${rows.map((row, index) => `
+              <tr class="teacher-travel-fee-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 ${weeks.map((week) => `
                   <td class="currency-input-cell">
@@ -12885,10 +12901,10 @@ function renderTeacherTravelFees() {
                 `).join("")}
                 <td class="text-cell right">${formatMoney(teacherTravelTotal(row))}</td>
               </tr>
-            `).join("") || `<tr><td colspan="${weeks.length + 2}" class="empty">暂无老师档案</td></tr>`}
+            `).join("") || `<tr><td colspan="${weeks.length + 3}" class="empty">暂无老师档案</td></tr>`}
             ${rows.length ? `
               <tr>
-                <td class="text-cell"><b>合计</b></td>
+                <td class="row-index"></td><td class="text-cell"><b>合计</b></td>
                 ${weeks.map((week) => `<td class="text-cell right"><b>${formatMoney(rows.reduce((sum, row) => sum + teacherTravelAmount(row, week), 0))}</b></td>`).join("")}
                 <td class="text-cell right"><b>${formatMoney(total)}</b></td>
               </tr>
@@ -12972,22 +12988,22 @@ function renderTeacherSalaryRules() {
         ${syncNotice}
       </div>
       <div class="table-wrap smooth-table-wrap">
-        <table class="teacher-salary-rule-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="7">
-          <colgroup><col data-column-type="select"><col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status" data-max-width="180"><col data-column-type="long"></colgroup>
-          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th><th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+        <table class="teacher-salary-rule-table uniform-table nowrap-table compact-rows" data-adaptive-table="true" data-adaptive-flex-column="8">
+          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status" data-min-width="120" data-max-width="180"><col data-column-type="long"></colgroup>
+          <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
-            ${visibleRules.map((rule) => `
+            ${visibleRules.map((rule, index) => `
               <tr class="teacher-salary-rule-row" data-rule-id="${rule.id}">
-                <td class="select-col adaptive-center"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>
+                <td class="select-col adaptive-center"><input class="teacher-salary-rule-select-row" type="checkbox" data-id="${escapeHtml(rule.id)}" ${selectedTeacherSalaryRuleIds.has(Number(rule.id)) ? "checked" : ""} ${canWriteData() ? "" : "disabled"} aria-label="选择薪资规则"></td>${renderRowIndex(index)}
                 <td class="text-cell adaptive-center">${escapeHtml(rule.teacher_name)}</td>
                 <td class="text-cell adaptive-center">${renderEntityBadge("grade", rule.grade)}</td>
                 <td class="text-cell adaptive-center">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(rule.student_names, { fallbackGrade: rule.grade })}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell adaptive-center rule-status-cell">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}<label class="rule-activation"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则"><span>${teacherSalaryRuleEnabled(rule) ? "参与匹配" : "已停用"}</span></label></td>
+                <td class="text-cell adaptive-center rule-status-cell"><label class="rule-activation" title="${teacherSalaryRuleEnabled(rule) ? "启用：规则可参与匹配，点击复选框停用" : "停用：规则不参与匹配，点击复选框启用"}"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</label></td>
                 <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide teacher-salary-rule-field" data-field="notes" rows="1" wrap="soft">${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}</textarea></td>
               </tr>
-            `).join("") || `<tr><td colspan="8" class="empty">暂无符合条件的薪资规则</td></tr>`}
+            `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -13129,10 +13145,11 @@ function renderTeacherDetail() {
         ${teacherSalaryBatchResultMarkup(teacherSalaryBatchResult)}
       ` : ""}
       <div class="table-wrap">
-        <table class="course-table teacher-detail-table uniform-table nowrap-table">
-          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可见课程"></th>` : ""}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
+        <table class="course-table teacher-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true">
+          <colgroup>${showSalary ? '<col data-column-type="select">' : ""}${rowIndexColumn()}<col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="short" data-min-width="128" data-max-width="128"><col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="long">${showSalary ? '<col data-column-type="money"><col data-column-type="money">' : ""}</colgroup>
+          <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可见课程"></th>` : ""}${rowIndexHeader()}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
-            ${visibleRows.map((row) => {
+            ${visibleRows.map((row, index) => {
               const calculated = showSalary ? teacherSalaryRuleCalculation(row) : null;
               const displayedRuleSalary = showSalary ? displayTeacherRuleSalaryForLesson(row) : null;
               const selected = selectedTeacherSalaryLessonIds.has(Number(row.id));
@@ -13144,14 +13161,14 @@ function renderTeacherDetail() {
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${canUpdateSalary ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : `选择后将返回处理原因：${disabledReason}`)}"></td>` : ""}
-                  <td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students"><span class="entity-badge-list">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
+                  ${renderRowIndex(index)}<td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students student-set-cell"><span class="student-set-badges">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right teacher-rule-salary-cell" title="${escapeHtml(ruleTitle)}">${teacherSalaryRuleCellMarkup(row)}</td>
                   ` : ""}
                 </tr>
               `;
-            }).join("") || `<tr><td colspan="${showSalary ? 13 : 10}" class="empty">${selectedTeacherDetail ? "暂无符合条件的教师课程" : "请先选择教师，再查看课时明细"}</td></tr>`}
+            }).join("") || `<tr><td colspan="${showSalary ? 14 : 11}" class="empty">${selectedTeacherDetail ? "暂无符合条件的教师课程" : "请先选择教师，再查看课时明细"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -15421,7 +15438,7 @@ function wireEvents() {
     } catch (error) { dialog.error = error.message; }
     finally { dialog.busy = false; if (view === "audit" && backupCleanupDialog === dialog) rerenderContent(renderAudit); }
   });
-  document.querySelectorAll(".lesson-table,.fee-detail-table,.recharge-table,.student-history-table,.student-pricing-table,.class-group-table,.student-profile-table,.teacher-salary-table,.teacher-detail-table,.teacher-salary-rule-table,.teacher-profile-table,.student-summary-table").forEach(table => {
+  document.querySelectorAll(".lesson-table,.fee-detail-table,.recharge-table,.student-history-table,.student-pricing-table,.class-group-table,.student-profile-table,.teacher-salary-table,.teacher-detail-table,.teacher-salary-rule-table,.teacher-profile-table,.student-summary-table,.user-admin-panel:not(.role-admin-panel) .user-table").forEach(table => {
     table.classList.add("business-sticky-table");
     table.closest(".table-wrap")?.classList.add("business-table-scroll");
   });
