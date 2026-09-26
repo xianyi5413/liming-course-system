@@ -117,13 +117,13 @@ test("month switching refreshes the full-bootstrap cache without stale fee detai
 test("fee and teacher detail headers and row cells share the approved column order", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456"); await openView(browser, "students", "feeDetails");
   await browser.waitFor("document.querySelectorAll('.fee-detail-table tbody tr:not(.empty)').length > 0");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用", "规则费用"]);
-  assert.equal(await browser.evaluate("document.querySelector('.fee-detail-table tbody tr')?.children.length"), 13);
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "序号", "学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用", "规则费用"]);
+  assert.equal(await browser.evaluate("document.querySelector('.fee-detail-table tbody tr')?.children.length"), 14);
   assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fee-detail-scroll')).overflowX !== 'visible'"), true);
   await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
   await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
   await browser.waitFor("Boolean(document.querySelector('.teacher-detail-table .teacher-salary-lesson-select'))");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资", "规则薪资"]);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.children.length"), 13);
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "序号", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资", "规则薪资"]);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.children.length"), 14);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));

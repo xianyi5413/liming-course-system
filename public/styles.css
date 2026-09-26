@@ -7584,17 +7584,17 @@ tr.risk-debt:hover td {
 
 .cell-input.number,
 .course-table :is(th, td):nth-child(12),
-.teacher-detail-table :is(th, td):nth-child(12),
 .teacher-detail-table :is(th, td):nth-child(13),
-.fee-detail-table :is(th, td):nth-child(12),
+.teacher-detail-table :is(th, td):nth-child(14),
 .fee-detail-table :is(th, td):nth-child(13),
-.student-summary-table :is(th, td):nth-child(n + 3),
-.recharge-table :is(th, td):nth-child(4),
+.fee-detail-table :is(th, td):nth-child(14),
+.student-summary-table :is(th, td):nth-child(n + 4),
 .recharge-table :is(th, td):nth-child(5),
+.recharge-table :is(th, td):nth-child(6),
 .pricing-table :is(th, td):nth-child(3),
 .student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(5),
-.teacher-salary-table :is(th, td):nth-child(n + 3):nth-child(-n + 8),
+.student-pricing-table :is(th, td):nth-child(6),
+.teacher-salary-table :is(th, td):nth-child(n + 4):nth-child(-n + 8),
 .finance-table :is(th, td):nth-child(n + 2),
 .risk-table :is(th, td):nth-child(3) {
   font-family: var(--font-number);
@@ -7613,41 +7613,41 @@ tr.risk-debt:hover td {
 .course-table :is(th, td):nth-child(13),
 .course-table :is(th, td):nth-child(14),
 .course-table :is(th, td):nth-child(15),
-.fee-detail-table :is(th, td):nth-child(4),
 .fee-detail-table :is(th, td):nth-child(5),
 .fee-detail-table :is(th, td):nth-child(6),
 .fee-detail-table :is(th, td):nth-child(7),
 .fee-detail-table :is(th, td):nth-child(8),
 .fee-detail-table :is(th, td):nth-child(9),
 .fee-detail-table :is(th, td):nth-child(10),
-.student-summary-table :is(th, td):nth-child(2),
-.recharge-table :is(th, td):nth-child(2),
-.recharge-table :is(th, td):nth-child(6),
+.fee-detail-table :is(th, td):nth-child(11),
+.student-summary-table :is(th, td):nth-child(3),
+.recharge-table :is(th, td):nth-child(3),
+.recharge-table :is(th, td):nth-child(7),
 .pricing-table :is(th, td):nth-child(1),
 .pricing-table :is(th, td):nth-child(2),
 .student-pricing-create-table :is(th, td):nth-child(2),
 .student-pricing-create-table :is(th, td):nth-child(5),
-.student-pricing-table :is(th, td):nth-child(2),
 .student-pricing-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(6),
-.teacher-salary-table :is(th, td):nth-child(2),
+.student-pricing-table :is(th, td):nth-child(4),
+.student-pricing-table :is(th, td):nth-child(7),
+.teacher-salary-table :is(th, td):nth-child(3),
 .top-students-table :is(th, td):nth-child(2),
 .risk-table :is(th, td):nth-child(1) {
   text-align: center;
 }
 
 .course-table :is(th, td):nth-child(12),
-.teacher-detail-table :is(th, td):nth-child(12),
 .teacher-detail-table :is(th, td):nth-child(13),
-.fee-detail-table :is(th, td):nth-child(12),
+.teacher-detail-table :is(th, td):nth-child(14),
 .fee-detail-table :is(th, td):nth-child(13),
-.student-summary-table :is(th, td):nth-child(n + 3),
-.recharge-table :is(th, td):nth-child(4),
+.fee-detail-table :is(th, td):nth-child(14),
+.student-summary-table :is(th, td):nth-child(n + 4),
 .recharge-table :is(th, td):nth-child(5),
+.recharge-table :is(th, td):nth-child(6),
 .pricing-table :is(th, td):nth-child(3),
 .student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(5),
-.teacher-salary-table :is(th, td):nth-child(n + 3):nth-child(-n + 8),
+.student-pricing-table :is(th, td):nth-child(6),
+.teacher-salary-table :is(th, td):nth-child(n + 4):nth-child(-n + 8),
 .profit-table :is(th, td):nth-child(n + 2),
 .balance-table :is(th, td):nth-child(2),
 .top-students-table :is(th, td):nth-child(3),
@@ -7659,22 +7659,22 @@ tr.risk-debt:hover td {
 .course-table :is(th, td):nth-child(1),
 .course-table :is(th, td):nth-child(9),
 .course-table :is(th, td):nth-child(10),
-.fee-detail-table :is(th, td):nth-child(2),
 .fee-detail-table :is(th, td):nth-child(3),
-.fee-detail-table :is(th, td):nth-child(11),
-.student-summary-table :is(th, td):nth-child(1),
-.recharge-table :is(th, td):nth-child(1),
-.recharge-table :is(th, td):nth-child(7),
+.fee-detail-table :is(th, td):nth-child(4),
+.fee-detail-table :is(th, td):nth-child(12),
+.student-summary-table :is(th, td):nth-child(2),
+.recharge-table :is(th, td):nth-child(2),
+.recharge-table :is(th, td):nth-child(8),
 .pricing-table :is(th, td):nth-child(4),
 .pricing-table :is(th, td):nth-child(5),
 .student-pricing-create-table :is(th, td):nth-child(1),
 .student-pricing-create-table :is(th, td):nth-child(4),
-.student-pricing-table :is(th, td):nth-child(1),
-.student-pricing-table :is(th, td):nth-child(4),
-.student-pricing-table :is(th, td):nth-child(7),
+.student-pricing-table :is(th, td):nth-child(2),
+.student-pricing-table :is(th, td):nth-child(5),
 .student-pricing-table :is(th, td):nth-child(8),
-.teacher-salary-table :is(th, td):nth-child(1),
-.teacher-salary-table :is(th, td):nth-child(9),
+.student-pricing-table :is(th, td):nth-child(9),
+.teacher-salary-table :is(th, td):nth-child(2),
+.teacher-salary-table :is(th, td):nth-child(10),
 .finance-table :is(th, td):nth-child(1),
 .risk-table :is(th, td):nth-child(2),
 .risk-table :is(th, td):nth-child(4) {
@@ -7700,13 +7700,13 @@ td.empty {
 .course-table td:nth-child(7) .cell-select,
 .course-table td:nth-child(8) .cell-select,
 .course-table td:nth-child(11) .cell-select,
-.fee-detail-table td:nth-child(12) .cell-input,
-.recharge-table td:nth-child(4) .cell-input,
+.fee-detail-table td:nth-child(13) .cell-input,
 .recharge-table td:nth-child(5) .cell-input,
+.recharge-table td:nth-child(6) .cell-input,
 .pricing-table td:nth-child(3) .cell-input,
 .student-pricing-create-table td:nth-child(3) .cell-input,
-.student-pricing-table td:nth-child(5) .cell-input,
-.teacher-salary-table td:nth-child(n + 3):nth-child(-n + 7) .cell-input {
+.student-pricing-table td:nth-child(6) .cell-input,
+.teacher-salary-table td:nth-child(n + 4):nth-child(-n + 7) .cell-input {
   text-align: inherit;
 }
 
@@ -7779,20 +7779,20 @@ td.empty {
 .course-table.lesson-table :is(td, th):nth-child(11),
 .course-table.week-detail-table :is(td, th):nth-child(9),
 .course-table.week-detail-table :is(td, th):nth-child(10),
-.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(11),
-.student-query-detail-table :is(td, th):nth-child(10),
-.recharge-table:not(.opening-balance-table) :is(td, th):nth-child(7),
-.opening-balance-table :is(td, th):nth-child(7),
-.student-pricing-table :is(td, th):nth-child(4),
-.student-pricing-table :is(td, th):nth-child(7),
-.teacher-salary-rule-table :is(td, th):nth-child(4),
-.teacher-salary-rule-table :is(td, th):nth-child(7),
+.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(12),
+.student-query-detail-table :is(td, th):nth-child(11),
+.recharge-table:not(.opening-balance-table) :is(td, th):nth-child(8),
+.opening-balance-table :is(td, th):nth-child(8),
+.student-pricing-table :is(td, th):nth-child(5),
+.student-pricing-table :is(td, th):nth-child(8),
+.teacher-salary-rule-table :is(td, th):nth-child(5),
+.teacher-salary-rule-table :is(td, th):nth-child(8),
 .profile-table :is(td, th).profile-notes-col,
 .pricing-table :is(td, th):nth-child(5) {
   text-align: left !important;
 }
 
-.teacher-salary-rule-table :is(td, th):nth-child(5) {
+.teacher-salary-rule-table :is(td, th):nth-child(6) {
   text-align: right !important;
 }
 
@@ -7801,9 +7801,9 @@ td.empty {
 .course-table.lesson-table :is(td, th):nth-child(12),
 .course-table.lesson-table :is(td, th):nth-child(13),
 .course-table.week-detail-table :is(td, th):last-child,
-.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(12),
 .fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(13),
-.student-query-detail-table :is(td, th):nth-child(11),
+.fee-detail-table:not(.student-query-detail-table) :is(td, th):nth-child(14),
+.student-query-detail-table :is(td, th):nth-child(12),
 .recharge-table .cell-input.number,
 .opening-balance-table .cell-input.number {
   text-align: center !important;
@@ -7811,13 +7811,13 @@ td.empty {
 
 .course-table.lesson-table.uniform-table :is(td, th):not(:nth-child(10)):not(:nth-child(11)),
 .course-table.week-detail-table.uniform-table :is(td, th):not(:nth-child(9)):not(:nth-child(10)),
-.fee-detail-table.uniform-table:not(.student-query-detail-table) :is(td, th):not(:nth-child(11)),
-.student-query-detail-table.uniform-table :is(td, th):not(:nth-child(10)),
-.recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(7)),
-.opening-balance-table.uniform-table :is(td, th):not(:nth-child(7)),
-.student-pricing-table.uniform-table :is(td, th):not(:nth-child(4)):not(:nth-child(7)),
+.fee-detail-table.uniform-table:not(.student-query-detail-table) :is(td, th):not(:nth-child(12)),
+.student-query-detail-table.uniform-table :is(td, th):not(:nth-child(11)),
+.recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(8)),
+.opening-balance-table.uniform-table :is(td, th):not(:nth-child(8)),
+.student-pricing-table.uniform-table :is(td, th):not(:nth-child(5)):not(:nth-child(8)),
 .pricing-table.uniform-table :is(td, th):not(:nth-child(5)),
-.teacher-salary-table.uniform-table :is(td, th):nth-child(1),
+.teacher-salary-table.uniform-table :is(td, th):nth-child(2),
 .profile-table.uniform-table :is(td, th):not(.profile-notes-col),
 .operation-log-table.uniform-table th,
 .audit-table.uniform-table th,
@@ -7825,10 +7825,10 @@ td.empty {
   text-align: center !important;
 }
 
-.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(1),
 .teacher-salary-rule-table.uniform-table :is(td, th):nth-child(2),
 .teacher-salary-rule-table.uniform-table :is(td, th):nth-child(3),
-.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(6) {
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(4),
+.teacher-salary-rule-table.uniform-table :is(td, th):nth-child(7) {
   text-align: center !important;
 }
 
@@ -7852,14 +7852,14 @@ table th,
 .course-table.lesson-table td:nth-child(11),
 .course-table.week-detail-table td:nth-child(9),
 .course-table.week-detail-table td:nth-child(10),
-.fee-detail-table:not(.student-query-detail-table) td:nth-child(11),
-.student-query-detail-table td:nth-child(10),
-.recharge-table:not(.opening-balance-table) td:nth-child(7),
-.opening-balance-table td:nth-child(7),
-.student-pricing-table td:nth-child(4),
-.student-pricing-table td:nth-child(7),
-.teacher-salary-rule-table td:nth-child(4),
-.teacher-salary-rule-table td:nth-child(7),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
+.student-query-detail-table td:nth-child(11),
+.recharge-table:not(.opening-balance-table) td:nth-child(8),
+.opening-balance-table td:nth-child(8),
+.student-pricing-table td:nth-child(5),
+.student-pricing-table td:nth-child(8),
+.teacher-salary-rule-table td:nth-child(5),
+.teacher-salary-rule-table td:nth-child(8),
 .teacher-detail-table td.teacher-detail-students,
 .teacher-detail-table td.teacher-detail-notes,
 .teacher-profile-table td.profile-notes-col,
@@ -7870,42 +7870,42 @@ table th,
 .course-table.lesson-table td:nth-child(12),
 .course-table.lesson-table td:nth-child(13),
 .course-table.week-detail-table td:last-child,
-.student-summary-table td:nth-child(1),
 .student-summary-table td:nth-child(2),
 .student-summary-table td:nth-child(3),
+.student-summary-table td:nth-child(4),
 .student-history-table td:nth-child(1),
 .student-history-table td:nth-child(2),
 .student-profile-table td,
 .teacher-profile-table td:not(.profile-notes-col),
-.teacher-salary-rule-table td:nth-child(1),
 .teacher-salary-rule-table td:nth-child(2),
 .teacher-salary-rule-table td:nth-child(3),
-.teacher-salary-rule-table td:nth-child(6) {
+.teacher-salary-rule-table td:nth-child(4),
+.teacher-salary-rule-table td:nth-child(7) {
   text-align: center !important;
 }
 
-.student-summary-table td:nth-child(n + 4),
-.fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
+.student-summary-table td:nth-child(n + 5),
 .fee-detail-table:not(.student-query-detail-table) td:nth-child(13),
-.student-query-detail-table td:nth-child(11),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(14),
+.student-query-detail-table td:nth-child(12),
 .student-history-table td:nth-child(n + 3):not(.center),
-.recharge-table:not(.opening-balance-table) td:nth-child(4),
 .recharge-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table td:nth-child(5),
+.recharge-table:not(.opening-balance-table) td:nth-child(6),
 .opening-balance-table td:nth-child(6),
-.student-pricing-table td:nth-child(5),
-.teacher-salary-rule-table td:nth-child(5),
-.teacher-detail-table td:nth-child(12),
+.opening-balance-table td:nth-child(7),
+.student-pricing-table td:nth-child(6),
+.teacher-salary-rule-table td:nth-child(6),
 .teacher-detail-table td:nth-child(13),
+.teacher-detail-table td:nth-child(14),
 .pricing-table td:nth-child(3) {
   text-align: right !important;
 }
 
 .course-table.lesson-table :is(th, td):nth-child(3),
 .course-table.week-detail-table :is(th, td):nth-child(2),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(4),
-.student-query-detail-table :is(th, td):nth-child(3),
-.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(6) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5),
+.student-query-detail-table :is(th, td):nth-child(4),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(7) {
   width: 116px;
   min-width: 116px;
   max-width: 116px;
@@ -7913,8 +7913,8 @@ table th,
 
 .course-table.lesson-table :is(th, td):nth-child(6),
 .course-table.week-detail-table :is(th, td):nth-child(5),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7),
-.student-query-detail-table :is(th, td):nth-child(6) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(8),
+.student-query-detail-table :is(th, td):nth-child(7) {
   width: 112px;
   min-width: 112px;
   max-width: 112px;
@@ -7926,20 +7926,20 @@ table th,
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(9),
-.student-pricing-table :is(th, td):nth-child(4),
-.teacher-salary-rule-table :is(th, td):nth-child(4) {
+.student-pricing-table :is(th, td):nth-child(5),
+.teacher-salary-rule-table :is(th, td):nth-child(5) {
   min-width: 240px;
   max-width: 460px;
 }
 
 .course-table.lesson-table :is(th, td):nth-child(11),
 .course-table.week-detail-table :is(th, td):nth-child(10),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11),
-.student-query-detail-table :is(th, td):nth-child(10),
-.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(7),
-.opening-balance-table :is(th, td):nth-child(7),
-.student-pricing-table :is(th, td):nth-child(7),
-.teacher-salary-rule-table :is(th, td):nth-child(7),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
+.student-query-detail-table :is(th, td):nth-child(11),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(8),
+.opening-balance-table :is(th, td):nth-child(8),
+.student-pricing-table :is(th, td):nth-child(8),
+.teacher-salary-rule-table :is(th, td):nth-child(8),
 .teacher-profile-table :is(th, td).profile-notes-col,
 .student-profile-table :is(th, td).profile-notes-col {
   min-width: 150px;
@@ -7967,23 +7967,23 @@ table th,
   max-width: 84px;
 }
 
-.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(4),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(5),
-.opening-balance-table :is(th, td):nth-child(5),
+.recharge-table:not(.opening-balance-table) :is(th, td):nth-child(6),
 .opening-balance-table :is(th, td):nth-child(6),
-.student-pricing-table :is(th, td):nth-child(5),
-.teacher-salary-rule-table :is(th, td):nth-child(5),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
+.opening-balance-table :is(th, td):nth-child(7),
+.student-pricing-table :is(th, td):nth-child(6),
+.teacher-salary-rule-table :is(th, td):nth-child(6),
 .fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(13),
-.student-query-detail-table :is(th, td):nth-child(11) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(14),
+.student-query-detail-table :is(th, td):nth-child(12) {
   min-width: 112px;
   max-width: 132px;
 }
 
 .course-table.lesson-table :is(th, td):nth-child(4),
 .course-table.week-detail-table :is(th, td):nth-child(3),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5),
-.student-query-detail-table :is(th, td):nth-child(4) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6),
+.student-query-detail-table :is(th, td):nth-child(5) {
   min-width: 84px;
   max-width: 104px;
 }
@@ -8010,17 +8010,17 @@ table th,
   text-align: center !important;
 }
 
-.fee-detail-table.uniform-table:not(.student-query-detail-table) td:nth-child(12),
 .fee-detail-table.uniform-table:not(.student-query-detail-table) td:nth-child(13),
-.student-query-detail-table.uniform-table td:nth-child(11),
-.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(4),
+.fee-detail-table.uniform-table:not(.student-query-detail-table) td:nth-child(14),
+.student-query-detail-table.uniform-table td:nth-child(12),
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(5),
-.opening-balance-table.uniform-table td:nth-child(5),
+.recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(6),
 .opening-balance-table.uniform-table td:nth-child(6),
-.student-pricing-table.uniform-table td:nth-child(5),
-.teacher-salary-rule-table.uniform-table td:nth-child(5),
-.teacher-detail-table.uniform-table td:nth-child(12),
+.opening-balance-table.uniform-table td:nth-child(7),
+.student-pricing-table.uniform-table td:nth-child(6),
+.teacher-salary-rule-table.uniform-table td:nth-child(6),
 .teacher-detail-table.uniform-table td:nth-child(13),
+.teacher-detail-table.uniform-table td:nth-child(14),
 .pricing-table.uniform-table td:nth-child(3) {
   text-align: right !important;
 }
@@ -8039,7 +8039,7 @@ table th,
 .teacher-profile-table td:not(.profile-notes-col) .cell-select,
 .course-table.lesson-table td:not(:nth-child(10)):not(:nth-child(11)) .cell-input,
 .course-table.lesson-table td:not(:nth-child(10)):not(:nth-child(11)) .cell-select,
-.recharge-table:not(.opening-balance-table) td:nth-child(6) .cell-input {
+.recharge-table:not(.opening-balance-table) td:nth-child(7) .cell-input {
   text-align: inherit;
 }
 
@@ -8186,10 +8186,10 @@ table th,
 }
 
 .teacher-profile-table td.profile-notes-col .cell-input,
-.recharge-table:not(.opening-balance-table) td:nth-child(7) .cell-input,
-.opening-balance-table td:nth-child(7) .cell-input,
-.student-pricing-table td:nth-child(7) .cell-input,
-.teacher-salary-rule-table td:nth-child(7) .cell-input {
+.recharge-table:not(.opening-balance-table) td:nth-child(8) .cell-input,
+.opening-balance-table td:nth-child(8) .cell-input,
+.student-pricing-table td:nth-child(8) .cell-input,
+.teacher-salary-rule-table td:nth-child(8) .cell-input {
   text-align: left;
 }
 
@@ -8206,14 +8206,14 @@ table th,
   min-width: 96px;
 }
 
-.class-group-table :is(th, td):nth-child(1),
 .class-group-table :is(th, td):nth-child(2),
-.class-group-table :is(th, td):nth-child(3) {
+.class-group-table :is(th, td):nth-child(3),
+.class-group-table :is(th, td):nth-child(4) {
   text-align: center;
 }
 
-.class-group-table :is(th, td):nth-child(4),
-.class-group-table :is(th, td):nth-child(5) {
+.class-group-table :is(th, td):nth-child(5),
+.class-group-table :is(th, td):nth-child(6) {
   text-align: left;
 }
 
@@ -8530,35 +8530,35 @@ table th,
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(1),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(3) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(4) {
   width: 112px;
   min-width: 96px;
   max-width: 132px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(2),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(4) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5) {
   width: 108px;
   min-width: 108px;
   max-width: 108px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(3),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(5) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6) {
   width: 86px;
   min-width: 78px;
   max-width: 96px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(4),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7) {
   width: 62px;
   min-width: 58px;
   max-width: 72px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(5),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(8) {
   width: 112px;
   min-width: 108px;
   max-width: 118px;
@@ -8566,15 +8566,15 @@ table th,
 
 .course-table.week-detail-table :is(th, td):nth-child(6),
 .course-table.week-detail-table :is(th, td):nth-child(7),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(8),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(9) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(9),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(10) {
   width: 76px;
   min-width: 70px;
   max-width: 86px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(8),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(10) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11) {
   width: 86px;
   min-width: 76px;
   max-width: 96px;
@@ -8587,14 +8587,14 @@ table th,
   text-align: left !important;
 }
 
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(2) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(3) {
   width: 128px;
   min-width: 112px;
   max-width: 160px;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(10),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(11) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12) {
   width: 168px;
   min-width: 120px;
   max-width: 220px;
@@ -8602,7 +8602,7 @@ table th,
 
 .course-table.week-detail-table td:nth-child(9),
 .course-table.week-detail-table td:nth-child(10),
-.fee-detail-table:not(.student-query-detail-table) td:nth-child(11) {
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(12) {
   overflow: hidden;
   text-align: left !important;
   text-overflow: ellipsis;
@@ -8616,14 +8616,14 @@ table th,
 }
 
 .course-table.week-detail-table td:nth-child(11):not(:last-child),
-.fee-detail-table:not(.student-query-detail-table) td:nth-child(12),
-.fee-detail-table:not(.student-query-detail-table) td:nth-child(13) {
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(13),
+.fee-detail-table:not(.student-query-detail-table) td:nth-child(14) {
   text-align: right !important;
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(11):not(:last-child),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(12),
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(13) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(13),
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(14) {
   width: 118px;
   min-width: 112px;
   max-width: 132px;
@@ -12121,7 +12121,7 @@ table th,
 
 /* 2026-07 table-cell pass: each wide value remains intact and only the
    page-scoped outer table wrapper owns horizontal scrolling. */
-.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(6) {
+.fee-detail-table:not(.student-query-detail-table) :is(th, td):nth-child(7) {
   width: 128px;
   min-width: 128px;
   max-width: 128px;
@@ -12328,18 +12328,18 @@ table th,
   font-weight: 600;
 }
 
-.teacher-salary-rule-table :is(th, td):nth-child(6),
-.teacher-salary-rule-table :is(th, td):nth-child(7) {
+.teacher-salary-rule-table :is(th, td):nth-child(7),
+.teacher-salary-rule-table :is(th, td):nth-child(8) {
   text-align: center !important;
 }
 
-.teacher-salary-rule-table :is(th, td):nth-child(8) {
+.teacher-salary-rule-table :is(th, td):nth-child(9) {
   min-width: 150px;
   max-width: 280px;
   text-align: left !important;
 }
 
-.teacher-salary-rule-table td:nth-child(8) .cell-input {
+.teacher-salary-rule-table td:nth-child(9) .cell-input {
   text-align: left;
 }
 
@@ -14314,7 +14314,7 @@ table.adaptive-table :is(th, td).adaptive-wrap {
 .class-group-type-cell { cursor: pointer; position: relative; }
 .class-group-type-cell:hover, .class-group-type-cell:focus-visible { background: var(--surface-hover); outline: 1px solid var(--brand-border); outline-offset: -1px; }
 .class-group-type-cell .schedule-inline-picker-native, .class-group-type-cell .schedule-inline-picker-anchor { position: absolute; opacity: 0; pointer-events: none; inset: 0; width: 100%; height: 100%; }
-.rule-activation { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: var(--text-caption); color: var(--muted); margin-top: 4px; }
+.rule-activation { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; cursor: pointer; }
 .recharge-page .recharge-analysis-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--space-3); }
 .recharge-page .recharge-analysis-card { padding: var(--space-3); min-height: 84px; align-content: center; background: var(--panel); }
 .recharge-page .recharge-analysis-card strong { font-size: 1.45rem; font-variant-numeric: tabular-nums; }
@@ -14322,3 +14322,19 @@ table.adaptive-table :is(th, td).adaptive-wrap {
 .teacher-profile-table.adaptive-table tbody td { padding-top: 4px; padding-bottom: 4px; }
 .teacher-profile-table.adaptive-table .cell-input { min-height: 32px; padding-top: 5px; padding-bottom: 5px; line-height: 20px; }
 @media print { .matrix-view-region .week-grid-scroll { max-height: none; overflow: visible; } .matrix-view-region .week-grid-scroll thead th { position: static; } }
+
+/* Shared display index and content-sized compact rows; never used as record identity. */
+col.row-index-column { width: 48px; }
+table.uniform-table :is(th, td).row-index {
+  width: 48px; min-width: 48px !important; max-width: 56px;
+  padding-left: 4px; padding-right: 4px; text-align: center !important;
+  vertical-align: middle; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+table.uniform-table.compact-rows tbody :is(tr, td) { height: auto; }
+table.uniform-table.compact-rows tbody td { padding-top: 4px; padding-bottom: 4px; vertical-align: middle; }
+table.uniform-table.compact-rows :is(.cell-input, .currency-input, .currency-input-wrap) { min-height: 32px; height: auto; line-height: 20px; }
+table.uniform-table.compact-rows :is(.cell-input, .currency-input) { padding-top: 5px; padding-bottom: 5px; }
+table.uniform-table.compact-rows :is(.content-wrap, .teacher-detail-notes) { white-space: pre-wrap !important; overflow-wrap: anywhere; overflow: visible; text-overflow: clip; }
+table.uniform-table.compact-rows .adaptive-textarea { min-height: 32px; max-height: none; overflow: hidden; }
+table.uniform-table.compact-rows .student-set-badges { flex-wrap: wrap; }
+table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { margin: 0; flex: 0 0 auto; }

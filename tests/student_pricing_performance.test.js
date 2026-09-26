@@ -244,6 +244,7 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     const first = await browser.evaluate(`(() => {
       const table=document.querySelector('.student-pricing-table');
       return {
+        indexes:[...table.querySelectorAll("td.row-index")].map(cell=>Number(cell.textContent)),
         initial:Number(table.dataset.initialRowCount),
         rendered:Number(table.dataset.renderedRows),
         layoutReads:Number(table.dataset.adaptiveLayoutReads),
@@ -252,10 +253,12 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
       };
     })()`);
     assert.equal(first.initial, INITIAL_ROW_COUNT);
+    assert.deepEqual(first.indexes, first.indexes.map((_, index) => index + 1));
     assert.equal(first.layoutReads, 0);
     assert.ok(operableMs < 2000, `operable ${operableMs.toFixed(1)}ms`);
     await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true' && document.querySelectorAll('.student-pricing-rule-row').length===${RULE_COUNT}`, 10_000);
     const allDataMs = performance.now() - started;
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), Array.from({length:RULE_COUNT}, (_, index) => index + 1));
     assert.ok(allDataMs < 3500, `all rows ${allDataMs.toFixed(1)}ms`);
     const pageResponses = browser.responses.slice(responseStart);
     assert.equal(pageResponses.filter((item) => /\/api\/student-pricing-page\?/.test(item.url)).length, 1);
@@ -279,6 +282,7 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     })()`);
     await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===2 && document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
     const filterMs = performance.now() - filterStarted;
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), [1, 2]);
     assert.ok(filterMs < 500, `filter ${filterMs.toFixed(1)}ms`);
     assert.match(await browser.evaluate("document.querySelector('.batch-selection-summary').textContent"), /2/);
 
@@ -329,6 +333,10 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     const secondMs = performance.now() - secondStarted;
     assert.ok(secondMs < 800, `second entry ${secondMs.toFixed(1)}ms`);
     assert.equal(browser.responses.slice(secondResponseStart).some((item) => /student-pricing-page/.test(item.url)), false);
+    await browser.evaluate(`studentPricingFilter={...studentPricingFilter,student:''};render();studentPricingFilter={...studentPricingFilter,student:'性能学生002'};render();`);
+    await browser.waitFor("document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), [1, 2]);
+    assert.ok(await browser.evaluate("[...document.querySelectorAll('.student-pricing-select-row')].every(input=>Number(input.dataset.id)>2)"));
     const longTasks = await browser.evaluate("window.__pricingLongTasks");
     assert.ok(Math.max(0, ...longTasks) < 500, JSON.stringify(longTasks));
     assert.deepEqual(browser.exceptions, []);

@@ -129,7 +129,7 @@ test("student-pricing student filter matches only student_name and supports sear
 test("opening balances have no month UI and remain unchanged when the top month changes", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456"); await openView(browser, "students", "openingBalances");
   const before = await browser.evaluate("document.querySelector('.opening-balance-table tbody')?.textContent.trim()");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.opening-balance-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "学生姓名", "年级", "期初实际余额", "期初赠送余额", "备注"]);
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.opening-balance-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "序号", "学生姓名", "年级", "期初实际余额", "期初赠送余额", "备注"]);
   assert.equal(await browser.evaluate("Boolean(document.querySelector('.opening-balance-filter [data-filter-field=\"month_key\"], .opening-balance-table input[type=\"month\"]'))"), false);
   await browser.click(".open-opening-balance-modal");
   assert.equal(await browser.evaluate("Boolean(document.querySelector('.opening-balance-modal input[type=\"month\"], .opening-balance-modal [data-field=\"month_key\"]'))"), false);

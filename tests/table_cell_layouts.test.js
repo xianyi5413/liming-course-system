@@ -122,7 +122,7 @@ test("target tables keep short fields complete, wrap bounded long fields and del
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
     const layout = await browser.evaluate(`(() => {
-      const cells=[...document.querySelectorAll('.fee-detail-table tbody tr td:nth-child(6)')];
+      const cells=[...document.querySelectorAll('.fee-detail-table tbody tr td:nth-child(7)')];
       const wrap=document.querySelector('.fee-detail-scroll');
       const table=document.querySelector('.fee-detail-table');
       return {
@@ -150,9 +150,9 @@ test("target tables keep short fields complete, wrap bounded long fields and del
   await openView(browser, "students", "recharges", ".recharge-row");
   assert.deepEqual(
     await browser.evaluate("[...document.querySelectorAll('.recharge-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"),
-    ["选择", "学生姓名", "年级", "本月实际充值", "本月赠送充值", "充值日期", "来源/渠道", "备注"],
+    ["选择", "序号", "学生姓名", "年级", "本月实际充值", "本月赠送充值", "充值日期", "来源/渠道", "备注"],
   );
-  assert.equal(await browser.evaluate("document.querySelector('.recharge-row').children.length"), 8);
+  assert.equal(await browser.evaluate("document.querySelector('.recharge-row').children.length"), 9);
   assert.equal(await browser.evaluate("Boolean(document.querySelector('.edit-recharge-record'))"), false);
   assert.equal(await browser.evaluate("document.querySelector('.recharge-channel-cell')?.getAttribute('role')"), "button");
 
