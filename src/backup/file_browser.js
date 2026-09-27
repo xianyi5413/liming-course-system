@@ -92,7 +92,9 @@ async function listManagedLocalExcel({ dataDir, records = [] }) {
   }
   const files = [];
   await walkExcelFiles(root, rootRealPath, files);
-  const items = await Promise.all(files.map(async ({ filename, info }) => {
+  const items = [];
+  for (let offset = 0; offset < files.length; offset += 32) {
+    items.push(...await Promise.all(files.slice(offset, offset + 32).map(async ({ filename, info }) => {
     const relativePath = slash(path.relative(path.resolve(dataDir), filename));
     const record = recordByPath.get(relativePath) || null;
     const sidecar = await safeRegularFile(`${filename}.sha256`, rootRealPath);
@@ -110,7 +112,8 @@ async function listManagedLocalExcel({ dataDir, records = [] }) {
         created_by_label: String(record.created_by_label || ""),
       } : null,
     };
-  }));
+    })));
+  }
   items.sort((a, b) => b.modified_at.localeCompare(a.modified_at) || a.filename.localeCompare(b.filename, "zh-CN"));
   return { root_status: "available", items };
 }

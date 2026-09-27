@@ -678,6 +678,7 @@ async function request(path, options = {}) {
     }
     if (method !== "GET") {
       clearStudentQueryCache();
+      if (state && /^\/api\/(recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
       invalidateRequestCache(cacheInvalidationPrefixes(path));
       if (String(path).startsWith("/api/student-pricing")
         || String(path).startsWith("/api/students")
@@ -1638,7 +1639,7 @@ function fullBootstrapCacheKey(monthKey = activeMonth) {
 }
 
 function viewNeedsFullBootstrap(viewKey = view) {
-  return ["feeDetails", "summary", "teacherSalary", "teacherTravelFees"].includes(viewKey)
+  return ["summary", "teacherSalary", "teacherTravelFees"].includes(viewKey)
     || (viewKey === "pricing" && Boolean(pricingAuditModal));
 }
 
@@ -1742,7 +1743,24 @@ async function loadStudentPricingPage({ force = false } = {}) {
   return promise;
 }
 
+let feeDetailsRequest = null;
+async function loadFeeDetailsPage() {
+  feeDetailsRequest?.abort();
+  const controller = new AbortController(); feeDetailsRequest = controller;
+  const month = activeMonth;
+  try {
+    const result = await request(`/api/fee-details-page?month=${encodeURIComponent(month)}`, { cache: false, signal: controller.signal });
+    if (view !== "feeDetails" || month !== activeMonth || controller.signal.aborted) return false;
+    state.derived.fee_details = result.fee_details || [];
+    return true;
+  } catch (error) {
+    if (controller.signal.aborted) return false;
+    throw error;
+  } finally { if (feeDetailsRequest === controller) feeDetailsRequest = null; }
+}
+
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
+  if (view === "feeDetails" && !await loadFeeDetailsPage()) return false;
   const stillCurrent = () => loadGeneration === generation;
   const stageConflictsPromise = view === "studentProfiles" && canView("studentProfiles")
     ? refreshStudentGradeStageConflicts({ renderStatus: false, generation })
@@ -2718,7 +2736,7 @@ function currencyInputMarkup(value, { className = "", attrs = "", inputValue = n
   return `
     <span class="${classes}">
       <span class="currency-display">${formatMoney(n)}</span>
-      <input class="cell-input number currency-input ${className}" type="number" value="${escapeHtml(inputValue ?? moneyInput(n))}" ${attrs}>
+      <input class="cell-input number currency-input ${className}" ${isReadonlyUser() ? "disabled" : ""} type="number" value="${escapeHtml(inputValue ?? moneyInput(n))}" ${attrs}>
     </span>
   `;
 }
@@ -2939,7 +2957,7 @@ function visiblePriceStatus(amount, isActive = 1) {
 }
 
 function visiblePriceStatusBadge(status) {
-  const normalized = status === "已设置" ? "已设置" : "未设置";
+  const normalized = ["已设置", "已停用"].includes(status) ? status : "未设置";
   return `<span class="visible-price-status ${normalized === "已设置" ? "is-set" : "is-unset"}">${normalized}</span>`;
 }
 
@@ -2950,6 +2968,7 @@ function studentPricingVisibleStatus(rule) {
 }
 
 function teacherSalaryRuleSalaryStatus(rule) {
+  if (String(rule.is_active) === "-1") return "已停用";
   return teacherSalaryRuleEnabled(rule) && optionalNumberValue(rule.salary_per_unit) != null ? "已设置" : "未设置";
 }
 
@@ -2977,7 +2996,7 @@ function dynamicTeacherSalaryRuleFilterOptions(rules, filter = teacherSalaryRule
     grades: uniqueSorted(rowsForFilterOption(rules, filter, "grade", teacherSalaryRuleMatchesFilter).map((rule) => rule.grade)),
     subjects: uniqueSorted(rowsForFilterOption(rules, filter, "subject", teacherSalaryRuleMatchesFilter).map((rule) => rule.subject)),
     students: uniqueSorted(rowsForFilterOption(rules, filter, "student", teacherSalaryRuleMatchesFilter).flatMap((rule) => splitStudents(rule.student_names))),
-    salaryStatuses: ["已设置", "未设置"],
+    salaryStatuses: ["已设置", "未设置", "已停用"],
   };
 }
 
@@ -3739,11 +3758,12 @@ function distributeAdaptiveGrowth(widths, definitions, availableWidth) {
   return widths;
 }
 
-function applyStudentPricingAdaptiveColumns(table, columns, headerCells, definitions) {
+function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions) {
   const started = performance.now();
   const style = getComputedStyle(table);
   const font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const rows = studentPricingVisibleRows.length ? studentPricingVisibleRows : (state?.student_pricing || []);
+  const fee = table.dataset.adaptiveSource === "fee-details";
+  const rows = fee ? feeDetailsVisibleRows : studentPricingVisibleRows.length ? studentPricingVisibleRows : (state?.student_pricing || []);
   const unique = (values) => [...new Set(values.map((value) => String(value || "")).filter(Boolean))];
   const measured = (values, fallback = "—") => Math.max(
     adaptiveTextWidthForData(fallback, font),
@@ -3751,7 +3771,7 @@ function applyStudentPricingAdaptiveColumns(table, columns, headerCells, definit
   );
   const noteTokens = unique(rows.flatMap((row) => String(row.notes || "").split(/[\s,，、;；/|]+/).filter(Boolean)));
   const studentLabels = unique(rows.flatMap((row) => row._students || splitStudents(row.student_names)));
-  const rawWidths = [
+  const rawWidths = fee ? [44, 48, ...['student_name','teacher_name','date','weekday','time_slot','classroom','status','grade','subject','notes','unit_price','rule_price'].map((key, index) => measured(rows.map(row => row[key])) + (index >= 10 ? 64 : 36))] : [
     44,
     adaptiveTextWidthForData(String(Math.max(1, rows.length)), font) + 20,
     measured(rows.map((row) => row.student_name)) + 36,
@@ -3796,8 +3816,8 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   columns.forEach((column) => { column.style.width = "auto"; });
 
   const definitions = columns.map((column, index) => adaptiveColumnDefinition(column, headerCells[index]));
-  if (table.dataset.adaptiveSource === "student-pricing") {
-    return applyStudentPricingAdaptiveColumns(table, columns, headerCells, definitions);
+  if (["student-pricing", "fee-details"].includes(table.dataset.adaptiveSource)) {
+    return applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions);
   }
   const started = performance.now();
   const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
@@ -4087,7 +4107,7 @@ function rechargeModalMarkup() {
         <div class="lesson-create-form recharge-form-grid">
           <label>学生姓名${filterComboControl({ id: "new-recharge-student", className: "recharge-modal-field", field: "student_name", value: draft.student_name || "", values: students, placeholder: "输入或选择学生", emptyLabel: "" })}</label>
           <label>年级${filterComboControl({ id: "new-recharge-grade", className: "recharge-modal-field", field: "grade", value: draft.grade || "", values: grades, placeholder: "输入或选择年级", emptyLabel: "" })}</label>
-          <label>充值日期<input id="new-recharge-date" class="control recharge-modal-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(draft.recharge_date || defaultRechargeDate())}"></label>
+          <label>充值日期<input id="new-recharge-date" required class="control recharge-modal-field" data-date-kind="single" data-field="recharge_date" type="date" value="${escapeHtml(draft.recharge_date || defaultRechargeDate())}"></label>
           <label>现金充值<input id="new-recharge-cur" class="control money-input recharge-modal-field" data-field="cur_recharge" type="number" step="0.01" value="${escapeHtml(draft.cur_recharge ?? 0)}"></label>
           <label>赠送充值<input id="new-recharge-gift" class="control money-input recharge-modal-field" data-field="cur_gift" type="number" step="0.01" value="${escapeHtml(draft.cur_gift ?? 0)}"></label>
           <fieldset class="recharge-channel-fieldset wide">
@@ -5169,7 +5189,8 @@ function renderStudentBadge(student, options = {}) {
   return `<${tag} class="entity-badge student-badge ${removable ? "student-badge-removable" : ""}"${removable ? ' type="button"' : ""}${attrs}${badgeColorStyle(getStudentGradeColor(grade))}><span>${escapeHtml(name)}</span>${removable ? '<span class="student-badge-remove" aria-hidden="true">×</span>' : ""}</${tag}>`;
 }
 
-function renderMissingField(label) { return `<span class="muted-tip missing-field">未填${escapeHtml(label)}</span>`; }
+function renderEmptyValue() { return '<span class="muted-tip missing-field">-</span>'; }
+function renderMissingField() { return renderEmptyValue(); }
 function renderLessonStudentBadges(row = {}) {
   return splitStudents(row.student_names).map(name => renderStudentBadge(name, { fallbackGrade: row.grade })).join("") || renderMissingField("学生");
 }
@@ -5373,9 +5394,11 @@ function safeDataCenterLoadError(error) {
   return /^[A-Z0-9_-]{3,100}$/.test(message) ? message : "数据中心信息暂时不可用";
 }
 
+let backupPagination = { page: 1, page_size: 10, total: 0, total_pages: 1 };
 async function refreshBackupData({ logView = false, tolerateFailure = false } = {}) {
   try {
-    const data = await request(`/api/data-center${logView ? "?log=1" : ""}`, { cache: false });
+    const data = await request(`/api/data-center?page=${backupPagination.page}&page_size=${backupPagination.page_size}${logView ? "&log=1" : ""}`, { cache: false });
+    backupPagination = data.pagination || backupPagination;
     const serverSettings = normalizeDataCenterSettings(data.settings);
     backupState = {
       ...backupState,
@@ -6310,7 +6333,7 @@ function lessonInlinePickerDisplay(row = {}, field = "") {
   if (field === "grade") return renderGradeBadge(row.grade);
   if (field === "subject") return renderSubjectBadge(row.subject);
   const value = field === "time_slot" ? lessonCandidateValue(field, row[field]) : (row[field] || "");
-  return `<span class="lesson-cell-text ${lessonInlineConflict(row, field) ? "candidate-conflict-text" : ""}">${escapeHtml(value)}</span>`;
+  return `<span class="lesson-cell-text ${lessonInlineConflict(row, field) ? "candidate-conflict-text" : ""}">${String(value).trim() ? escapeHtml(value) : renderEmptyValue()}</span>`;
 }
 
 function lessonInlinePickerCell(row, field, tdClass = "") {
@@ -6401,7 +6424,7 @@ function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
 }
 
 function lessonTextCell(colClass, value, { html = "", title = value } = {}) {
-  const shown = html || escapeHtml(value || "");
+  const shown = html || (String(value ?? "").trim() ? escapeHtml(value) : renderEmptyValue());
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
   return `<td class="readonly ${colClass}"${titleAttr}><span class="lesson-cell-text">${shown}</span></td>`;
 }
@@ -6447,9 +6470,9 @@ function lessonReadonlyCells(row, visibleIndex, cumulative) {
     lessonTextCell("col-teacher", row.teacher_name),
     lessonTextCell("col-date", row.date),
     lessonTextCell("col-weekday", weekdayCn(row.date)),
-    lessonTextCell("col-time", row.time_slot, { html: `<span class="${lessonInlineConflict(row, "time_slot") ? "candidate-conflict-text" : ""}">${escapeHtml(row.time_slot || "")}</span>` }),
-    lessonTextCell("col-room", row.classroom, { html: `<span class="${lessonInlineConflict(row, "classroom") ? "candidate-conflict-text" : ""}">${escapeHtml(row.classroom || "")}</span>` }),
-    lessonTextCell("col-type", row.course_type || "—"),
+    lessonTextCell("col-time", row.time_slot, { html: `<span class="${lessonInlineConflict(row, "time_slot") ? "candidate-conflict-text" : ""}">${row.time_slot ? escapeHtml(row.time_slot) : renderEmptyValue()}</span>` }),
+    lessonTextCell("col-room", row.classroom, { html: `<span class="${lessonInlineConflict(row, "classroom") ? "candidate-conflict-text" : ""}">${row.classroom ? escapeHtml(row.classroom) : renderEmptyValue()}</span>` }),
+    lessonTextCell("col-type", row.course_type || ""),
     `<td class="readonly col-status">${renderCourseStatusBadge(rowStatus(row))}</td>`,
     `<td class="readonly col-grade">${renderGradeBadge(row.grade)}</td>`,
     `<td class="readonly col-subject">${renderSubjectBadge(row.subject)}</td>`,
@@ -6472,7 +6495,7 @@ function lessonEditCells(row, visibleIndex, cumulative) {
       ${lessonInlinePickerCell(row, "grade", "col-grade")}
       ${lessonInlinePickerCell(row, "subject", "col-subject")}
       ${lessonScheduleStudentCell(row)}
-      <td class="col-note"><textarea class="cell-input lesson-field wide lesson-note-input" data-id="${row.id}" data-field="notes" rows="1">${escapeHtml(row.notes || "")}</textarea></td>
+      <td class="col-note"><textarea class="cell-input lesson-field wide lesson-note-input" data-id="${row.id}" data-field="notes" placeholder="-" title="${escapeHtml(row.notes || "")}" rows="1" wrap="off">${escapeHtml(row.notes || "")}</textarea></td>
       <td class="readonly col-index narrow">${cumulative}</td>
   `;
 }
@@ -8471,8 +8494,8 @@ function renderWeekMatrix() {
     `${range.label} · 已筛选 ${rows.length} / 共 ${weekRows.length} 节`,
   );
   contentEl.innerHTML = `
-    <div class="matrix-date-region">${renderMatrixDateFilter()}</div>
-    <div class="matrix-filter-region">${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}</div>
+    <div class="filter-bar matrix-unified-filter"><div class="matrix-date-region">${renderMatrixDateFilter()}</div>
+    <div class="matrix-filter-region">${renderLessonFilterBar({ rows: weekRows, filteredRows: rows, compact: true })}</div></div>
     <div class="matrix-view-region">${renderMatrixScheduleView(rows, range, conflicts)}</div>
   `;
 }
@@ -8536,38 +8559,22 @@ async function refreshWeekMatrixView({ reloadRange = false } = {}) {
   wireEvents();
 }
 
-function renderFeeDetails() {
-  ensureFeeDetailsFilterMonth();
-  const rows = state.derived.fee_details;
-  const visibleRows = rows.filter((row) => feeDetailMatchesFilter(row));
-  const selectableRows = visibleRows.filter(canApplyStudentPricingRule);
-  const selectableKeys = new Set(selectableRows.map(feeDetailKey));
-  selectedFeeDetailKeys = new Set([...selectedFeeDetailKeys].filter((key) => selectableKeys.has(key)));
-  const selectedCount = selectedFeeDetailKeys.size;
-  const allSelectableChecked = selectableRows.length > 0 && selectedCount === selectableRows.length;
-  const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
-  renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${formatMoney(total)}`);
-  contentEl.innerHTML = `
-    <div class="band">
-      ${renderFeeDetailsFilterBar(rows, visibleRows)}
-      <div class="bulk-action-row fee-detail-bulk-actions">
-        <button class="btn primary apply-selected-student-pricing-rules" type="button" ${bulkActionDisabledAttr(selectedCount)}>${bulkActionText("按规则更新所选费用", selectedCount)}</button>
-        <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
-      </div>
-      <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
-        <table class="fee-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true">
-          <colgroup>
-            <col class="fee-detail-col-select" data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
-            <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
-          </colgroup>
-          <thead>
-            <tr>
-              <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>${rowIndexHeader()}
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${visibleRows.map((row, index) => {
+let feeDetailsVisibleRows = [];
+function appendProgressiveRows(table, rows, markup, offset, batchSize = 72, { isCurrent = () => true, onProgress = () => {}, schedule: scheduler = null } = {}) {
+  table.dataset.renderComplete = String(offset >= rows.length);
+  const append = () => {
+    if (!table.isConnected || !isCurrent()) return;
+    const end = Math.min(rows.length, offset + batchSize);
+    table.tBodies[0].insertAdjacentHTML('beforeend', rows.slice(offset, end).map((row, index) => markup(row, offset + index)).join(''));
+    offset = end; table.dataset.renderComplete = String(offset >= rows.length);
+    table.dataset.renderedRows = String(offset); onProgress(offset);
+    if (offset < rows.length) schedule();
+  };
+  const schedule = () => scheduler ? scheduler(append) : window.requestIdleCallback ? window.requestIdleCallback(append, {timeout:80}) : window.setTimeout(append, 0);
+  if (offset < rows.length) schedule();
+}
+
+function feeDetailRowMarkup(row, index) {
               const canApply = canApplyStudentPricingRule(row);
               const key = feeDetailKey(row);
               return `
@@ -8587,12 +8594,58 @@ function renderFeeDetails() {
                 <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
               </tr>
             `;
-            }).join("") || `<tr><td colspan="14" class="empty">暂无费用明细</td></tr>`}
+
+}
+
+function renderFeeDetails() {
+  ensureFeeDetailsFilterMonth();
+  const rows = state.derived.fee_details;
+  const visibleRows = rows.filter((row) => feeDetailMatchesFilter(row));
+  feeDetailsVisibleRows = visibleRows;
+  const selectableRows = visibleRows.filter(canApplyStudentPricingRule);
+  const selectableKeys = new Set(selectableRows.map(feeDetailKey));
+  selectedFeeDetailKeys = new Set([...selectedFeeDetailKeys].filter((key) => selectableKeys.has(key)));
+  const selectedCount = selectedFeeDetailKeys.size;
+  const allSelectableChecked = selectableRows.length > 0 && selectedCount === selectableRows.length;
+  const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
+  renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${formatMoney(total)}`);
+  contentEl.innerHTML = `
+    <div class="band">
+      ${renderFeeDetailsFilterBar(rows, visibleRows)}
+      <div class="bulk-action-row fee-detail-bulk-actions">
+        <button class="btn primary apply-selected-student-pricing-rules" type="button" ${bulkActionDisabledAttr(selectedCount)}>${bulkActionText("按规则更新所选费用", selectedCount)}</button>
+        <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
+      </div>
+      <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
+        <table class="fee-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true" data-adaptive-source="fee-details">
+          <colgroup>
+            <col class="fee-detail-col-select" data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
+            <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>${rowIndexHeader()}
+              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${visibleRows.slice(0, 36).map(feeDetailRowMarkup).join("") || `<tr><td colspan="14" class="empty">暂无费用明细</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
   `;
+  const table = contentEl.querySelector('.fee-detail-table');
+  table.addEventListener('change', event => {
+    const input = event.target;
+    if (input.matches('.fee-detail-select-row')) {
+      const key = `${input.dataset.lessonId}\u0001${input.dataset.studentName}`;
+      if (input.checked) selectedFeeDetailKeys.add(key); else selectedFeeDetailKeys.delete(key);
+      render();
+    }
+    if (input.matches('.fee-override')) refreshAfter(() => request('/api/fee-overrides', {method:'POST',body:{lesson_id:Number(input.dataset.lessonId),student_name:input.dataset.studentName,unit_price:input.value}}));
+  });
+  appendProgressiveRows(table, visibleRows, feeDetailRowMarkup, 36);
 }
 
 function renderSummary() {
@@ -9274,8 +9327,8 @@ function rechargeAnalysisSplitMarkup(title, rows = []) {
     <div class="recharge-analysis-split">
       <div class="recharge-analysis-split-title">${escapeHtml(title)}</div>
       <div class="recharge-analysis-chip-list">
-        ${rows.slice(0, 6).map((row) => `
-          <span class="recharge-analysis-chip">
+        ${rows.map((row) => `
+          <span class="metric recharge-analysis-card recharge-analysis-chip">
             <b>${escapeHtml(row.name)}</b>
             <span class="${row.net < 0 ? "negative-text" : ""}">${escapeHtml(formatMoney(row.net))}</span>
             <em>${row.records} 笔 / ${row.students} 人</em>
@@ -9727,7 +9780,7 @@ function studentStatementCanvas(report = studentStatementReport()) {
   const monthColumns = studentQueryMonthColumns(report, { parent: true });
   y += drawShotTable(ctx, colors, monthColumns, monthRows, contentX, y, monthColumns.map(() => contentWidth / monthColumns.length), { rowHeight: 36, emptyText: "暂无月份汇总" });
   y += 42;
-  drawShotSectionTitle(ctx, colors, "明细课程表", contentX, y, contentWidth);
+  drawShotSectionTitle(ctx, colors, "明细课时表", contentX, y, contentWidth);
   y += 18;
   drawShotTable(ctx, colors, [
     { label: "日期", value: (row) => row.date, align: "left" },
@@ -9737,9 +9790,8 @@ function studentStatementCanvas(report = studentStatementReport()) {
     { label: "老师", value: (row) => row.teacher_name },
     { label: "年级", value: (row) => row.grade },
     { label: "科目", value: (row) => row.subject },
-    { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "费用", value: (row) => formatMoney(row.unit_price || 0), align: "right" },
-  ], details, contentX, y, [112, 68, 62, 116, 86, 72, 80, 346, 98], { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
+  ], details, contentX, y, [144, 80, 72, 176, 144, 104, 144, 176].map(width => width * contentWidth / 1040), { rowHeight: 38, headHeight: 42, emptyText: "暂无课程明细" });
   return canvas;
 }
 
@@ -9983,7 +10035,7 @@ function studentQueryResultsMarkup(report = studentStatementReport()) {
       ${studentQueryComparisonPanel(report)}
     </div>
     <div class="student-query-detail-slot">
-      <div class="band">
+      <div class="band"><div class="section-title">明细课时表</div>
         <div class="table-wrap smooth-table-wrap">
           <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table">
             <colgroup>${rowIndexColumn()}${Array(11).fill("<col>").join("")}</colgroup>
@@ -10184,12 +10236,12 @@ function backupCleanupMarkup() {
   const entries = dialog.result?.results || preview?.entries || [];
   return `<div class="modal-backdrop backup-cleanup-modal"><div class="modal-panel managed-file-browser-panel" role="dialog" aria-modal="true" aria-label="删除多余文件预览">
     <div class="modal-head"><div class="modal-title">删除多余文件${dialog.result ? "结果" : "预览"}</div></div>
-    <p>${dialog.busy ? "正在扫描或清理，请稍候…" : "先核对以下服务端扫描结果，再确认删除。固定、运行中、最后有效副本和未知历史文件受保护。"}</p>
+    <p>${dialog.busy ? escapeHtml(dialog.progress || "正在扫描或清理，请稍候…") : "先核对以下服务端扫描结果，再确认删除。固定、运行中、最后有效副本和未知历史文件受保护。"}</p>
     ${dialog.error ? `<p class="danger">${escapeHtml(dialog.error)}</p>` : ""}
     ${preview ? `<p>本地 ${summary.local_files} 个文件（${formatFileSize(summary.local_bytes)}），百度 ${summary.remote_files} 个文件（${summary.remote_bytes == null ? "空间未知" : formatFileSize(summary.remote_bytes)}）；关联 ${summary.backups} 条备份，孤立 ${summary.orphan_files} 个文件。</p>${preview.warnings.map(w => `<p class="muted-tip">${escapeHtml(w)}</p>`).join("")}` : ""}
     ${dialog.result ? `<p>实际删除 ${dialog.result.deleted_files} 个，失败/跳过 ${dialog.result.failed_files} 个；本地释放 ${formatFileSize(dialog.result.local_bytes)}，百度释放 ${formatFileSize(dialog.result.remote_bytes)}。</p>` : ""}
     <div class="table-wrap managed-file-browser-table-wrap"><table class="uniform-table managed-file-browser-table"><thead><tr><th>来源</th><th>文件</th><th>备份</th><th>类型</th><th>时间</th><th>大小</th><th>原因/结果</th></tr></thead><tbody>${entries.flatMap(entry => entry.files.map(file => `<tr><td>${file.source === "local" ? "本地" : "百度"}</td><td>${escapeHtml(file.relative_path)}</td><td>${entry.backup_id || "无记录"}</td><td>${escapeHtml(entry.backup_type || entry.kind)}</td><td>${escapeHtml(file.created_at || "未知")}</td><td>${file.size == null ? "未知" : formatFileSize(file.size)}</td><td>${escapeHtml(file.status || entry.reason || "已完成")}${entry.reason && file.status ? ` · ${escapeHtml(entry.reason)}` : ""}</td></tr>`)).join("") || '<tr><td colspan="7">没有已确认可清理的文件</td></tr>'}</tbody></table></div>
-    <div class="modal-actions"><button class="btn backup-cleanup-close" type="button" ${dialog.busy ? "disabled" : ""}>关闭</button>${!dialog.result ? `<button class="btn danger backup-cleanup-confirm" type="button" ${dialog.busy || !preview?.entries.length ? "disabled" : ""}>确认删除</button>` : ""}</div>
+    <div class="modal-actions"><button class="btn backup-cleanup-close" type="button" ${dialog.busy && dialog.preview ? "disabled" : ""}>关闭</button>${!dialog.result ? `<button class="btn danger backup-cleanup-confirm" type="button" ${dialog.busy || !preview?.entries.length ? "disabled" : ""}>确认删除</button>` : ""}</div>
   </div></div>`;
 }
 
@@ -10278,11 +10330,11 @@ function backupBatchDeleteDialogMarkup() {
 }
 
 function dataCenterBackupRows() {
-  return (backupState.records || []).map((row) => {
+  return (backupState.records || []).map((row, index) => {
     const legacy = row.backup_format !== "full_data_excel";
     const downloadPath = legacy ? `/api/backups/${encodeURIComponent(row.id)}/download` : `/api/data-center/backups/${encodeURIComponent(row.id)}/download`;
     const deletePolicy = backupRecordDeletePolicy(row);
-    return `<tr data-backup-id="${escapeHtml(row.id)}">
+    return `<tr data-backup-id="${escapeHtml(row.id)}">${renderRowIndex(index, (backupPagination.page - 1) * backupPagination.page_size)}
       <td class="select-col backup-select-col"><input class="backup-record-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedBackupRecordIds.has(Number(row.id)) ? "checked" : ""} ${deletePolicy.allowed ? "" : `disabled title="${escapeHtml(deletePolicy.reason)}"`} aria-label="选择备份记录：${escapeHtml(row.filename || row.id)}"></td>
       <td>${escapeHtml(formatBeijingTime(row.backup_time) || row.backup_time || "-")}</td>
       <td>${escapeHtml(legacy ? "旧版业务归档" : `${row.retention_class || "全量数据"} · ${row.operation_logs_included === false ? "不含操作日志" : "包含操作日志"}`)}</td>
@@ -10300,7 +10352,7 @@ function dataCenterBackupRows() {
         ${legacy ? "" : `<button class="btn backup-verify" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>验证</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn backup-remote-retry" type="button" data-id="${escapeHtml(row.id)}" ${row.status === "success" ? "" : "disabled"}>重试上传</button>${row.remote_status === "success" && !/\.enc$/i.test(row.remote_path || "") ? `<button class="btn backup-remote-download" type="button" data-id="${escapeHtml(row.id)}" data-name="${escapeHtml(row.filename || "backup.xlsx")}">下载远端</button>` : ""}<button class="btn backup-toggle-pinned" type="button" data-id="${escapeHtml(row.id)}" data-pinned="${row.pinned ? "1" : "0"}">${row.pinned ? "取消固定" : "固定"}</button>` : ""}<button class="btn backup-metadata-save" type="button" data-id="${escapeHtml(row.id)}">保存</button>${isOwnerRoleValue(auth.user?.role) ? `<button class="btn danger backup-delete" type="button" data-id="${escapeHtml(row.id)}" ${deletePolicy.allowed ? "" : `disabled title="${escapeHtml(deletePolicy.reason)}"`}>删除</button>` : ""}`}
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="13" class="empty">暂无备份记录</td></tr>`;
+  }).join("") || `<tr><td colspan="14" class="empty">暂无备份记录</td></tr>`;
 }
 
 function importPreviewMarkup() {
@@ -10634,9 +10686,10 @@ function renderAudit() {
       <div class="section-head"><div><div class="section-title">备份记录</div><div class="section-subtitle">旧业务归档仅兼容查看和下载，不参与新备份清理。</div></div><div class="audit-toolbar"><button class="btn managed-local-excel-open" type="button">查看本地Excel文件</button><button class="btn managed-baidu-excel-open" type="button">查看百度Excel文件</button>${isOwnerRoleValue(auth.user?.role) && !isReadonlyUser() ? '<button class="btn backup-cleanup-open" type="button">删除多余文件</button>' : ""}<button class="btn backup-refresh" type="button">刷新</button></div></div>
       ${backupBatchDeleteToolbarMarkup()}
       <div class="table-wrap smooth-table-wrap"><table class="audit-table uniform-table nowrap-table data-center-backup-table">
-        <thead><tr><th class="select-col backup-select-col"><input class="backup-record-select-all" type="checkbox" ${allDeletableSelected ? "checked" : ""} ${deletableBackupRows.length ? "" : "disabled"} aria-label="全选当前可删除备份记录"></th><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
+        <thead><tr>${rowIndexHeader()}<th class="select-col backup-select-col"><input class="backup-record-select-all" type="checkbox" ${allDeletableSelected ? "checked" : ""} ${deletableBackupRows.length ? "" : "disabled"} aria-label="全选当前可删除备份记录"></th><th>时间</th><th>类型</th><th>触发</th><th>文件</th><th>本地状态</th><th>百度状态</th><th>失败原因</th><th>大小</th><th>SHA-256</th><th>创建账号</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>${dataCenterBackupRows()}</tbody>
       </table></div>
+      <div class="pagination-bar"><div class="pagination-info">共 ${backupPagination.total} 条 <select class="control backup-page-size">${[10,20,50].map(size=>`<option value="${size}" ${size===backupPagination.page_size?'selected':''}>${size} 条/页</option>`).join('')}</select></div><div class="pagination-controls"><button class="btn backup-page" data-page="${backupPagination.page-1}" ${backupPagination.page<=1?'disabled':''}>上一页</button><span>${backupPagination.page} / ${backupPagination.total_pages}</span><button class="btn backup-page" data-page="${backupPagination.page+1}" ${backupPagination.page>=backupPagination.total_pages?'disabled':''}>下一页</button></div></div>
     </section>
     ${baiduSimpleGuideMarkup()}
     ${baiduTestDetailsMarkup()}
@@ -10702,7 +10755,7 @@ function userAccountRowMarkup(user, teacherValues = userTeacherValues(), index =
     <tr class="user-row ${isPreflightTarget ? "preflight-target" : ""}" data-id="${escapeHtml(user.id)}" data-username="${escapeHtml(user.username)}">
       ${renderRowIndex(index)}<td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
       <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
-      <td><select class="cell-select user-field" data-field="role">${roleSelectOptions(user.role)}</select></td>
+      <td class="user-role-cell lesson-edit-cell" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"><span class="lesson-inline-picker">${escapeHtml((auth.roles?.[user.role] || ROLE_LABELS[user.role] || user.role))}</span></td>
       <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
       <td><select class="cell-select user-field inline-status-select user-inline-status" data-field="status" data-original-value="${escapeHtml(user.status || "active")}">
         <option value="active" ${user.status !== "disabled" ? "selected" : ""}>启用</option>
@@ -11442,10 +11495,10 @@ function renderPricing() {
     <div class="band">
       <div class="table-wrap">
         <table class="pricing-table uniform-table nowrap-table">
-          <thead><tr><th>年级</th><th>人数</th><th>单人费用</th><th>查找键</th><th>说明</th></tr></thead>
+          <thead><tr>${rowIndexHeader()}<th>年级</th><th>人数</th><th>单人费用</th><th>查找键</th><th>说明</th></tr></thead>
           <tbody>
-            ${rows.map((row) => `
-              <tr>
+            ${rows.map((row, index) => `
+              <tr>${renderRowIndex(index)}
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell right">${row.student_count}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.unit_price, { className: "pricing-field", attrs: `data-id="${row.id}" data-field="unit_price"` })}</td>
@@ -11584,32 +11637,17 @@ function cancelStudentPricingProgressiveRender() {
 
 function scheduleStudentPricingProgressiveRender(rows, startIndex) {
   const generation = ++studentPricingRenderGeneration;
-  const schedule = (callback) => {
-    studentPricingRenderHandle = window.requestIdleCallback
-      ? window.requestIdleCallback(callback, { timeout: 80 })
-      : window.setTimeout(() => callback({ timeRemaining: () => 8 }), 0);
-  };
-  const appendBatch = () => {
-    if (generation !== studentPricingRenderGeneration || view !== "studentPricing") return;
-    const body = document.querySelector(".student-pricing-table tbody");
-    if (!body) return;
-    const end = Math.min(rows.length, startIndex + STUDENT_PRICING_RENDER_BATCH_SIZE);
-    body.insertAdjacentHTML("beforeend", rows.slice(startIndex, end).map((row, index) => studentPricingRowMarkup(row, startIndex + index)).join(""));
-    startIndex = end;
-    const progress = document.querySelector(".student-pricing-render-progress");
-    if (progress) progress.textContent = startIndex < rows.length
-      ? `正在加载更多规则 ${startIndex} / ${rows.length}`
-      : `已加载全部 ${rows.length} 条规则`;
-    const table = document.querySelector(".student-pricing-table");
-    if (table) table.dataset.renderedRows = String(startIndex);
-    if (startIndex < rows.length) {
-      schedule(appendBatch);
-    } else if (table) {
-      table.dataset.renderComplete = "true";
-      studentPricingRenderHandle = 0;
-    }
-  };
-  if (startIndex < rows.length) schedule(appendBatch);
+  const table = document.querySelector('.student-pricing-table');
+  if (!table) return;
+  appendProgressiveRows(table, rows, studentPricingRowMarkup, startIndex, STUDENT_PRICING_RENDER_BATCH_SIZE, {
+    isCurrent: () => generation === studentPricingRenderGeneration && view === 'studentPricing',
+    schedule: callback => { studentPricingRenderHandle = window.requestIdleCallback ? window.requestIdleCallback(callback, {timeout:80}) : window.setTimeout(callback, 0); },
+    onProgress: count => {
+      const progress = document.querySelector('.student-pricing-render-progress');
+      if(progress) progress.textContent = count < rows.length ? `正在加载更多规则 ${count} / ${rows.length}` : `已加载全部 ${rows.length} 条规则`;
+      if(count === rows.length) studentPricingRenderHandle = 0;
+    },
+  });
 }
 
 function renderStudentPricing() {
@@ -11696,7 +11734,7 @@ function renderClassGroups() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
-          <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="130"><col data-column-type="students"><col data-column-type="long"></colgroup>
+          <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="130"><col data-column-type="students"><col data-column-type="name" data-min-width="100" data-max-width="280" data-grow="0"></colgroup>
           <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
             ${visibleRows.map((row, index) => `
@@ -11706,7 +11744,7 @@ function renderClassGroups() {
                 <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
                 <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"><span class="lesson-inline-picker">${escapeHtml(row.course_type || "按人数默认")}</span></td>
                 <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
-                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="未命名"></td>
+                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="-"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无班级候选</td></tr>`}
           </tbody>
@@ -12006,7 +12044,7 @@ function studentProfileTableRowMarkup(row, index = 0) {
       ${renderRowIndex(index)}<td class="student-name-cell"><div class="student-name-with-conflict">${renderStudentBadge(row.name, { grade: currentGrade })}${conflictMarker}</div></td>
       <td class="text-cell center current-grade-cell">${renderGradeBadge(currentGrade)}</td>
       <td><input class="cell-input profile-field" data-field="guardian" value="${escapeHtml(row.guardian || "")}"></td>
-      <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
+      <td><input class="cell-input profile-field" data-field="phone" placeholder="-" value="${escapeHtml(row.phone || "")}"></td>
       <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在读")}">${options(studentStatusOptions, row.status || "在读")}</select></td>
       <td><input class="cell-input profile-field" data-field="joined_at" type="date" data-date-kind="single" value="${escapeHtml(profileDateValue(row))}"></td>
       <td><input class="cell-input profile-field" data-field="left_at" type="date" data-date-kind="single" value="${escapeHtml(row.left_at || "")}"></td>
@@ -12126,7 +12164,7 @@ function renderProfileDirectory(kind = profileTab) {
             <td class="select-col"><input class="teacher-profile-select-row" type="checkbox" data-id="${escapeHtml(row.id)}" ${selectedTeacherProfileIds.has(Number(row.id)) ? "checked" : ""} aria-label="选择老师档案"></td>
             ${renderRowIndex(index, 0, "teacher-profile-serial")}
             <td><input class="cell-input profile-field" data-field="name" value="${escapeHtml(row.name)}"></td>
-            <td><input class="cell-input profile-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
+            <td><input class="cell-input profile-field" data-field="phone" placeholder="-" value="${escapeHtml(row.phone || "")}"></td>
             <td><select class="cell-select profile-field inline-status-select profile-inline-status" data-field="status" data-original-value="${escapeHtml(row.status || "在职")}">${options(["在职", "离职", "暂停"], row.status || "在职")}</select></td>
           <td><input class="cell-input profile-field" data-date-kind="single" data-field="joined_at" type="date" value="${escapeHtml(profileDateValue(row))}"></td>
           <td><input class="cell-input profile-field" data-date-kind="single" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
@@ -12327,7 +12365,7 @@ function staffProfilesPanelMarkup() {
                 <td class="currency-input-cell">${currencyInputMarkup(row.base_salary, { className: "staff-field", attrs: `data-field="base_salary"` })}</td>
                 <td class="currency-input-cell">${currencyInputMarkup(row.daily_rate, { className: "staff-field", attrs: `data-field="daily_rate"` })}</td>
                 <td><input class="cell-input number staff-field" data-field="standard_work_days" type="number" value="${moneyInput(row.standard_work_days || 26)}"></td>
-                <td><input class="cell-input staff-field" data-field="phone" value="${escapeHtml(row.phone || "")}"></td>
+                <td><input class="cell-input staff-field" data-field="phone" placeholder="-" value="${escapeHtml(row.phone || "")}"></td>
                 <td><select class="cell-select staff-field" data-field="status">${options(["在职", "暂停", "离职"], row.status || "在职")}</select></td>
             <td><input class="cell-input staff-field" data-date-kind="single" data-field="joined_at" type="date" value="${escapeHtml(row.joined_at || "")}"></td>
             <td><input class="cell-input staff-field" data-date-kind="single" data-field="left_at" type="date" value="${escapeHtml(row.left_at || "")}"></td>
@@ -12948,7 +12986,8 @@ function renderTeacherSalaryRules() {
     students: uniqueSorted((state.profile_students || []).map((row) => row.name).filter(Boolean)),
   };
   const effectiveCount = rules.filter((rule) => teacherSalaryRuleSalaryStatus(rule) === "已设置").length;
-  const pendingCount = rules.length - effectiveCount;
+  const pendingCount = rules.filter((rule) => teacherSalaryRuleSalaryStatus(rule) === "未设置").length;
+  const disabledCount = rules.length - effectiveCount - pendingCount;
   const sync = teacherSalaryRuleCandidateSync;
   const syncNotice = sync.busy
     ? `<div class="section-subtitle">正在根据历史课程自动补齐薪资规则候选...</div>`
@@ -12959,7 +12998,7 @@ function renderTeacherSalaryRules() {
         : "";
   renderTopbar(
     "薪资规则",
-    `有效 ${effectiveCount} 条 / 待设置 ${pendingCount} 条 / 共 ${rules.length} 条`,
+    `有效 ${effectiveCount} 条 / 待设置 ${pendingCount} 条 / 已停用 ${disabledCount} 条 / 共 ${rules.length} 条`,
   );
   contentEl.innerHTML = `
     <div class="band teacher-salary-rule-page">
@@ -13000,7 +13039,7 @@ function renderTeacherSalaryRules() {
                 <td class="text-cell adaptive-center">${renderEntityBadge("subject", rule.subject)}</td>
                 <td class="text-cell wide student-set-cell adaptive-left">${renderStudentSetBadges(rule.student_names, { fallbackGrade: rule.grade })}</td>
                 <td class="currency-input-cell adaptive-right">${currencyInputMarkup(rule.salary_per_unit, { className: "teacher-salary-rule-field", attrs: `data-field="salary_per_unit" min="0" step="0.01"`, inputValue: teacherSalaryInputValue(rule.salary_per_unit) })}</td>
-                <td class="text-cell adaptive-center rule-status-cell"><label class="rule-activation" title="${teacherSalaryRuleEnabled(rule) ? "启用：规则可参与匹配，点击复选框停用" : "停用：规则不参与匹配，点击复选框启用"}"><input class="teacher-salary-rule-field teacher-salary-rule-active" data-field="is_active" type="checkbox" ${teacherSalaryRuleEnabled(rule) ? "checked" : ""} aria-label="启用薪资规则">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</label></td>
+                <td class="text-cell adaptive-center rule-status-cell"><button class="rule-activation inline-value-button" type="button" data-rule-id="${rule.id}" title="点击修改规则启用状态">${visiblePriceStatusBadge(teacherSalaryRuleSalaryStatus(rule))}</button></td>
                 <td class="adaptive-left"><textarea class="cell-input adaptive-textarea wide teacher-salary-rule-field" data-field="notes" rows="1" wrap="soft">${escapeHtml(teacherSalaryRuleDisplayNotes(rule))}</textarea></td>
               </tr>
             `).join("") || `<tr><td colspan="9" class="empty">暂无符合条件的薪资规则</td></tr>`}
@@ -13146,7 +13185,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true">
-          <colgroup>${showSalary ? '<col data-column-type="select">' : ""}${rowIndexColumn()}<col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="short" data-min-width="128" data-max-width="128"><col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="long">${showSalary ? '<col data-column-type="money"><col data-column-type="money">' : ""}</colgroup>
+          <colgroup>${showSalary ? '<col data-column-type="select">' : ""}${rowIndexColumn()}<col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="short" data-min-width="128" data-max-width="128"><col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-wrap="false" data-max-width="100000"><col data-column-type="long" data-wrap="false" data-max-width="480">${showSalary ? '<col data-column-type="money"><col data-column-type="money">' : ""}</colgroup>
           <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可见课程"></th>` : ""}${rowIndexHeader()}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row, index) => {
@@ -13161,7 +13200,7 @@ function renderTeacherDetail() {
               return `
                 <tr class="${isAbnormal(row) ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${canUpdateSalary ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : `选择后将返回处理原因：${disabledReason}`)}"></td>` : ""}
-                  ${renderRowIndex(index)}<td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students student-set-cell"><span class="student-set-badges">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes">${escapeHtml(row.notes)}</td>
+                  ${renderRowIndex(index)}<td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students student-set-cell"><span class="student-set-badges">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes" title="${escapeHtml(row.notes || "")}">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
                     <td class="text-cell right price-cell-wrap teacher-salary-cell" title="${escapeHtml(salaryTitle)}"><span class="price-inline editable-price-inline">${currencyInputMarkup(displayedTeacherSalary, { className: `teacher-detail-salary-field ${sourceLabel === "手动" ? "manual-price" : ""}`, attrs: `data-id="${row.id}" data-field="teacher_salary" step="0.01" placeholder="未填写" title="${escapeHtml(salaryTitle)}" ${isCompletedLesson(row) ? "" : "disabled"}`, inputValue: teacherSalaryInputValue(displayedTeacherSalary) })}${teacherSalarySourceBadge(row)}</span></td>
                     <td class="text-cell right teacher-rule-salary-cell" title="${escapeHtml(ruleTitle)}">${teacherSalaryRuleCellMarkup(row)}</td>
@@ -14819,6 +14858,15 @@ function bindInlineStatusPicker(select, { save, onSaved, successMessage = "状�
 function bindUserAccountRowEvents(row) {
   if (!row || row.dataset.userAccountRowBound === "true") return;
   row.dataset.userAccountRowBound = "true";
+  const roleCell = row.querySelector('.user-role-cell');
+  if (roleCell) bindInlineCellAction(roleCell, () => {
+    const user = (state.users || []).find(user => String(user.id) === row.dataset.id);
+    if (!user) return;
+    openInlineCustomPicker(roleCell, {id:user.id,field:'role',choices:roleSelectOptions(user.role),onChange:async input=>{
+      try { const result=await request(`/api/users/${user.id}`,{method:'PATCH',body:{role:input.value}});patchUserState(result);roleCell.querySelector('.lesson-inline-picker').textContent=(auth.roles?.[result.role] || ROLE_LABELS[result.role] || result.role);scheduleAdaptiveTableColumns();showToast('角色已保存'); }
+      catch(error){showToast(error.message,'error');}
+    }});
+  });
   row.querySelectorAll(".user-field").forEach((input) => {
     if (input.classList.contains("user-inline-status")) return;
     input.addEventListener("change", () => {
@@ -15023,7 +15071,7 @@ async function refreshMonthRelatedActiveView() {
   if (view === "finance") return refreshFinanceForActiveMonth({ resetToActiveMonth: true });
   if (view === "recharges") return refreshRechargesForActiveMonth();
   if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
-  if (view === "feeDetails") return refreshDerivedForActiveMonth(renderFeeDetails);
+  if (view === "feeDetails") { if (await loadFeeDetailsPage()) return rerenderCurrentView(renderFeeDetails); return; }
   if (view === "studentPricing") return refreshStudentPricingModule();
   if (view === "classGroups") return refreshDerivedForActiveMonth(renderClassGroups);
   if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
@@ -15419,10 +15467,35 @@ function classGroupCreateMarkup() {
     </div><div class="modal-actions"><button class="btn close-class-group-create" type="button">取消</button><button class="btn primary" type="submit">保存</button></div></form></div>`;
 }
 
+function bindInlineCellAction(cell, action) {
+  cell.addEventListener('click', event => { if (!event.target.closest('.custom-select')) action(); });
+  cell.addEventListener('keydown', event => { if (['Enter',' '].includes(event.key)) {event.preventDefault();action();} });
+}
+
 function wireEvents() {
+  document.querySelectorAll('.rule-activation[data-rule-id]').forEach(cell=>bindInlineCellAction(cell,()=>{
+    const rule=(state.teacher_salary_rules||[]).find(rule=>String(rule.id)===cell.dataset.ruleId);
+    if(!rule)return;
+    openInlineCustomPicker(cell,{id:rule.id,field:'is_active',choices:`<option value="1" ${teacherSalaryRuleEnabled(rule)?'selected':''}>启用</option><option value="-1" ${teacherSalaryRuleEnabled(rule)?'':'selected'}>停用</option>`,onChange:async input=>{
+      try {await request(`/api/teacher-salary-rules/${rule.id}`,{method:'PUT',body:{...rule,is_active:input.value==='1'}});await load();}
+      catch(error){showToast(error.message,'error');}
+    }});
+  }));
+  document.querySelectorAll('.backup-page').forEach(button => button.addEventListener('click', async()=>{backupPagination.page=Number(button.dataset.page);await refreshBackupData();rerenderContent(renderAudit);}));
+  document.querySelector('.backup-page-size')?.addEventListener('change',async event=>{backupPagination.page_size=Number(event.target.value);backupPagination.page=1;await refreshBackupData();rerenderContent(renderAudit);});
   document.querySelector(".backup-cleanup-open")?.addEventListener("click", async () => {
     const dialog = { busy: true }; backupCleanupDialog = dialog; rerenderContent(renderAudit);
-    try { dialog.preview = await request("/api/data-center/cleanup/preview", { method: "POST", body: {} }); }
+    try {
+      let job = await request("/api/data-center/cleanup/preview/start", { method: "POST", body: {} });
+      while (job.status === "running" && view === "audit" && backupCleanupDialog === dialog) {
+        dialog.progress = job.progress; rerenderContent(renderAudit);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (view !== "audit" || backupCleanupDialog !== dialog) return;
+        job = await request(`/api/data-center/cleanup/preview/${job.job_id}`, { cache: false });
+      }
+      if (job.status === "failed") throw new Error("扫描失败，请重试");
+      dialog.preview = job.preview;
+    }
     catch (error) { dialog.error = error.message; }
     finally { dialog.busy = false; if (view === "audit" && backupCleanupDialog === dialog) rerenderContent(renderAudit); }
   });
@@ -16383,6 +16456,7 @@ function wireEvents() {
       const channelOther = channel === "other" ? (document.querySelector("#new-recharge-channel-other")?.value.trim() || "") : "";
       const notes = document.querySelector("#new-recharge-notes")?.value || "";
       if (!studentName) return alert("请填写学生姓名");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(rechargeDate)) return alert("请填写有效的充值日期（YYYY-MM-DD）");
       if (!channel) return alert("请选择来源 / 渠道");
       if (channel === "other" && !channelOther) return alert("选择“其他”时，请填写具体渠道");
       if (optionalNumberValue(curRecharge) === null) return alert("请填写有效的现金充值");
@@ -16395,7 +16469,6 @@ function wireEvents() {
           body: {
             student_name: studentName,
             grade,
-            month_key: state.settings.month_key,
             cur_recharge: optionalNumberValue(curRecharge) || 0,
             cur_gift: optionalNumberValue(curGift) || 0,
             recharge_date: rechargeDate,
@@ -16408,6 +16481,7 @@ function wireEvents() {
         rechargeModalOpen = false;
         rechargeModalDraft = null;
         await refreshRechargesForActiveMonth();
+        if (rechargeDate.slice(0,7) !== activeMonth.slice(0,7)) showToast(`已保存至 ${rechargeDate.slice(0,4)}年${Number(rechargeDate.slice(5,7))}月充值记录`);
       } catch (error) {
         button.disabled = false;
         alert(`${id ? "编辑" : "新增"}充值记录失败：${error.message}`);
@@ -17927,15 +18001,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".fee-detail-select-row").forEach((input) => {
-    input.addEventListener("change", () => {
-      const key = `${input.dataset.lessonId}\u0001${input.dataset.studentName}`;
-      if (input.checked) selectedFeeDetailKeys.add(key);
-      else selectedFeeDetailKeys.delete(key);
-      render();
-    });
-  });
-
   document.querySelectorAll(".fee-detail-select-all").forEach((input) => {
     input.addEventListener("change", () => {
       const visibleRows = (state.derived.fee_details || [])
@@ -18553,7 +18618,7 @@ function wireEvents() {
     scheduleInlinePickerEventsBound = true;
     document.addEventListener("click", (event) => {
       if (!activeScheduleInlinePicker) return;
-      if (event.target.closest("[data-lesson-edit-trigger], .custom-select, .custom-select-menu")) return;
+      if (activeScheduleInlinePicker.trigger?.contains(event.target) || event.target.closest(".custom-select, .custom-select-menu")) return;
       closeScheduleInlinePicker();
     });
     document.addEventListener("keydown", (event) => {
@@ -18945,7 +19010,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".fee-override").forEach((input) => {
+  document.querySelectorAll(".fee-override:not(.fee-detail-table .fee-override)").forEach((input) => {
     input.addEventListener("change", () => refreshAfter(() => request("/api/fee-overrides", {
       method: "POST",
       body: {
@@ -19175,6 +19240,8 @@ function wireEvents() {
             : field.value;
       });
       if (payload.salary_per_unit === null) payload.salary_per_unit = 0;
+      const savedRule = (state.teacher_salary_rules || []).find(rule => String(rule.id) === row.dataset.ruleId);
+      payload.is_active = input.dataset.field === "salary_per_unit" ? true : teacherSalaryRuleEnabled(savedRule || {});
       refreshAfter(() => request(`/api/teacher-salary-rules/${row.dataset.ruleId}`, {
         method: "PUT",
         body: payload,
@@ -19616,3 +19683,9 @@ bindNavigationEvents();
 load().catch((error) => {
   renderLoadFailure(error);
 });
+
+const MONEY_INPUT_SELECTOR = 'input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value';
+document.addEventListener('wheel', event => {
+  const input = event.target.closest?.(MONEY_INPUT_SELECTOR);
+  if (input && document.activeElement === input) { event.preventDefault(); input.blur(); }
+}, { passive: false });

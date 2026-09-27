@@ -1,3 +1,4 @@
+const { normalizeHistoricalRecharge, rechargeMonth } = require("../domain/recharge_date");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -86,12 +87,12 @@ function templateSourceData(parsed) {
   data.class_groups = parsed.class_groups.map((row, index) => ({ id: index + 1, teacher: row.teacher, grade: row.grade, subject: row.subject, students_key: normalizeStudents(row.students_display), students_display: row.students_display, class_name: row.class_name, created_at: now, updated_at: now }));
   data.lessons = parsed.lessons.map((row, index) => ({ id: index + 1, teacher_name: row.teacher_name, date: row.date, lesson_status: ["试课", "考试"].includes(row.display_status) ? row.display_status : "上课", time_slot: row.time_slot, classroom: row.classroom, grade: row.grade, subject: row.subject, student_names: row.student_names, notes: row.notes, course_status: row.display_status === "已上" ? "已上" : row.display_status === "请假" ? "请假" : "未上", status: row.display_status || "待上", teacher_salary: 0, teacher_salary_source: "", teacher_salary_rule_id: null, month_key: monthKey(row.date), sort_order: index + 1, created_at: now, updated_at: now }));
   data.recharge_records = parsed.recharge_records.map((row, index) => {
-    const businessMonth = monthKeyFromLabel(row.month_label);
+    const businessMonth = rechargeMonth(row.recharge_date) || monthKeyFromLabel(row.month_label);
     if (!businessMonth) throw new FullExcelError("FULL_EXCEL_RECHARGE_MONTH_INVALID", `所有充值记录 第${index + 2}行月份格式无效`);
     const channel = String(row.channel || "");
     const channelOther = channel === "other" ? String(row.channel_other || "").trim() : "";
     if (channel === "other" && !channelOther) throw new FullExcelError("FULL_EXCEL_RECHARGE_CHANNEL_OTHER_REQUIRED", `所有充值记录 第${index + 2}行选择其他渠道时必须填写说明`);
-    return { id: index + 1, student_name: row.student_name, grade: row.grade, prev_actual: 0, prev_gift: 0, cur_recharge: row.cur_recharge, cur_gift: row.cur_gift, recharge_date: row.recharge_date, channel, channel_other: channelOther, notes: row.notes, source: "manual", month_key: businessMonth };
+    return normalizeHistoricalRecharge({ id: index + 1, student_name: row.student_name, grade: row.grade, prev_actual: 0, prev_gift: 0, cur_recharge: row.cur_recharge, cur_gift: row.cur_gift, recharge_date: row.recharge_date, channel, channel_other: channelOther, notes: row.notes, source: "manual", month_key: businessMonth });
   });
   data.student_opening_balances = parsed.student_opening_balances.map((row, index) => ({ id: index + 1, student_name: row.student_name, grade: row.grade, opening_actual_balance: row.opening_actual_balance, opening_gift_balance: row.opening_gift_balance, notes: row.notes, created_at: now, updated_at: now }));
   data.teacher_travel_fees = parsed.teacher_travel_fees.map((row, index) => ({ id: index + 1, month_key: row.month_key, teacher_name: row.teacher_name, week_index: row.week_index, week_start: row.week_start, week_end: row.week_end, amount: row.amount, notes: row.notes, created_at: now, updated_at: now }));

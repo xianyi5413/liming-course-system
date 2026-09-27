@@ -1,3 +1,4 @@
+const { migrateRechargeDates } = require("../domain/recharge_date");
 const { migrateCourseTypes, defaultCourseType } = require("../domain/course_type");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -465,7 +466,8 @@ function restoreFullData({ dbPath, inputPath }) {
         const available = new Set(tableColumns(db, definition.source_table));
         for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
       }
-      if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, integrity_check: "ok", foreign_key_violation_count: 0 };
+      const rechargeMigration = migrateRechargeDates(db);
+      if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, recharge_migration: rechargeMigration, integrity_check: "ok", foreign_key_violation_count: 0 };
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   } finally { db.close(); }
 }

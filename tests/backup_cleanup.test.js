@@ -104,9 +104,34 @@ test("cleanup API requires delete privilege, confirmation and an owner-bound pre
     const post=(route,cookie,body={})=>fetch(base+"/api/data-center/cleanup/"+route,{method:"POST",headers:{cookie,"content-type":"application/json"},body:JSON.stringify(body)});
     assert.equal((await post("preview",reader)).status,403);assert.equal((await post("execute",reader,{confirmed:true})).status,403);
     assert.equal((await post("execute",boss,{confirmed:true})).status,409);
-    const preview=await (await post("preview",boss)).json();assert.ok(fs.existsSync(file.filename));assert.equal(preview.summary.orphan_files,2);
+    const start=await post("preview",boss);assert.equal(start.status,202);let job=await start.json();
+    const t=performance.now();assert.equal((await fetch(base+'/api/version')).status,200);assert.ok(performance.now()-t<1000);
+    assert.equal((await fetch(base+'/api/data-center/cleanup/preview/'+job.job_id,{headers:{cookie:reader}})).status,403);
+    for(let i=0;i<200&&job.status==='running';i++){await new Promise(r=>setTimeout(r,25));job=await (await fetch(base+'/api/data-center/cleanup/preview/'+job.job_id,{headers:{cookie:boss}})).json();}
+    assert.equal(job.status,'completed');const preview=job.preview;assert.ok(fs.existsSync(file.filename));assert.equal(preview.summary.orphan_files,2);
     assert.equal((await post("execute",boss,{preview_id:preview.preview_id})).status,409);
     const result=await (await post("execute",boss,{preview_id:preview.preview_id,confirmed:true})).json();assert.equal(result.ok,true);assert.ok(!fs.existsSync(file.filename));
     const audit=f.service.database();const logs=audit.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE operation_type='清理多余备份文件'").all();audit.close();assert.equal(logs.length,1);assert.doesNotMatch(JSON.stringify(logs),/dlink|token|secret|cookie|session|synthetic\.sqlite/i);
   } finally { if(server.exitCode==null){const exited=new Promise(r=>server.once("exit",r));server.kill();await exited;} }
+});
+
+
+test("cleanup jobs deduplicate, bind owners, expire and isolate CPU work from the HTTP event loop", async () => {
+  const { CleanupPreviewJobs } = require('../src/backup/cleanup_jobs');
+  const { Worker } = require('node:worker_threads');
+  const cleanup = { service: { dbPath:'synthetic-only',dataDir:'synthetic-only' }, plans:new Map() };
+  let workers=0;
+  const jobs = new CleanupPreviewJobs({cleanup,workerFactory:()=>{workers++;return new Worker(`const {parentPort}=require('node:worker_threads');const end=Date.now()+200;while(Date.now()<end){};parentPort.postMessage({preview:{preview_id:'synthetic-preview'},plan:{owner:1,expires:Date.now()+60000,entries:[]}});`,{eval:true});}});
+  const first=jobs.start(1);assert.equal(first.status,'running');assert.equal(jobs.start(1).job_id,first.job_id);assert.equal(workers,1);assert.equal(jobs.get(2,first.job_id),null);assert.throws(()=>jobs.start(2),/已有/);
+  let ticks=0;const timer=setInterval(()=>ticks++,10);
+  try {for(let i=0;i<100&&jobs.get(1,first.job_id).status==='running';i++)await new Promise(r=>setTimeout(r,10));}finally{clearInterval(timer);}
+  assert.equal(jobs.get(1,first.job_id).status,'completed');assert.ok(ticks>=5);assert.equal(cleanup.plans.get('synthetic-preview').owner,1);
+  jobs.jobs.get(first.job_id).expires=0;assert.equal(jobs.get(1,first.job_id),null);
+});
+test("remote pagination failure preserves local preview and never exposes unknown remote candidates", async()=>{
+  const f=await fixture('remote-failure',3);let calls=0;
+  const remote={configurationStatus:()=>({authorized:true}),client:{listDirectory:async()=>{calls++;if(calls===1)return {list:[],has_more:true,next_start:200};throw new Error('synthetic timeout');}}};
+  const cleanup=new BackupCleanupService({service:f.service,settings:()=>f.settings,remote});
+  const preview=await cleanup.scan(1);assert.equal(calls,2);assert.ok(preview.summary.local_files>0);assert.equal(preview.summary.remote_files,0);assert.ok(preview.warnings.some(w=>w.includes('百度扫描失败')));
+  assert.ok(preview.entries.flatMap(e=>e.files).every(file=>file.source==='local'));
 });

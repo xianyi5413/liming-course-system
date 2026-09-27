@@ -186,7 +186,15 @@ class BackupService {
     if (row.status === "success" && successful <= 1) return { deletable: false, code: "BACKUP_LAST_VALID", reason: "不能删除最后一份有效全量备份" };
     return { deletable: true, code: "", reason: "" };
   }
-  list(limit = 100) {
+  listPage(page = 1, pageSize = 10) {
+    pageSize = [10,20,50].includes(Number(pageSize)) ? Number(pageSize) : 10;
+    const db = this.database(); let total;
+    try { total = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records").get().count); } finally { db.close(); }
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    page = Math.min(totalPages, Math.max(1, Math.floor(Number(page) || 1)));
+    return { records: this.list(pageSize, (page - 1) * pageSize), pagination: { page, page_size: pageSize, total, total_pages: totalPages } };
+  }
+  list(limit = 100, offset = 0) {
     const db = this.database();
     try {
       const rows = db.prepare(`
@@ -194,9 +202,9 @@ class BackupService {
           u.display_name AS creator_display_name, u.status AS creator_status
         FROM backup_records br
         LEFT JOIN users u ON u.id = br.created_by_user_id
-        ORDER BY br.backup_time DESC, br.id DESC
-        LIMIT ?
-      `).all(Math.max(1, Math.min(500, Number(limit) || 100)));
+        ORDER BY br.created_at DESC, br.id DESC
+        LIMIT ? OFFSET ?
+      `).all(Math.max(1, Math.min(500, Number(limit) || 100)), Math.max(0, Number(offset) || 0));
       const validCount = Number(db.prepare("SELECT COUNT(*) AS count FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(deleted_at,'')=''").get(BACKUP_FORMAT).count);
       return rows.map((row) => {
         const policy = this.deletionPolicy(db, row, validCount);
@@ -212,7 +220,7 @@ class BackupService {
           u.display_name AS creator_display_name, u.status AS creator_status
         FROM backup_records br
         LEFT JOIN users u ON u.id = br.created_by_user_id
-        ORDER BY br.backup_time DESC, br.id DESC
+        ORDER BY br.created_at DESC, br.id DESC
         LIMIT ?
       `).all(Math.max(1, Math.min(5000, Number(limit) || 5000))).map((row) => this.dto(row));
     } finally { db.close(); }
