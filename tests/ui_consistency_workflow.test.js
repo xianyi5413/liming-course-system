@@ -64,8 +64,8 @@ test('empty course fields and actual badge geometry agree in both modes; matrix 
   await browser.evaluate(`lessonFilter={...defaultLessonFilter(),start_date:'2026-07-01',end_date:'2026-07-31',date_preset_initialized:true};`);
   await show(browser,'lessons');
   for(const editing of [true,false]) {
-    const result=await browser.evaluate(`(()=>{scheduleMode=${editing};lessonFilter={...defaultLessonFilter(),start_date:'2026-07-01',end_date:'2026-07-31',date_preset_initialized:true};render();const row=[...document.querySelectorAll('.lesson-table tbody tr[data-row-id]')].find(row=>row.textContent.includes('未填科目'));return ['grade','subject','students'].map(field=>{const td=row.querySelector('.col-'+field),cell=field==='students'?td.querySelector('.lesson-student-badges'):td;return {text:cell.textContent.trim(),badges:cell.querySelectorAll('.entity-badge').length};});})()`);
-    assert.deepEqual(result,[{text:'未填年级',badges:0},{text:'未填科目',badges:0},{text:'未填学生',badges:0}]);
+    const result=await browser.evaluate(`(()=>{scheduleMode=${editing};lessonFilter={...defaultLessonFilter(),start_date:'2026-07-01',end_date:'2026-07-31',date_preset_initialized:true};render();const row=[...document.querySelectorAll('.lesson-table tbody tr[data-row-id]')].find(row=>row.textContent.includes('-'));return ['grade','subject','students'].map(field=>{const td=row.querySelector('.col-'+field),cell=field==='students'?td.querySelector('.lesson-student-badges'):td;return {text:cell.textContent.trim(),badges:cell.querySelectorAll('.entity-badge').length};});})()`);
+    assert.deepEqual(result,[{text:'-',badges:0},{text:'-',badges:0},{text:'-',badges:0}]);
   }
   const alignment=await browser.evaluate(`(()=>{const cell=[...document.querySelectorAll('.lesson-table td.col-students')].find(cell=>cell.querySelector('.student-badge'));const badge=cell.querySelector('.student-badge'),style=getComputedStyle(cell);return {offset:badge.getBoundingClientRect().left-cell.getBoundingClientRect().left,padding:parseFloat(style.paddingLeft),head:getComputedStyle(document.querySelector('.lesson-table th.col-students')).textAlign};})()`);
   assert.ok(Math.abs(alignment.offset-alignment.padding)<3,JSON.stringify(alignment));assert.equal(alignment.head,'center');
@@ -137,13 +137,13 @@ test('gift visibility, dynamic count alignment, shared adaptive tables, compact 
   await browser.waitFor(`!activeScheduleInlinePicker && document.querySelector('.class-group-type-cell').textContent.trim()==='1V2'`);
   await show(browser,'teacherSalaryRules');
   assert.equal(await browser.evaluate(`[...document.querySelectorAll('.teacher-salary-rule-table th')].some(th=>th.textContent.trim()==='启用')`),false);
-  assert.equal(await browser.evaluate(`!!document.querySelector('.rule-status-cell .teacher-salary-rule-active')`),true);
+  assert.equal(await browser.evaluate(`!!document.querySelector('.rule-status-cell input')`),false);
   const rule=await browser.evaluate(`(()=>{const row=document.querySelector('.teacher-salary-rule-row');return {id:Number(row.dataset.ruleId),notes:row.querySelector('[data-field="notes"]').value};})()`);
-  await browser.evaluate(`(()=>{const input=document.querySelector('.rule-status-cell .teacher-salary-rule-active');input.checked=false;input.dispatchEvent(new Event('change'));})()`);
-  await browser.waitFor(`!!document.querySelector('.rule-status-cell .teacher-salary-rule-active') && !document.querySelector('.rule-status-cell .teacher-salary-rule-active').checked`);
+  await browser.evaluate(`(()=>{document.querySelector('.rule-status-cell .rule-activation').click();const input=activeScheduleInlinePicker.select;input.value='-1';input.dispatchEvent(new Event('change'));})()`);
+  await browser.waitFor(`document.querySelector('.rule-status-cell .rule-activation')?.textContent.includes('已停用')`);
   for(let i=0;i<100;i++){const db=new DatabaseSync(dbPath);const saved=db.prepare('SELECT is_active FROM teacher_salary_rules WHERE id=?').get(rule.id);db.close();if(saved?.is_active===-1)break;await new Promise(resolve=>setTimeout(resolve,20));}
   const rulesDb=new DatabaseSync(dbPath);const savedRule=rulesDb.prepare('SELECT is_active,notes FROM teacher_salary_rules WHERE id=?').get(rule.id);rulesDb.close();assert.equal(savedRule.is_active,-1);assert.equal(savedRule.notes,rule.notes);
 
-  await show(browser,'recharges');assert.equal(await browser.evaluate(`document.querySelectorAll('.recharge-analysis-card.metric').length`),6);
+  await show(browser,'recharges');assert.equal(await browser.evaluate(`document.querySelectorAll('.recharge-analysis-grid .recharge-analysis-card.metric').length`),6);
   assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
 }));

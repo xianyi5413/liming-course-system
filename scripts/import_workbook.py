@@ -348,6 +348,9 @@ def import_recharges(conn, wb, month_key, replace=True):
         student_name = text(ws.cell(row_idx, 1).value)
         if not student_name:
             continue
+        recharge_date = iso_date(ws.cell(row_idx, 7).value) or month_key
+        recharge_date = dt.date.fromisoformat(recharge_date).isoformat()
+        recharge_month = month_key_from_date(recharge_date)
         payload = (
             student_name,
             text(ws.cell(row_idx, 2).value),
@@ -355,9 +358,9 @@ def import_recharges(conn, wb, month_key, replace=True):
             number(ws.cell(row_idx, 4).value),
             number(ws.cell(row_idx, 5).value),
             number(ws.cell(row_idx, 6).value),
-            iso_date(ws.cell(row_idx, 7).value),
+            recharge_date,
             text(ws.cell(row_idx, 8).value),
-            month_key,
+            recharge_month,
         )
         conn.execute(
             """

@@ -1,3 +1,5 @@
+const { CleanupPreviewJobs } = require("./backup/cleanup_jobs");
+const { rechargeMonth, normalizeHistoricalRecharge, migrateRechargeDates } = require("./domain/recharge_date");
 const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseTypes } = require("./domain/course_type");
 const http = require("node:http");
 const fs = require("node:fs");
@@ -43,7 +45,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260925-table-index-compact-layout";
+const APP_VERSION = process.env.APP_VERSION || "20260926-ui-performance-recharge-backup-fixes";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1053,6 +1055,7 @@ function initDb() {
   seedDefaultUsers();
   seedDefaultRolesAndPermissions();
   db.prepare("UPDATE users SET display_name = 'Qing' WHERE username = 'boss' AND display_name IN ('最大老板', '晴')").run();
+  console.info(`[recharge dates migration] ${JSON.stringify(migrateRechargeDates(db))}`);
   lastTimeSlotMigrationReport = migrateHistoricalTimeSlots();
   console.info(`[course types migration] ${JSON.stringify(migrateCourseTypes(db))}`);
 }
@@ -1061,6 +1064,7 @@ if (!readOnlyBalanceCli) initDb();
 
 let backupServiceInstance = null;
 let backupCleanupInstance = null;
+let backupCleanupJobs = null;
 function backupCleanupService() {
   if (!backupCleanupInstance) backupCleanupInstance = new BackupCleanupService({ service: backupService(), settings: () => loadFullBackupSettings(dbPath), remote: baiduBackupManager() });
   return backupCleanupInstance;
@@ -3511,14 +3515,19 @@ function patchExpense(id, body) {
 }
 
 function buildFeeDetails(monthKey) {
+  const started = performance.now();
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
+  const lessonSqlMs = performance.now() - started;
   const pricingLookups = feePricingLookups();
+  const lookupMs = performance.now() - started - lessonSqlMs;
+  let pricingMs = 0;
   const details = [];
   for (const lesson of lessons) {
     const names = splitStudents(lesson.student_names);
     const studentCount = names.length;
     const status = deriveStatus(lesson);
     names.forEach((studentName, index) => {
+      const priceStarted = performance.now();
       const price = unitPriceFor({
         studentName,
         subject: lesson.subject,
@@ -3528,6 +3537,7 @@ function buildFeeDetails(monthKey) {
         status,
         studentNames: lesson.student_names,
       }, pricingLookups);
+      pricingMs += performance.now() - priceStarted;
       const detail = {
         status,
         unit_price: price.unit_price,
@@ -3562,6 +3572,7 @@ function buildFeeDetails(monthKey) {
       });
     });
   }
+  if (process.env.FEE_DETAILS_PERF_DIAGNOSTICS === "1") console.info(`[fee-details-perf] ${JSON.stringify({ month: monthKey, rows: details.length, queries: 4, lessonSqlMs, lookupMs, pricingMs, totalMs: performance.now() - started })}`);
   return details;
 }
 
@@ -4157,8 +4168,8 @@ function buildStudentSummary(details, monthKey, includeInactive = false, carryOv
     const carryOver = carryOverBalances.get(row.student_name);
     const storedPrevActual = num(recharge.prev_actual);
     const storedPrevGift = num(recharge.prev_gift);
-    const prevActual = carryOver ? num(carryOver.actual_balance) : storedPrevActual;
-    const prevGift = carryOver ? num(carryOver.gift_balance) : storedPrevGift;
+    const prevActual = carryOver ? num(carryOver.actual_balance) : 0;
+    const prevGift = carryOver ? num(carryOver.gift_balance) : 0;
     const account = calculateStudentAccountTimeline({
       studentName: row.student_name,
       monthKey,
@@ -9950,6 +9961,7 @@ function apiArea(req, url) {
 
 function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
+  if (p === "/api/fee-details-page") return ["feeDetails"];
   if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
   if (p === "/api/teacher-salary-rules/apply-selected") return ["teacherDetail"];
   if (p.startsWith("/api/data-center")) return ["audit"];
@@ -11002,6 +11014,8 @@ function insertRechargeFromWorkbook(row, monthKey, sourceLabel) {
   const curRecharge = num(row.values[4]);
   const curGift = num(row.values[5]);
   if (curRecharge === 0 && curGift === 0) return false;
+  const normalized = normalizeHistoricalRecharge({ recharge_date: isoDateValue(row.values[6]), month_key: monthKey });
+  if (!rechargeMonth(normalized.recharge_date)) throw new Error("充值日期无效且无法从原业务月份补全");
   db.prepare(`
     INSERT INTO recharge_records(
       student_name, grade, prev_actual, prev_gift, cur_recharge, cur_gift,
@@ -11015,10 +11029,10 @@ function insertRechargeFromWorkbook(row, monthKey, sourceLabel) {
     num(row.values[3]),
     curRecharge,
     curGift,
-    isoDateValue(row.values[6]),
+    normalized.recharge_date,
     text(row.values[7]),
     sourceLabel,
-    monthKey,
+    normalized.month_key,
   );
   upsertStudent(studentName, grade);
   return true;
@@ -12830,6 +12844,11 @@ async function handleApi(req, res, url) {
       : bootstrap(monthKey, includeInactiveRows);
     return sendJson(res, sanitizeBootstrap(payload, user));
   }
+  if (req.method === "GET" && url.pathname === "/api/fee-details-page") {
+    const monthKey = resolveMonthKey(url);
+    const sanitized = sanitizeBootstrap({ lessons: [], derived: { fee_details: feeDetails(monthKey) } }, user);
+    return sendJson(res, { month_key: monthKey, fee_details: sanitized.derived.fee_details.map(({ teacher_salary, ...row }) => row) });
+  }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
     const monthKey = resolveMonthKey(url);
     return sendJson(res, studentPricingPagePayload(monthKey, user));
@@ -13272,14 +13291,25 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory });
   }
 
-  if (req.method === "POST" && ["/api/data-center/cleanup/preview", "/api/data-center/cleanup/execute"].includes(url.pathname)) {
+  const cleanupJobMatch = url.pathname.match(/^\/api\/data-center\/cleanup\/preview\/([a-f0-9]{32})$/);
+  if ((req.method === "POST" && ["/api/data-center/cleanup/preview/start", "/api/data-center/cleanup/preview"].includes(url.pathname)) || (req.method === "GET" && cleanupJobMatch)) {
+    if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以清理多余备份文件");
+    if (!backupCleanupJobs) backupCleanupJobs = new CleanupPreviewJobs({ cleanup: backupCleanupService() });
+    try {
+      const result = req.method === "GET" ? backupCleanupJobs.get(user.id, cleanupJobMatch[1]) : backupCleanupJobs.start(user.id);
+      if (!result) return sendError(res, 404, "扫描任务不存在或已过期");
+      if (req.method === "POST") writeOperationLog(user, { operation_type: "扫描多余备份文件", operation_content: "已提交后台清理预览任务", target_type: "backup_cleanup", details: { job_id: result.job_id, status: result.status } }, req);
+      return sendJson(res, result, req.method === "POST" ? 202 : 200);
+    } catch { return sendError(res, 409, "已有扫描正在运行，请稍后重试"); }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-center/cleanup/execute") {
     if (!isSuperRole(user.role)) return sendError(res, 403, "仅老板可以清理多余备份文件");
     const body = await readBody(req);
-    const execute = url.pathname.endsWith("/execute");
     try {
-      const result = execute ? await backupCleanupService().execute(user.id, body.preview_id, body.confirmed === true) : await backupCleanupService().scan(user.id);
-      const summary = execute ? { scanned_files: result.scanned_files, deleted_files: result.deleted_files, failed_files: result.failed_files, local_bytes: result.local_bytes, remote_bytes: result.remote_bytes, orphan_files: result.orphan_files, backup_ids: result.results.map(row => row.backup_id).filter(Boolean), ok: result.ok } : result.summary;
-      writeOperationLog(user, { operation_type: execute ? "清理多余备份文件" : "扫描多余备份文件", operation_content: execute ? `删除${result.deleted_files}个文件，失败${result.failed_files}个` : `预览${result.summary.local_files + result.summary.remote_files}个可清理文件`, target_type: "backup_cleanup", result_status: execute && !result.ok ? "failure" : "success", details: summary }, req);
+      const result = await backupCleanupService().execute(user.id, body.preview_id, body.confirmed === true);
+      const summary = { scanned_files: result.scanned_files, deleted_files: result.deleted_files, failed_files: result.failed_files, local_bytes: result.local_bytes, remote_bytes: result.remote_bytes, orphan_files: result.orphan_files, backup_ids: result.results.map(row => row.backup_id).filter(Boolean), ok: result.ok };
+      writeOperationLog(user, { operation_type: "清理多余备份文件", operation_content: `删除${result.deleted_files}个文件，失败${result.failed_files}个`, target_type: "backup_cleanup", result_status: !result.ok ? "failure" : "success", details: summary }, req);
       return sendJson(res, result);
     } catch (error) {
       return sendJson(res, { error: "清理未完成，请重新扫描或稍后重试", code: /^[A-Z0-9_]+$/.test(error.code || "") ? error.code : "CLEANUP_FAILED" }, 409);
@@ -13357,7 +13387,7 @@ async function handleApi(req, res, url) {
     const settings = loadFullBackupSettings(dbPath);
     const baiduSchedule = remoteDueState(dbPath, settings, new Date(), remote);
     return sendJson(res, {
-      records: service.list(),
+      ...service.listPage(url.searchParams.get("page"), url.searchParams.get("page_size")),
       settings: { ...settings, managed_directory: "backups/full-excel", local_storage_status: service.rootStatus().status, remote_status: remote.status },
       baidu: { ...remote, redirect_uri: remote.redirect_uri || baiduCallbackUrl(req), remote_directory: settings.remote_directory },
       baidu_schedule: baiduSchedule,
@@ -14361,10 +14391,10 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/recharges") {
     const body = await readBody(req);
-    const monthKey = text(body.month_key || getSetting("month_key"));
+    const monthKey = rechargeMonth(text(body.recharge_date));
     const studentName = text(body.student_name);
     if (!studentName) return sendError(res, 400, "学生姓名不能为空");
-    if (!validMonthKey(monthKey)) return sendError(res, 400, "month_key must be YYYY-MM-01");
+    if (!validMonthKey(monthKey)) return sendError(res, 400, "请填写有效的充值日期（YYYY-MM-DD）");
     const curRecharge = num(body.cur_recharge);
     const curGift = num(body.cur_gift);
     if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
@@ -14447,17 +14477,17 @@ async function handleApi(req, res, url) {
     const before = get("SELECT * FROM recharge_records WHERE id = ?", [id]);
     if (!before) return sendError(res, 404, "充值记录不存在");
     const body = await readBody(req);
-    const monthKey = text(body.month_key || before.month_key || getSetting("month_key"));
+    const rechargeDate = body.recharge_date === undefined ? text(before.recharge_date) : text(body.recharge_date);
+    const monthKey = rechargeMonth(rechargeDate);
     const studentName = text(body.student_name || before.student_name);
     if (!studentName) return sendError(res, 400, "学生姓名不能为空");
-    if (!validMonthKey(monthKey)) return sendError(res, 400, "month_key must be YYYY-MM-01");
+    if (!validMonthKey(monthKey)) return sendError(res, 400, "请填写有效的充值日期（YYYY-MM-DD）");
     const curRecharge = body.cur_recharge === undefined ? num(before.cur_recharge) : num(body.cur_recharge);
     const curGift = body.cur_gift === undefined ? num(before.cur_gift) : num(body.cur_gift);
     if (Math.abs(curRecharge) > 100000) return sendError(res, 400, "充值金额超出合理范围");
     if (Math.abs(curGift) > 100000) return sendError(res, 400, "赠送金额超出合理范围");
     const grade = body.grade === undefined ? text(before.grade) : text(body.grade);
     const source = body.source === undefined ? text(before.source) : text(body.source);
-    const rechargeDate = body.recharge_date === undefined ? text(before.recharge_date) : text(body.recharge_date);
     const notes = body.notes === undefined ? text(before.notes) : text(body.notes);
     const channel = normalizeRechargeChannel(
       body.channel === undefined ? before.channel : body.channel,
@@ -14468,7 +14498,7 @@ async function handleApi(req, res, url) {
     if (curRecharge === 0 && curGift === 0) {
       const deleted = withTransaction(() => {
         db.prepare("DELETE FROM recharge_records WHERE id = ?").run(id);
-        return refreshCarryOverAfter(monthKey);
+        return refreshCarryOverAfter(before.month_key);
       });
       recordAuditEvent(req, user, { action: "delete_zero_recharge", entity_type: "recharge_records", entity_id: String(id), before, after: { row: null, carry_over: deleted } });
       writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${before.student_name} ${before.month_key}`, target_type: "recharge_records", target_id: String(id) });

@@ -14338,3 +14338,66 @@ table.uniform-table.compact-rows :is(.content-wrap, .teacher-detail-notes) { whi
 table.uniform-table.compact-rows .adaptive-textarea { min-height: 32px; max-height: none; overflow: hidden; }
 table.uniform-table.compact-rows .student-set-badges { flex-wrap: wrap; }
 table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { margin: 0; flex: 0 0 auto; }
+
+/* Shared compact filter dimensions: CSS sizing, no per-render DOM text measurement. */
+.filter-bar, .filter-bar .filter-controls, .lesson-filter-top .filter-controls {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; min-width: 0;
+}
+.filter-bar .filter-field, .filter-bar .unified-filter-field {
+  flex: 0 1 auto; width: max-content; min-width: 104px; max-width: min(240px, 100%);
+}
+.filter-bar :is(.multi-select,.filter-combo,.custom-select,.text-filter) { width: auto; min-width: 0; max-width: 100%; }
+.filter-bar :is(.control,.multi-select-toggle,.custom-select-button) {
+  min-width: 104px; max-width: 100%; min-height: 36px; border-radius: 8px; font-size: var(--text-table); box-sizing: border-box;
+}
+.filter-bar .multi-select-toggle { width: auto; max-width: 240px; }
+.filter-bar .filter-search { width: 230px; max-width: 100%; }
+.filter-bar .filter-date-range { width: 270px; max-width: 100%; }
+.filter-bar .date-range-picker { width: 270px; max-width: 100%; min-width: 0; }
+.filter-bar .date-range-trigger { width: 100%; min-width: 0; }
+.lesson-filter-top { width: 100%; min-width: 0; }
+.lesson-date-filter-group { flex: 0 1 auto; width: auto; max-width: 100%; }
+.lesson-date-shortcuts { flex-wrap: wrap; }
+.filter-bar .filter-summary { flex: 0 1 auto; margin-left: 0; max-width: 100%; }
+.matrix-unified-filter { display: block; }
+.matrix-unified-filter .filter-bar { padding: 0; margin: 0; border: 0; box-shadow: none; background: transparent; }
+.matrix-unified-filter .matrix-date-region { margin-bottom: 10px; }
+.notice-task-title, .notice-task-description { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; -webkit-line-clamp: unset; }
+.lesson-table .col-note { max-width: 360px; white-space: nowrap !important; }
+.lesson-table .col-note .lesson-cell-text { display: block; max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lesson-table .lesson-note-input { height: 32px !important; min-height: 32px; max-height: 32px; resize: none; white-space: pre; overflow: hidden; }
+.recharge-analysis-list { display: flex; flex-wrap: wrap; gap: 10px; }
+.recharge-analysis-chip { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; width: 164px; min-height: 96px; gap: 5px; box-sizing: border-box; }
+.recharge-analysis-chip > span { font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.recharge-analysis-chip em { color: var(--muted); font-size: var(--text-caption); font-style: normal; }
+:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value) { appearance: textfield; -moz-appearance: textfield; }
+:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value)::-webkit-inner-spin-button,
+:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value)::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.teacher-detail-table.compact-rows tbody td, .teacher-detail-table.compact-rows .teacher-detail-notes { white-space: nowrap !important; }
+.teacher-detail-table.compact-rows .student-set-badges { flex-wrap: nowrap; width: max-content; }
+.teacher-detail-table .teacher-detail-notes { max-width: 480px; overflow: hidden !important; text-overflow: ellipsis; }
+.inline-value-button { background: transparent; border: 0; padding: 0; font: inherit; color: inherit; }
+.inline-value-button:hover, .user-role-cell:hover { background: var(--hover-bg, rgba(80,110,160,.08)); }
+.user-role-cell { white-space: nowrap; cursor: pointer; }
+.base-data-grid { grid-template-columns: minmax(0, 1fr); }
+.data-backup-card-grid > *, .data-backup-subcard, .data-backup-primary-grid > *, .data-backup-retention-grid > *, .data-backup-settings-grid > *, .baidu-settings-group > * { min-width: 0; }
+.data-backup-subcard :is(input,select,.custom-select,.custom-select-button) { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.data-backup-primary-grid { grid-template-columns: repeat(auto-fit, minmax(min(180px,100%),1fr)); }
+.data-backup-retention-grid { grid-template-columns: repeat(auto-fit, minmax(min(120px,100%),1fr)); }
+.data-backup-subcard .custom-select-value { white-space: normal; overflow-wrap: anywhere; }
+@media(max-width:600px) {
+  .filter-bar .filter-field { flex: 0 1 auto; max-width: 100%; }
+  .matrix-date-filter .matrix-tabs-region { max-width: 100%; }
+  .data-backup-card-grid { grid-template-columns: minmax(0,1fr); }
+}
+
+table.uniform-table.teacher-detail-table.compact-rows tbody td, table.uniform-table.teacher-detail-table.compact-rows .teacher-detail-notes { white-space: nowrap !important; }
+table.uniform-table.teacher-detail-table.compact-rows .student-set-badges { flex-wrap: nowrap; }
+.data-backup-subcard .filter-field :is(input,select,.custom-select,.custom-select-button) { min-width: 0; width: 100%; max-width: 100%; }
+.data-backup-subcard .baidu-settings-group { grid-template-columns: repeat(auto-fit,minmax(min(180px,100%),1fr)); }
+.data-backup-subcard > *, .data-backup-subcard .filter-field { min-width: 0; }
+
+.course-table.lesson-table td.col-note .lesson-cell-text { white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; max-width: 100%; }
+.course-table.lesson-table td.col-note .lesson-note-input { height: 32px; min-height: 32px; max-height: 32px; white-space: nowrap; overflow-wrap: normal; overflow: hidden; }
+
+.notice-simple-tile { height: auto; min-height: 188px; overflow: visible; }

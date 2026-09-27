@@ -59,7 +59,7 @@ test('inline picker immediately paints grade/subject independently, types share 
       const subjectTrigger=document.querySelector('[data-lesson-id="'+row.id+'"][data-field="subject"]');openScheduleInlinePicker(subjectTrigger);const subject=activeScheduleInlinePicker.select;subject.value='数学';await handleLessonFieldChange(subject);closeScheduleInlinePicker();
       return {empty,shown,subject:subjectTrigger.textContent.trim(),students:state.lessons.find(item=>item.id===row.id).student_names};
     })()`);
-    assert.deepEqual(immediate.empty,{grade:'未填年级',badge:false,subject:'未填科目'});assert.equal(immediate.shown,'初一');assert.equal(immediate.subject,'数学');assert.equal(immediate.students,'');
+    assert.deepEqual(immediate.empty,{grade:'-',badge:false,subject:'-'});assert.equal(immediate.shown,'初一');assert.equal(immediate.subject,'数学');assert.equal(immediate.students,'');
     const candidate=await browser.evaluate(`(()=>{const trigger=document.querySelector('[data-field="course_type"][data-lesson-edit-trigger]');trigger.focus();trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));const picker=activeScheduleInlinePicker;return {open:!!picker,portal:picker?.menu.parentElement===document.body,cls:picker?.wrapper.className};})()`);
     assert.equal(candidate.open,true);assert.equal(candidate.portal,true);assert.match(candidate.cls,/schedule-inline-picker-anchor/);
     await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);

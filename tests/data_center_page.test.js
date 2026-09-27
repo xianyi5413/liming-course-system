@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260925-table-index-compact-layout",
-      "/app.js?v=20260925-table-index-compact-layout",
+      "/styles.css?v=20260926-ui-performance-recharge-backup-fixes",
+      "/app.js?v=20260926-ui-performance-recharge-backup-fixes",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -605,8 +605,8 @@ test("owner can inspect a safe invalid-role record and jump to the matching acco
     await browser.click(".preflight-account-link");
     await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('账号权限') && Boolean(document.querySelector('.user-row.preflight-target[data-username=\"role-broken\"]'))");
     assert.equal(await browser.evaluate("document.activeElement?.closest('.user-row')?.dataset.username"), "role-broken");
-    await browser.evaluate("(() => { const select=document.querySelector('.user-row.preflight-target .user-field[data-field=\"role\"]'); select.dataset.pendingTest='1'; select.value='owner'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
-    await browser.waitFor("!document.querySelector('[data-pending-test]') && document.querySelector('.user-row.preflight-target .user-field[data-field=\"role\"]')?.value === 'owner'");
+    await browser.evaluate("(() => { document.querySelector('.user-row.preflight-target .user-role-cell').click(); const select=activeScheduleInlinePicker.select; select.dataset.pendingTest='1'; select.value='owner'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
+    await browser.waitFor("!document.querySelector('[data-pending-test]') && document.querySelector('.user-row.preflight-target .user-role-cell')?.textContent.includes('老板')");
     await browser.openDataCenter(); await assertThreeRegions(browser);
     await browser.waitFor("!document.querySelector('.data-preflight-panel') && document.querySelector('.backup-run-now')?.disabled === false");
     assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

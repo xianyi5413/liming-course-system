@@ -65,7 +65,7 @@ async function openView(browser, group, view) {
 
 const scenarios = [
   { name: "费用汇总", group: "students", view: "summary", title: "学生费用汇总", row: ".student-summary-table tbody tr:not(.empty)", text: "首次加载学生" },
-  { name: "费用明细", group: "students", view: "feeDetails", title: "学生费用明细", row: ".fee-detail-table tbody tr:not(.empty)", text: "首次加载课程" },
+  { name: "费用明细", group: "students", view: "feeDetails", title: "学生费用明细", row: ".fee-detail-table tbody tr:not(.empty)", text: "首次加载课程", direct: true },
   { name: "学生单价", group: "students", view: "studentPricing", title: "学生单价规则", row: ".student-pricing-rule-row", text: "首次加载学生", direct: true },
   { name: "教师薪资汇总", group: "teachers", view: "teacherSalary", title: "薪资汇总", row: ".teacher-salary-summary-row", text: "首次加载老师" },
   { name: "教师车费明细", group: "teachers", view: "teacherTravelFees", title: "车费明细", row: ".teacher-travel-fee-row", text: "首次加载老师" },
@@ -89,8 +89,8 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
   await browser.waitFor(`document.querySelector('#topbar')?.textContent.includes(${JSON.stringify(scenario.title)}) && document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0 && document.body.textContent.includes(${JSON.stringify(scenario.text)})`);
   assert.equal(await browser.evaluate("document.querySelector('.month-select')?.value || '2026-07-01'"), MONTH);
   if (!scenario.direct) assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
-  if (scenario.view === "studentPricing") {
-    assert.equal(browser.responses.some((response) => /\/api\/student-pricing-page\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
+  if (["studentPricing", "feeDetails"].includes(scenario.view)) {
+    assert.equal(browser.responses.some((response) => new RegExp(scenario.view === "feeDetails" ? "/api/fee-details-page\\?" : "/api/student-pricing-page\\?").test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
     assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url)), false, JSON.stringify(browser.responses));
   }
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

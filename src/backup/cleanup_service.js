@@ -55,6 +55,7 @@ class BackupCleanupService {
   async remoteFiles(root) {
     const files = new Map(); let start = 0;
     for (let page = 0; page < 100; page++) {
+      if (this.remoteDeadline && Date.now() > this.remoteDeadline) throw error("CLEANUP_REMOTE_TIMEOUT");
       const result = await this.remote.client.listDirectory(root, { start, limit: 200 });
       for (const item of result.list) {
         const name = String(item.path || "").slice(root.length + 1);
@@ -88,15 +89,19 @@ class BackupCleanupService {
     return fingerprint([crypto.createHash("sha256").update(bytes).digest("hex"), checksum.toString("utf8")]);
   }
   publicEntry(entry) { return { kind: entry.kind, backup_id: entry.backup_id || null, backup_type: entry.backup_type || "无记录完整备份", reason: entry.reason, files: entry.files.map(({ source, filename, relative_path, size, created_at }) => ({ source, filename, relative_path, size, created_at })) }; }
-  async scan(owner) {
+  async scan(owner, progress = () => {}) {
     const lock = this.service.acquireLock(); let db;
     try {
       db = this.service.database(); const records = this.records(db), settings = this.settings(), root = safeRemotePath(settings.remote_directory);
+      progress("正在扫描本地文件");
       const local = await listManagedLocalExcel({ dataDir: this.service.dataDir, records });
       let remote = new Map(), remoteAvailable = false; const warnings = [];
+      this.remoteDeadline = Date.now() + 45_000;
+      progress(`本地扫描完成，正在分页扫描百度目录（${local.items.length} 个本地文件）`);
       if (this.remote.configurationStatus().authorized) {
-        try { remote = await this.remoteFiles(root); remoteAvailable = true; } catch { warnings.push("百度扫描未完成；本轮不会清理任何百度文件或关联远端的备份"); }
+        try { remote = await this.remoteFiles(root); remoteAvailable = true; } catch { warnings.push("百度扫描失败；本轮不会清理任何百度文件或关联远端的备份"); }
       } else warnings.push("百度未授权，仅扫描本地文件");
+      progress("正在核对保留策略与文件完整性");
       const ids = eligibleRecordIds(records, settings, this.service, db), entries = [];
       const localRefs = new Set(records.flatMap(row => [row.managed_relative_path, row.managed_relative_path ? row.managed_relative_path + ".sha256" : ""]).map(value => String(value || "").replaceAll("\\", "/")));
       const remoteRefs = new Set(records.flatMap(row => [row.remote_path, row.remote_checksum_path]));
@@ -117,6 +122,7 @@ class BackupCleanupService {
       }
       const localRecovery = this.hasRecoveryCopy(records, "local"), remoteRecovery = this.hasRecoveryCopy(records, "baidu", remote);
       for (const item of local.items.filter(item => localRecovery && !item.backup_record && knownName(item.filename))) {
+        if (entries.length >= 100) break;
         try {
           const files = [this.localFile(item.relative_path), this.localFile(item.relative_path + ".sha256")];
           if (files.some(file => !file || localRefs.has(file.relative_path))) continue;
@@ -124,9 +130,10 @@ class BackupCleanupService {
         } catch { /* Unrecognized or incomplete historical files remain protected. */ }
       }
       for (const file of remote.values()) {
+        if (entries.length >= 100 || Date.now() > this.remoteDeadline) { warnings.push("百度完整性核对达到本轮上限，未核对文件保持受保护"); break; }
         if (!remoteRecovery || !knownName(file.filename) || remoteRefs.has(file.remote_path)) continue;
         const pair = remote.get(file.remote_path + ".sha256"); if (!pair || remoteRefs.has(pair.remote_path)) continue;
-        try { const files = [file, pair], digest = await this.orphanPair(files); entries.push({ kind: "orphan", reason: "百度无记录引用，完整 v4 与 SHA-256 配对校验通过", files, digest }); } catch { /* Fail closed. */ }
+        try { const files = [file, pair], digest = await this.orphanPair(files); entries.push({ kind: "orphan", reason: "百度无记录引用，完整 v4 与 SHA-256 配对校验通过", files, digest }); } catch { warnings.push("百度扫描失败：部分孤立文件未完成完整性校验，保持受保护"); break; }
       }
       if (entries.length > 100) warnings.push("单次最多预览100组，完成后可重新扫描");
       const chosen = entries.slice(0, 100), allFiles = chosen.flatMap(entry => entry.files);
@@ -145,6 +152,7 @@ class BackupCleanupService {
     }
   }
   async execute(owner, token, confirmed) {
+    this.remoteDeadline = 0;
     const plan = this.plans.get(token);
     if (!confirmed || !plan || plan.owner !== owner || plan.expires < Date.now()) throw error("CLEANUP_PREVIEW_REQUIRED");
     this.plans.delete(token); const results = [];
