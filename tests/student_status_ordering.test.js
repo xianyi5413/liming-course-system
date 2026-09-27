@@ -161,7 +161,7 @@ test("API and student page enforce the four statuses, shared ordering and immedi
       const graduated=rows.findIndex((row)=>row.querySelector('.student-name-cell')?.textContent.includes('毕业甲'));
       return state.profile_students.find((row)=>Number(row.id)===98202)?.status==='已流出' && moved>graduated;
     })()`);
-    const after = await chrome.session.evaluate(`({names:[...document.querySelectorAll('.student-profile-main-row')].map((row)=>row.querySelector('.student-name-cell').textContent.trim()), selected:[...document.querySelectorAll('.student-profile-select-row:checked')].map((box)=>box.dataset.id), conflicts:Boolean(document.querySelector('.student-stage-conflict-banner'))})`);
+    const after = await chrome.session.evaluate(`({names:[...document.querySelectorAll('.student-profile-main-row')].map((row)=>row.querySelector('.student-name-cell').textContent.trim()), selected:[...document.querySelectorAll('.student-profile-select-row:checked')].map((box)=>box.dataset.id), conflicts:Boolean(document.querySelector('.student-stage-conflict-check'))})`);
     assert.equal(after.names.indexOf("安安") > after.names.indexOf("毕业甲"), true);
     assert.deepEqual(after.selected, ["98202"]);
     assert.equal(after.conflicts, true);

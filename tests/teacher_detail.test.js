@@ -105,7 +105,7 @@ const sourceContracts = [
   ["rule writes invalidate lesson cache", frontendSource, /teacher-salary-rules[^]*lessons-range/],
   ["teacher detail GET bypasses cache", frontendSource, /view === "teacherDetail" \? \{ cache: false \}/],
   ["batch and page share resolver", serverSource, /const resolved = resolveTeacherSalaryRuleForLesson\(lesson, rules\)/],
-  ["static resource version is current", indexSource, /20260926-ui-performance-recharge-backup-fixes/g],
+  ["static resource version is current", indexSource, /20260927-pinyin-log-layout-permission-fixes/g],
 ];
 
 for (const [label, source, pattern] of sourceContracts) {
@@ -522,14 +522,10 @@ test("real Chromium keeps initial state empty, updates mixed results, and works 
     }), true, JSON.stringify(browser.responses.filter((item) => item.url.includes("/api/lessons-range"))));
     assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.textContent.includes('300.00')"), true);
     const ruleCellText = await browser.evaluate("[...document.querySelectorAll('.teacher-rule-salary-cell')].map((cell)=>cell.textContent).join('|')");
-    assert.match(ruleCellText, /未匹配/);
-    assert.match(ruleCellText, /规则不可用/);
-    assert.match(ruleCellText, /存在多条匹配规则/);
-    assert.match(ruleCellText, /无法计算/);
-    assert.match(ruleCellText, /当前状态不参与计薪/);
+    assert.match(ruleCellText, /无规则/);
+    assert.doesNotMatch(ruleCellText, /规则不可用|存在多条匹配规则|无法计算|当前状态不参与计薪/);
     assert.match(ruleCellText, /0\.00/);
-    await browser.click(".teacher-rule-match-details summary");
-    assert.match(await browser.evaluate("document.querySelector('.teacher-rule-match-details')?.textContent"), /教师.*年级.*科目.*学生集合/s);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-rule-match-details').length"), 0);
     await browser.evaluate("window.confirm=()=>true");
     await browser.click(".teacher-salary-select-all");
     await browser.click(".apply-selected-teacher-salary-rules");

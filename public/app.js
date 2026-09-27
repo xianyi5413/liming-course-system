@@ -1,3 +1,4 @@
+const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
@@ -678,6 +679,7 @@ async function request(path, options = {}) {
     }
     if (method !== "GET") {
       clearStudentQueryCache();
+      SearchTools.clear();
       if (state && /^\/api\/(recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
       invalidateRequestCache(cacheInvalidationPrefixes(path));
       if (String(path).startsWith("/api/student-pricing")
@@ -1052,7 +1054,7 @@ function customSelectFilterText(value) {
 }
 
 function normalizeSearchKeyword(value) {
-  return String(value || "").normalize("NFKC").trim().toLocaleLowerCase("zh-Hans-CN");
+  return normalizeSearchText(value);
 }
 
 function filterCustomSelectOptions(wrapper) {
@@ -1062,7 +1064,7 @@ function filterCustomSelectOptions(wrapper) {
   let visibleCount = 0;
   menu.querySelectorAll(".custom-select-option").forEach((option) => {
     const haystack = customSelectFilterText(`${option.textContent || ""} ${option.dataset.value || ""}`);
-    const matched = !query || haystack.includes(query);
+    const matched = !query || matchesSearchQuery(haystack, query);
     option.hidden = !matched;
     if (matched && !option.disabled) visibleCount += 1;
   });
@@ -1118,7 +1120,7 @@ function positionCustomSelectMenu(wrapper) {
   const menu = customSelectMenu(wrapper);
   if (!button || !menu || !wrapper.classList.contains("open")) return;
 
-  const rect = button.getBoundingClientRect();
+  const rect = (wrapper._inlineAnchor || button).getBoundingClientRect();
   menu.style.minWidth = `${rect.width}px`;
   menu.style.maxWidth = `${Math.max(160, window.innerWidth - 16)}px`;
   menu.style.left = "8px";
@@ -1193,6 +1195,7 @@ function enhanceCustomSelects() {
   cleanupCustomSelectPortals();
   document.querySelectorAll("select").forEach((select) => {
     if (select.multiple || select.dataset.customSelect === "1") return;
+    SearchTools.prime([...select.options].map(option => customSelectFilterText(`${option.textContent || ""} ${option.value || ""}`)));
     select.dataset.customSelect = "1";
     select.classList.add("native-select-hidden");
     select.tabIndex = -1;
@@ -1324,7 +1327,7 @@ function enhanceCustomSelects() {
         return;
       }
 
-      if (!event.target.closest(".custom-select") && !event.target.closest(".custom-select-menu")) closeCustomSelects();
+      if (!event.target.closest(".custom-select") && !event.target.closest(".custom-select-menu") && !activeScheduleInlinePicker?.trigger?.contains(event.target)) closeCustomSelects();
     });
     document.addEventListener("compositionstart", (event) => {
       if (event.target.matches?.(".custom-select-search-input")) event.target.dataset.composing = "1";
@@ -1759,6 +1762,14 @@ async function loadFeeDetailsPage() {
   } finally { if (feeDetailsRequest === controller) feeDetailsRequest = null; }
 }
 
+function primeSearchData() {
+  const values = new Set();
+  for (const rows of [state.profile_students, state.profile_teachers, state.student_pricing, state.class_groups, state.lessons, state.teacher_salary_rules]) {
+    for (const row of rows || []) for (const key of ['name','student_name','teacher_name','student_names','students_display','class_name']) if (row[key]) values.add(row[key]);
+  }
+  SearchTools.prime(values);
+}
+
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
   if (view === "feeDetails" && !await loadFeeDetailsPage()) return false;
   const stillCurrent = () => loadGeneration === generation;
@@ -1924,6 +1935,7 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
     state.student_statement = null;
   }
 
+  primeSearchData();
   return true;
 }
 
@@ -1936,6 +1948,7 @@ async function load(options = {}) {
   lessonWarningsMap = {};            /* [约束5] 全量重绘时清空 warnings 缓存 */
   const thisGeneration = ++loadGeneration;
   if (refreshGlobal) {
+    SearchTools.clear();
     authResult = await request("/api/auth/me");
     if (loadGeneration !== thisGeneration) return;
     auth = { ...auth, ...authResult };
@@ -2899,30 +2912,8 @@ function teacherSalaryRuleDiagnosticMarkup(lesson) {
 }
 
 function teacherSalaryRuleCellMarkup(lesson) {
-  const status = lesson.rule_match_status || lesson.teacher_salary_rule_status;
   const salary = optionalNumberValue(lesson.rule_salary);
-  const reason = teacherSalaryRuleDisableReason(lesson);
-  if (status === "matched" && salary != null) {
-    return `
-      <div class="teacher-rule-result matched">
-        <strong>${formatMoney(salary)}</strong>
-        ${lesson.payroll_eligible === false ? `<small>当前状态不参与计薪</small>` : ""}
-      </div>
-    `;
-  }
-  const label = {
-    not_matched: "未匹配",
-    rule_unavailable: "规则不可用",
-    ambiguous: "存在多条匹配规则",
-    calculation_error: "无法计算",
-  }[status] || "未匹配";
-  return `
-    <div class="teacher-rule-result ${escapeHtml(status || "not_matched")}">
-      <strong>${label}</strong>
-      <small>${escapeHtml(reason)}</small>
-      ${teacherSalaryRuleDiagnosticMarkup(lesson)}
-    </div>
-  `;
+  return (lesson.rule_match_status || lesson.teacher_salary_rule_status) === "matched" && salary != null ? formatMoney(salary) : "无规则";
 }
 
 function teacherDetailMatchesFilter(row, filter = teacherDetailFilter) {
@@ -2930,7 +2921,7 @@ function teacherDetailMatchesFilter(row, filter = teacherDetailFilter) {
   if (filter.subject && !textContains(row.subject, filter.subject)) return false;
   if (filter.student) {
     const needle = String(filter.student || "").trim().toLowerCase();
-    if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
+    if (!splitStudents(row.student_names).some((name) => matchesSearchQuery(name, needle))) return false;
   }
   if (filter.source && !textContains(teacherSalarySourceLabel(row), filter.source)) return false;
   if (filter.rule_status && !textContains(teacherSalaryRuleStatusForLesson(row), filter.rule_status)) return false;
@@ -3678,12 +3669,14 @@ function adaptiveColumnDefinition(column, header) {
     name: { minWidth: 96, maxWidth: 190, grow: 0, wrap: false, alignment: "center" },
     phone: { minWidth: 132, maxWidth: 210, grow: 0, wrap: false, alignment: "center" },
     status: { minWidth: 92, maxWidth: 150, grow: 0, wrap: false, alignment: "center" },
-    date: { minWidth: 132, maxWidth: 156, grow: 0, wrap: false, alignment: "center" },
+    date: { minWidth: 108, maxWidth: 156, grow: 0, wrap: false, alignment: "center" },
     money: { minWidth: 128, maxWidth: 168, grow: 0, wrap: false, alignment: "right" },
     action: { minWidth: 92, maxWidth: 250, grow: 0, wrap: false, alignment: "center" },
     account: { minWidth: 132, maxWidth: 220, grow: 0, wrap: false, alignment: "center" },
     long: { minWidth: 160, maxWidth: 360, grow: 1, wrap: true, alignment: "left" },
     students: { minWidth: 220, maxWidth: 480, grow: 2, wrap: true, alignment: "left" },
+    full: { minWidth: 96, maxWidth: Number.MAX_SAFE_INTEGER, grow: 0, wrap: false, alignment: "left" },
+    note: { minWidth: 76, maxWidth: 360, grow: 1, wrap: true, alignment: "left" },
     permissions: { minWidth: 220, maxWidth: 420, grow: 1, wrap: true, alignment: "left" },
   };
   const preset = presets[type] || presets.short;
@@ -3706,7 +3699,10 @@ function adaptiveCellContentWidth(cell, definition, font) {
   const measure = value => adaptiveTextWidthForData(value, font);
   const wrapWidth = value => Math.max(0, ...String(value || "").split(/[\s,，、;；/|]+/).map(measure));
   const studentSet = cell.querySelector(".student-set-badges");
-  if (studentSet) return Math.max(0, ...[...studentSet.querySelectorAll(".student-badge")].map(badge => measure(badge.textContent.trim()))) + 44;
+  if (studentSet) {
+    const widths = [...studentSet.querySelectorAll(".student-badge")].map(badge => measure(badge.textContent.trim()) + 24);
+    return (definition.wrap ? Math.max(0, ...widths) : widths.reduce((sum, width) => sum + width + 6, 0)) + 20;
+  }
   const currency = cell.querySelector(".currency-display");
   if (currency) return measure(currency.textContent.trim()) + 56;
   const input = cell.querySelector(":scope > .cell-input");
@@ -3842,8 +3838,10 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     const definition = definitions[index];
     column.style.width = `${Math.ceil(widths[index])}px`;
     headerCells[index].classList.toggle("adaptive-wrap", definition.wrap);
+    headerCells[index].classList.toggle("adaptive-full", definition.type === "full");
     bodyRows.map((row) => row.children[index]).filter(Boolean).forEach((cell) => {
       cell.classList.toggle("adaptive-wrap", definition.wrap);
+      cell.classList.toggle("adaptive-full", definition.type === "full");
       cell.dataset.adaptiveAlignment = definition.alignment;
     });
   });
@@ -4140,14 +4138,14 @@ function openingBalanceRows() {
 }
 
 function openingBalanceMatchesFilter(row) {
-  if (openingBalanceFilter.student && !row.student_name.toLowerCase().includes(openingBalanceFilter.student.toLowerCase())) return false;
+  if (openingBalanceFilter.student && !matchesSearchQuery(row.student_name, openingBalanceFilter.student)) return false;
   if (openingBalanceFilter.grade && !textContains(row.grade, openingBalanceFilter.grade)) return false;
   return true;
 }
 
 function dynamicOpeningBalanceFilterOptions(rows) {
   const rowsFor = (field) => rowsForFilterOption(rows, openingBalanceFilter, field, (row, filter) => {
-    if (field !== "student" && filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+    if (field !== "student" && filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
     if (field !== "grade" && filter.grade && !textContains(row.grade, filter.grade)) return false;
     return true;
   });
@@ -4435,7 +4433,7 @@ function lessonMatchesFilter(row, filter, options = {}) {
   if (studentNames.length && !splitStudents(row.student_names).some((name) => studentNames.includes(name))) return false;
   if (!studentNames.length && filter.student) {
     const needle = filter.student.toLowerCase();
-    if (!splitStudents(row.student_names).some((name) => name.toLowerCase().includes(needle))) return false;
+    if (!splitStudents(row.student_names).some((name) => matchesSearchQuery(name, needle))) return false;
   }
   if (filter.time_slot && String(row.time_slot || "") !== filter.time_slot) return false;
   if (filter.classroom && !textContains(row.classroom, filter.classroom)) return false;
@@ -4449,7 +4447,7 @@ function lessonMatchesFilter(row, filter, options = {}) {
   if (includeQuery && filter.query) {
     const needle = filter.query.toLowerCase();
     const haystack = [row.student_names, row.notes, row.classroom, row.subject].join(" ").toLowerCase();
-    if (!haystack.includes(needle)) return false;
+    if (!matchesSearchQuery(haystack, needle)) return false;
   }
   return true;
 }
@@ -4530,10 +4528,11 @@ function textFilterControl({ id = "", className = "", field, value = "", placeho
   `;
 }
 
-function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false, searchPlaceholder = "搜索选项", inputAttrs = "", selectionSummary = "", multiple = true, emptyText = "" }) {
+function multiSelectControl({ id = "", className = "", field, selected = [], values = [], placeholder = "全部", clearLabel = "全部", dataAttr = "filter-field", includeSelected = true, searchable = false, searchPlaceholder = "搜索选项", inputAttrs = "", selectionSummary = "", multiple = true, emptyText = "", inline = false }) {
   const selectedList = normalizeNameList(selected);
   const selectedSet = new Set(selectedList);
   const rawValues = [...(values || []), ...(includeSelected ? selectedList : [])];
+  SearchTools.prime(values);
   const normalized = ["price", "salary_status"].includes(field)
     ? [...new Set(rawValues.map((value) => String(value || "").trim()).filter(Boolean))]
     : uniqueSorted(rawValues);
@@ -4541,7 +4540,7 @@ function multiSelectControl({ id = "", className = "", field, selected = [], val
   const label = multiSelectSelectionMarkup(field, selectedList, placeholder);
   const emptyLabel = emptyText || (/student/.test(field || "") ? "暂无匹配学生" : "暂无匹配选项");
   return `
-    <span class="multi-select ${selectedList.length ? "has-value" : ""}" data-field="${escapeHtml(field)}" data-placeholder="${escapeHtml(placeholder)}" data-selection-mode="${multiple ? "multiple" : "single"}">
+    <span class="multi-select ${inline ? "inline-value-picker" : ""} ${selectedList.length ? "has-value" : ""}" data-field="${escapeHtml(field)}" data-placeholder="${escapeHtml(placeholder)}" data-selection-mode="${multiple ? "multiple" : "single"}">
       <button ${id ? `id="${escapeHtml(id)}"` : ""} class="control multi-select-toggle ${className}" type="button" aria-expanded="false">
         <span class="multi-select-label">${label}</span>
         <span class="multi-select-caret">⌄</span>
@@ -4737,7 +4736,7 @@ function refreshScheduleStudentPopoverLayout(select) {
 function filterSearchableOptions(options, keyword, readValue = (item) => item) {
   const query = normalizeSearchKeyword(keyword);
   if (!query) return [...options];
-  return [...options].filter((item) => normalizeSearchKeyword(readValue(item)).includes(query));
+  return [...options].filter((item) => matchesSearchQuery(readValue(item), query));
 }
 
 function refreshSearchableSelectResults(select) {
@@ -4840,7 +4839,7 @@ function rowsForFilterOption(rows, filter, excludeField, matcher) {
 function textContains(value, filter) {
   const needle = String(filter || "").trim().toLowerCase();
   if (!needle) return true;
-  return String(value || "").toLowerCase().includes(needle);
+  return matchesSearchQuery(value, needle);
 }
 
 function canonicalFilterValue(entries, value) {
@@ -4991,7 +4990,7 @@ function feeDetailStatusOptions() {
 }
 
 function feeDetailMatchesFilter(row, filter = feeDetailsFilter) {
-  if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+  if (filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
   if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.status) {
@@ -5046,7 +5045,7 @@ function renderFeeDetailsFilterBar(rows, filteredRows) {
 }
 
 function summaryMatchesFilter(row, filter = summaryFilter) {
-  if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+  if (filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.balance === "actual" && numberValue(row.actual_balance) === 0) return false;
   if (filter.balance === "gift" && numberValue(row.gift_balance) === 0) return false;
@@ -6399,6 +6398,7 @@ function openScheduleInlinePicker(trigger) {
 }
 
 function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
+  if (trigger?.getAttribute("aria-busy") === "true") return;
   if (!trigger || isReadonlyUser()) return;
   closeScheduleInlinePicker();
   const select = document.createElement("select");
@@ -6415,10 +6415,18 @@ function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
     return;
   }
   wrapper.classList.add("schedule-inline-picker-anchor");
+  wrapper._inlineAnchor = trigger;
   activeScheduleInlinePicker = { select, wrapper, menu, trigger };
   trigger.setAttribute("aria-expanded", "true");
   select.addEventListener("change", () => {
-    Promise.resolve(onChange(select)).finally(() => closeScheduleInlinePicker());
+    select.disabled = true;
+    trigger.setAttribute("aria-busy", "true");
+    Promise.resolve(onChange(select))
+      .catch(error => showToast(error.message, "error"))
+      .finally(() => {
+        trigger.removeAttribute("aria-busy");
+        if (activeScheduleInlinePicker?.select === select) closeScheduleInlinePicker();
+      });
   }, { once: true });
   openCustomSelect(wrapper);
 }
@@ -6450,7 +6458,14 @@ function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
   return width;
 }
 
+function measureLessonNoteWidth(rows = visibleLessonRows()) {
+  const style = getComputedStyle(document.body);
+  const font = `400 ${getComputedStyle(document.documentElement).getPropertyValue('--text-table').trim() || '13px'} ${style.fontFamily}`;
+  return Math.ceil(Math.max(96, ...rows.map(row => adaptiveTextWidthForData(String(row.notes || '').replace(/\n/g, ' '), font) + 36)));
+}
+
 function applyLessonTableStudentColumnWidth(width = measureVisibleStudentColumnWidth()) {
+  document.querySelector(".lesson-table")?.style.setProperty("--lesson-note-column-width", `${measureLessonNoteWidth()}px`);
   document.querySelector(".lesson-table")?.style.setProperty("--lesson-student-column-width", `${width}px`);
 }
 
@@ -6857,7 +6872,7 @@ function filterLessonCreateStudents(modal, value = "") {
   const query = String(value || "").trim().toLocaleLowerCase("zh-Hans-CN");
   modal.querySelectorAll(".lesson-create-student-option").forEach((option) => {
     const name = String(option.dataset.studentName || "").toLocaleLowerCase("zh-Hans-CN");
-    const filteredOut = Boolean(query) && !name.includes(query);
+    const filteredOut = Boolean(query) && !matchesSearchQuery(name, query);
     option.hidden = filteredOut;
     option.classList.toggle("is-search-filtered", filteredOut);
     option.setAttribute("aria-hidden", String(filteredOut));
@@ -7026,7 +7041,7 @@ function lessonCreateModal() {
   const selectedStudents = new Set(draft.selected_students || []);
   const studentSearch = String(draft.student_search || "");
   const normalizedStudentSearch = studentSearch.trim().toLocaleLowerCase("zh-Hans-CN");
-  const studentResultCount = students.filter((name) => String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch)).length;
+  const studentResultCount = students.filter((name) => matchesSearchQuery(name, normalizedStudentSearch)).length;
   const status = draft.status || "待上";
   const candidate = lessonCreateCandidateFromDraft({ ...draft, date });
   const conflictInfo = buildLessonCandidateConflict(candidate, { rows: lessonCreateConflictCandidateRows() });
@@ -7103,7 +7118,7 @@ function lessonCreateModal() {
             </div>
             <div class="lesson-create-student-list">
               ${students.map((name) => `
-                <label class="lesson-create-student-option ${normalizedStudentSearch && !String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch) ? "is-search-filtered" : ""}" data-student-name="${escapeHtml(name)}" ${normalizedStudentSearch && !String(name).toLocaleLowerCase("zh-Hans-CN").includes(normalizedStudentSearch) ? "hidden aria-hidden=\"true\"" : "aria-hidden=\"false\""}>
+                <label class="lesson-create-student-option ${normalizedStudentSearch && !matchesSearchQuery(name, normalizedStudentSearch) ? "is-search-filtered" : ""}" data-student-name="${escapeHtml(name)}" ${normalizedStudentSearch && !matchesSearchQuery(name, normalizedStudentSearch) ? "hidden aria-hidden=\"true\"" : "aria-hidden=\"false\""}>
                   <input class="lesson-create-student-existing" type="checkbox" value="${escapeHtml(name)}" ${selectedStudents.has(name) ? "checked" : ""}>
                   <span>${escapeHtml(name)}</span>
                 </label>
@@ -7404,7 +7419,7 @@ function renderLessons() {
     <div class="lesson-toolbar-region">${lessonToolbarHtml(rows)}</div>
     <div class="band">
       <div class="table-wrap smooth-table-wrap lesson-table-scroll">
-        <table class="course-table lesson-table uniform-table nowrap-table ${scheduleMode ? "is-editing" : "is-browsing"}" style="--lesson-student-column-width:${studentColumnWidth}px">
+        <table class="course-table lesson-table uniform-table nowrap-table ${scheduleMode ? "is-editing" : "is-browsing"}" style="--lesson-student-column-width:${studentColumnWidth}px;--lesson-note-column-width:${measureLessonNoteWidth(rows)}px">
           <colgroup><col span="11"><col class="col-students"><col span="2"></colgroup>
           <thead>
             <tr>
@@ -7710,7 +7725,7 @@ function lessonScheduleStudentCell(row) {
 function filterLessonStudentCandidates(select, keyword = "") {
   const candidates = select?._studentCandidates || [];
   const needle = String(keyword || "").trim().toLocaleLowerCase("zh-Hans-CN");
-  return candidates.filter((name) => !needle || String(name).toLocaleLowerCase("zh-Hans-CN").includes(needle));
+  return candidates.filter((name) => !needle || matchesSearchQuery(name, needle));
 }
 
 function renderLessonStudentCandidateList(select, draft = []) {
@@ -8476,7 +8491,7 @@ function renderMatrixDateFilter() {
       <label>日期范围</label>
       ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}
       <div class="matrix-tabs-region">${renderMatrixViewTabs()}</div>
-      <button class="btn matrix-range-reset" type="button">重置</button>
+
     </div>
   `;
 }
@@ -9264,7 +9279,7 @@ function rechargeMatchesFilter(row, filter = currentRechargeFilter()) {
   const source = rechargeSource(row);
   if (filter.source === "carry_over" && source !== "carry_over") return false;
   if (filter.source === "manual" && source === "carry_over") return false;
-  if (filter.student && !row.student_name.toLowerCase().includes(filter.student.toLowerCase())) return false;
+  if (filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
   if (filter.start && (!row.recharge_date || row.recharge_date < filter.start)) return false;
   if (filter.end && (!row.recharge_date || row.recharge_date > filter.end)) return false;
@@ -9403,7 +9418,7 @@ function renderRecharges() {
           <colgroup>
             <col class="recharge-col-select" data-column-type="select">${rowIndexColumn()}<col class="recharge-col-student" data-column-type="name"><col class="recharge-col-grade" data-column-type="short" data-max-width="120">
             <col class="recharge-col-money" data-column-type="money"><col class="recharge-col-money" data-column-type="money"><col class="recharge-col-date" data-column-type="date">
-            <col class="recharge-col-channel" data-column-type="long" data-min-width="128" data-max-width="260" data-grow="0.5" data-alignment="center"><col class="recharge-col-notes" data-column-type="long">
+            <col class="recharge-col-channel" data-column-type="short" data-max-width="260" data-wrap="true" data-alignment="center"><col class="recharge-col-notes" data-column-type="long">
           </colgroup>
           <thead>
             <tr><th class="select-col"><input class="recharge-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length ? "" : "disabled"} aria-label="全选当前充值记录"></th>${rowIndexHeader()}<th>学生姓名</th><th>年级</th><th>本月实际充值</th><th>本月赠送充值</th><th>充值日期</th><th>来源/渠道</th><th class="wide recharge-notes-head">备注</th></tr>
@@ -9536,16 +9551,15 @@ function studentQueryControls(studentNames) {
   `;
 }
 
+function studentQuerySectionHeader(title, report, month = false) {
+  return `<div class="section-head"><div><div class="section-title">${escapeHtml(title)}</div><div class="section-subtitle" ${month ? 'data-student-query-range-label' : ''}>${escapeHtml(studentStatementRangeLabel(report))}</div></div></div>`;
+}
+
 function studentQueryComparisonPanel(report) {
   const hasReport = Boolean(selectedStudent && report?.summary);
   return `
     <div class="band student-comparison-panel" data-student-query-comparison-panel ${hasReport ? "" : "hidden"}>
-      <div class="section-head">
-        <div>
-          <div class="section-title">月份汇总</div>
-          <div class="section-subtitle" data-student-query-range-label>${escapeHtml(studentStatementRangeLabel(report))}</div>
-        </div>
-      </div>
+      ${studentQuerySectionHeader("月份汇总", report, true)}
       <div class="table-wrap smooth-table-wrap">
         <table class="student-history-table uniform-table nowrap-table">
           <thead><tr>${studentQueryMonthColumns(report).map(column => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead>
@@ -10035,10 +10049,10 @@ function studentQueryResultsMarkup(report = studentStatementReport()) {
       ${studentQueryComparisonPanel(report)}
     </div>
     <div class="student-query-detail-slot">
-      <div class="band"><div class="section-title">明细课时表</div>
+      <div class="band">${studentQuerySectionHeader("明细课时表", report)}
         <div class="table-wrap smooth-table-wrap">
-          <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table">
-            <colgroup>${rowIndexColumn()}${Array(11).fill("<col>").join("")}</colgroup>
+          <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table" data-adaptive-table="true">
+            <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date"><col data-column-type="status"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="note"><col data-column-type="money"></colgroup>
             <thead>
               <tr>${rowIndexHeader()}<th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
             </thead>
@@ -10540,7 +10554,7 @@ function managedExcelBrowserVisibleItems() {
   const query = String(browser.query || "").trim().toLowerCase();
   const items = (browser.items || []).filter((item) => !query
     || [item.filename, item.relative_path, item.backup_record?.created_by_label]
-      .some((value) => String(value || "").toLowerCase().includes(query)));
+      .some((value) => matchesSearchQuery(value, query)));
   const sizeSort = String(browser.sort || "").startsWith("size_");
   const direction = String(browser.sort || "").endsWith("_asc") ? 1 : -1;
   return items.sort((left, right) => direction * (sizeSort
@@ -10756,7 +10770,7 @@ function userAccountRowMarkup(user, teacherValues = userTeacherValues(), index =
       ${renderRowIndex(index)}<td><input class="cell-input user-field" data-field="username" value="${escapeHtml(user.username)}"></td>
       <td><input class="cell-input user-field" data-field="display_name" value="${escapeHtml(user.display_name || "")}"></td>
       <td class="user-role-cell lesson-edit-cell" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"><span class="lesson-inline-picker">${escapeHtml((auth.roles?.[user.role] || ROLE_LABELS[user.role] || user.role))}</span></td>
-      <td>${multiSelectControl({ className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
+      <td class="user-teachers-cell">${multiSelectControl({ inline: true, className: "user-row-teachers", field: "teacher_names", selected: teacherNames, values: teacherValues, placeholder: "未绑定", clearLabel: "清空", dataAttr: "field", includeSelected: false, searchable: true })}</td>
       <td><select class="cell-select user-field inline-status-select user-inline-status" data-field="status" data-original-value="${escapeHtml(user.status || "active")}">
         <option value="active" ${user.status !== "disabled" ? "selected" : ""}>启用</option>
         <option value="disabled" ${user.status === "disabled" ? "selected" : ""}>停用</option>
@@ -10783,7 +10797,7 @@ function userAccountsTableMarkup(users = [], teacherValues = userTeacherValues()
             <col class="user-col-username" data-column-type="account">
             <col class="user-col-display-name" data-column-type="name">
             <col class="user-col-role" data-column-type="status">
-            <col class="user-col-teachers" data-column-type="permissions">
+            <col class="user-col-teachers" data-column-type="note">
             <col class="user-col-status" data-column-type="status">
             <col class="user-col-password" data-column-type="action" data-min-width="210">
             <col class="user-col-delete" data-column-type="action">
@@ -11574,10 +11588,10 @@ function pricingAuditModalMarkup() {
 function studentPricingMatchesFilter(row) {
   const filter = studentPricingFilter;
   const studentNeedle = filter.student.trim().toLowerCase();
-  if (studentNeedle && !row._student_key.includes(studentNeedle)) return false;
+  if (studentNeedle && !matchesSearchQuery(row.student_name, studentNeedle)) return false;
   if (filter.grade && !row._grade_key.includes(filter.grade.toLocaleLowerCase("zh-CN"))) return false;
   if (filter.subject && !row._subject_key.includes(filter.subject.toLocaleLowerCase("zh-CN"))) return false;
-  if (filter.student_names && !row._student_names_key.includes(filter.student_names.toLocaleLowerCase("zh-CN"))) return false;
+  if (filter.student_names && !matchesSearchQuery(row.student_names, filter.student_names)) return false;
   if (filter.price && filter.price !== (studentPricingVisibleStatus(row) === "已设置" ? "set" : "unset")) return false;
   const currentLessons = numberValue(row.current_month_lessons);
   const totalLessons = numberValue(row.total_lessons);
@@ -11667,18 +11681,10 @@ function renderStudentPricing() {
   const initialRows = visibleRows.slice(0, STUDENT_PRICING_INITIAL_ROW_COUNT);
   renderTopbar("学生单价规则", `已筛选 ${visibleRows.length} / 共 ${rows.length} 条规则`, historyToggleAction());
   contentEl.innerHTML = `
-    ${unsetRows.length ? `
-      <div class="finance-notice-list">
-        <div class="finance-notice">
-          <strong>发现 ${unsetRows.length} 条未设置单价规则</strong>
-          <span>单价为 0 的规则只作为候选保留，不参与费用规则匹配；填写有效金额后才会用于自动判断。</span>
-        </div>
-      </div>
-    ` : ""}
     <div class="band student-pricing-page">
       ${renderStudentPricingFilterBar(rows, visibleRows)}
       <div class="transaction-action-row pricing-batch-actions" role="toolbar" aria-label="学生单价批量操作">
-        <span class="batch-selection-summary">已选择 <b>${selectedStudentPricingIds.size}</b> 条</span>
+        <span class="pricing-unset-summary">${unsetRows.length} 条未设置</span><span class="batch-selection-summary">已选择 <b>${selectedStudentPricingIds.size}</b> 条</span>
         <button class="btn clear-student-pricing-selection" type="button" ${selectedStudentPricingIds.size ? "" : "disabled"}>清空选择</button>
         <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
       </div>
@@ -11764,11 +11770,11 @@ function profileRows(kind = profileTab) {
   const gradeRows = gradeFilter ? statusRows.filter((row) => textContains(row.grade || "", gradeFilter)) : statusRows;
   const nameQuery = String(profileNameFilter[kind] || "").trim().toLowerCase();
   const nameRows = nameQuery
-    ? gradeRows.filter((row) => String(row.name || "").toLowerCase().includes(nameQuery))
+    ? gradeRows.filter((row) => matchesSearchQuery(row.name, nameQuery))
     : gradeRows;
   const keyword = String(profileKeywordFilter[kind] || "").trim().toLowerCase();
   const filtered = keyword
-    ? nameRows.filter((row) => [row.phone, row.status, row.joined_at, row.left_at, row.notes].some((value) => String(value || "").toLowerCase().includes(keyword)))
+    ? nameRows.filter((row) => [row.phone, row.status, row.joined_at, row.left_at, row.notes].some((value) => matchesSearchQuery(value, keyword)))
     : nameRows;
   if (kind !== "students") return filtered;
   return sortStudentProfiles(filtered);
@@ -11821,29 +11827,16 @@ async function refreshStudentGradeStageConflicts({ renderStatus = true, generati
 
 function studentStageConflictBannerMarkup(forcedStatus = "") {
   const status = forcedStatus || studentGradeStageConflictCheck.status || "idle";
-  const studentCount = new Set((studentGradeStageConflicts || []).map((item) => Number(item.student_id) || item.student_name)).size;
-  if (status === "loading" || status === "idle") return `<section class="student-stage-conflict-banner student-stage-conflict-check loading" data-status="loading" role="status" aria-live="polite">
-    <div><span class="student-stage-conflict-icon" aria-hidden="true">…</span><div><strong>阶段冲突：正在检查……</strong></div></div>
-    <button class="btn student-stage-conflict-refresh" type="button" disabled>重新检查</button>
-  </section>`;
-  if (status === "error") return `<section class="student-stage-conflict-banner student-stage-conflict-check error" data-status="error" role="status" aria-live="polite">
-    <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>阶段冲突检查失败：${escapeHtml(studentGradeStageConflictCheck.errorKind || "无法获取检查结果")}</strong></div></div>
-    <button class="btn danger student-stage-conflict-refresh" type="button">重试</button>
-  </section>`;
-  if (!studentCount) return `<section class="student-stage-conflict-banner student-stage-conflict-check success" data-status="success" role="status" aria-live="polite">
-    <div><span class="student-stage-conflict-icon" aria-hidden="true">✓</span><div><strong>阶段冲突：未发现冲突</strong></div></div>
-    <button class="btn student-stage-conflict-refresh" type="button">重新检查</button>
-  </section>`;
-  return `<section class="student-stage-conflict-banner student-stage-conflict-check warning" data-status="warning" role="status" aria-live="polite">
-    <div><span class="student-stage-conflict-icon" aria-hidden="true">!</span><div><strong>发现 ${studentCount} 名学生存在年级阶段时间冲突</strong><span class="student-stage-conflict-chip">阶段冲突 ${studentGradeStageConflicts.length}</span></div></div>
-    <div class="student-stage-conflict-actions"><button class="btn danger student-stage-conflict-view" type="button">查看冲突</button><button class="btn student-stage-conflict-refresh" type="button">重新检查</button></div>
-  </section>`;
+  const count = new Set((studentGradeStageConflicts || []).map(item => Number(item.student_id) || item.student_name)).size;
+  const busy = ["loading", "idle"].includes(status);
+  const label = busy ? "阶段冲突：正在检查……" : status === "error" ? `阶段冲突检查失败：${studentGradeStageConflictCheck.errorKind || "请重试"}` : `阶段冲突 ${count}`;
+  return `<button class="btn student-stage-conflict-check ${count && !busy && status !== 'error' ? 'student-stage-conflict-view' : 'student-stage-conflict-refresh'} ${busy ? 'loading' : status === 'error' ? 'error' : count ? 'warning' : 'success'}" data-status="${busy ? 'loading' : status === 'error' ? 'error' : count ? 'warning' : 'success'}" type="button" ${busy ? 'disabled' : ''} title="${status === 'error' ? '重试阶段冲突检查' : count ? '查看阶段冲突' : '重新检查阶段冲突'}" aria-live="polite">${escapeHtml(label)}</button>`;
 }
 
 function studentStageConflictModalMarkup() {
   if (!studentGradeStageConflictModalOpen) return "";
   return `<div class="modal-backdrop student-stage-conflict-modal"><div class="modal-panel student-stage-conflict-panel" role="dialog" aria-modal="true" aria-labelledby="student-stage-conflict-title">
-    <div class="modal-head"><div><div class="modal-title" id="student-stage-conflict-title">年级阶段时间冲突</div><div class="modal-subtitle">共 ${studentGradeStageConflicts.length} 组冲突；日期端点相同也视为重叠。</div></div><button class="btn student-stage-conflict-close" type="button">关闭</button></div>
+    <div class="modal-head"><div><div class="modal-title" id="student-stage-conflict-title">年级阶段时间冲突</div><div class="modal-subtitle">共 ${studentGradeStageConflicts.length} 组冲突；日期端点相同也视为重叠。</div></div><button class="btn student-stage-conflict-refresh" type="button">重新检查</button><button class="btn student-stage-conflict-close" type="button">关闭</button></div>
     <div class="student-stage-conflict-list">${studentGradeStageConflicts.map((conflict) => `<article class="student-stage-conflict-record">
       <div class="student-stage-conflict-record-head"><strong>${escapeHtml(conflict.student_name || "未命名学生")}</strong><span>${escapeHtml(conflict.current_grade || "未设置")}</span></div>
       <p>${escapeHtml(studentStageConflictSummary(conflict))}</p>
@@ -12156,7 +12149,7 @@ function renderProfileDirectory(kind = profileTab) {
   renderTopbar(isTeacher ? "老师档案" : "学生档案", `${rows.length} 条`, historyToggleAction());
   const teacherTable = `
     <table class="profile-table teacher-profile-table uniform-table nowrap-table" data-adaptive-table="true">
-      <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="long" data-max-width="480"></colgroup>
+      <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="phone"><col data-column-type="status"><col data-column-type="date"><col data-column-type="date"><col data-column-type="note"></colgroup>
       <thead><tr><th class="select-col"><input class="teacher-profile-select-all" type="checkbox" ${allVisibleTeachersSelected ? "checked" : ""} ${rows.length ? "" : "disabled"} aria-label="全选当前老师档案"></th>${rowIndexHeader()}<th>姓名</th><th>电话</th><th>状态</th><th>入职日期</th><th>离职日期</th><th class="wide profile-notes-col">备注</th></tr></thead>
       <tbody>
         ${rows.map((row, index) => `
@@ -12194,7 +12187,6 @@ function renderProfileDirectory(kind = profileTab) {
     </table>
   `;
   contentEl.innerHTML = `
-    ${isTeacher ? "" : studentStageConflictBannerMarkup()}
     <div class="band profile-panel">
       <div class="filter-bar compact unified-filter-bar profile-filter-bar">
         <div class="filter-controls">
@@ -12211,6 +12203,7 @@ function renderProfileDirectory(kind = profileTab) {
         ${isTeacher ? `<button class="btn danger batch-delete-teacher-profiles" type="button" ${bulkActionDisabledAttr(selectedTeacherProfileIds.size)}>${bulkActionText("批量删除", selectedTeacherProfileIds.size)}</button>` : ""}
         <button class="btn backfill-profile-joined-at" type="button" data-kind="${kind}">${isTeacher ? "补齐入职日期" : "补齐入学日期"}</button>
         <button class="btn primary new-profile" type="button" data-kind="${kind}">+ 新增${isTeacher ? "老师" : "学生"}</button>
+        ${isTeacher ? "" : studentStageConflictBannerMarkup()}
       </div>
       <div class="table-wrap">
         ${isTeacher ? teacherTable : studentTable}
@@ -12229,7 +12222,7 @@ function filteredStaffRows() {
     if (staffStatusFilter && !textContains(row.status, staffStatusFilter)) return false;
     if (!query) return true;
     return [row.name, row.role, row.phone, row.status, row.notes]
-      .some((value) => String(value || "").toLowerCase().includes(query));
+      .some((value) => matchesSearchQuery(value, query));
   });
 }
 
@@ -12509,7 +12502,7 @@ function payrollRows() {
   const rows = (state.staff_salary || []).filter((row) => !(row.left_at && row.left_at < monthKey));
   if (!query) return rows;
   return rows.filter((row) => [row.name, row.role, row.notes]
-    .some((value) => String(value || "").toLowerCase().includes(query)));
+    .some((value) => matchesSearchQuery(value, query)));
 }
 
 function renderStaffPayroll() {
@@ -13020,7 +13013,7 @@ function renderTeacherSalaryRules() {
           <button class="btn clear-teacher-salary-rule-selection" type="button" ${selectedTeacherSalaryRuleIds.size ? "" : "disabled"}>清空选择</button>
           <button class="btn primary open-teacher-salary-rule-batch-modal" type="button" ${selectedTeacherSalaryRuleIds.size && canWriteData() ? "" : "disabled"}>批量设置薪资</button>
           <button class="btn reset-teacher-salary-rule-filter" type="button">清筛</button>
-          <button class="btn primary open-teacher-salary-rule-modal" type="button">+ 新增薪资规则</button>
+
         </div>
       </div>
       <div class="teacher-salary-rule-actions" role="toolbar" aria-label="薪资规则操作">
@@ -13028,7 +13021,7 @@ function renderTeacherSalaryRules() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="teacher-salary-rule-table uniform-table nowrap-table compact-rows" data-adaptive-table="true" data-adaptive-flex-column="8">
-          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status" data-min-width="120" data-max-width="180"><col data-column-type="long"></colgroup>
+          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students"><col data-column-type="money"><col data-column-type="status" data-min-width="120" data-max-width="180"><col data-column-type="note" data-grow="0.5"></colgroup>
           <thead><tr><th class="select-col"><input class="teacher-salary-rule-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRules.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见薪资规则"></th>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th class="wide">学生集合</th><th>每2小时薪资</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
           <tbody>
             ${visibleRules.map((rule, index) => `
@@ -13185,7 +13178,7 @@ function renderTeacherDetail() {
       ` : ""}
       <div class="table-wrap">
         <table class="course-table teacher-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true">
-          <colgroup>${showSalary ? '<col data-column-type="select">' : ""}${rowIndexColumn()}<col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="short" data-min-width="128" data-max-width="128"><col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="students" data-wrap="false" data-max-width="100000"><col data-column-type="long" data-wrap="false" data-max-width="480">${showSalary ? '<col data-column-type="money"><col data-column-type="money">' : ""}</colgroup>
+          <colgroup>${showSalary ? '<col data-column-type="select">' : ""}${rowIndexColumn()}<col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col data-column-type="short" data-min-width="128" data-max-width="128"><col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="full"><col data-column-type="full">${showSalary ? '<col data-column-type="money"><col data-column-type="money">' : ""}</colgroup>
           <thead><tr>${showSalary ? `<th class="select-col"><input class="teacher-salary-select-all" type="checkbox" ${allSelected ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可见课程"></th>` : ""}${rowIndexHeader()}<th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide teacher-detail-students-head">学生</th><th class="wide teacher-detail-notes-head">备注</th>${showSalary ? "<th>教师薪资</th><th>规则薪资</th>" : ""}</tr></thead>
           <tbody>
             ${visibleRows.map((row, index) => {
@@ -13198,7 +13191,7 @@ function renderTeacherDetail() {
               const salaryTitle = showSalary ? teacherSalarySourceTitle(row) : "";
               const displayedTeacherSalary = displayTeacherSalaryForLesson(row);
               return `
-                <tr class="${isAbnormal(row) ? "abnormal" : ""}">
+                <tr class="${isAbnormal(row) && rowStatus(row) !== "待上" ? "abnormal" : ""}">
                   ${showSalary ? `<td class="teacher-salary-select-cell select-col"><input class="teacher-salary-lesson-select" data-id="${row.id}" type="checkbox" ${selected ? "checked" : ""} ${canUpdateSalary ? "" : "disabled"} title="${escapeHtml(calculated ? "选择后可按规则覆盖当前薪资" : `选择后将返回处理原因：${disabledReason}`)}"></td>` : ""}
                   ${renderRowIndex(index)}<td class="text-cell">${escapeHtml(row.teacher_name)}</td><td class="text-cell">${escapeHtml(row.date)}</td><td class="text-cell">${escapeHtml(weekdayCn(row.date))}</td><td class="text-cell">${escapeHtml(row.time_slot)}</td><td class="text-cell">${escapeHtml(row.classroom)}</td><td class="text-cell">${statusBadge(rowStatus(row))}</td><td class="text-cell">${renderEntityBadge("grade", row.grade)}</td><td class="text-cell">${renderEntityBadge("subject", row.subject)}</td><td class="text-cell teacher-detail-students student-set-cell"><span class="student-set-badges">${splitStudents(row.student_names).map((name) => renderEntityBadge("student", name, { fallbackGrade: row.grade })).join("")}</span></td><td class="text-cell teacher-detail-notes" title="${escapeHtml(row.notes || "")}">${escapeHtml(row.notes)}</td>
                   ${showSalary ? `
@@ -14893,18 +14886,41 @@ function bindUserAccountRowEvents(row) {
     });
   });
   row.querySelectorAll(".multi-select-value.user-row-teachers").forEach((input) => {
-    input.addEventListener("change", () => {
-      const currentRow = input.closest(".user-row");
-      if (!currentRow) return;
-      const teacherNames = normalizeNameList(input.value || "");
-      refreshAfter(() => request(`/api/users/${currentRow.dataset.id}`, {
-        method: "PATCH",
-        body: { teacher_names: teacherNames },
-      }), async (result) => {
-        patchUserState(result);
-        if (Number(result.id) === Number(auth.user?.id)) await load();
-        else rerenderContent(renderUserAdmin);
-      });
+    const picker = input.closest('.multi-select');
+    const toggle = picker.querySelector('.multi-select-toggle');
+    const cell = picker.closest('.user-teachers-cell');
+    cell.addEventListener('click', event => {
+      if (event.target === cell && !toggle.disabled) toggle.click();
+    });
+    let pendingNames = null;
+    input.addEventListener("change", async () => {
+      pendingNames = normalizeNameList(input.value || '');
+      if (input.dataset.saving === '1') return;
+      input.dataset.saving = '1';
+      toggle.setAttribute('aria-busy', 'true');
+      try {
+        while (pendingNames !== null) {
+          const teacherNames = pendingNames;
+          pendingNames = null;
+          try {
+            const result = await request(`/api/users/${row.dataset.id}`, { method: 'PATCH', body: { teacher_names: teacherNames } });
+            patchUserState(result);
+            if (Number(result.id) === Number(auth.user?.id)) await load();
+          } catch (error) {
+            pendingNames = null;
+            showToast(error.message, 'error');
+            return;
+          }
+        }
+        showToast('绑定老师已保存');
+      } finally {
+        const user = (state.users || []).find(item => String(item.id) === row.dataset.id);
+        input.value = normalizeNameList(user?.bound_teacher_names || user?.teacher_names || user?.teacher_name).join('\n');
+        picker._multiSelectSync?.();
+        input.dataset.saving = '0';
+        toggle.removeAttribute('aria-busy');
+        scheduleAdaptiveTableColumns();
+      }
     });
   });
   row.querySelectorAll(".user-reset-password").forEach((button) => {
@@ -15799,13 +15815,14 @@ function wireEvents() {
       combo.classList.add("open");
       toggleButton?.setAttribute("aria-expanded", "true");
     };
+    SearchTools.prime([...(menu?.querySelectorAll(".filter-combo-option") || [])].map(option => customSelectFilterText(`${option.textContent || ""} ${option.dataset.value || ""}`)));
     const optionsList = () => [...(menu?.querySelectorAll(".filter-combo-option") || [])].filter((option) => !option.hidden);
     const filterOptions = () => {
       const query = customSelectFilterText(input?.value || "");
       let visibleCount = 0;
       menu?.querySelectorAll(".filter-combo-option").forEach((option) => {
         const haystack = customSelectFilterText(`${option.textContent || ""} ${option.dataset.value || ""}`);
-        const matched = !query || haystack.includes(query);
+        const matched = !query || matchesSearchQuery(haystack, query);
         option.hidden = !matched;
         if (matched) visibleCount += 1;
       });
@@ -18191,6 +18208,13 @@ function wireEvents() {
       const hadStudentSelection = normalizeNameList(lessonFilter.student_names || []).length > 0;
       focusedLessonIds = [];
       resetLessonFilter();
+      if (view === "weekMatrix") {
+        matrixRange = currentMatrixRange(state.settings.month_key || activeMonth);
+        localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
+        saveMatrixRange();
+        await refreshWeekMatrixView({ reloadRange: true });
+        return;
+      }
       await refreshLessonsView({ reloadRange: hadStudentSelection || !lessonRangeLoaded() });
     });
   });
@@ -18607,6 +18631,13 @@ function wireEvents() {
       event.preventDefault();
       openScheduleInlinePicker(trigger);
     });
+    contentEl.addEventListener("input", event => {
+      const input = event.target.closest('.lesson-note-input');
+      if (!input) return;
+      const table = input.closest('.lesson-table');
+      const width = Math.max(parseFloat(table.style.getPropertyValue('--lesson-note-column-width')) || 96, measureLessonNoteWidth([{ notes: input.value }]));
+      table.style.setProperty('--lesson-note-column-width', `${width}px`);
+    });
     contentEl.addEventListener("change", (event) => {
       const input = event.target.closest(".lesson-field");
       if (!input) return;
@@ -18986,15 +19017,6 @@ function wireEvents() {
         return;
       }
       render();
-    });
-  });
-
-  document.querySelectorAll(".matrix-range-reset").forEach((button) => {
-    button.addEventListener("click", async () => {
-      matrixRange = currentMatrixRange(state.settings.month_key || activeMonth);
-      localStorage.setItem(MATRIX_RANGE_USER_SET_KEY, "1");
-      saveMatrixRange();
-      await load();
     });
   });
 
