@@ -1,3 +1,4 @@
+const { formatAuditChange, LESSON_FIELDS } = require("./domain/audit_change");
 const { CleanupPreviewJobs } = require("./backup/cleanup_jobs");
 const { rechargeMonth, normalizeHistoricalRecharge, migrateRechargeDates } = require("./domain/recharge_date");
 const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseTypes } = require("./domain/course_type");
@@ -45,7 +46,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260926-ui-performance-recharge-backup-fixes";
+const APP_VERSION = process.env.APP_VERSION || "20260927-pinyin-log-layout-permission-fixes";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -8434,7 +8435,7 @@ function operationLogChanges(details = {}) {
 
 function operationLogDetailSummary(row = {}, details = {}) {
   const parts = [];
-  const changes = operationLogChanges(details);
+  const changes = details.semantic_version === 1 ? "" : operationLogChanges(details);
   if (changes) parts.push(changes);
   const filename = details.filename || details.source_file;
   if (filename) parts.push(`文件 ${path.basename(text(filename))}`);
@@ -8615,7 +8616,7 @@ function lessonOperationText(row = {}) {
     .join(" ");
 }
 
-const LESSON_OPERATION_FIELDS = ["date", "teacher_name", "time_slot", "classroom", "status", "grade", "subject", "student_names", "notes"];
+const LESSON_OPERATION_FIELDS = Object.keys(LESSON_FIELDS);
 
 function lessonOperationDetails(before = {}, after = {}, extra = {}) {
   const changed_fields = LESSON_OPERATION_FIELDS.filter((field) => text(before?.[field]) !== text(after?.[field]));
@@ -8624,14 +8625,12 @@ function lessonOperationDetails(before = {}, after = {}, extra = {}) {
 }
 
 function lessonOperationChangeText(before = {}, after = {}) {
-  const changes = LESSON_OPERATION_FIELDS
-    .filter((field) => text(before?.[field]) !== text(after?.[field]))
-    .map((field) => `${OPERATION_LOG_FIELD_LABELS[field] || field}由 ${text(before?.[field]) || "空"} 改为 ${text(after?.[field]) || "空"}`);
+  const changes = formatAuditChange(before, after);
   const context = [after.date, after.time_slot, after.teacher_name ? `老师 ${after.teacher_name}` : ""]
     .map(text)
     .filter(Boolean)
     .join("，");
-  return changes.length ? `${context}${context ? "，" : ""}${changes.join("；")}` : lessonOperationText(after);
+  return changes.length ? `${context}${context ? "，" : ""}${changes}` : lessonOperationText(after);
 }
 
 function userOperationText(row = {}) {
@@ -14068,7 +14067,7 @@ async function handleApi(req, res, url) {
       operation_content: `课程#${lessonMatch[1]}：${lessonOperationChangeText(current, updated)}`,
       target_type: "lessons",
       target_id: String(lessonMatch[1]),
-      details: lessonOperationDetails(current, updated, { allow_conflicts: body.allow_conflicts === true, conflict_count: conflictReport.issue_count || 0 }),
+      details: lessonOperationDetails(current, updated, { semantic_version: 1, allow_conflicts: body.allow_conflicts === true, conflict_count: conflictReport.issue_count || 0 }),
     }, req);
     return sendJson(res, { ...updated, warnings: lessonWarnings(updated), schedule_conflicts: conflictReport });
   }
@@ -14642,6 +14641,11 @@ async function handleApi(req, res, url) {
 }
 
 function serveStatic(req, res, url) {
+  if (url.pathname === "/vendor/pinyin-pro.js") {
+    const body = fs.readFileSync(require.resolve("pinyin-pro"));
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "content-length": body.length, "cache-control": "public, max-age=86400" });
+    return res.end(body);
+  }
   let filePath = url.pathname === "/" ? path.join(publicDir, "index.html") : path.join(publicDir, decodeURIComponent(url.pathname));
   if (!filePath.startsWith(publicDir)) {
     res.writeHead(403);

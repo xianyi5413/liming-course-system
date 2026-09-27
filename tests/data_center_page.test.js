@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20260926-ui-performance-recharge-backup-fixes",
-      "/app.js?v=20260926-ui-performance-recharge-backup-fixes",
+      "/styles.css?v=20260927-pinyin-log-layout-permission-fixes",
+      "/app.js?v=20260927-pinyin-log-layout-permission-fixes",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -279,8 +279,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
     await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.dataset.status === 'loading'");
     assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.disabled"), true);
     await browser.waitFor("Boolean(document.querySelector('.student-profile-table'))");
-    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
-    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.textContent.trim()"), "重新检查");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 0')");
+    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.title"), "重新检查阶段冲突");
     const firstCheckCount = browser.responses.filter((item) => /\/api\/student-grade-stages\/conflicts(?:\?.*)?$/.test(item.url)).length;
     browser.stageConflictDelayOnce = 150;
     await browser.click(".student-stage-conflict-refresh");
@@ -316,7 +316,7 @@ test("student profiles keep loading, empty and conflict states visible and refre
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
     await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
-    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('发现 2 名学生')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 2')");
     await browser.click(".student-stage-conflict-view");
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-record').length"), 2);
     assert.deepEqual(browser.exceptions, []);
@@ -335,9 +335,9 @@ test("student profile conflict failures are safe and retry recovers", async () =
     let text = await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent");
     assert.doesNotMatch(text, /SQL|stack|token|undefined|Error|Session|Cookie/);
     assert.match(browser.consoleErrors.shift() || "", /500/);
-    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.textContent.trim()"), "重试");
+    assert.equal(await browser.evaluate("document.querySelector('.student-stage-conflict-refresh')?.title"), "重试阶段冲突检查");
     await browser.click(".student-stage-conflict-refresh");
-    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 0')");
 
     browser.stageConflictResult = { status: 403, body: { error: "permission details must stay private" } };
     await browser.click(".student-stage-conflict-refresh");
@@ -346,7 +346,7 @@ test("student profile conflict failures are safe and retry recovers", async () =
     assert.doesNotMatch(text, /permission details|undefined|Error/);
     assert.match(browser.consoleErrors.shift() || "", /403/);
     await browser.click(".student-stage-conflict-refresh");
-    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 0')");
     assert.deepEqual(browser.exceptions, []);
     assert.deepEqual(browser.consoleErrors, []);
   });
@@ -371,11 +371,11 @@ test("student conflict totals ignore filters and historical students are reveale
     await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
     await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
-    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('发现 2 名学生')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 2')");
 
     await browser.evaluate(`(() => { const input=document.querySelector('input.profile-status-filter'); input.value='在读'; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new Event('change',{bubbles:true})); })()`);
     await browser.waitFor("!document.querySelector('.student-profile-main-row[data-id=\"8711\"]')");
-    assert.match(await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent"), /发现 2 名学生/);
+    assert.match(await browser.evaluate("document.querySelector('.student-stage-conflict-check')?.textContent"), /阶段冲突 2/);
     await browser.click(".student-stage-conflict-view");
     await browser.click('.student-stage-conflict-edit[data-student-id="8711"]');
     await browser.waitFor("Boolean(document.querySelector('.student-grade-stage-modal')) && Boolean(document.querySelector('.student-profile-main-row[data-id=\"8711\"]'))");
@@ -437,7 +437,7 @@ test("student profiles show stage conflicts, locate the editor, repair them and 
     await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
     await browser.click('.nav-sub-btn[data-view="studentProfiles"]');
-    await browser.waitFor("document.querySelector('.student-stage-conflict-banner')?.textContent.includes('发现 1 名学生')");
+    await browser.waitFor("document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 1')");
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-marker').length"), 1);
     await browser.click(".student-stage-conflict-view");
     await browser.waitFor("document.querySelector('.student-stage-conflict-modal')?.textContent.includes('初三') && document.querySelector('.student-stage-conflict-modal')?.textContent.includes('2026-08-01')");
@@ -448,7 +448,7 @@ test("student profiles show stage conflicts, locate the editor, repair them and 
     await browser.waitFor("document.querySelector('.student-grade-stage-modal')?.textContent.includes('浏览器阶段冲突学生姓名较长用于窄屏验收')");
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-card-conflict').length"), 2);
     await browser.evaluate(`(() => { const input=document.querySelector('.student-grade-stage-field[data-stage="高一"][data-field="start_date"]'); input.value='2026-09-01'; input.dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('.student-grade-stage-save').click(); })()`);
-    await browser.waitFor("!document.querySelector('.student-grade-stage-modal') && document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突：未发现冲突')");
+    await browser.waitFor("!document.querySelector('.student-grade-stage-modal') && document.querySelector('.student-stage-conflict-check')?.textContent.includes('阶段冲突 0')");
     await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
     await browser.waitFor("window.innerWidth === 390");
     assert.equal(await browser.evaluate("document.body.scrollWidth <= window.innerWidth && document.querySelector('#app').scrollWidth <= window.innerWidth"), true);

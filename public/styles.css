@@ -4423,7 +4423,7 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 
 .recharge-analysis-breakdowns {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
 }
 
@@ -8325,10 +8325,10 @@ table th,
 }
 
 .course-table.lesson-table .col-note {
-  width: 170px;
-  min-width: 120px;
-  max-width: 220px;
-  text-align: left !important;
+  width: var(--lesson-note-column-width, 96px);
+  min-width: var(--lesson-note-column-width, 96px);
+  max-width: none;
+  text-align: left;
 }
 
 .course-table.lesson-table .col-index {
@@ -8404,10 +8404,10 @@ table th,
 }
 
 .course-table.lesson-table :is(th, td).col-note {
-  width: 170px !important;
-  min-width: 120px !important;
-  max-width: 220px !important;
-  text-align: left !important;
+  width: var(--lesson-note-column-width, 96px);
+  min-width: var(--lesson-note-column-width, 96px);
+  max-width: none;
+  text-align: left;
 }
 
 .course-table.lesson-table :is(th, td).col-index {
@@ -14363,8 +14363,8 @@ table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { 
 .matrix-unified-filter .filter-bar { padding: 0; margin: 0; border: 0; box-shadow: none; background: transparent; }
 .matrix-unified-filter .matrix-date-region { margin-bottom: 10px; }
 .notice-task-title, .notice-task-description { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; -webkit-line-clamp: unset; }
-.lesson-table .col-note { max-width: 360px; white-space: nowrap !important; }
-.lesson-table .col-note .lesson-cell-text { display: block; max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+
 .lesson-table .lesson-note-input { height: 32px !important; min-height: 32px; max-height: 32px; resize: none; white-space: pre; overflow: hidden; }
 .recharge-analysis-list { display: flex; flex-wrap: wrap; gap: 10px; }
 .recharge-analysis-chip { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; width: 164px; min-height: 96px; gap: 5px; box-sizing: border-box; }
@@ -14375,7 +14375,7 @@ table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { 
 :is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value)::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .teacher-detail-table.compact-rows tbody td, .teacher-detail-table.compact-rows .teacher-detail-notes { white-space: nowrap !important; }
 .teacher-detail-table.compact-rows .student-set-badges { flex-wrap: nowrap; width: max-content; }
-.teacher-detail-table .teacher-detail-notes { max-width: 480px; overflow: hidden !important; text-overflow: ellipsis; }
+
 .inline-value-button { background: transparent; border: 0; padding: 0; font: inherit; color: inherit; }
 .inline-value-button:hover, .user-role-cell:hover { background: var(--hover-bg, rgba(80,110,160,.08)); }
 .user-role-cell { white-space: nowrap; cursor: pointer; }
@@ -14397,7 +14397,35 @@ table.uniform-table.teacher-detail-table.compact-rows .student-set-badges { flex
 .data-backup-subcard .baidu-settings-group { grid-template-columns: repeat(auto-fit,minmax(min(180px,100%),1fr)); }
 .data-backup-subcard > *, .data-backup-subcard .filter-field { min-width: 0; }
 
-.course-table.lesson-table td.col-note .lesson-cell-text { white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; max-width: 100%; }
+.course-table.lesson-table td.col-note .lesson-cell-text { white-space: nowrap !important; overflow: visible; text-overflow: clip; overflow-wrap: normal; max-width: none; }
 .course-table.lesson-table td.col-note .lesson-note-input { height: 32px; min-height: 32px; max-height: 32px; white-space: nowrap; overflow-wrap: normal; overflow: hidden; }
 
 .notice-simple-tile { height: auto; min-height: 188px; overflow: visible; }
+
+/* Complete business values use either wrapping or an uncapped measured column. */
+table.adaptive-table :is(th,td).adaptive-full { max-width: none; white-space: nowrap; overflow: visible; text-overflow: clip; }
+table.adaptive-table:is(.recharge-table,.student-query-detail-table,.teacher-profile-table,.teacher-salary-rule-table,.user-table) td.adaptive-wrap { overflow: visible; text-overflow: clip; }
+.inline-value-picker, .inline-value-picker .multi-select-toggle { width: 100%; min-width: 0; max-width: 100%; }
+.inline-value-picker .multi-select-toggle { border: 0; background: transparent; box-shadow: none; padding: 4px; height: auto; text-align: left; }
+.inline-value-picker .multi-select-label { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+.inline-value-picker :is(.multi-select-caret,.multi-select-clear-icon) { display: none; }
+.inline-value-picker .multi-select-toggle:hover, .user-role-cell:hover { background: var(--surface-hover); }
+.user-role-cell, .user-teachers-cell { position: relative; }
+.notice-filter-bar .notice-filter-primary-row, .notice-filter-bar .notice-primary-controls { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.notice-filter-bar .notice-primary-controls > * { flex: 0 0 auto; max-width: 100%; }
+.notice-filter-bar .notice-primary-controls > .filter-field { max-width: 100%; width: auto; flex-wrap: wrap; }
+.notice-filter-bar .notice-tail-row { width: 100%; max-width: 100%; grid-template-columns: max-content minmax(0,1fr); }
+.notice-filter-bar .filter-summary { flex: 0 0 auto; }
+.query-head.student-statement-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
+.query-head.student-statement-metrics .metric { width: auto; min-width: 0; max-width: none; padding: 10px; }
+.query-head.student-statement-metrics .metric-label { white-space: normal; overflow: visible; }
+.query-head.student-statement-metrics .metric-value { font-size: 1.1rem; white-space: normal; overflow-wrap: anywhere; overflow: visible; }
+@media(min-width:1400px) { .query-head.student-statement-metrics { grid-template-columns: repeat(8,minmax(0,1fr)); } }
+@media(max-width:700px) { .query-head.student-statement-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media(max-width:500px) { .notice-filter-bar .notice-tail-row { grid-template-columns: minmax(0,1fr); } }
+.pricing-unset-summary { color: var(--warning, #a66b12); font-size: var(--text-caption); white-space: nowrap; }
+button.student-stage-conflict-check { display: inline-flex; flex: 0 1 auto; width: auto; min-height: 36px; padding: 6px 10px; margin: 0; }
+button.student-stage-conflict-check.success { color: var(--success, #247d4f); }
+button.student-stage-conflict-check:is(.warning,.error) { color: var(--danger); }
+.appearance-settings { width: fit-content; max-width: min(900px,100%); box-sizing: border-box; }
+@media(max-width:700px) { .appearance-settings { width: 100%; } }

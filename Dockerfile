@@ -6,8 +6,8 @@ ENV NODE_ENV=production
 ENV PORT=5177
 ENV DATA_DIR=/app/data
 
-COPY package.json ./
-RUN npm install --omit=dev --ignore-scripts
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY public ./public
 COPY src ./src
