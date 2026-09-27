@@ -19,6 +19,9 @@ function initDatabase(dbPath) { fs.mkdirSync(path.dirname(dbPath), { recursive: 
 function emptyManagedData(dbPath) { const db = new DatabaseSync(dbPath); db.exec("PRAGMA foreign_keys=OFF"); for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) db.exec(`DELETE FROM ${definition.source_table}`); db.exec("PRAGMA foreign_keys=ON"); db.close(); }
 function seedCompleteData(db) {
   db.exec(`
+    INSERT INTO salary_tables(id,name,effective_start,effective_end) VALUES(51,'合成秋季薪资表','2026-09-01','2026-12-31');
+    INSERT INTO salary_table_rules(id,salary_table_id,grade,course_type,formula) VALUES(52,51,'高一','小班课','60+30*(n-1)+40*K');
+    INSERT INTO teacher_monthly_performance(teacher_name,month_key,coefficient) VALUES('恢复教师','2026-09-01',0.85);
     INSERT INTO settings(key,value) VALUES ('custom_course_statuses','["调课"]') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     INSERT INTO settings(key,value) VALUES ('baidu_access_token','must-not-export');
     INSERT INTO teachers(id,name,phone,notes,status,joined_at,left_at) VALUES (101,'恢复教师','13900000000','教师备注','在职','2025-01-01','');
@@ -48,6 +51,7 @@ function seedCompleteData(db) {
     INSERT INTO role_filter_presets(id,role_code,view_key,filter_key,filter_value_json,created_at,updated_at) VALUES (2201,'academic','lessons','status','"调课"','2026-04-01','2026-04-01');
     INSERT INTO backup_records(id,backup_type,included_months,filename,file_path,file_size,status,message) VALUES (2301,'manual',1,'legacy.zip','/sensitive/server/path/legacy.zip',123,'success','不应导出');
   `);
+  db.prepare("UPDATE lessons SET teacher_base_salary_override=220.5,teacher_base_salary_source='manual' WHERE id=701").run();
   longJson = JSON.stringify({ before: "😀".repeat(17000), nested: { safe: true } }); longContent = `修改说明：${"长文本😀".repeat(6500)}`;
   db.prepare("INSERT INTO operation_logs(id,campus_name,operator_name,operator_account,operation_type,operation_content,target_type,target_id,result_status,client_ip,user_agent,created_at,extra_json) VALUES (1901,'黎明教育','Qing','boss','测试操作',?,'lesson','701','success','127.0.0.1','test-agent','2026-04-10',?)").run(longContent, longJson);
   db.prepare("INSERT INTO audit_events(id,actor_user_id,actor_username,actor_role,action,entity_type,entity_id,before_json,after_json,ip,user_agent,created_at) VALUES (1601,1,'boss','owner','update','lesson','701','{}',?,'127.0.0.1','test-agent','2026-04-10')").run("x".repeat(32767));
@@ -70,7 +74,40 @@ after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-full-ex
 test("legacy corruption sample reproduces sheet33 audit G2 at 32767 UTF-16 units", () => { const parsed = parseWorkbook(legacyUnsafeWorkbook()); assert.equal(parsed.sheets[32].name, "审计事件"); assert.equal(parsed.sheets[32].rows[1][6].length, 32767); });
 test("structural validator rejects the legacy 32767-cell workbook", () => assert.throws(() => validateWorkbookStructure(legacyUnsafeWorkbook()), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
 test("writer rejects any unchunked cell above the 30000 limit", () => assert.throws(() => createWorkbook([{ name: "超长", rows: [["值"], ["x".repeat(30001)]] }]), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
-test("full export uses v4", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 4); });
+test("full export uses v5", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 5); });
+test("v5 retains salary tables, formulas, monthly K and explicit special base source", () => {
+  assert.equal(verified.data.salary_tables[0].name, '合成秋季薪资表');
+  assert.equal(verified.data.salary_table_rules[0].formula, '60+30*(n-1)+40*K');
+  assert.equal(verified.data.teacher_monthly_performance[0].coefficient, 0.85);
+  assert.equal(verified.data.lessons[0].teacher_base_salary_source, 'manual');
+  assert.equal(verified.data.lessons[0].teacher_base_salary_override, 220.5);
+});
+test("legacy v4 full workbook restores without silently inventing new salary data", () => {
+  const clean = structuredClone(verified.data);
+  delete clean.salary_tables; delete clean.salary_table_rules; delete clean.teacher_monthly_performance;
+  for (const row of clean.lessons) { delete row.teacher_base_salary_source; delete row.teacher_base_salary_override; }
+  const original = parseWorkbook(buildFullDataBufferFromSourceData(clean).buffer);
+  const sheets = original.sheets.map(sheet => ({ name: sheet.name, state: sheet.state, rows: sheet.rows.map(row => [...row]) }));
+  const info = sheets.find(sheet => sheet.name === '导出说明');
+  info.rows.find(row => row[0] === '格式版本')[1] = 4;
+  const metadata = sheets.find(sheet => sheet.name === '__恢复元数据');
+  metadata.rows.find(row => row[1] === 'format_version')[2] = 4;
+  // Sheet rows are arrays/primitives, whose canonical encoding is JSON.
+  metadata.rows.find(row => row[0] === '工作表' && row[1] === '导出说明')[3] = crypto.createHash('sha256').update(JSON.stringify(info.rows)).digest('hex');
+  const buffer = createWorkbook(sheets), result = verifyFullData(buffer);
+  assert.equal(result.version, 4); assert.deepEqual(result.data.salary_tables, []);
+  const legacyPath = path.join(tempRoot, 'legacy-v4.xlsx'), restoredPath = path.join(tempRoot, 'legacy-target.sqlite');
+  fs.writeFileSync(legacyPath, buffer); initDatabase(restoredPath);
+  const db = new DatabaseSync(restoredPath);
+  db.exec('DROP TABLE salary_table_rules; DROP TABLE salary_tables; DROP TABLE teacher_monthly_performance; ALTER TABLE lessons DROP COLUMN teacher_base_salary_override; ALTER TABLE lessons DROP COLUMN teacher_base_salary_source;');
+  db.close();
+  assert.equal(restoreFullData({ dbPath: restoredPath, inputPath: legacyPath }).ok, true);
+  const restored = new DatabaseSync(restoredPath);
+  try {
+    assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM salary_tables').get().n, 0);
+    assert.equal(restored.prepare('SELECT teacher_salary FROM lessons WHERE id=701').get().teacher_salary, 220.5);
+  } finally { restored.close(); }
+});
 test("visible workbook has exactly 22 business sheets", () => assert.deepEqual(verified.workbook.sheets.filter((sheet) => sheet.state === "visible").map((sheet) => sheet.name), VISIBLE_SHEET_NAMES));
 test("visible sheet order is the approved order", () => assert.deepEqual(VISIBLE_SHEET_NAMES, ["导出说明", "所有课程数据", "所有学生费用明细", "所有充值记录", "期初余额", "所有学生单价", "所有班级管理", "学生档案", "所有教师车费明细", "所有教师课时明细", "所有教师薪资规则", "教师档案", "员工", "所有员工薪资", "所有员工考勤", "所有日常开销", "系统设置", "基础数据", "费用标准", "操作日志", "角色管理", "账号管理"]));
 test("full workbook has the exact visible and hidden sequence", () => assert.deepEqual(verified.workbook.sheets.map((sheet) => sheet.name), expectedSheetNames()));
@@ -83,7 +120,7 @@ test("amount cells use the two-decimal style without styling the whole column", 
 test("actual fee and salary columns keep page values without recalculable duplicates", () => {
   const data = structuredClone(verified.data); const original = data.lessons.find((row) => row.id === 701);
   data.lessons.push({ ...original, id: 702, date: "2026-04-09", student_names: "恢复学生、合成甲、合成乙", course_status: "未上", status: "待上", teacher_salary: 99, teacher_salary_rule_id: null, sort_order: 8 });
-  data.lessons.push({ ...original, id: 703, date: "2026-04-10", student_names: "恢复学生、合成甲、合成乙", teacher_salary: 0, teacher_salary_rule_id: null, sort_order: 9 });
+  data.lessons.push({ ...original, id: 703, teacher_base_salary_override: null, teacher_base_salary_source: "", date: "2026-04-10", student_names: "恢复学生、合成甲、合成乙", teacher_salary: 0, teacher_salary_rule_id: null, sort_order: 9 });
   const workbook = verifyFullData(buildFullDataBufferFromSourceData(data, { createdAt: new Date("2026-07-20T07:00:00Z") }).buffer).workbook;
   const feeRows = workbook.sheetMap.get("所有学生费用明细").rows.slice(1); const salaryRows = workbook.sheetMap.get("所有教师课时明细").rows.slice(1);
   const pendingFees = feeRows.filter((row) => row[2] === "2026-04-09"); assert.equal(pendingFees.length, 3); assert.equal(pendingFees.every((row) => row[10] === 0 && row.length === 11), true);
@@ -111,7 +148,7 @@ test("operation logs can be excluded while preserving the v4 sheet contract and 
   const output = path.join(tempRoot, "without logs", "全量数据_不含操作日志.xlsx");
   exportFullData({ dbPath: sourcePath, outputPath: output, includeOperationLogs: false });
   const result = verifyFullData(output); const info = new Map(result.workbook.sheetMap.get("导出说明").rows.slice(1).map((row) => [row[0], row[1]]));
-  assert.equal(result.version, 4); assert.equal(result.operation_logs_included, false); assert.equal(result.workbook.sheetMap.get("操作日志").rows.length, 1); assert.match(info.get("是否包含操作日志"), /^否/);
+  assert.equal(result.version, 5); assert.equal(result.operation_logs_included, false); assert.equal(result.workbook.sheetMap.get("操作日志").rows.length, 1); assert.match(info.get("是否包含操作日志"), /^否/);
   const metadata = new Map(result.workbook.sheetMap.get("__恢复元数据").rows.filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]])); assert.equal(metadata.get("operation_logs_included"), "false");
 });
 test("long operation content and JSON are chunked and fully reassembled", () => { const row = verified.data.operation_logs.find((item) => item.id === 1901); assert.equal(row.operation_content, longContent); assert.equal(row.extra_json, longJson); assert.ok(verified.workbook.sheetMap.get("__长文本分片").rows.length > 3); });
@@ -146,7 +183,7 @@ test("restored database passes foreign_key_check", () => { const db = new Databa
 test("backup_records is not restored", () => { const db = new DatabaseSync(targetPath, { readOnly: true }); assert.equal(db.prepare("SELECT COUNT(*) AS count FROM backup_records").get().count, 0); db.close(); });
 test("excluded diagnostic audit events are not restored", () => { const db = new DatabaseSync(targetPath, { readOnly: true }); assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events").get().count, 0); db.close(); });
 test("CLI export verify and restore work with spaces and Unicode paths", () => { const output = path.join(tempRoot, "CLI 空格", "全量.xlsx"); const target = path.join(tempRoot, "CLI 目标", "target.sqlite"); initDatabase(target); emptyManagedData(target); const run = (script, args) => spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", script), ...args], { cwd: root, encoding: "utf8" }); assert.equal(run("export_full_excel.js", ["--db", sourcePath, "--output", output]).status, 0); assert.equal(run("verify_full_excel.js", ["--input", output]).status, 0); assert.equal(run("restore_full_excel.js", ["--db", target, "--input", output, "--confirm", "OVERWRITE"]).status, 0); });
-test("synthetic v4 acceptance fixture uses the global opening-balance schema", () => { const output = path.join(tempRoot, "acceptance fixture", "黎明教育_全量数据_合成验收_v4.xlsx"); const result = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/create_acceptance_fixture.js"), "--output", output], { cwd: root, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); const fixture = verifyFullData(output); assert.equal(fixture.version, 4); assert.equal(fixture.data.student_opening_balances.length, 1); assert.equal(Object.prototype.hasOwnProperty.call(fixture.data.student_opening_balances[0], "month_key"), false); });
+test("synthetic v4 acceptance fixture uses the global opening-balance schema", () => { const output = path.join(tempRoot, "acceptance fixture", "黎明教育_全量数据_合成验收_v4.xlsx"); const result = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/create_acceptance_fixture.js"), "--output", output], { cwd: root, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); const fixture = verifyFullData(output); assert.equal(fixture.version, 5); assert.equal(fixture.data.student_opening_balances.length, 1); assert.equal(Object.prototype.hasOwnProperty.call(fixture.data.student_opening_balances[0], "month_key"), false); });
 test("full-data filename is Windows-safe", () => assert.doesNotMatch(path.basename(backupPath), /[<>:"/\\|?*]/));
 test("restored account can log in with its original password", async () => {
   const port = await freePort(); let stderr = "";

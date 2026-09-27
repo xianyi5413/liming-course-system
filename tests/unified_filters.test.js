@@ -61,9 +61,15 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view) {
+  if (view === "teacherSalaryRules") {
+    await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");
+    await browser.waitFor("Boolean(document.querySelector('[data-salary-action=legacy]'))");
+    await browser.click('[data-salary-action=legacy]');
+  } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) await browser.click(`.nav-btn[data-nav-group="${group}"]`);
   await browser.waitFor(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`);
   await browser.click(`.nav-sub-btn[data-view="${view}"]`);
+  }
   await browser.waitFor(`document.querySelectorAll('.unified-filter-field .lesson-filter-select').length > 0`);
   const stableRows = { recharges: ".recharge-row", openingBalances: ".opening-balance-row", studentPricing: ".student-pricing-rule-row", classGroups: ".class-group-row", studentProfiles: ".profile-row[data-kind=\"students\"]", teacherSalaryRules: ".teacher-salary-rule-row", teacherProfiles: ".profile-row[data-kind=\"teachers\"]" };
   if (stableRows[view]) await browser.waitFor(`document.querySelectorAll(${JSON.stringify(stableRows[view])}).length > 0`);

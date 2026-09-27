@@ -94,7 +94,10 @@ test('long business values, compact regions and shared notice toolbars fit four 
    if(page==='studentPricing') {assert.equal(await browser.evaluate("document.querySelectorAll('.finance-notice-list').length"),0);assert.ok(await browser.evaluate("!!document.querySelector('.pricing-batch-actions .pricing-unset-summary')"));}
    if(page==='studentProfiles') {assert.equal(await browser.evaluate("document.querySelectorAll('.student-stage-conflict-banner').length"),0);assert.ok(await browser.evaluate("document.querySelector('.new-profile').nextElementSibling.matches('.student-stage-conflict-check')"));}
    if(page==='teacherDetail') {
-    assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table tbody tr')].some(e=>e.textContent.includes('待上')&&!e.classList.contains('abnormal'))"));
+    await browser.click('[data-salary-class]');
+    await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");
+    assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-class-lessons tbody tr')].some(e=>e.textContent.includes('待上')&&!e.classList.contains('abnormal'))"));
+    await browser.click('[data-salary-action=close]');
     assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table td.adaptive-full')].every(e=>getComputedStyle(e).textOverflow!=='ellipsis'&&e.scrollWidth<=e.clientWidth+1)"));
     assert.equal(await browser.evaluate("teacherSalaryRuleCellMarkup({rule_match_status:'matched',rule_salary:0})"),'¥0.00');assert.equal(await browser.evaluate("teacherSalaryRuleCellMarkup({rule_match_status:'not_matched',rule_salary:null})"),'无规则');
    }

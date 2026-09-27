@@ -8,7 +8,7 @@ const navGroups = [
     views: [["summary", "费用汇总"], ["feeDetails", "费用明细"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
     moreViews: [["studentPricing", "学生单价"], ["classGroups", "班级管理"], ["studentProfiles", "学生档案"]],
   },
-  { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherSalaryRules", "薪资规则"], ["teacherProfiles", "教师档案"]] },
+  { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherProfiles", "教师档案"]] },
   { key: "operations", label: "运营", views: [["staffPayroll", "员工薪资"], ["staffAttendance", "员工考勤"], ["expenses", "日常开销"]] },
   { key: "finance", label: "经营概览", views: [["finance", "期间概览"]] },
   { key: "settings", label: "设置", views: [["appearance", "外观设置"], ["baseData", "基础数据"], ["pricing", "费用标准"], ["audit", "数据中心"], ["operationLogs", "操作日志"], ["userAdmin", "账号权限"]] },
@@ -35,11 +35,11 @@ const navGroups = [
  * | teacher_salary  | ✓ |   | ✓ | teacherSalary                            |
  */
 const FIELD_TIERS = {
-  course_type:    { tiers: ["A"],       dirtyKeys: [] },
+  course_type:    { tiers: ["A", "C"],  dirtyKeys: ["teacherSalary", "finance"] },
   notes:          { tiers: ["A"],       dirtyKeys: [] },
   teacher_name:   { tiers: ["B", "C"],  dirtyKeys: ["teacherSalary"] },
   date:           { tiers: ["B", "C"],  dirtyKeys: ["finance", "summary"] },
-  time_slot:      { tiers: ["B"],       dirtyKeys: [] },
+  time_slot:      { tiers: ["B", "C"],  dirtyKeys: ["teacherSalary", "finance"] },
   classroom:      { tiers: ["B"],       dirtyKeys: [] },
   student_names:  { tiers: ["B", "C"],  dirtyKeys: ["finance", "studentSummary"] },
   status:         { tiers: ["B", "C"],  dirtyKeys: ["finance", "teacherSalary", "studentSummary"] },
@@ -622,6 +622,7 @@ function invalidateRequestCache(prefixes = []) {
 
 function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
+  if (/^\/api\/(salary-tables|teacher-monthly-performance|teacher-detail\/salary)/.test(base)) return ["/api/salary-tables", "/api/teacher-detail", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
@@ -680,7 +681,7 @@ async function request(path, options = {}) {
     if (method !== "GET") {
       clearStudentQueryCache();
       SearchTools.clear();
-      if (state && /^\/api\/(recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
+      if (state && /^\/api\/(salary-tables|teacher-monthly-performance|teacher-detail\/salary|recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
       invalidateRequestCache(cacheInvalidationPrefixes(path));
       if (String(path).startsWith("/api/student-pricing")
         || String(path).startsWith("/api/students")
@@ -898,6 +899,7 @@ function setActiveView(nextView) {
     backupState.fileBrowser = { ...backupState.fileBrowser, open: false, generation: backupState.fileBrowser.generation + 1 };
   }
   if (view === "teacherDetail" && previousView !== "teacherDetail") {
+    SalaryUI.resetView();
     selectedTeacherDetail = "";
     selectedTeacherSalaryLessonIds = new Set();
     teacherSalaryBatchResult = null;
@@ -943,7 +945,7 @@ function saveExpandedNavGroups() {
 function visibleNavGroups() {
   return navGroups.map((group) => ({
     ...group,
-    views: (group.views || []).filter(([key]) => canView(key)),
+    views: [...(group.views || []), ...(group.key === "teachers" && !canView("teacherDetail") && canView("teacherSalaryRules") ? [["teacherSalaryRules", "历史薪资规则"]] : [])].filter(([key]) => canView(key)),
     moreViews: (group.moreViews || []).filter(([key]) => canView(key)),
   })).filter((group) => group.views.length || group.moreViews.length);
 }
@@ -1780,7 +1782,7 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   const [teachersResult, studentsResult, teacherDetailTeachersResult, studentPricingResult] = await Promise.all([
     viewNeedsProfileTeachers() && view !== "teacherDetail" ? request("/api/teachers") : null,
     viewNeedsProfileStudents() && canArea("students") ? request("/api/students") : null,
-    view === "teacherDetail" ? request("/api/teacher-detail/teachers", { cache: false }) : null,
+    view === "teacherDetail" ? request(SalaryUI.candidatesUrl(), { cache: false }) : null,
     view === "studentPricing" && canView("studentPricing") ? loadStudentPricingPage() : null,
   ]);
   if (!stillCurrent()) return false;
@@ -1805,15 +1807,17 @@ async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false
   if (viewNeedsLessonRange()) {
     const lessonRange = lessonLoadRange();
     if (view === "teacherDetail" && !selectedTeacherDetail) {
+      SalaryUI.setData(null);
       state.lessons = [];
       state.lesson_loaded_range = lessonRange || null;
     } else if (lessonRange) {
       const lessonsResult = await request(
-        lessonsRangeUrl(lessonRange, lessonDataViewKey()),
+        view === "teacherDetail" ? `/api/teacher-detail/workflow?${new URLSearchParams({ ...lessonRange, teacher: selectedTeacherDetail })}` : lessonsRangeUrl(lessonRange, lessonDataViewKey()),
         view === "teacherDetail" ? { cache: false } : {},
       );
       if (!stillCurrent()) return false;
       state.lessons = lessonsResult.lessons || [];
+      if (view === "teacherDetail") SalaryUI.setData(lessonsResult);
       state.lesson_loaded_range = lessonRange;
     }
   }
@@ -2479,6 +2483,7 @@ async function clearDateRangePickerValue(wrapper) {
 }
 
 async function applyDateRangeToScope(scope, start, end) {
+  if (await SalaryUI.applyRange(scope, start, end)) return;
   if (scope === "lesson") {
     focusedLessonIds = [];
     lessonFilter = { ...lessonFilter, start_date: start, end_date: end, date_preset_initialized: true };
@@ -2743,12 +2748,12 @@ function optionalNumberValue(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function currencyInputMarkup(value, { className = "", attrs = "", inputValue = null } = {}) {
+function currencyInputMarkup(value, { className = "", attrs = "", inputValue = null, displayValue = null } = {}) {
   const n = numberValue(value);
   const classes = ["currency-input-wrap", n < 0 ? "negative" : ""].filter(Boolean).join(" ");
   return `
     <span class="${classes}">
-      <span class="currency-display">${formatMoney(n)}</span>
+      <span class="currency-display">${displayValue == null ? formatMoney(n) : escapeHtml(displayValue)}</span>
       <input class="cell-input number currency-input ${className}" ${isReadonlyUser() ? "disabled" : ""} type="number" value="${escapeHtml(inputValue ?? moneyInput(n))}" ${attrs}>
     </span>
   `;
@@ -2833,7 +2838,7 @@ function teacherSalaryRuleCalculation(lesson) {
 }
 
 function displayTeacherSalaryForLesson(lesson) {
-  return isCompletedLesson(lesson) ? numberValue(lesson.teacher_salary) : 0;
+  return isCompletedLesson(lesson) ? numberValue(Object.hasOwn(lesson, "teacher_base_salary") ? lesson.teacher_base_salary : lesson.teacher_salary) : 0;
 }
 
 function displayTeacherRuleSalaryForLesson(lesson) {
@@ -2842,6 +2847,11 @@ function displayTeacherRuleSalaryForLesson(lesson) {
 }
 
 function teacherSalarySourceLabel(lesson) {
+  if (Object.hasOwn(lesson, "teacher_base_salary_source")) {
+    if (lesson.teacher_base_salary_source === "auto") return "自动";
+    if (["manual", "legacy", "import"].includes(lesson.teacher_base_salary_source)) return "手动";
+    return "未设置";
+  }
   if (!isCompletedLesson(lesson)) return "自动";
   const calculated = teacherSalaryRuleCalculation(lesson);
   const ruleSalary = calculated ? calculated.salary : null;
@@ -4306,6 +4316,7 @@ function ensureLessonFilterDates({ defaultToThisWeek = view === "lessons" } = {}
 }
 
 function lessonLoadRange({ includeActiveMonth = view !== "lessons" } = {}) {
+  if (view === "teacherDetail") return SalaryUI.bounds();
   const bounds = monthBounds(state?.settings?.month_key || activeMonth);
   const prefilterRange = rolePrefilterDateRange(lessonDataViewKey());
   const start = isDateValue(lessonFilter.start_date)
@@ -5559,6 +5570,7 @@ function groupViews(group) {
 }
 
 function groupForView(viewKey) {
+  if (viewKey === "teacherSalaryRules") return navGroups.find(group => group.key === "teachers");
   return navGroups.find((group) => groupViews(group).some(([key]) => key === viewKey)) || navGroups[0];
 }
 
@@ -5632,6 +5644,7 @@ function passwordEyeIcon(visible) {
 }
 
 function renderLogin(error = "") {
+  SalaryUI.resetSession();
   dismissToast();
   closeSearchablePicker();
   cleanupCustomSelectPortals();
@@ -8744,8 +8757,8 @@ function financeQualityNotices(summary) {
   const salaryLessons = numberValue(quality.teacher_salary_lessons);
   if (salaryLessons > 0 && missingTeacherSalary > 0) {
     notices.push({
-      title: "教师课时费待录入",
-      body: `${missingTeacherSalary} / ${salaryLessons} 节有效课还没有课时费，当前毛利和 ROI 是暂估口径。`,
+      title: "教师薪资待完成核算",
+      body: `${missingTeacherSalary} / ${salaryLessons} 节有效课的薪资尚不完整，请检查规则、基础课薪及月度绩效系数；当前毛利和 ROI 为暂估。`,
     });
   }
   const debt = numberValue(summary.balance_sheet?.account_debt_receivable);
@@ -9903,28 +9916,24 @@ function teacherTransportDetailRows(summary = {}) {
   }));
 }
 
-function teacherDetailCanvas(teacherName = selectedTeacher) {
+function teacherDetailCanvas(teacherName = selectedTeacherDetail) {
   const colors = courseNoticeShotPalette();
   const rows = sortedLessons().filter((row) => row.teacher_name === teacherName);
   const completedRows = rows.filter(isCompletedLesson);
-  const summary = teacherSummaryRowFor(teacherName);
-  const classSalary = numberValue(summary.salary_total) || completedRows.reduce((sum, row) => sum + displayTeacherSalaryForLesson(row), 0);
-  const transportTotal = teacherTravelTotal(summary);
-  const salaryTotal = numberValue(summary.total_salary) || classSalary + transportTotal;
+  const classSalary = completedRows.reduce((sum, row) => sum + displayTeacherSalaryForLesson(row), 0);
+  const performanceBase = completedRows.reduce((sum, row) => sum + numberValue(row.performance_base), 0);
+  const range = SalaryUI.bounds();
   const width = 1240;
   const contentWidth = width - 96;
   const detailTableHeight = 42 + Math.max(1, rows.length) * 38;
-  const transportRows = teacherTransportDetailRows(summary);
-  const transportTableHeight = 40 + 38;
-  const height = 48 + 96 + 104 + detailTableHeight + 52 + transportTableHeight + 54;
+  const height = 48 + 96 + 104 + detailTableHeight + 54;
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
-  drawShotHeader(ctx, colors, `${monthLabel()} ${teacherName || "未选择教师"} 课时明细`, "", width);
+  drawShotHeader(ctx, colors, `${teacherName || "未选择教师"} 课时明细`, `${range.start} 至 ${range.end} · 基础课薪不含绩效`, width);
   drawShotMetricCards(ctx, colors, [
     { label: "有效课时", value: String(completedRows.length) },
     { label: "课程记录", value: String(rows.length) },
-    { label: "课时薪资", value: formatMoney(classSalary) },
-    { label: "车票/交通补贴", value: formatMoney(transportTotal) },
-    { label: "薪资统计", value: formatMoney(salaryTotal) },
+    { label: "基础课薪", value: formatMoney(classSalary) },
+    { label: "绩效基数", value: formatMoney(performanceBase) },
   ], 48, 142, contentWidth);
   let y = 246;
   drawShotTable(ctx, colors, [
@@ -9939,38 +9948,21 @@ function teacherDetailCanvas(teacherName = selectedTeacher) {
     { label: "学生", value: (row) => row.student_names, align: "left" },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "教师薪资", value: (row) => formatMoney(displayTeacherSalaryForLesson(row)), align: "right" },
-    { label: "规则薪资", value: (row) => { const amount = displayTeacherRuleSalaryForLesson(row); return amount == null ? "" : formatMoney(amount); }, align: "right" },
+    { label: "规则薪资", value: (row) => { if (row.salary_rule_expression) return row.salary_rule_expression; const amount = displayTeacherRuleSalaryForLesson(row); return amount == null ? "" : formatMoney(amount); }, align: "right" },
   ], rows, 48, y, [90, 95, 50, 85, 50, 55, 50, 55, 180, 235, 85, 85], { rowHeight: 38, headHeight: 42, emptyText: "暂无教师课程明细" });
-  y += detailTableHeight + 42;
-  drawShotSectionTitle(ctx, colors, "车票/交通补贴明细", 48, y, contentWidth);
-  y += 18;
-  drawShotTable(
-    ctx,
-    colors,
-    transportRows.map((item) => ({
-      label: item.item,
-      value: () => formatMoney(item.amount || 0),
-      align: "center",
-    })),
-    [{}],
-    48,
-    y,
-    transportRows.map(() => contentWidth / Math.max(transportRows.length, 1)),
-    { rowHeight: 38, headHeight: 40, emptyText: "暂无车票/交通补贴" },
-  );
   return canvas;
 }
 
 async function downloadTeacherDetailPng() {
-  if (!selectedTeacher) throw new Error("请先选择教师");
-  const canvas = teacherDetailCanvas(selectedTeacher);
-  await downloadCanvasPng(canvas, `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_课时明细.png`);
+  if (!selectedTeacherDetail) throw new Error("请先选择教师");
+  const canvas = teacherDetailCanvas(selectedTeacherDetail);
+  await downloadCanvasPng(canvas, `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacherDetail)}_课时明细.png`);
 }
 
 async function copyTeacherDetailPng() {
-  if (!selectedTeacher) throw new Error("请先选择教师");
-  const filename = `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacher)}_课时明细.png`;
-  const canvas = teacherDetailCanvas(selectedTeacher);
+  if (!selectedTeacherDetail) throw new Error("请先选择教师");
+  const filename = `黎明教育_${imageFilenamePart(monthLabel())}_${imageFilenamePart(selectedTeacherDetail)}_课时明细.png`;
+  const canvas = teacherDetailCanvas(selectedTeacherDetail);
   await copyOrDownloadCanvasPng(canvas, filename);
 }
 
@@ -12833,55 +12825,12 @@ function bindOperationLogEvents() {
 
 function renderTeacherSalary() {
   const rows = state.derived.teacher_summary;
-  const weeks = teacherTravelWeeks();
-  const disabled = canWriteData() ? "" : "disabled";
-  const total = rows.reduce((sum, row) => sum + numberValue(row.total_salary), 0);
-  const lessonTotal = rows.reduce((sum, row) => sum + numberValue(row.lesson_count), 0);
-  const classSalaryTotal = rows.reduce((sum, row) => sum + numberValue(row.salary_total), 0);
-  renderTopbar(
-    `${monthLabel()} 薪资汇总`,
-    `薪资合计 ${formatMoney(total)}`,
-    `<button class="btn export-teacher-salary" type="button">导出本月</button>`,
-  );
-  contentEl.innerHTML = `
-    <div class="band">
-      <div class="table-wrap">
-        <table class="teacher-salary-table uniform-table nowrap-table">
-          <colgroup>${rowIndexColumn()}${Array(weeks.length + 5).fill("<col>").join("")}</colgroup>
-          <thead>
-            <tr>${rowIndexHeader()}
-              <th>教师姓名</th>
-              <th>上课课时数</th>
-              <th>课时合计</th>
-              ${weeks.map((week) => `<th>${teacherTravelHeaderMarkup(week)}</th>`).join("")}
-              <th>薪资合计</th>
-              <th class="wide">备注</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map((row, index) => `
-              <tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}
-                <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
-                <td class="text-cell right">${row.lesson_count}</td>
-                <td class="text-cell right">${formatMoney(row.salary_total)}</td>
-                ${weeks.map((week) => `<td class="text-cell right">${formatMoney(teacherTravelAmount(row, week))}</td>`).join("")}
-                <td class="text-cell right">${formatMoney(row.total_salary)}</td>
-                <td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${disabled}></td>
-              </tr>
-            `).join("")}
-            <tr>
-              <td class="row-index"></td><td class="text-cell"><b>合计</b></td>
-              <td class="text-cell right"><b>${lessonTotal}</b></td>
-              <td class="text-cell right"><b>${formatMoney(classSalaryTotal)}</b></td>
-              ${weeks.map((week) => `<td class="text-cell right"><b>${formatMoney(rows.reduce((sum, row) => sum + teacherTravelAmount(row, week), 0))}</b></td>`).join("")}
-              <td class="text-cell right"><b>${formatMoney(total)}</b></td>
-              <td></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
+  const sum = field => rows.reduce((total, row) => total + numberValue(row[field]), 0);
+  const pending = rows.some(row => row.total_salary == null);
+  renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐规则或绩效系数" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
+  contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table"><colgroup>${rowIndexColumn()}${Array(8).fill("<col>").join("")}</colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>月度绩效</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
+    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="right">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="number" min="0" max="1" step="0.01" placeholder="未设置" value="${row.performance_coefficient == null ? "" : Number(row.performance_coefficient).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
+    <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
 
 function teacherTravelFeeRowsForPage() {
@@ -13124,10 +13073,12 @@ function teacherSalaryBatchResultMarkup(result) {
   `;
 }
 
-function renderTeacherDetail() {
+function renderTeacherDetail() { return SalaryUI.renderDetail(); }
+
+function renderLegacyTeacherDetail() {
   const teachers = (state.teacher_detail_teachers || []).map((row) => row.name);
   const monthKey = state?.settings?.month_key || activeMonth;
-  const monthRows = sortedLessons().filter((row) => (row.month_key || monthKeyFromDateValue(row.date)) === monthKey);
+  const monthRows = sortedLessons().filter((row) => !row.salary_table_id);
   const rows = selectedTeacherDetail ? monthRows.filter((row) => row.teacher_name === selectedTeacherDetail) : [];
   const filterOptions = dynamicTeacherDetailFilterOptions(rows);
   const visibleRows = rows.filter((row) => teacherDetailMatchesFilter(row));
@@ -13143,9 +13094,9 @@ function renderTeacherDetail() {
   const selectedCount = selectedTeacherSalaryLessonIds.size;
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedTeacherSalaryLessonIds.has(Number(row.id)));
   renderTopbar(
-    `${monthLabel()} 课时明细`,
+    "历史课时操作",
     selectedTeacherDetail ? (showSalary ? `${selectedTeacherDetail} · 在这里录入课时薪资` : selectedTeacherDetail) : "未选择教师",
-    `<button class="btn export-teacher-detail-image" type="button" ${selectedTeacherDetail ? "" : "disabled"}>复制图片</button>`,
+    `<button class="btn" data-salary-action="classes">返回班级汇总</button><button class="btn export-teacher-detail-image" type="button" ${selectedTeacherDetail ? "" : "disabled"}>复制图片</button>`,
   );
   contentEl.innerHTML = `
     <div class="query-head">
@@ -14690,6 +14641,7 @@ function renderLoadFailure(error) {
 }
 
 function render() {
+  if (view !== "teacherDetail") SalaryUI.close();
   if (auth.user && !ensureAccessibleView()) return;
   if (view !== "dashboard") disposeDashboardTrendChart();
   if (view !== "studentProfiles" && studentGradeStageModalDraft) {
@@ -15240,8 +15192,8 @@ async function applyAttendanceBulk({ weekday = "all", status = "上班", mode = 
   }
 }
 
-function bindDateRangePickerControls() {
-  document.querySelectorAll(".date-range-picker").forEach((picker) => {
+function bindDateRangePickerControls(root = document) {
+  root.querySelectorAll(".date-range-picker").forEach((picker) => {
     const trigger = picker.querySelector(".date-range-trigger");
     trigger?.addEventListener("click", (event) => {
       event.preventDefault();
@@ -17250,7 +17202,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v4.xlsx");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v5.xlsx");
       } catch (error) {
         showToast(error.message || "下载模板失败", "error");
       } finally {
@@ -18789,6 +18741,7 @@ function wireEvents() {
       teacherSalaryBatchResult = null;
       if (!selectedTeacherDetail) {
         state.lessons = [];
+        SalaryUI.setData(null);
         render();
         return;
       }

@@ -109,7 +109,7 @@ test('v4 hidden mapping retains types and dictionaries through restore and re-ex
   exportFullData({ dbPath, outputPath: first }); init(target);
   restoreFullData({ dbPath: target, inputPath: first }); exportFullData({ dbPath: target, outputPath: second });
   const a = verifyFullData(first); const b = verifyFullData(second);
-  assert.equal(a.version, 4); assert.equal(a.workbook.sheets.length, 26);
+  assert.equal(a.version, 5); assert.equal(a.workbook.sheets.length, 26);
   assert.ok(a.workbook.sheetMap.get('__关系映射').rows.some(row => row.includes('course_type')));
   for (const table of ['lessons','class_groups']) assert.deepEqual(b.data[table].map(row => [row.id,row.course_type]), a.data[table].map(row => [row.id,row.course_type]));
   assert.equal(b.data.settings.find(row => row.key === 'custom_course_types_senior').value, '["高中特训"]');

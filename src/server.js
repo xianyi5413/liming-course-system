@@ -1,3 +1,6 @@
+const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
+const SalaryWorkflow = require("./domain/salary_workflow");
+const { createSalaryStore } = require("./domain/salary_store");
 const { formatAuditChange, LESSON_FIELDS } = require("./domain/audit_change");
 const { CleanupPreviewJobs } = require("./backup/cleanup_jobs");
 const { rechargeMonth, normalizeHistoricalRecharge, migrateRechargeDates } = require("./domain/recharge_date");
@@ -46,7 +49,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260927-pinyin-log-layout-permission-fixes";
+const APP_VERSION = process.env.APP_VERSION || "20260928-salary-table-performance-workflow";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1059,6 +1062,7 @@ function initDb() {
   console.info(`[recharge dates migration] ${JSON.stringify(migrateRechargeDates(db))}`);
   lastTimeSlotMigrationReport = migrateHistoricalTimeSlots();
   console.info(`[course types migration] ${JSON.stringify(migrateCourseTypes(db))}`);
+  SalaryWorkflow.migrateSalaryWorkflow(db);
 }
 
 if (!readOnlyBalanceCli) initDb();
@@ -1159,6 +1163,12 @@ const REAL_RECHARGE_SQL = "(COALESCE(cur_recharge, 0) <> 0 OR COALESCE(cur_gift,
 const DERIVED_CACHE_LOG_THRESHOLD_MS = Number(process.env.DERIVED_CACHE_LOG_THRESHOLD_MS || 120);
 const DERIVED_CACHE_DEBUG = process.env.DERIVED_CACHE_DEBUG === "1";
 const DERIVED_CACHE_LOG_ENABLED = process.env.PERF_LOG === "1" || DERIVED_CACHE_DEBUG;
+const salaryStore = createSalaryStore(db, {
+  minutes: slot => { const hours = parseLessonHours(slot); return hours == null ? null : Math.round(hours * 60); },
+  legacyRule: resolveTeacherSalaryRuleForLesson,
+  eligible: isCompletedLesson,
+});
+
 const derivedCaches = {
   bootstrap: new Map(),
   feeDetails: new Map(),
@@ -1215,6 +1225,7 @@ function derivedCacheEntryCount() {
 }
 
 function clearDerivedCache(reason = "") {
+  salaryStore.invalidate();
   const count = derivedCacheEntryCount();
   for (const cache of Object.values(derivedCaches)) cache.clear();
   if (count && DERIVED_CACHE_DEBUG) {
@@ -1987,7 +1998,7 @@ function isCompletedLesson(row) {
 }
 
 function effectiveTeacherSalary(row) {
-  return isCompletedLesson(row) ? num(row.teacher_salary) : 0;
+  return isCompletedLesson(row) ? num(row.teacher_payroll_amount ?? row.teacher_salary) : 0;
 }
 
 function isUnpaid(row) {
@@ -2687,11 +2698,11 @@ function teacherProfiles() {
   `).map((row) => ({ ...row, first_lesson_date: firstTeacherLessonDate(row.name) }));
 }
 
-function teacherDetailTeacherCandidates(user) {
+function teacherDetailTeacherCandidates(user, includeInactive = false) {
   const activeRows = all(`
     SELECT id, name, phone, notes, status, joined_at, left_at
     FROM teachers
-    WHERE status = '在职' AND TRIM(name) <> ''
+    WHERE ${includeInactive ? "1=1" : "status = '在职'"} AND TRIM(name) <> ''
     ORDER BY name
   `);
   let allowedNames = null;
@@ -3133,7 +3144,8 @@ function deleteTeacherProfile(id) {
         disabled_account_count: disabledAccounts.count,
       };
     }
-    db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
+    db.prepare("DELETE FROM teacher_monthly_performance WHERE teacher_name = ?").run(row.name);
+  db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
     db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
     db.prepare("DELETE FROM teacher_travel_fees WHERE teacher_name = ?").run(row.name);
     db.prepare("DELETE FROM teachers WHERE id = ?").run(Number(id));
@@ -4295,6 +4307,7 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
 }
 
 function buildTeacherSummary(monthKey, includeInactive = false) {
+  const coefficients = new Map(all("SELECT teacher_name, coefficient FROM teacher_monthly_performance WHERE month_key=?", [monthKey]).map(row => [row.teacher_name, row.coefficient]));
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
   const weeks = teacherMonthWeeks(monthKey);
   const adjustments = new Map(all(
@@ -4329,7 +4342,10 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
     const row = byTeacher.get(name);
     if (isCompletedLesson(lesson)) {
       row.lesson_count += 1;
-      row.salary_total = moneyRound(row.salary_total + num(lesson.teacher_salary));
+      const calculated = salaryStore.resolve(lesson, false);
+      row.salary_total = moneyRound(row.salary_total + num(calculated.teacher_base_salary));
+      row.performance_base = moneyRound(num(row.performance_base) + calculated.performance_base);
+      row.missing_salary_rules = num(row.missing_salary_rules) + (calculated.salary_rule_missing ? 1 : 0);
     }
   }
   return [...byTeacher.values()].filter((row) => row.active_this_month).map((row) => {
@@ -4349,7 +4365,12 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
       travel_weeks: travelWeeks,
       transport_total: transportTotal,
       salary_total: moneyRound(row.salary_total),
-      total_salary: moneyRound(row.salary_total + transportTotal),
+      base_salary: moneyRound(row.salary_total),
+      performance_base: num(row.performance_base),
+      performance_coefficient: coefficients.get(row.teacher_name) ?? null,
+      performance_actual: num(row.performance_base) && !coefficients.has(row.teacher_name) ? null : SalaryWorkflow.Formula.total(0, Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? null) / 100,
+      salary_pending_reason: row.missing_salary_rules ? "待补齐规则" : num(row.performance_base) && !coefficients.has(row.teacher_name) ? "待设置系数" : "",
+      total_salary: row.missing_salary_rules || (num(row.performance_base) && !coefficients.has(row.teacher_name)) ? null : SalaryWorkflow.Formula.total(Math.round(row.salary_total * 100), Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? null, Math.round(transportTotal * 100)) / 100,
       notes: adj.notes || "",
     };
     for (const week of travelWeeks) {
@@ -5243,6 +5264,13 @@ function buildFinanceBase(range) {
     }
   }
 
+  const payrollLessons = all("SELECT * FROM lessons WHERE month_key BETWEEN ? AND ? ORDER BY date,teacher_name,time_slot,sort_order,id", [monthKeyFromDate(range.start), monthKeyFromDate(range.end)]);
+  const payrollCoefficients = new Map(all("SELECT * FROM teacher_monthly_performance WHERE month_key BETWEEN ? AND ?", [monthKeyFromDate(range.start), monthKeyFromDate(range.end)]).map(row => [JSON.stringify([row.teacher_name, row.month_key]), row.coefficient]));
+  const payroll = salaryStore.allocate(payrollLessons, payrollCoefficients, false);
+  for (const detail of details) {
+    const calculated = payroll.get(detail.lesson_id);
+    if (calculated) { detail.teacher_payroll_amount = calculated.teacher_payroll_amount; detail.teacher_payroll_pending = calculated.teacher_payroll_pending; }
+  }
   const effectiveDetails = details.filter((row) => row.effective);
   let revenue = 0;
   let giftConsumption = 0;
@@ -5276,7 +5304,7 @@ function buildFinanceBase(range) {
   }
   const teacherCost = moneyRound([...lessonSalary.values()].reduce((sum, value) => sum + value, 0));
   const lessonSalaryValues = [...lessonSalary.values()];
-  const teacherSalaryMissingLessons = lessonSalaryValues.filter((value) => num(value) <= 0).length;
+  const teacherSalaryMissingLessons = [...lessonSalary].filter(([id, value]) => num(value) <= 0 || payroll.get(id)?.teacher_payroll_pending).length;
   const transport = weightedTeacherTransport(range);
   const staffSalary = weightedStaffSalary(range);
   const expenses = operatingExpenseSummary(range);
@@ -6495,27 +6523,12 @@ function backupRecordForDownload(id) {
 
 function teacherSalaryRows(monthKey) {
   const rows = teacherSummary(monthKey);
-  const weeks = teacherMonthWeeks(monthKey);
-  const total = rows.reduce((sum, row) => sum + num(row.total_salary), 0);
+  const sum = field => moneyRound(rows.reduce((total, row) => total + num(row[field]), 0));
   return [
     [`${monthKey} 薪资汇总`],
-    ["教师姓名", "上课课时数", "课时合计", ...weeks.map((week) => week.label), "薪资合计", "备注"],
-    ...rows.map((row) => [
-      row.teacher_name,
-      row.lesson_count,
-      row.salary_total,
-      ...weeks.map((week) => row[teacherTravelField(week.week_index)]),
-      row.total_salary,
-      row.notes,
-    ]),
-    [
-      "合计",
-      rows.reduce((sum, row) => sum + num(row.lesson_count), 0),
-      rows.reduce((sum, row) => sum + num(row.salary_total), 0),
-      ...weeks.map((week) => rows.reduce((sum, row) => sum + num(row[teacherTravelField(week.week_index)]), 0)),
-      total,
-      "",
-    ],
+    ["序号", "教师姓名", "上课课时数", "基础课薪", "月度绩效", "绩效系数", "车票合计", "薪资合计", "备注"],
+    ...rows.map((row, index) => [index + 1, row.teacher_name, row.lesson_count, row.base_salary, row.performance_base, row.performance_coefficient == null ? "未设置" : row.performance_coefficient.toFixed(2), row.transport_total, row.total_salary == null ? row.salary_pending_reason : row.total_salary, row.notes]),
+    ["", "合计", sum("lesson_count"), sum("base_salary"), sum("performance_base"), "", sum("transport_total"), rows.some(row => row.total_salary == null) ? "待完成核算" : sum("total_salary"), ""],
   ];
 }
 
@@ -7659,7 +7672,7 @@ function teacherDetailLessonRuleData(lesson, rules = null) {
 
 function teacherDetailLessonRows(rows = []) {
   const rules = teacherSalaryRules();
-  return rows.map((lesson) => teacherDetailLessonRuleData(lesson, rules));
+  return rows.map((lesson) => ({ ...teacherDetailLessonRuleData(lesson, rules), ...salaryStore.resolve(lesson, rules) }));
 }
 
 function resolvedTeacherSalaryForLesson(data, options = {}) {
@@ -7777,6 +7790,10 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
         });
         continue;
       }
+      if (SalaryWorkflow.matchTable(salaryStore.context(), lesson.date)) {
+        results.push({ lesson_id: id, status: "skipped", old_salary: lesson.teacher_salary, new_salary: null, rule_id: null, reason: "已由薪资表管理，请在班级课程中恢复自动薪资" });
+        continue;
+      }
       const resolved = resolveTeacherSalaryRuleForLesson(lesson, rules);
       if (resolved.status !== "matched" || !resolved.payroll_eligible) {
         results.push({
@@ -7796,7 +7813,7 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
       }
       const calculated = resolved.calculation;
       const oldSalary = moneyRound(lesson.teacher_salary);
-      if (Math.abs(oldSalary - calculated.salary) < 0.005) {
+      if (Math.abs(oldSalary - calculated.salary) < 0.005 && lesson.teacher_base_salary_source !== "manual") {
         results.push({
           lesson_id: id,
           date: text(lesson.date),
@@ -7816,6 +7833,7 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
       db.prepare(`
         UPDATE lessons
         SET teacher_salary = ?, teacher_salary_source = 'auto',
+            teacher_base_salary_override = NULL, teacher_base_salary_source = 'auto',
             teacher_salary_rule_id = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(calculated.salary, calculated.rule_id, id);
@@ -8761,6 +8779,7 @@ function deleteTeacherProfileCore(id) {
       disabled_account_count: disabledAccounts.count,
     };
   }
+  db.prepare("DELETE FROM teacher_monthly_performance WHERE teacher_name = ?").run(row.name);
   db.prepare("DELETE FROM teacher_adjustments_monthly WHERE teacher_name = ?").run(row.name);
   db.prepare("DELETE FROM teacher_adjustments WHERE teacher_name = ?").run(row.name);
   db.prepare("DELETE FROM teacher_travel_fees WHERE teacher_name = ?").run(row.name);
@@ -9931,6 +9950,7 @@ function roleCan(user, area, action = "read") {
 
 function apiArea(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/salary-tables") || p === "/api/teacher-monthly-performance") return "teacherSalary";
   if (p.startsWith("/api/teacher-detail")) return p.includes("/salary/") ? "teacherSalary" : "profiles";
   if (p.startsWith("/api/data-center")) return "coreExport";
   if (p.startsWith("/api/roles")) return "roles";
@@ -9960,6 +9980,8 @@ function apiArea(req, url) {
 
 function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
+  if (p.startsWith("/api/salary-tables")) return ["teacherDetail"];
+  if (p === "/api/teacher-monthly-performance") return ["teacherSalary"];
   if (p === "/api/fee-details-page") return ["feeDetails"];
   if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
   if (p === "/api/teacher-salary-rules/apply-selected") return ["teacherDetail"];
@@ -10153,6 +10175,15 @@ function sanitizeLessonRows(rows, user) {
   return output.map((row) => ({
     ...row,
     teacher_salary: 0,
+    teacher_base_salary: null,
+    teacher_base_salary_override: null,
+    teacher_base_salary_source: "",
+    performance_base: null,
+    salary_table_id: null,
+    salary_rule_expression: "",
+    salary_rule_reason: "",
+    salary_rule_missing: null,
+    rule_base_salary: null,
     teacher_salary_source: "",
     teacher_salary_rule_id: null,
     teacher_salary_rule_status: "",
@@ -10194,6 +10225,12 @@ function sanitizeBootstrap(data, user) {
         ? (data.derived.teacher_summary || []).map((row) => ({
           ...row,
           salary_total: 0,
+          base_salary: 0,
+          performance_base: 0,
+          performance_coefficient: null,
+          performance_actual: null,
+          salary_pending_reason: "",
+          missing_salary_rules: 0,
           total_salary: num(row.transport_total),
         }))
         : canSeeTeacherSalary ? data.derived.teacher_summary : [],
@@ -11508,47 +11545,6 @@ function spawnSafeReadRaw(req) {
   return readRawBody(req, 10_000_000);
 }
 
-function timeTokenToMinutes(value) {
-  const raw = text(value).replace(/[：﹕]/g, ":");
-  const match = raw.match(/^(\d{1,2})(?::?(\d{2}))?$/);
-  if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2] || 0);
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return hour * 60 + minute;
-}
-
-function formatTimeMinutes(minutes) {
-  const value = Number(minutes);
-  if (!Number.isInteger(value) || value < 0 || value >= 24 * 60) return "";
-  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
-}
-
-// Course time is persisted only in this format. Keep parsing and overlap checks
-// on this same canonical representation so equivalent user input cannot diverge.
-function normalizeTimeSlot(value) {
-  const raw = text(value)
-    .replace(/[：﹕]/g, ":")
-    .replace(/[—–－~～至到]/g, "-")
-    .replace(/\s+/g, "");
-  if (!raw) return null;
-  if (!/^[^-]+-[^-]+$/.test(raw)) return null;
-  const parts = raw.split("-");
-  const start = timeTokenToMinutes(parts[0]);
-  const end = timeTokenToMinutes(parts[1]);
-  if (start == null || end == null || end <= start) return null;
-  return `${formatTimeMinutes(start)}-${formatTimeMinutes(end)}`;
-}
-
-function parseTimeRange(value) {
-  const normalized = normalizeTimeSlot(value);
-  if (!normalized) return null;
-  const [startToken, endToken] = normalized.split("-");
-  const start = timeTokenToMinutes(startToken);
-  const end = timeTokenToMinutes(endToken);
-  if (start == null || end == null || end <= start) return null;
-  return { start, end };
-}
 
 function timeSlotSortValue(value) {
   return parseTimeRange(value)?.start ?? Number.MAX_SAFE_INTEGER;
@@ -12994,8 +12990,74 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/teachers") {
     return sendJson(res, { teachers: teacherProfiles() });
   }
+  const salaryTableMatch = url.pathname.match(/^\/api\/salary-tables(?:\/(\d+)(?:\/(impact))?)?$/);
+  const baseSalaryMatch = url.pathname.match(/^\/api\/teacher-detail\/salary\/(\d+)$/);
+  const monthlyPerformance = url.pathname === "/api/teacher-monthly-performance";
+  if (salaryTableMatch || baseSalaryMatch || monthlyPerformance) {
+    // Institution-wide rules and payroll changes remain manager-only, in addition
+    // to the global page-permission and readonly checks above.
+    if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或有薪资权限的教务可管理薪资");
+    const canManageInstitutionTable = isSuperRole(user.role) || ["teacherDetail", "teacherSalary", "teacherSalaryRules"].every(key => Object.keys(rolePrefilterForView(user, key)).length === 0);
+    if (salaryTableMatch && req.method !== "GET" && !canManageInstitutionTable) return sendError(res, 403, "机构薪资表会影响所有教师，需要完整薪资管理范围");
+    try {
+      const id = Number(salaryTableMatch?.[1] || baseSalaryMatch?.[1] || 0);
+      if (salaryTableMatch && req.method === "GET") return sendJson(res, salaryTableMatch[2] ? salaryStore.impact(id) : id ? salaryStore.list().find(row => row.id === id) || {} : { tables: salaryStore.list(), can_manage: canManageInstitutionTable });
+      const body = await readBody(req);
+      let result, operation, target;
+      if (salaryTableMatch && !salaryTableMatch[2] && ((req.method === "POST" && !id) || (["PATCH", "PUT"].includes(req.method) && id))) {
+        result = salaryStore.save(body, id || null);
+        operation = `${id ? "修改" : "新增"}薪资表：${result.effective_start} 至 ${result.effective_end}`;
+        target = "salary_tables";
+      } else if (salaryTableMatch && id && req.method === "DELETE") {
+        result = salaryStore.remove(id, body);
+        operation = `删除薪资表：${result.effective_start} 至 ${result.effective_end}，影响 ${result.affected} 节课程，保留特殊薪资`;
+        target = "salary_tables";
+      } else if (monthlyPerformance && ["PUT", "PATCH"].includes(req.method)) {
+        const teacher = text(body.teacher_name), month = text(body.month_key);
+        if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可管理范围内");
+        result = salaryStore.coefficient(teacher, month, body.coefficient);
+        const kText = value => value == null ? "未设置" : Number(value).toFixed(2);
+        operation = `修改${teacher}${month.slice(0, 7)}绩效系数：${kText(result.before)} → ${kText(result.coefficient)}`;
+        target = "teacher_monthly_performance";
+      } else if (baseSalaryMatch && req.method === "PATCH") {
+        const lesson = get("SELECT * FROM lessons WHERE id=?", [id]);
+        if (!lesson) return sendError(res, 404, "课程不存在");
+        if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === lesson.teacher_name) || !filterLessonsByRolePrefilter([lesson], user, "teacherDetail").length) return sendError(res, 403, "课程不在可管理范围内");
+        result = salaryStore.override(id, body);
+        operation = result.source === "auto" ? `恢复课程 #${id} 自动基础课薪` : `将课程 #${id} 教师基础课薪调整为 ¥${result.amount.toFixed(2)}`;
+        target = "lessons";
+      } else return sendError(res, 405, "不支持的薪资操作");
+      clearDerivedCache("salary workflow mutation");
+      writeOperationLog(user, { operation_type: operation.split("：")[0], operation_content: operation, target_type: target, target_id: String(result.id || result.teacher_name || "") });
+      return sendJson(res, { ok: true, ...result, before: undefined });
+    } catch (error) { return sendError(res, 400, error.message); }
+  }
+  if (req.method === "GET" && url.pathname === "/api/teacher-detail/workflow") {
+    const start = text(url.searchParams.get("start")), end = text(url.searchParams.get("end")), teacher = text(url.searchParams.get("teacher"));
+    if (!SalaryWorkflow.validDate(start) || !SalaryWorkflow.validDate(end) || start > end) return sendError(res, 400, "请选择有效的日期范围");
+    if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可查看范围内");
+    const lessons = teacherDetailLessonRows(filterLessonsByRolePrefilter(all("SELECT * FROM lessons WHERE teacher_name=? AND date BETWEEN ? AND ? ORDER BY date,time_slot,id", [teacher, start, end]), user, "teacherDetail"));
+    const ctx = salaryStore.context();
+    const tables = ctx.tables.filter(table => table.effective_start <= end && table.effective_end >= start).map(({ id, name, effective_start, effective_end }) => ({ id, name, effective_start, effective_end }));
+    const groups = new Map();
+    for (const lesson of lessons) {
+      const key = SalaryWorkflow.classKey(lesson);
+      if (!groups.has(key)) groups.set(key, { key, teacher_name: lesson.teacher_name, grade: lesson.grade, subject: lesson.subject, course_type: lesson.course_type, student_names: normalizeStoredStudentSet(lesson.student_names), lesson_ids: [], rules: {} });
+      const group = groups.get(key);
+      group.lesson_ids.push(lesson.id);
+      const table = SalaryWorkflow.matchTable(ctx, lesson.date);
+      const column = table ? String(table.id) : "legacy";
+      if (!group.rules[column]) {
+        // Class columns quote the two-hour tariff; individual lessons show their
+        // own duration. No class/table cell is populated without actual lessons.
+        const rule = table ? SalaryWorkflow.tableRule(ctx, table, lesson, 120) : null;
+        group.rules[column] = rule ? (rule.matched ? rule.expression : "无规则") : "历史规则";
+      }
+    }
+    return sendJson(res, { tables, classes: [...groups.values()], lessons: sanitizeLessonRows(lessons, user) });
+  }
   if (req.method === "GET" && url.pathname === "/api/teacher-detail/teachers") {
-    return sendJson(res, { teachers: teacherDetailTeacherCandidates(user) });
+    return sendJson(res, { teachers: teacherDetailTeacherCandidates(user, url.searchParams.get("include_inactive") === "1") });
   }
   if (req.method === "POST" && url.pathname === "/api/teachers") {
     const result = createTeacherProfile(await readBody(req));
@@ -14026,12 +14088,22 @@ async function handleApi(req, res, url) {
     catch (error) { return sendError(res, 400, error.message); }
     delete payload.teacher_salary_source;
     delete payload.teacher_salary_rule_id;
+    delete payload.teacher_base_salary_override;
+    delete payload.teacher_base_salary_source;
     delete payload.allow_conflicts;
     if (Object.prototype.hasOwnProperty.call(incoming, "teacher_salary")) {
       const manualSalary = optionalNumber(incoming.teacher_salary);
       payload.teacher_salary = manualSalary;
       payload.teacher_salary_source = manualSalary === null ? "empty" : "manual";
       payload.teacher_salary_rule_id = null;
+      if (current.teacher_base_salary_source || SalaryWorkflow.matchTable(salaryStore.context(), payload.date || current.date)) {
+        if (!["owner", "academic"].includes(canonicalRole(user.role)) || !roleCan(user, "teacherSalary", "write")) return sendError(res, 403, "无权调整教师基础课薪");
+        try {
+          payload.teacher_base_salary_override = manualSalary == null ? null : SalaryWorkflow.Formula.cents(manualSalary) / 100;
+          if (payload.teacher_base_salary_override > 100000) return sendError(res, 400, "单节基础课薪不得超过 100000 元");
+        } catch (error) { return sendError(res, 400, error.message); }
+        payload.teacher_base_salary_source = manualSalary == null ? "auto" : "manual";
+      }
     } else {
       const salaryMatchFields = ["teacher_name", "grade", "subject", "student_names", "time_slot"];
       const matchFieldsChanged = salaryMatchFields.some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
@@ -14059,6 +14131,7 @@ async function handleApi(req, res, url) {
       "teacher_name", "date", "lesson_status", "time_slot", "classroom", "grade", "subject",
       "student_names", "notes", "course_status", "status", "teacher_salary", "teacher_salary_source",
       "teacher_salary_rule_id", "month_key", "sort_order", "updated_at", "course_type",
+      "teacher_base_salary_override", "teacher_base_salary_source",
     ], payload, "lessons");
     const updated = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]);
     const studentNamesChanged = Object.prototype.hasOwnProperty.call(incoming, "student_names") && text(current.student_names) !== text(updated.student_names);
@@ -14641,6 +14714,11 @@ async function handleApi(req, res, url) {
 }
 
 function serveStatic(req, res, url) {
+  if (url.pathname === "/salary-formula.js") {
+    const body = fs.readFileSync(path.join(__dirname, "domain", "salary_formula.js"));
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
+    return res.end(body);
+  }
   if (url.pathname === "/vendor/pinyin-pro.js") {
     const body = fs.readFileSync(require.resolve("pinyin-pro"));
     res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "content-length": body.length, "cache-control": "public, max-age=86400" });

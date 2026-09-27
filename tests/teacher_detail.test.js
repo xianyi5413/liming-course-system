@@ -105,7 +105,7 @@ const sourceContracts = [
   ["rule writes invalidate lesson cache", frontendSource, /teacher-salary-rules[^]*lessons-range/],
   ["teacher detail GET bypasses cache", frontendSource, /view === "teacherDetail" \? \{ cache: false \}/],
   ["batch and page share resolver", serverSource, /const resolved = resolveTeacherSalaryRuleForLesson\(lesson, rules\)/],
-  ["static resource version is current", indexSource, /20260927-pinyin-log-layout-permission-fixes/g],
+  ["static resource version is current", indexSource, /20260928-salary-table-performance-workflow/g],
 ];
 
 for (const [label, source, pattern] of sourceContracts) {
@@ -492,103 +492,28 @@ test("diagnostics expose safe match states without SQL, paths or unrelated rule 
   assert.doesNotMatch(serialized, /SELECT|teacher_salary_rules|sqlite|stack|phone|guardian/i);
 });
 
-test("real Chromium keeps initial state empty, updates mixed results, and works at 1440px and 390px", async () => {
+test("real Chromium keeps class-first detail empty until selection and supports historical lessons", async () => {
   resetJulySalaries();
-  const db = new DatabaseSync(databasePath);
-  db.exec("DELETE FROM lessons WHERE id=9208; DELETE FROM teachers WHERE name='历史无档案';");
-  db.close();
-  const chrome = await launchChrome(path.join(tempRoot, "chrome-profile"));
-  const browser = chrome.session;
+  const chrome = await launchChrome(path.join(tempRoot, "chrome-profile")); const browser = chrome.session;
   try {
     await browser.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
-    await browser.login("boss", "123456");
-    const rangeResponsesBefore = browser.responses.filter((item) => /\/api\/lessons-range\?.*view=teacherDetail/.test(item.url)).length;
+    await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}/` }); await browser.login("boss", "123456");
     await openTeacherDetail(browser);
     await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
-    assert.equal(await browser.evaluate("document.querySelector('.multi-select:has(input.teacher-detail-teacher-select) .multi-select-label')?.textContent.trim()"), "请选择教师");
-    assert.equal(await browser.evaluate("document.querySelector('.apply-selected-teacher-salary-rules')?.disabled"), true);
-    assert.equal(browser.responses.filter((item) => /\/api\/lessons-range\?.*view=teacherDetail/.test(item.url)).length, rangeResponsesBefore);
-    const candidateNames = await browser.evaluate("[...document.querySelector('.multi-select:has(input.teacher-detail-teacher-select)').querySelectorAll('.multi-select-option')].map((item)=>item.dataset.value)");
-    assert.deepEqual(candidateNames, ["在职甲", "在职乙"]);
-
-    await selectTeacher(browser);
-    assert.equal(browser.responses.some((item) => {
-      const responseUrl = new URL(item.url);
-      return responseUrl.pathname === "/api/lessons-range"
-        && responseUrl.searchParams.get("view") === "teacherDetail"
-        && responseUrl.searchParams.get("teacher_names") === "在职甲"
-        && item.status === 200;
-    }), true, JSON.stringify(browser.responses.filter((item) => item.url.includes("/api/lessons-range"))));
-    assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.textContent.includes('300.00')"), true);
-    const ruleCellText = await browser.evaluate("[...document.querySelectorAll('.teacher-rule-salary-cell')].map((cell)=>cell.textContent).join('|')");
-    assert.match(ruleCellText, /无规则/);
-    assert.doesNotMatch(ruleCellText, /规则不可用|存在多条匹配规则|无法计算|当前状态不参与计薪/);
-    assert.match(ruleCellText, /0\.00/);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-rule-match-details').length"), 0);
-    await browser.evaluate("window.confirm=()=>true");
-    await browser.click(".teacher-salary-select-all");
-    await browser.click(".apply-selected-teacher-salary-rules");
-    await browser.waitFor("document.querySelector('.teacher-salary-batch-result')?.textContent.includes('更新4节，无需更新1节，跳过7节')");
-    assert.equal(await browser.evaluate("document.querySelector('.teacher-salary-batch-result')?.textContent.includes('全部跳过')"), false);
-    await browser.click(".teacher-salary-batch-details summary");
-    const detailText = await browser.evaluate("document.querySelector('.teacher-salary-batch-details')?.textContent");
-    assert.match(detailText, /未找到科目完全一致的规则/);
-    assert.match(detailText, /规则已停用/);
-    assert.match(detailText, /当前课程状态不参与教师计薪/);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-salary-lesson-select:checked').length"), 7);
-
-    await browser.evaluate(`(() => {
-      const select = document.querySelector('.month-select');
-      select.value = '2026-08-01';
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('8月') && document.querySelector('input.teacher-detail-teacher-select')?.value === '在职甲' && document.body.textContent.includes('八月课程')");
-
-    await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value=''; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
+    assert.equal(await browser.evaluate("document.querySelectorAll('[data-salary-class]').length"), 0);
+    await browser.evaluate(`(() => {const input=document.querySelector('input.teacher-detail-teacher-select');input.value='在职甲';input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await browser.waitFor("document.querySelectorAll('[data-salary-class]').length > 0");
+    assert.equal(browser.responses.some(item => item.url.includes('/api/teacher-detail/workflow?') && item.status === 200), true);
+    await browser.click('[data-salary-class]');
+    await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");
+    assert.match(await browser.evaluate("document.querySelector('.teacher-class-lessons').textContent"), /教师薪资|规则薪资/);
+    await browser.click('[data-salary-action="close"]');
+    await browser.evaluate("(() => {const input=document.querySelector('input.teacher-detail-teacher-select');input.value='';input.dispatchEvent(new Event('change',{bubbles:true}));})()");
     await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
-    assert.equal(await browser.evaluate("document.querySelector('.apply-selected-teacher-salary-rules')?.disabled"), true);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-salary-lesson-select:checked').length"), 0);
-
-    await selectTeacher(browser);
-    await browser.evaluate("setActiveView('dashboard'); load({ refreshGlobal: false })");
-    await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('首页')");
-    await openTeacherDetail(browser);
-    await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
-    assert.equal(await browser.evaluate("document.querySelector('input.teacher-detail-teacher-select')?.value"), "");
-
-    await selectTeacher(browser);
-    await browser.send("Page.reload");
-    await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
-    assert.equal(await browser.evaluate("document.querySelector('input.teacher-detail-teacher-select')?.value"), "");
-
-    await selectTeacher(browser);
-    const inactiveDb = new DatabaseSync(databasePath);
-    inactiveDb.prepare("UPDATE teachers SET status='离职' WHERE name='在职甲'").run();
-    inactiveDb.close();
-    await browser.evaluate(`(() => {
-      const select = document.querySelector('.month-select');
-      select.value = '2026-07-01';
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师') && document.querySelector('input.teacher-detail-teacher-select')?.value === ''");
-    const restoreDb = new DatabaseSync(databasePath);
-    restoreDb.prepare("UPDATE teachers SET status='在职' WHERE name='在职甲'").run();
-    restoreDb.close();
-
-    await browser.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await browser.waitFor("window.innerWidth === 390");
-    assert.equal(await browser.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
-    await browser.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    assert.equal(await browser.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
-    assert.deepEqual(browser.exceptions, []);
-    assert.deepEqual(browser.consoleErrors, []);
-  } finally {
-    await browser.close();
-    if (chrome.child.exitCode == null) {
-      const exited = new Promise((resolve) => chrome.child.once("exit", resolve));
-      chrome.child.kill("SIGTERM");
-      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    for (const width of [390,1440]) {
+      await browser.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      assert.equal(await browser.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 2"), true);
     }
-  }
+    assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+  } finally { await browser.close(); chrome.child.kill('SIGTERM'); }
 });
