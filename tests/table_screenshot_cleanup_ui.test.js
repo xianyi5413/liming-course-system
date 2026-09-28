@@ -60,10 +60,7 @@ test('inline picker immediately paints grade/subject independently, types share 
       return {empty,shown,subject:subjectTrigger.textContent.trim(),students:state.lessons.find(item=>item.id===row.id).student_names};
     })()`);
     assert.deepEqual(immediate.empty,{grade:'-',badge:false,subject:'-'});assert.equal(immediate.shown,'初一');assert.equal(immediate.subject,'数学');assert.equal(immediate.students,'');
-    const candidate=await browser.evaluate(`(()=>{const trigger=document.querySelector('[data-field="course_type"][data-lesson-edit-trigger]');trigger.focus();trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));const picker=activeScheduleInlinePicker;return {open:!!picker,portal:picker?.menu.parentElement===document.body,cls:picker?.wrapper.className};})()`);
-    assert.equal(candidate.open,true);assert.equal(candidate.portal,true);assert.match(candidate.cls,/schedule-inline-picker-anchor/);
-    await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
-    assert.equal(await browser.evaluate(`document.querySelectorAll('.custom-select.open').length`),0);
+    assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
     assert.equal(await browser.evaluate(`(()=>{lessonFilter.time_slot='15:40-17:40';return visibleLessonRows().length;})()`),1);
     const filters=await browser.evaluate(`(async()=>{lessonFilter.time_slot='15:40-17:40';lessonFilter.teacher_names=['合成老师'];lessonFilter.student_names=['合成学生'];lessonFilter.grade='高一';await refreshLessonsView({reloadRange:false});const count=visibleLessonRows().length;return {count,time:visibleLessonRows()[0]?.time_slot};})()`);
     assert.deepEqual(filters,{count:1,time:'15:40-17:40'});
@@ -76,12 +73,13 @@ test('inline picker immediately paints grade/subject independently, types share 
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
   });
 });
-test('grade changes preserve valid manual types and reset types outside the new scope', async () => {
-  const lesson = await api('/api/lessons', 'POST', {teacher_name:'合成老师',date:'2026-08-10',month_key:'2026-08-01',time_slot:'08:00-10:00',grade:'初一',subject:'英语',student_names:'合成学生',course_type:'初中特训'});
+test('grade changes preserve manually managed valid types', async () => {
+  const lesson = await api('/api/lessons', 'POST', {teacher_name:'合成老师',date:'2026-08-10',month_key:'2026-08-01',time_slot:'08:00-10:00',grade:'初一',subject:'英语',student_names:'合成学生'});
   assert.equal(lesson.status,201);
   const route='/api/lessons/'+lesson.data.id;
   const reset=await api(route,'PATCH',{grade:'高一'}); assert.equal(reset.status,200);assert.equal(reset.data.course_type,'1V1');
-  assert.equal((await api(route,'PATCH',{course_type:'1V2'})).status,200);
+  const group=(await api('/api/class-groups')).data.class_groups.find(row=>row.lesson_ids.includes(lesson.data.id));
+  assert.equal((await api('/api/class-groups/course-type','PATCH',{group_key:group.group_key,lesson_ids:[lesson.data.id],mode:'lesson',course_type:'1V2'})).status,200);
   assert.equal((await api(route,'PATCH',{grade:'初二'})).data.course_type,'1V2');
   assert.equal((await api(route,'PATCH',{notes:'保留明确选择'})).data.course_type,'1V2');
 });

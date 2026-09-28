@@ -133,7 +133,7 @@ test('gift visibility, dynamic count alignment, shared adaptive tables, compact 
   assert.ok(heights.find(row=>!row.note).height<=55,JSON.stringify(heights));assert.ok(heights.find(row=>row.note).height>heights.find(row=>!row.note).height);
   await show(browser,'classGroups');
   const picker=await browser.evaluate(`(()=>{const cell=document.querySelector('.class-group-type-cell');cell.dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}));return {hidden:!!cell.querySelector('.schedule-inline-picker-anchor'),portal:activeScheduleInlinePicker.menu.parentElement===document.body};})()`);assert.deepEqual(picker,{hidden:true,portal:true});
-  await browser.evaluate(`(async()=>{const select=activeScheduleInlinePicker.select;select.value='1V2';select.dispatchEvent(new Event('change'));})()`);
+  await browser.evaluate(`(async()=>{window.confirm=()=>true;const select=activeScheduleInlinePicker.select;select.value='1V2';select.dispatchEvent(new Event('change'));})()`);
   await browser.waitFor(`!activeScheduleInlinePicker && document.querySelector('.class-group-type-cell').textContent.trim()==='1V2'`);
   await show(browser,'teacherSalaryRules');
   assert.equal(await browser.evaluate(`[...document.querySelectorAll('.teacher-salary-rule-table th')].some(th=>th.textContent.trim()==='启用')`),false);

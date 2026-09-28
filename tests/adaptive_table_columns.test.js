@@ -42,6 +42,9 @@ function seed(db) {
       (9751,'自适应老师','初一','数学','短名','短名','一班'),
       (9752,'名字较长的自适应老师','高三','物理','长集合','${LONG_STUDENT}，学生乙；学生丙
 学生丁','高三物理自适应测试班');
+    INSERT INTO lessons(teacher_name,date,month_key,grade,subject,student_names,time_slot,status) VALUES
+      ('自适应老师','2026-07-01','${MONTH}','初一','数学','短名','09:00-11:00','待上'),
+      ('名字较长的自适应老师','2026-07-02','${MONTH}','高三','物理','${LONG_STUDENT}、学生乙、学生丙、学生丁','09:00-11:00','待上');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES
       (9761,'自适应老师','初一','数学','短名',0,2,1,'短'),
       (9762,'名字较长的自适应老师','高三','物理','${LONG_STUDENT}、学生乙，学生丙；学生丁',23456.78,2,1,'较长的薪资规则备注');

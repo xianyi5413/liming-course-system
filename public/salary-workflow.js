@@ -7,13 +7,13 @@ const SalaryUI = (() => {
   let modal = null, draft = null, tables = [], activeClass = '', returnFocus = null;
   let legacyDetail = false;
   let sessionGeneration = 0;
-  let tablesWritable = false;
+  let tablesWritable = false, templateDialog = null;
   const tableDisabled = () => tablesWritable ? '' : 'disabled';
   const manager = () => ['owner', 'admin', 'boss', 'academic', 'jiaowu'].includes(auth.user?.role);
   const writable = () => manager() && canWriteData() && (['owner', 'admin', 'boss'].includes(auth.user?.role) || canView('teacherSalary'));
   const disabled = () => writable() ? '' : 'disabled';
   const bounds = () => range || monthBounds(state?.settings?.month_key || activeMonth);
-  function close() { closeDateRangePicker(); modal?.remove(); modal = null; draft = null; activeClass = ''; returnFocus?.focus(); }
+  function close() { templateDialog?.close(); templateDialog = null; closeDateRangePicker(); modal?.remove(); modal = null; draft = null; activeClass = ''; returnFocus?.focus(); }
   function show(title, body, extra = '') {
     if (!modal) returnFocus = document.activeElement;
     modal?.remove();
@@ -23,6 +23,7 @@ const SalaryUI = (() => {
     document.body.appendChild(modal);
     bindDateRangePickerControls(modal);
     modal.querySelector('button')?.focus();
+    scheduleAdaptiveTableColumns();
   }
   async function refresh() {
     await load({ refreshGlobal: true });
@@ -48,7 +49,7 @@ const SalaryUI = (() => {
       ${unifiedFilterField({ label: '科目', className: 'teacher-detail-filter-input', field: 'subject', value: teacherDetailFilter.subject, values: options.subjects })}
       ${unifiedFilterField({ label: '学生', className: 'teacher-detail-filter-input', field: 'student', value: teacherDetailFilter.student, values: options.students })}
       </div><div class="filter-summary"><span>${classes.length} 个班级 · ${rows.length} 节课程</span><button class="btn reset-teacher-detail-filter">清空筛选</button></div></div>
-      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true"><colgroup>${rowIndexColumn()}<col><col><col><col><col>${data.tables.map(() => '<col>').join('')}${legacy ? '<col>' : ''}</colgroup>
+      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="full" data-alignment="center">${data.tables.map(() => '<col data-column-type="full" data-alignment="right">').join('')}${legacy ? '<col data-column-type="full" data-alignment="right">' : ''}</colgroup>
       <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th>学生</th>${data.tables.map((table, i) => `<th>规则薪资${i + 1}<br><small>${escapeHtml(table.effective_start)}～${escapeHtml(table.effective_end)}</small></th>`).join('')}${legacy ? '<th>历史规则</th>' : ''}</tr></thead>
       <tbody>${classes.map((row, i) => `<tr data-salary-class="${escapeHtml(row.key)}" tabindex="0" role="button" aria-label="查看${escapeHtml(row.student_names)}的课程">${renderRowIndex(i)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${escapeHtml(row.course_type)}</td><td class="student-set-cell">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>${data.tables.map(table => `<td>${escapeHtml(row.rules[table.id] || '—（无课程）')}</td>`).join('')}${legacy ? `<td>${escapeHtml(row.rules.legacy || '—（无课程）')}</td>` : ''}</tr>`).join('') || `<tr><td colspan="${6 + data.tables.length + Number(legacy)}" class="empty">${selectedTeacherDetail ? '此日期范围暂无课程' : '请先选择教师'}</td></tr>`}</tbody></table></div></div>`;
   }
@@ -57,11 +58,13 @@ const SalaryUI = (() => {
     if (!group) { close(); return; }
     activeClass = key;
     const ids = new Set(group.lesson_ids), rows = data.lessons.filter(row => ids.has(row.id));
-    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${group.course_type} · ${group.student_names}`, `<p class="section-subtitle">教师薪资为实际基础课薪，不含绩效；规则金额已按课程时长折算。</p><div class="table-wrap"><table class="course-table teacher-class-lessons uniform-table nowrap-table compact-rows"><thead><tr>${rowIndexHeader()}${['老师', '日期', '星期', '时间', '教室', '状态', '年级', '科目', '类型', '学生', '备注', '教师薪资', '规则薪资'].map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.map((row, index) => {
+    const salaryCells = row => {
       const special = ['manual', 'legacy', 'import'].includes(row.teacher_base_salary_source);
-      return `<tr>${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.date)}</td><td>${escapeHtml(weekdayCn(row.date))}</td><td>${escapeHtml(row.time_slot)}</td><td>${escapeHtml(row.classroom)}</td><td>${statusBadge(rowStatus(row))}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${escapeHtml(row.course_type)}</td><td class="salary-full-text">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td><td class="salary-full-text">${escapeHtml(row.notes || '')}</td><td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge">${special ? '特' : row.teacher_base_salary_source === 'auto' ? '自' : '—'}</span></span>${writable() ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td></tr>`;
-    }).join('')}</tbody></table></div>`, 'salary-lessons-panel');
+      return `<td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge">${special ? '特' : row.teacher_base_salary_source === 'auto' ? '自' : '—'}</span></span>${writable() ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td>`;
+    };
+    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${group.course_type} · ${group.student_names}`, '<p class="section-subtitle">教师薪资为实际基础课薪，不含绩效；规则金额已按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
   }
+
   async function showTables() {
     draft = null; activeClass = '';
     const generation = sessionGeneration;
@@ -75,8 +78,51 @@ const SalaryUI = (() => {
   function editTable(id) {
     draft = id ? structuredClone(tables.find(row => row.id === id)) : { name: '', effective_start: '', effective_end: '', rules: [] };
     const grades = ['初一', '初二', '初三', '高一', '高二', '高三'], types = ['1V1', '1V2', '1V3', '小班课'];
-    show(id ? '编辑薪资表' : '新增薪资表', `<div class="filter-bar unified-filter-bar"><label class="filter-field"><span>名称（选填）</span><input class="control" id="salary-table-name" maxlength="80" value="${escapeHtml(draft.name)}" ${tableDisabled()}></label><label class="filter-field"><span>生效日期（必填）</span>${dateRangePickerControl({ scope: 'salary-table-editor', start: draft.effective_start, end: draft.effective_end, disabled: !tablesWritable })}</label></div><p>每 2 小时计价；n 为实际学生人数，K 为教师当月绩效系数。留空表示未配置规则。</p><div class="table-wrap"><table class="uniform-table salary-formula-table"><thead><tr><th>年级</th><th>1V1</th><th>1V2</th><th>1V3</th><th>小班公式</th><th>小班6人</th></tr></thead><tbody>${grades.map(grade => `<tr><th>${grade}</th>${types.map(type => grade.startsWith('初') && type === '1V3' ? '<td>—</td>' : `<td><input class="cell-input salary-formula-input" data-grade="${grade}" data-type="${type}" aria-label="${grade}${type}薪资公式" value="${escapeHtml(draft.rules.find(rule => rule.grade === grade && rule.course_type === type)?.formula || '')}" ${tableDisabled()}></td>`).join('')}<td data-salary-preview="${grade}">—</td></tr>`).join('')}</tbody></table></div><p class="salary-editor-error" role="alert"></p><div class="salary-table-actions"><button class="btn primary" data-salary-action="save" ${tableDisabled()}>保存</button><button class="btn" data-salary-action="tables">返回列表</button>${id ? `<button class="btn danger" data-salary-action="delete" data-id="${id}" ${tableDisabled()}>删除薪资表</button>` : ''}</div>`);
+    show(id ? '编辑薪资表' : '新增薪资表', `<div class="salary-editor-controls"><label class="filter-field"><span>名称（选填）</span><input class="control" id="salary-table-name" maxlength="80" value="${escapeHtml(draft.name)}" ${tableDisabled()}></label><label class="filter-field"><span>生效日期（必填）</span>${dateRangePickerControl({ scope: 'salary-table-editor', start: draft.effective_start, end: draft.effective_end, disabled: !tablesWritable })}</label><button class="btn" data-salary-action="template-add" ${tableDisabled()}>添加为模板</button><button class="btn" data-salary-action="template-use" ${tableDisabled()}>使用模板</button></div><p>每 2 小时计价；n 为实际学生人数，K 为教师当月绩效系数。留空表示未配置规则。</p><div class="table-wrap"><table class="uniform-table salary-formula-table"><thead><tr><th>年级</th><th>1V1</th><th>1V2</th><th>1V3</th><th>小班公式</th><th>小班6人</th></tr></thead><tbody>${grades.map(grade => `<tr><th>${grade}</th>${types.map(type => grade.startsWith('初') && type === '1V3' ? '<td>—</td>' : `<td><input class="cell-input salary-formula-input" data-grade="${grade}" data-type="${type}" aria-label="${grade}${type}薪资公式" value="${escapeHtml(draft.rules.find(rule => rule.grade === grade && rule.course_type === type)?.formula || '')}" ${tableDisabled()}></td>`).join('')}<td data-salary-preview="${grade}">—</td></tr>`).join('')}</tbody></table></div><p class="salary-editor-error" role="alert"></p><div class="salary-table-actions"><button class="btn primary" data-salary-action="save" ${tableDisabled()}>保存</button><button class="btn" data-salary-action="tables">返回列表</button>${id ? `<button class="btn danger" data-salary-action="delete" data-id="${id}" ${tableDisabled()}>删除薪资表</button>` : ''}</div>`);
     previews();
+  }
+  function gridRules() {
+    return [...modal.querySelectorAll('.salary-formula-input')].map(input => ({ grade: input.dataset.grade, course_type: input.dataset.type, formula: input.value }));
+  }
+  function templateNameDialog() {
+    const generation = sessionGeneration, editor = modal;
+    // Validate without requiring dates or persisting the active salary table.
+    const rules = gridRules();
+    for (const rule of rules) if (rule.formula.trim()) SalaryFormula.validate(rule.formula, { allowN: rule.course_type === '小班课' });
+    templateDialog = CourseDetails.dialog('添加为模板', '<form class="salary-template-form"><label class="filter-field"><span>模板名称</span><input class="control" name="name" maxlength="80" required placeholder="例如：2026暑期薪资模板"></label><p class="salary-editor-error" role="alert"></p><button class="btn primary" type="submit">保存模板</button></form>');
+    templateDialog.element.classList.add('salary-template-dialog');
+    const dialog = templateDialog;
+    const form = templateDialog.element.querySelector('form');
+    form.elements.name.focus();
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const button = form.querySelector('button'); button.disabled = true;
+      try {
+        await request('/api/salary-templates', { method: 'POST', body: { name: form.elements.name.value, rules } });
+        if (generation !== sessionGeneration || editor !== modal || templateDialog !== dialog || !dialog.element.isConnected) return;
+        templateDialog.close(); templateDialog = null; showToast('薪资模板已保存');
+      } catch (error) { form.querySelector('[role=alert]').textContent = error.message; }
+      finally { button.disabled = false; }
+    };
+  }
+  async function templatePicker() {
+    const generation = sessionGeneration, editor = modal;
+    const result = await request('/api/salary-templates', { cache: false });
+    if (generation !== sessionGeneration || editor !== modal || !draft) return;
+    templateDialog = CourseDetails.dialog('使用模板', `<div class="salary-table-cards">${result.templates.map(row => `<button class="btn salary-table-card" data-template-id="${row.id}"><b>${escapeHtml(row.name)}</b><span>更新：${escapeHtml(row.updated_at)}</span></button>`).join('') || '<p class="empty">暂无薪资模板</p>'}</div>`);
+    templateDialog.element.classList.add('salary-template-dialog');
+    const dialog = templateDialog;
+    templateDialog.element.querySelectorAll('[data-template-id]').forEach(button => { button.onclick = async () => {
+      if (gridRules().some(rule => rule.formula.trim()) && !confirm('使用模板将覆盖当前已填写的薪资规则，是否继续？')) return;
+      button.disabled = true;
+      try {
+        const result = await request(`/api/salary-templates/${button.dataset.templateId}/use`, { method: 'POST', body: {} });
+        if (generation !== sessionGeneration || editor !== modal || templateDialog !== dialog || !dialog.element.isConnected) return;
+        modal.querySelectorAll('.salary-formula-input').forEach(input => { input.value = result.template.rules.find(rule => rule.grade === input.dataset.grade && rule.course_type === input.dataset.type)?.formula || ''; });
+        previews(); templateDialog.close(); templateDialog = null;
+      } catch (error) { showToast(error.message, 'error'); }
+      finally { button.disabled = false; }
+    }; });
   }
   function previews() {
     modal?.querySelectorAll('[data-salary-preview]').forEach(cell => {
@@ -98,6 +144,8 @@ const SalaryUI = (() => {
       if (task === 'legacy') { close(); setActiveView('teacherSalaryRules'); await load({ refreshGlobal: false }); return; }
       if (task === 'new' || task === 'edit') return editTable(Number(button.dataset.id) || null);
       if (!writable() || (['save', 'delete'].includes(task) && !tablesWritable)) return;
+      if (task === 'template-add' && tablesWritable) return templateNameDialog();
+      if (task === 'template-use' && tablesWritable) return await templatePicker();
       button.disabled = true;
       if (task === 'auto') {
         await request(`/api/teacher-detail/salary/${button.dataset.id}`, { method: 'PATCH', body: { source: 'auto' } });
@@ -122,7 +170,7 @@ const SalaryUI = (() => {
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && modal && !activeDateRangePicker) close();
     if (event.key === 'Enter' && event.target.matches('[data-salary-class]')) showClass(event.target.dataset.salaryClass);
-    if (event.key === 'Tab' && modal) {
+    if (event.key === 'Tab' && modal && !templateDialog?.element.isConnected) {
       const items = [...modal.querySelectorAll('button:not(:disabled),input:not(:disabled),[tabindex="0"]')].filter(node => node.getClientRects().length);
       if (event.shiftKey && document.activeElement === items[0]) { event.preventDefault(); items.at(-1)?.focus(); }
       else if (!event.shiftKey && document.activeElement === items.at(-1)) { event.preventDefault(); items[0]?.focus(); }

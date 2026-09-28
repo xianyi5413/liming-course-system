@@ -152,7 +152,7 @@ const WORKBOOK_SEQUENCE = Object.freeze([...VISIBLE_SHEET_NAMES, ...HIDDEN_SHEET
 // backup indexes are intentionally outside this contract.
 const SOURCE_TABLE_DEFINITIONS = Object.freeze([
   ["settings", 10, ["key"]], ["teachers", 20, ["id"]], ["students", 30, ["id"]], ["student_grade_stages", 40, ["id"]],
-  ["pricing_standards", 50, ["id"]], ["student_pricing", 60, ["id"]], ["teacher_salary_rules", 70, ["id"]], ["salary_tables", 71, ["id"]], ["salary_table_rules", 72, ["id"]], ["teacher_monthly_performance", 73, ["teacher_name", "month_key"]], ["class_groups", 80, ["id"]],
+  ["pricing_standards", 50, ["id"]], ["student_pricing", 60, ["id"]], ["teacher_salary_rules", 70, ["id"]], ["salary_tables", 71, ["id"]], ["salary_table_rules", 72, ["id"]], ["teacher_monthly_performance", 73, ["teacher_name", "month_key"]], ["salary_table_templates", 74, ["id"]], ["salary_table_template_rules", 75, ["id"]], ["class_groups", 80, ["id"]],
   ["lessons", 90, ["id"]], ["fee_overrides", 100, ["lesson_id", "student_name"]], ["recharge_records", 110, ["id"]],
   ["student_opening_balances", 120, ["id"]], ["teacher_adjustments", 130, ["teacher_name"]],
   ["teacher_adjustments_monthly", 140, ["teacher_name", "month_key"]], ["teacher_travel_fees", 150, ["id"]],
