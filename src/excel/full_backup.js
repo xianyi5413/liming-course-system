@@ -1,3 +1,6 @@
+const { parseTimeRange } = require("../domain/lesson_time");
+const SalaryWorkflow = require("../domain/salary_workflow");
+const SALARY_TABLES = new Set(["salary_tables", "salary_table_rules", "teacher_monthly_performance"]);
 const { migrateRechargeDates } = require("../domain/recharge_date");
 const { migrateCourseTypes, defaultCourseType } = require("../domain/course_type");
 const crypto = require("node:crypto");
@@ -13,7 +16,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 4;
+const FORMAT_VERSION = 5;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -83,7 +86,7 @@ function recordKey(table, row) { const fields = sourceDefinition(table)?.key_fie
 function safeSettingRows(rows) { return rows.filter((row) => SETTING_LABELS[row.key] && !SECRET_SETTING_PATTERN.test(row.key)); }
 
 function ensureSchemaCompatible(db) {
-  for (const definition of SOURCE_TABLE_DEFINITIONS) if (!tableExists(db, definition.source_table)) throw new FullExcelError("FULL_EXCEL_SCHEMA_MISSING", `缺少数据表：${definition.source_table}`);
+  for (const definition of SOURCE_TABLE_DEFINITIONS) if (!tableExists(db, definition.source_table) && !SALARY_TABLES.has(definition.source_table)) throw new FullExcelError("FULL_EXCEL_SCHEMA_MISSING", `缺少数据表：${definition.source_table}`);
 }
 
 function customStatuses(sourceData) {
@@ -138,7 +141,7 @@ function sourceDataFromDb(db, options = {}) {
   const includeOperationLogs = options.includeOperationLogs !== false;
   const result = {};
   for (const definition of SOURCE_TABLE_DEFINITIONS) {
-    let rows = definition.source_table === "operation_logs" && !includeOperationLogs
+    let rows = (definition.source_table === "operation_logs" && !includeOperationLogs) || (SALARY_TABLES.has(definition.source_table) && !tableExists(db, definition.source_table))
       ? []
       : db.prepare(`SELECT * FROM ${definition.source_table}`).all();
     if (definition.source_table === "settings") rows = safeSettingRows(rows);
@@ -147,10 +150,18 @@ function sourceDataFromDb(db, options = {}) {
   return result;
 }
 
+function excelBaseSalary(lesson, context) {
+  if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return 0;
+  const table = SalaryWorkflow.matchTable(context.salaryContext, lesson.date);
+  const duration = parseTimeRange(lesson.time_slot);
+  const rule = table ? SalaryWorkflow.tableRule(context.salaryContext, table, lesson, duration ? duration.end - duration.start : null) : null;
+  const resolved = SalaryWorkflow.resolveBase(lesson, rule);
+  return resolved.cents == null ? null : resolved.cents / 100;
+}
 function visibleRecords(definition, sourceData, context) {
   const rows = sourceData[definition.source_table] || [];
   if (definition.key === "student_fee_details") return context.lessons.flatMap((lesson) => splitList(lesson.student_names).map((studentName) => ({ visible: { student_name: studentName, teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, notes: lesson.notes, ...studentFeeValues(lesson, studentName, context) } }))).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
-  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: deriveStatus(lesson, context.allowedStatuses) === "已上" ? moneyRound(lesson.teacher_salary) : 0 } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
+  if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: excelBaseSalary(lesson, context) } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
   if (definition.key === "base_data") {
     const values = [];
     const add = (category, names, status) => [...new Set(names.map(text).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")).forEach((name, index) => values.push({ visible: { category, name, status, sort_order: index + 1 } }));
@@ -271,6 +282,7 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const createdAt = options.createdAt || new Date(); const allowedStatuses = new Set([...DEFAULT_COURSE_STATUSES, ...customStatuses(sourceData)]);
   const context = {
     lessons: sourceData.lessons,
+    salaryContext: SalaryWorkflow.tableContext(sourceData.salary_tables, sourceData.salary_table_rules),
     allowedStatuses,
     staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])),
     feeOverrides: new Map(sourceData.fee_overrides.map((row) => [`${row.lesson_id}\u0001${text(row.student_name)}`, Number(row.unit_price)])),
@@ -377,7 +389,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || Number(meta.get("format_version")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v4 文件");
+  if (meta.get("file_type") !== FILE_TYPE || ![4, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 或 v5 完整数据文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -429,6 +441,31 @@ function validateGradeStages(row) {
   for (let index = 1; index < ranges.length; index += 1) if (ranges[index][0] <= ranges[index - 1][1]) throw new FullExcelError("FULL_EXCEL_GRADE_TIMELINE_OVERLAP", `${row.name}年级阶段日期重叠`);
 }
 function validateData(data, parsedVisible) {
+  try {
+    const ordered = [...data.salary_tables].sort((a, b) => String(a.effective_start).localeCompare(String(b.effective_start)));
+    const ids = new Set();
+    for (let index = 0; index < ordered.length; index++) {
+      const table = ordered[index];
+      if (!Number.isSafeInteger(table.id) || table.id <= 0 || ids.has(table.id)) throw new Error("薪资表编号无效或重复");
+      ids.add(table.id);
+      SalaryWorkflow.normalizeTable({ ...table, rules: data.salary_table_rules.filter(rule => rule.salary_table_id === table.id) });
+      if (index && table.effective_start <= ordered[index - 1].effective_end) throw new Error("薪资表生效日期重叠");
+    }
+    for (const rule of data.salary_table_rules) if (!ids.has(rule.salary_table_id)) throw new Error("薪资表规则缺少对应薪资表");
+    const coefficients = new Set();
+    for (const row of data.teacher_monthly_performance) {
+      if (!text(row.teacher_name) || !SalaryWorkflow.validDate(row.month_key) || !row.month_key.endsWith("-01") || SalaryWorkflow.Formula.cents(row.coefficient) > 100) throw new Error("教师月度绩效系数无效");
+      const key = JSON.stringify([row.teacher_name, row.month_key]);
+      if (coefficients.has(key)) throw new Error("教师月度绩效系数重复");
+      coefficients.add(key);
+    }
+    for (const row of data.lessons) {
+      if (![undefined, null, "", "manual", "auto"].includes(row.teacher_base_salary_source)) throw new Error("基础课薪来源无效");
+      if (row.teacher_base_salary_override != null && SalaryWorkflow.Formula.cents(row.teacher_base_salary_override) > 10000000) throw new Error("特殊基础课薪超出范围");
+      if (row.teacher_base_salary_source === "manual" && row.teacher_base_salary_override == null) throw new Error("特殊基础课薪缺少金额");
+    }
+  } catch (error) { throw new FullExcelError("FULL_EXCEL_SALARY_INVALID", error.message); }
+
   const ids = (table, field = "id") => new Set((data[table] || []).map((row) => row[field])); const requireRef = (rows, field, valid, label, nullable = false) => rows.forEach((row) => { if (nullable && (row[field] === null || row[field] === "" || row[field] === undefined)) return; if (!valid.has(row[field])) throw new FullExcelError("FULL_EXCEL_RELATION_INVALID", `${label}关联不存在`); });
   requireRef(data.fee_overrides, "lesson_id", ids("lessons"), "单节费用课程"); requireRef([...data.staff_salary_monthly, ...data.staff_attendance], "staff_id", ids("staff"), "员工"); requireRef([...data.user_teacher_bindings, ...data.user_page_permissions, ...data.user_filter_presets], "user_id", ids("users"), "账号"); requireRef(data.users, "role", ids("roles", "code"), "账号角色"); requireRef(data.lessons, "teacher_salary_rule_id", ids("teacher_salary_rules"), "课程薪资规则", true);
   const openingStudents = new Set();
@@ -438,24 +475,27 @@ function validateData(data, parsedVisible) {
 
 function verifyFullData(input) {
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (Number(infoMap.get("格式版本")) !== FORMAT_VERSION) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请重新导出 v4 文件");
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 或 v5 完整数据文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
   const metadata = verifyMetadata(workbook);
+  if (Number(metadata.get("format_version")) !== Number(infoMap.get("格式版本"))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "说明与恢复元数据的版本不一致");
   // v4 files created before this optional flag existed contained operation logs.
   const operationLogsIncluded = metadata.has("operation_logs_included") ? metadata.get("operation_logs_included") === "true" : true;
   if (!operationLogsIncluded && parsedVisible.operation_logs.length) throw new FullExcelError("FULL_EXCEL_OPERATION_LOGS_UNEXPECTED", "未包含操作日志的文件中存在操作日志数据");
   const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); validateData(data, parsedVisible);
   const counts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
-  return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: FORMAT_VERSION, operation_logs_included: operationLogsIncluded, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
+  return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: Number(metadata.get("format_version")), operation_logs_included: operationLogsIncluded, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
 }
 
 function restoreFullData({ dbPath, inputPath }) {
   const verified = verifyFullData(inputPath); const target = path.resolve(dbPath); if (!fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_DB_NOT_FOUND", "目标数据库不存在，请先初始化数据库结构"); const db = new DatabaseSync(target);
   try {
-    ensureSchemaCompatible(db); db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
+    db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
+      SalaryWorkflow.migrateSalaryWorkflow(db);
+      ensureSchemaCompatible(db);
       migrateCourseTypes(db, { backfill: false });
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;

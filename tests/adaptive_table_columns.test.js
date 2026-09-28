@@ -96,11 +96,17 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view, tableSelector) {
+  if (view === "teacherSalaryRules") {
+    await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");
+    await browser.waitFor("Boolean(document.querySelector('[data-salary-action=legacy]'))");
+    await browser.click('[data-salary-action=legacy]');
+  } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) {
     await browser.click(`.nav-btn[data-nav-group="${group}"]`);
   }
   await browser.waitFor(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`);
   await browser.click(`.nav-sub-btn[data-view="${view}"]`);
+  }
   await browser.waitFor(`Boolean(document.querySelector(${JSON.stringify(`${tableSelector}[data-adaptive-widths]`)}))`);
 }
 

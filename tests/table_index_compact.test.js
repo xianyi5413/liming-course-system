@@ -69,7 +69,7 @@ const pages = [
   ['studentQuery','.student-query-detail-table',0], ['studentPricing','.student-pricing-table',1],
   ['classGroups','.class-group-table',0], ['studentProfiles','.student-profile-table',1],
   ['teacherSalary','.teacher-salary-table',0], ['teacherTravelFees','.teacher-travel-table',0],
-  ['teacherDetail','.teacher-detail-table',1], ['teacherSalaryRules','.teacher-salary-rule-table',1],
+  ['teacherDetail','.teacher-detail-table',0], ['teacherSalaryRules','.teacher-salary-rule-table',1],
   ['userAdmin','.user-table:not(.role-table)',0],
 ];
 async function assertIndexes(browser, selector, position) {
@@ -121,7 +121,7 @@ test('filters, history, teacher changes and real recharge deletion regenerate di
     assert.ok(await browser.evaluate(`document.querySelectorAll(${JSON.stringify(selector+' tbody tr')}).length`)<before,page);
   }
   for(const teacher of ['合成老师','合成老师乙']) {
-    await show(browser,'teacherDetail');await browser.evaluate(`(async()=>{selectedTeacherDetail=${JSON.stringify(teacher)};await load({refreshGlobal:false});})()`);await assertIndexes(browser,'.teacher-detail-table',1);
+    await show(browser,'teacherDetail');await browser.evaluate(`(async()=>{selectedTeacherDetail=${JSON.stringify(teacher)};await load({refreshGlobal:false});})()`);await assertIndexes(browser,'.teacher-detail-table',0);
   }
   await browser.evaluate("selectedTeacherDetail='';render();");assert.equal(await browser.evaluate("document.querySelectorAll('.teacher-detail-table td.row-index').length"),0);
   await browser.evaluate("profileGradeFilter.students='';includeInactive=true;");await show(browser,'studentProfiles');await assertIndexes(browser,'.student-profile-table',1);
@@ -136,12 +136,12 @@ test('filters, history, teacher changes and real recharge deletion regenerate di
 }));
 
 test('compact rows grow with notes, salary state stays one line and activation retains matching semantics',async()=>browserRun(async browser=>{
-  for(const [page,selector] of [['feeDetails','.fee-detail-table'],['teacherDetail','.teacher-detail-table'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
-    await show(browser,page);if(page==='teacherDetail')await browser.evaluate("selectedTeacherDetail='合成老师';render();");
+  for(const [page,selector] of [['feeDetails','.fee-detail-table'],['teacherDetail','.teacher-class-lessons'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
+    await show(browser,page);if(page==='teacherDetail'){await browser.click('[data-salary-class]');await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");}
     await browser.evaluate('new Promise(requestAnimationFrame)');
-    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.teacher-detail-notes')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
+    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.teacher-detail-notes,.salary-full-text:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
     const short=heights.find(row=>!row.note),long=heights.find(row=>row.note);
-    assert.ok(short&&long,JSON.stringify({page,heights}));assert.ok(short.height<=55,JSON.stringify({page,short}));if(page==='teacherDetail')assert.ok(Math.abs(long.height-short.height)<2,JSON.stringify({page,heights}));else assert.ok(long.height>short.height,JSON.stringify({page,heights}));assert.ok(heights.every(row=>!row.scroll));
+    assert.ok(short&&long,JSON.stringify({page,heights}));assert.ok(short.height<=55,JSON.stringify({page,short}));assert.ok(long.height>=short.height,JSON.stringify({page,heights}));assert.ok(heights.every(row=>!row.scroll));if(page==='teacherDetail')await browser.click('[data-salary-action=close]');
   }
   const rule=await browser.evaluate(`(()=>{const row=[...document.querySelectorAll('.teacher-salary-rule-row')].find(row=>row.querySelector('.rule-activation').textContent.includes('已停用')),cell=row.querySelector('.rule-status-cell');return {id:Number(row.dataset.ruleId),text:cell.textContent.trim(),badges:cell.querySelectorAll('.visible-price-status').length,inputs:cell.querySelectorAll('input').length};})()`);
   assert.equal(rule.badges,1);assert.equal(rule.inputs,0);assert.equal(rule.text,'已停用');

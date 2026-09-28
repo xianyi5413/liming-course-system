@@ -58,9 +58,15 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view) {
+  if (view === "teacherSalaryRules") {
+    await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");
+    await browser.waitFor("Boolean(document.querySelector('[data-salary-action=legacy]'))");
+    await browser.click('[data-salary-action=legacy]');
+  } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) await browser.click(`.nav-btn[data-nav-group="${group}"]`);
   await browser.waitFor(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`);
   await browser.click(`.nav-sub-btn[data-view="${view}"]`);
+  }
 }
 
 const scenarios = [
@@ -122,8 +128,11 @@ test("fee and teacher detail headers and row cells share the approved column ord
   assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fee-detail-scroll')).overflowX !== 'visible'"), true);
   await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
   await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
-  await browser.waitFor("Boolean(document.querySelector('.teacher-detail-table .teacher-salary-lesson-select'))");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["选择", "序号", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "学生", "备注", "教师薪资", "规则薪资"]);
-  assert.equal(await browser.evaluate("document.querySelector('.teacher-detail-table tbody tr')?.children.length"), 14);
+  await browser.waitFor("Boolean(document.querySelector('[data-salary-class]'))");
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map(cell=>cell.textContent.trim())"), ["序号", "老师", "年级", "科目", "类型", "学生", "历史规则"]);
+  await browser.click('[data-salary-class]');
+  await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-class-lessons thead th')].map(cell=>cell.textContent.trim())"), ["序号", "老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "类型", "学生", "备注", "教师薪资", "规则薪资"]);
+  assert.equal(await browser.evaluate("document.querySelector('.teacher-class-lessons tbody tr')?.children.length"), 14);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));
