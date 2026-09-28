@@ -14,6 +14,18 @@ function migrateSalaryWorkflow(db) {
   db.exec('SAVEPOINT salary_workflow_migration');
   try {
     db.exec(`
+      CREATE TABLE IF NOT EXISTS salary_table_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS salary_table_template_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER NOT NULL REFERENCES salary_table_templates(id) ON DELETE CASCADE,
+        grade TEXT NOT NULL, course_type TEXT NOT NULL, formula TEXT NOT NULL,
+        UNIQUE(template_id,grade,course_type)
+      );
       CREATE TABLE IF NOT EXISTS salary_tables (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL DEFAULT '',
@@ -51,12 +63,10 @@ function migrateSalaryWorkflow(db) {
     db.exec('RELEASE salary_workflow_migration');
   } catch (error) { db.exec('ROLLBACK TO salary_workflow_migration; RELEASE salary_workflow_migration'); throw error; }
 }
-function normalizeTable(body) {
-  const effective_start = text(body.effective_start), effective_end = text(body.effective_end);
-  if (!validDate(effective_start) || !validDate(effective_end) || effective_start > effective_end) throw new Error('请填写有效起止日期，结束日期不得早于开始日期');
-  if (!Array.isArray(body.rules) || body.rules.length > 24) throw new Error('薪资规则必须为六个年级的课型列表');
+function normalizeRules(input) {
+  if (!Array.isArray(input) || input.length > 24) throw new Error('薪资规则必须为六个年级的课型列表');
   const seen = new Set();
-  const rules = body.rules.map(row => {
+  const rules = input.map(row => {
     const grade = text(row.grade), course_type = text(row.course_type), formula = text(row.formula);
     if (!GRADES.includes(grade) || !TYPES.includes(course_type)) throw new Error('薪资规则年级或课型无效');
     if (grade.startsWith('初') && course_type === '1V3') throw new Error('初中不支持 1V3');
@@ -65,6 +75,12 @@ function normalizeTable(body) {
     seen.add(key);
     return { grade, course_type, formula: formula ? Formula.validate(formula, { allowN: course_type === '小班课' }) : '' };
   }).filter(row => row.formula);
+  return rules;
+}
+function normalizeTable(body) {
+  const effective_start = text(body.effective_start), effective_end = text(body.effective_end);
+  if (!validDate(effective_start) || !validDate(effective_end) || effective_start > effective_end) throw new Error('请填写有效起止日期，结束日期不得早于开始日期');
+  const rules = normalizeRules(body.rules);
   const name = text(body.name);
   if (name.length > 80) throw new Error('薪资表名称不得超过 80 字符');
   return { name, effective_start, effective_end, rules };
@@ -104,4 +120,4 @@ function resolveBase(lesson, newRule, legacyRule = null) {
   // Explicit restoration applies a legacy rule once in the storage layer.
   return { cents: lesson.teacher_salary == null ? null : Math.round(Number(lesson.teacher_salary) * 100), source: text(lesson.teacher_salary_source) || 'legacy' };
 }
-module.exports = { GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, resolveBase, Formula };
+module.exports = { GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeRules, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, resolveBase, Formula };

@@ -74,8 +74,8 @@ after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-full-ex
 test("legacy corruption sample reproduces sheet33 audit G2 at 32767 UTF-16 units", () => { const parsed = parseWorkbook(legacyUnsafeWorkbook()); assert.equal(parsed.sheets[32].name, "审计事件"); assert.equal(parsed.sheets[32].rows[1][6].length, 32767); });
 test("structural validator rejects the legacy 32767-cell workbook", () => assert.throws(() => validateWorkbookStructure(legacyUnsafeWorkbook()), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
 test("writer rejects any unchunked cell above the 30000 limit", () => assert.throws(() => createWorkbook([{ name: "超长", rows: [["值"], ["x".repeat(30001)]] }]), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
-test("full export uses v5", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 5); });
-test("v5 retains salary tables, formulas, monthly K and explicit special base source", () => {
+test("full export uses v6", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 6); });
+test("v6 retains salary tables, formulas, monthly K and explicit special base source", () => {
   assert.equal(verified.data.salary_tables[0].name, '合成秋季薪资表');
   assert.equal(verified.data.salary_table_rules[0].formula, '60+30*(n-1)+40*K');
   assert.equal(verified.data.teacher_monthly_performance[0].coefficient, 0.85);
@@ -148,7 +148,7 @@ test("operation logs can be excluded while preserving the v4 sheet contract and 
   const output = path.join(tempRoot, "without logs", "全量数据_不含操作日志.xlsx");
   exportFullData({ dbPath: sourcePath, outputPath: output, includeOperationLogs: false });
   const result = verifyFullData(output); const info = new Map(result.workbook.sheetMap.get("导出说明").rows.slice(1).map((row) => [row[0], row[1]]));
-  assert.equal(result.version, 5); assert.equal(result.operation_logs_included, false); assert.equal(result.workbook.sheetMap.get("操作日志").rows.length, 1); assert.match(info.get("是否包含操作日志"), /^否/);
+  assert.equal(result.version, 6); assert.equal(result.operation_logs_included, false); assert.equal(result.workbook.sheetMap.get("操作日志").rows.length, 1); assert.match(info.get("是否包含操作日志"), /^否/);
   const metadata = new Map(result.workbook.sheetMap.get("__恢复元数据").rows.filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]])); assert.equal(metadata.get("operation_logs_included"), "false");
 });
 test("long operation content and JSON are chunked and fully reassembled", () => { const row = verified.data.operation_logs.find((item) => item.id === 1901); assert.equal(row.operation_content, longContent); assert.equal(row.extra_json, longJson); assert.ok(verified.workbook.sheetMap.get("__长文本分片").rows.length > 3); });
@@ -183,7 +183,7 @@ test("restored database passes foreign_key_check", () => { const db = new Databa
 test("backup_records is not restored", () => { const db = new DatabaseSync(targetPath, { readOnly: true }); assert.equal(db.prepare("SELECT COUNT(*) AS count FROM backup_records").get().count, 0); db.close(); });
 test("excluded diagnostic audit events are not restored", () => { const db = new DatabaseSync(targetPath, { readOnly: true }); assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events").get().count, 0); db.close(); });
 test("CLI export verify and restore work with spaces and Unicode paths", () => { const output = path.join(tempRoot, "CLI 空格", "全量.xlsx"); const target = path.join(tempRoot, "CLI 目标", "target.sqlite"); initDatabase(target); emptyManagedData(target); const run = (script, args) => spawnSync(process.execPath, [path.join(root, "scripts", "excel_backup", script), ...args], { cwd: root, encoding: "utf8" }); assert.equal(run("export_full_excel.js", ["--db", sourcePath, "--output", output]).status, 0); assert.equal(run("verify_full_excel.js", ["--input", output]).status, 0); assert.equal(run("restore_full_excel.js", ["--db", target, "--input", output, "--confirm", "OVERWRITE"]).status, 0); });
-test("synthetic v4 acceptance fixture uses the global opening-balance schema", () => { const output = path.join(tempRoot, "acceptance fixture", "黎明教育_全量数据_合成验收_v4.xlsx"); const result = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/create_acceptance_fixture.js"), "--output", output], { cwd: root, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); const fixture = verifyFullData(output); assert.equal(fixture.version, 5); assert.equal(fixture.data.student_opening_balances.length, 1); assert.equal(Object.prototype.hasOwnProperty.call(fixture.data.student_opening_balances[0], "month_key"), false); });
+test("synthetic v4 acceptance fixture uses the global opening-balance schema", () => { const output = path.join(tempRoot, "acceptance fixture", "黎明教育_全量数据_合成验收_v4.xlsx"); const result = spawnSync(process.execPath, [path.join(root, "scripts/excel_backup/create_acceptance_fixture.js"), "--output", output], { cwd: root, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); const fixture = verifyFullData(output); assert.equal(fixture.version, 6); assert.equal(fixture.data.student_opening_balances.length, 1); assert.equal(Object.prototype.hasOwnProperty.call(fixture.data.student_opening_balances[0], "month_key"), false); });
 test("full-data filename is Windows-safe", () => assert.doesNotMatch(path.basename(backupPath), /[<>:"/\\|?*]/));
 test("restored account can log in with its original password", async () => {
   const port = await freePort(); let stderr = "";

@@ -1,6 +1,6 @@
 const { parseTimeRange } = require("../domain/lesson_time");
 const SalaryWorkflow = require("../domain/salary_workflow");
-const SALARY_TABLES = new Set(["salary_tables", "salary_table_rules", "teacher_monthly_performance"]);
+const SALARY_TABLES = new Set(["salary_tables", "salary_table_rules", "teacher_monthly_performance", "salary_table_templates", "salary_table_template_rules"]);
 const { migrateRechargeDates } = require("../domain/recharge_date");
 const { migrateCourseTypes, defaultCourseType } = require("../domain/course_type");
 const crypto = require("node:crypto");
@@ -16,7 +16,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 5;
+const FORMAT_VERSION = 6;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -389,7 +389,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || ![4, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 或 v5 完整数据文件");
+  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5 或 v6 完整数据文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -452,6 +452,14 @@ function validateData(data, parsedVisible) {
       if (index && table.effective_start <= ordered[index - 1].effective_end) throw new Error("薪资表生效日期重叠");
     }
     for (const rule of data.salary_table_rules) if (!ids.has(rule.salary_table_id)) throw new Error("薪资表规则缺少对应薪资表");
+    const templateIds = new Set();
+    for (const template of data.salary_table_templates) {
+      if (!Number.isSafeInteger(template.id) || template.id <= 0 || templateIds.has(template.id) || !text(template.name) || text(template.name).length > 80) throw new Error("薪资模板名称或编号无效");
+      if (Object.hasOwn(template, "effective_start") || Object.hasOwn(template, "effective_end")) throw new Error("薪资模板不能包含生效日期");
+      templateIds.add(template.id);
+      SalaryWorkflow.normalizeRules(data.salary_table_template_rules.filter(rule => rule.template_id === template.id));
+    }
+    for (const rule of data.salary_table_template_rules) if (!templateIds.has(rule.template_id)) throw new Error("模板规则缺少对应模板");
     const coefficients = new Set();
     for (const row of data.teacher_monthly_performance) {
       if (!text(row.teacher_name) || !SalaryWorkflow.validDate(row.month_key) || !row.month_key.endsWith("-01") || SalaryWorkflow.Formula.cents(row.coefficient) > 100) throw new Error("教师月度绩效系数无效");
@@ -460,6 +468,7 @@ function validateData(data, parsedVisible) {
       coefficients.add(key);
     }
     for (const row of data.lessons) {
+      if (![undefined, null, "", "manual", "auto", "legacy"].includes(row.course_type_source)) throw new Error("课程类型来源无效");
       if (![undefined, null, "", "manual", "auto"].includes(row.teacher_base_salary_source)) throw new Error("基础课薪来源无效");
       if (row.teacher_base_salary_override != null && SalaryWorkflow.Formula.cents(row.teacher_base_salary_override) > 10000000) throw new Error("特殊基础课薪超出范围");
       if (row.teacher_base_salary_source === "manual" && row.teacher_base_salary_override == null) throw new Error("特殊基础课薪缺少金额");
@@ -475,7 +484,7 @@ function validateData(data, parsedVisible) {
 
 function verifyFullData(input) {
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 或 v5 完整数据文件");
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5 或 v6 完整数据文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
@@ -504,7 +513,7 @@ function restoreFullData({ dbPath, inputPath }) {
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => a.restore_order - b.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         const available = new Set(tableColumns(db, definition.source_table));
-        for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
+        for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); if (definition.source_table === "lessons" && !Object.hasOwn(row, "course_type_source")) row.course_type_source = row.course_type ? "legacy" : "auto"; const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
       }
       const rechargeMigration = migrateRechargeDates(db);
       if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, recharge_migration: rechargeMigration, integrity_check: "ok", foreign_key_violation_count: 0 };

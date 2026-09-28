@@ -49,7 +49,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260928-salary-table-performance-workflow";
+const APP_VERSION = process.env.APP_VERSION || "20260928-salary-template-course-type-ui-fixes";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -7175,23 +7175,32 @@ function syncClassGroupsFromSources() {
   });
 }
 
-function classGroupRows() {
+function classGroupCourseRows(user) {
+  let rows = all("SELECT * FROM lessons ORDER BY date,time_slot,id");
+  if (user) {
+    rows = filterLessonsByRolePrefilter(rows, user, "classGroups");
+    if (canonicalRole(user.role) === "teacher") rows = rows.filter(row => uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]).includes(text(row.teacher_name)));
+  }
+  return rows;
+}
+
+function classGroupRows(user = null) {
   syncClassGroupsFromSources();
-  return all(`
-    SELECT *
-    FROM class_groups
-    ORDER BY teacher,
-      CASE grade
-        WHEN '初一' THEN 1
-        WHEN '初二' THEN 2
-        WHEN '初三' THEN 3
-        WHEN '高一' THEN 4
-        WHEN '高二' THEN 5
-        WHEN '高三' THEN 6
-        ELSE 99
-      END,
-      grade, subject, students_display, id
-  `);
+  const metadata = all("SELECT * FROM class_groups ORDER BY teacher,grade,subject,id");
+  const byIdentity = new Map(metadata.map(row => [classGroupLookupKey(row), row]));
+  const groups = new Map();
+  for (const lesson of classGroupCourseRows(user)) {
+    const identity = classGroupIdentity(lesson);
+    if (!identity.teacher || !identity.grade || !identity.subject || !identity.students_key) continue;
+    const record = byIdentity.get(classGroupLookupKey(lesson));
+    if (!record) continue;
+    const key = SalaryWorkflow.classKey(lesson);
+    if (!groups.has(key)) groups.set(key, { ...record, id: String(record.id) + ":" + encodeURIComponent(lesson.course_type || ""), metadata_id: record.id, course_type: lesson.course_type, group_key: key, lesson_ids: [], course_count: 0 });
+    const group = groups.get(key);
+    group.lesson_ids.push(lesson.id); group.course_count++;
+  }
+  // Name metadata stays persisted, but the management view contains actual course groups only.
+  return [...groups.values()];
 }
 
 function classGroupLookupMap() {
@@ -7206,6 +7215,7 @@ function classGroupLookupMap() {
 function updateClassGroupName(body = {}) {
   const id = Number(body.id);
   const className = text(body.class_name);
+  if (Object.hasOwn(body, "course_type")) return { error: "请通过班级课程类型专用接口修改", status: 400 };
   if (id) {
     const before = get("SELECT * FROM class_groups WHERE id = ?", [id]);
     if (!before) return { error: "班级不存在", status: 404 };
@@ -9950,7 +9960,7 @@ function roleCan(user, area, action = "read") {
 
 function apiArea(req, url) {
   const p = url.pathname;
-  if (p.startsWith("/api/salary-tables") || p === "/api/teacher-monthly-performance") return "teacherSalary";
+  if ((p.startsWith("/api/salary-tables") || p.startsWith("/api/salary-templates")) || p === "/api/teacher-monthly-performance") return "teacherSalary";
   if (p.startsWith("/api/teacher-detail")) return p.includes("/salary/") ? "teacherSalary" : "profiles";
   if (p.startsWith("/api/data-center")) return "coreExport";
   if (p.startsWith("/api/roles")) return "roles";
@@ -9980,7 +9990,7 @@ function apiArea(req, url) {
 
 function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
-  if (p.startsWith("/api/salary-tables")) return ["teacherDetail"];
+  if ((p.startsWith("/api/salary-tables") || p.startsWith("/api/salary-templates"))) return ["teacherDetail"];
   if (p === "/api/teacher-monthly-performance") return ["teacherSalary"];
   if (p === "/api/fee-details-page") return ["feeDetails"];
   if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
@@ -11993,14 +12003,15 @@ function patchTable(table, idField, idValue, allowedFields, data) {
 }
 
 function resolveCourseType(data, current = null) {
-  const changedGrade = current && text(current.grade) !== text(data.grade);
-  const value = changedGrade && !courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))).includes(text(data.course_type)) ? "" : text(data.course_type);
-  if (value && (!current || value !== text(current.course_type)) && !courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))).includes(value)) {
-    throw Object.assign(new Error("课程类型不属于当前年级的候选范围"), { status: 400 });
+  const choices = courseTypeOptions(data.grade, Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value])));
+  if (current && ["manual", "legacy"].includes(current.course_type_source)) {
+    if (text(current.grade) !== text(data.grade) && !choices.includes(text(current.course_type))) throw new Error("人工课程类型不适用于新年级，请先在班级管理调整类型");
+    return text(current.course_type);
   }
-  if (value) return value;
-  const group = tableExists("class_groups") ? get("SELECT course_type FROM class_groups WHERE teacher=? AND grade=? AND subject=? AND students_key=?", [text(data.teacher_name), text(data.grade), text(data.subject), normalizedStudents(data.student_names)]) : null;
-  return text(group?.course_type) || defaultCourseType(data.grade, data.student_names || data.students_key);
+  const identityChanged = current && (text(current.grade) !== text(data.grade) || normalizedStudents(current.student_names) !== normalizedStudents(data.student_names));
+  const value = identityChanged ? "" : text(data.course_type);
+  if (value && (!current || value !== text(current.course_type)) && !choices.includes(value)) throw new Error("课程类型不属于当前年级的候选范围");
+  return value || defaultCourseType(data.grade, data.student_names || data.students_key);
 }
 
 function insertLesson(data, options = {}) {
@@ -12016,9 +12027,9 @@ function insertLesson(data, options = {}) {
     INSERT INTO lessons(
       teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
       student_names, notes, course_status, status, teacher_salary, teacher_salary_source,
-      teacher_salary_rule_id, month_key, sort_order, course_type
+      teacher_salary_rule_id, month_key, sort_order, course_type, course_type_source
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     text(data.teacher_name),
     text(data.date || monthKey),
@@ -12037,6 +12048,7 @@ function insertLesson(data, options = {}) {
     text(monthKey),
     num(data.sort_order),
     courseType,
+    options.preserveCourseType ? (data.course_type_source || "legacy") : (text(data.course_type) ? "legacy" : "auto"),
   );
   const lesson = get("SELECT * FROM lessons WHERE id = ?", [Number(result.lastInsertRowid)]);
   return salary.warning ? { ...lesson, teacher_salary_warning: salary.warning } : lesson;
@@ -12169,6 +12181,7 @@ function copyLessons(body) {
         time_slot: src.time_slot,
         classroom: src.classroom,
         course_type: src.course_type,
+        course_type_source: src.course_type_source,
         grade: src.grade,
         subject: src.subject,
         student_names: src.student_names,
@@ -12206,6 +12219,8 @@ function createLessonsBatch(rows) {
   for (const item of items) {
     const normalized = normalizeLessonPersistenceInput(item);
     if (normalized.error) return { error: normalized.error, status: 400 };
+    const source = item.source_id ? get("SELECT course_type FROM lessons WHERE id=?", [Number(item.source_id)]) : null;
+    if (text(item.course_type) && (!source || source.course_type !== item.course_type)) return { error: "复制只能保留原课程类型，人工修改请在班级管理操作", status: 400 };
     normalizedItems.push(normalized.data);
   }
   return withTransaction(() => {
@@ -12216,9 +12231,10 @@ function createLessonsBatch(rows) {
       if (!validDateKey(text(item.date))) {
         return { error: `目标日期无效：${text(item.date) || "空"}`, status: 400 };
       }
-      const source = item.source_id ? get("SELECT course_type FROM lessons WHERE id = ?", [Number(item.source_id)]) : null;
+      const source = item.source_id ? get("SELECT course_type,course_type_source FROM lessons WHERE id = ?", [Number(item.source_id)]) : null;
       created.push(insertLesson({
         ...item,
+        course_type_source: source?.course_type_source,
         month_key: text(item.month_key) || monthKeyFromDate(item.date) || getSetting("month_key"),
       }, { preserveCourseType: Boolean(source && source.course_type === item.course_type) }));
     }
@@ -12871,7 +12887,36 @@ async function handleApi(req, res, url) {
     return sendJson(res, data);
   }
   if (req.method === "GET" && url.pathname === "/api/class-groups") {
-    return sendJson(res, { class_groups: classGroupRows() });
+    return sendJson(res, { class_groups: classGroupRows(user) });
+  }
+  if (req.method === "GET" && url.pathname === "/api/class-groups/courses") {
+    const key = text(url.searchParams.get("key"));
+    const lessons = classGroupCourseRows(user).filter(row => SalaryWorkflow.classKey(row) === key);
+    return sendJson(res, { lessons: sanitizeLessonRows(lessons, user) });
+  }
+  if (req.method === "PATCH" && url.pathname === "/api/class-groups/course-type") {
+    if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或教务可修改课程类型");
+    const body = await readBody(req);
+    const ids = [...new Set(Array.isArray(body.lesson_ids) ? body.lesson_ids : [])];
+    if (!ids.length || ids.length > 10000 || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) return sendError(res, 400, "请选择有效课程");
+    const key = text(body.group_key), type = text(body.course_type);
+    const rows = classGroupCourseRows(user).filter(row => SalaryWorkflow.classKey(row) === key);
+    const wanted = new Set(ids), selected = rows.filter(row => wanted.has(row.id));
+    if (selected.length !== ids.length) return sendError(res, 409, "班级课程已变化或不在权限范围，请刷新后重试");
+    if (!["class", "lesson"].includes(body.mode) || (body.mode === "lesson" && ids.length !== 1) || (body.mode === "class" && rows.length !== ids.length)) return sendError(res, 409, "班级课程数量已变化，请刷新后重新确认");
+    const settings = Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]));
+    if (!type || selected.some(row => !courseTypeOptions(row.grade, settings).includes(type))) return sendError(res, 400, "课程类型不属于当前年级的候选范围");
+    withTransaction(() => {
+      const update = db.prepare("UPDATE lessons SET course_type=?,course_type_source='manual',updated_at=CURRENT_TIMESTAMP WHERE id=?");
+      for (const row of selected) update.run(type, row.id);
+      const first = selected[0];
+      const description = body.mode === "class"
+        ? `修改班级类型：${first.grade}${first.subject}班由“${first.course_type}”调整为“${type}”，共更新${selected.length}节课程`
+        : `修改课程类型：${first.date} ${first.grade}${first.subject}由“${first.course_type}”调整为“${type}”`;
+      writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(",") });
+    });
+    clearDerivedCache("class course type updated");
+    return sendJson(res, { ok: true, updated: selected.length, class_groups: classGroupRows(user) });
   }
   const classGroupMatch = url.pathname.match(/^\/api\/class-groups\/(\d+)$/);
   if (classGroupMatch && (req.method === "PATCH" || req.method === "PUT")) {
@@ -12989,6 +13034,23 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/teachers") {
     return sendJson(res, { teachers: teacherProfiles() });
+  }
+  const templateMatch = url.pathname.match(/^\/api\/salary-templates(?:\/(\d+)\/(use))?$/);
+  if (templateMatch) {
+    if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或有薪资权限的教务可使用薪资模板");
+    const fullScope = isSuperRole(user.role) || ["teacherDetail", "teacherSalary", "teacherSalaryRules"].every(key => Object.keys(rolePrefilterForView(user, key)).length === 0);
+    if (req.method === "GET" && !templateMatch[1]) return sendJson(res, { templates: salaryStore.templates() });
+    if (req.method !== "POST") return sendError(res, 405, "不支持的模板操作");
+    if (!fullScope) return sendError(res, 403, "薪资模板需要完整薪资管理范围");
+    try {
+      let template;
+      if (templateMatch[1]) {
+        template = salaryStore.templates().find(row => row.id === Number(templateMatch[1]));
+        if (!template) return sendError(res, 404, "薪资模板不存在");
+      } else template = salaryStore.saveTemplate(await readBody(req));
+      writeOperationLog(user, { operation_type: templateMatch[1] ? "使用薪资模板" : "新增薪资模板", operation_content: templateMatch[1] ? `在薪资表中使用模板：“${template.name}”` : `新增薪资模板：“${template.name}”`, target_type: "salary_table_templates", target_id: String(template.id) });
+      return sendJson(res, { ok: true, template });
+    } catch (error) { return sendError(res, 400, error.message); }
   }
   const salaryTableMatch = url.pathname.match(/^\/api\/salary-tables(?:\/(\d+)(?:\/(impact))?)?$/);
   const baseSalaryMatch = url.pathname.match(/^\/api\/teacher-detail\/salary\/(\d+)$/);
@@ -14045,6 +14107,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/lessons") {
     const body = await readBody(req);
+    if (text(body.course_type) || Object.hasOwn(body, "course_type_source")) return sendError(res, 400, "新课程类型由系统推断，人工修改请在班级管理操作");
     const nameError = teacherNameError(body.teacher_name);
     if (nameError) return sendError(res, 400, nameError);
     const normalized = normalizeLessonPersistenceInput(body);
@@ -14075,6 +14138,7 @@ async function handleApi(req, res, url) {
   const lessonMatch = url.pathname.match(/^\/api\/lessons\/(\d+)$/);
   if (lessonMatch && req.method === "PATCH") {
     const body = await readBody(req);
+    if (Object.hasOwn(body, "course_type") || Object.hasOwn(body, "course_type_source")) return sendError(res, 400, "课程类型请在班级管理中修改");
     const normalized = normalizeLessonPersistenceInput(body);
     if (normalized.error) return sendError(res, 400, normalized.error);
     const incoming = normalized.data;

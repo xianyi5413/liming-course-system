@@ -152,9 +152,9 @@ test('actual role clicks stay open, save locally and teacher binding retains sea
 
 test('new lesson logs use semantic changes while historical text remains unchanged',async()=>{
  const db=new DatabaseSync(dbPath);const historical=db.prepare('SELECT id,operation_content,extra_json FROM operation_logs ORDER BY id LIMIT 1').get();const id=db.prepare('SELECT id FROM lessons ORDER BY id LIMIT 1').get().id;db.close();
- const result=await api('/api/lessons/'+id,'PATCH',{student_names:'合成学生、蔡文姬',notes:'业务备注',course_type:'1V2',allow_conflicts:true});assert.equal(result.status,200);
+ const result=await api('/api/lessons/'+id,'PATCH',{student_names:'合成学生、蔡文姬',notes:'业务备注',allow_conflicts:true});assert.equal(result.status,200);
  const inspect=new DatabaseSync(dbPath);const log=inspect.prepare("SELECT operation_content,extra_json FROM operation_logs WHERE target_type='lessons' AND target_id=? ORDER BY id DESC LIMIT 1").get(String(id));assert.deepEqual(inspect.prepare('SELECT id,operation_content,extra_json FROM operation_logs WHERE id=?').get(historical.id),historical);inspect.close();
- assert.match(log.operation_content,/加入“蔡文姬”/);assert.match(log.operation_content,/备注更新为“业务备注”/);assert.match(log.operation_content,/课程类型/);assert.doesNotMatch(log.operation_content,/student_names|course_type|notes/);assert.equal(JSON.parse(log.extra_json).semantic_version,1);
+ assert.match(log.operation_content,/加入“蔡文姬”/);assert.match(log.operation_content,/备注更新为“业务备注”/);assert.doesNotMatch(log.operation_content,/student_names|course_type|notes/);assert.equal(JSON.parse(log.extra_json).semantic_version,1);
  const response=await api('/api/operation-logs?page_size=50');assert.equal(response.status,200);
 });
 

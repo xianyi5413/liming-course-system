@@ -13,7 +13,7 @@ function courseTypeOptions(grade, settings = {}) {
   if (!scope) return [];
   let custom = settings[`custom_course_types_${scope}`] || [];
   if (typeof custom === 'string') { try { custom = JSON.parse(custom); } catch { custom = []; } }
-  return [...new Set([...COURSE_TYPE_DEFAULTS[scope], ...(Array.isArray(custom) ? custom : [])].map(v => String(v).trim()).filter(Boolean))];
+  return [...new Set([...COURSE_TYPE_DEFAULTS[scope], ...(Array.isArray(custom) ? custom : [])].map(v => String(v).trim()).filter(value => value && !(scope === 'junior' && value === '1V3')))];
 }
 function migrateCourseTypes(db, { backfill = true } = {}) {
   const report = { lessons: 0, class_groups: 0 };
@@ -22,6 +22,13 @@ function migrateCourseTypes(db, { backfill = true } = {}) {
     for (const [table, students] of [['lessons', 'student_names'], ['class_groups', 'students_key']]) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
       if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === 'course_type')) db.exec(`ALTER TABLE ${table} ADD COLUMN course_type TEXT DEFAULT ''`);
+      if (table === 'lessons') {
+        if (!db.prepare('PRAGMA table_info(lessons)').all().some(c => c.name === 'course_type_source')) {
+          db.exec("ALTER TABLE lessons ADD COLUMN course_type_source TEXT NOT NULL DEFAULT ''");
+          // Existing nonempty types have unknown provenance; preserve them.
+          db.exec("UPDATE lessons SET course_type_source='legacy' WHERE TRIM(COALESCE(course_type,''))<>''");
+        }
+      }
       if (!backfill) continue;
       const update = db.prepare(`UPDATE ${table} SET course_type=? WHERE id=? AND TRIM(COALESCE(course_type,''))=''`);
       for (const row of db.prepare(`SELECT id,grade,${students} AS students FROM ${table} WHERE TRIM(COALESCE(course_type,''))=''`).all()) {
@@ -29,6 +36,7 @@ function migrateCourseTypes(db, { backfill = true } = {}) {
         if (value) report[table] += Number(update.run(value, row.id).changes);
       }
     }
+    if (backfill && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'").get()) db.exec("UPDATE lessons SET course_type_source='auto' WHERE course_type_source='' AND TRIM(COALESCE(course_type,''))<>''");
     db.exec('RELEASE course_types_migration');
     return report;
   } catch (error) { db.exec('ROLLBACK TO course_types_migration; RELEASE course_types_migration'); throw error; }

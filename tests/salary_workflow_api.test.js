@@ -53,6 +53,12 @@ test('synthetic 6000-course workflow queries dates and teachers and stays respon
   const response = await api('/api/teacher-detail/workflow?' + new URLSearchParams({ teacher: '性能教师0', start: '2026-10-01', end: '2026-12-31' }));
   assert.equal(response.payload.lessons.length, 750); assert.equal(response.payload.classes.length, 25); assert.equal(response.payload.tables.length, 3);
   assert.ok(performance.now() - started < 2000, 'scoped API should finish within 2 seconds');
+  const classStarted = performance.now();
+  const allClasses = await api('/api/class-groups');
+  assert.equal(allClasses.response.status, 200);
+  assert.ok(allClasses.payload.class_groups.reduce((sum, row) => sum + row.course_count, 0) >= 6000);
+  assert.ok(allClasses.payload.class_groups.every(row => row.lesson_ids.length === row.course_count && !Object.hasOwn(row, 'lessons')));
+  assert.ok(performance.now() - classStarted < 2000, 'class aggregation returns IDs/counts in one request');
   const chrome = await launchChrome(path.join(tempRoot, 'performance-chrome')); const browser = chrome.session;
   try {
     await browser.send('Page.navigate', { url: `http://127.0.0.1:${port}/` }); await browser.login('boss', '123456');

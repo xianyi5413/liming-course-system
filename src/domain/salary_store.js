@@ -41,6 +41,21 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
       return { id, ...value };
     });
   }
+  function templates() {
+    const rules = rows('SELECT * FROM salary_table_template_rules ORDER BY id');
+    return rows('SELECT * FROM salary_table_templates ORDER BY updated_at DESC,id DESC').map(row => ({ ...row, rules: rules.filter(rule => rule.template_id === row.id) }));
+  }
+  function saveTemplate(body) {
+    const name = String(body.name || '').trim();
+    if (!name || name.length > 80) throw new Error('模板名称必填，且不得超过 80 字符');
+    const rules = W.normalizeRules(body.rules);
+    return atomic(() => {
+      const id = Number(db.prepare('INSERT INTO salary_table_templates(name) VALUES(?)').run(name).lastInsertRowid);
+      const insert = db.prepare('INSERT INTO salary_table_template_rules(template_id,grade,course_type,formula) VALUES(?,?,?,?)');
+      for (const rule of rules) insert.run(id, rule.grade, rule.course_type, rule.formula);
+      return templates().find(row => row.id === id);
+    });
+  }
   function impact(id) {
     const table = db.prepare('SELECT * FROM salary_tables WHERE id=?').get(id);
     if (!table) throw new Error('薪资表不存在');
@@ -118,7 +133,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     }
     return result;
   }
-  return { context, list, save, impact, remove, coefficient, resolve, override, allocate, invalidate };
+  return { context, list, save, templates, saveTemplate, impact, remove, coefficient, resolve, override, allocate, invalidate };
 }
 
 module.exports = { createSalaryStore };

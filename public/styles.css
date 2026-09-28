@@ -14447,3 +14447,28 @@ button.student-stage-conflict-check:is(.warning,.error) { color: var(--danger); 
 .salary-auto-button { display: inline-block; margin: 0 0 0 8px; }
 .salary-coefficient-input { min-width: 84px; width: 90px; }
 .salary-editor-error { color: #c62828; }
+
+
+/* Reuse adaptive column semantics for all course-detail dialogs. */
+.salary-editor-controls { display: flex; align-items: flex-end; flex-wrap: wrap; justify-content: flex-start; gap: 12px; }
+.salary-editor-controls > .filter-field { flex: 0 1 auto; min-width: 0; margin: 0; }
+.salary-editor-controls > .filter-field:first-child { flex-basis: 240px; }
+.salary-editor-controls .control, .salary-editor-controls .btn { min-height: 38px; }
+.salary-editor-controls .filter-date-range, .salary-editor-controls .date-range-picker { margin-left: 0; }
+.salary-editor-controls > .btn { flex: 0 0 auto; }
+.salary-template-dialog { z-index: 1500; }
+.salary-template-dialog .modal-panel { width: min(520px, calc(100vw - 32px)); }
+.salary-template-form { display: grid; gap: 12px; }
+.course-details-table thead th, .teacher-class-summary-table thead th, .teacher-salary-table thead th { text-align: center !important; }
+table.adaptive-table .adaptive-full .student-set-badges { display: inline-flex; flex-wrap: nowrap; width: max-content; max-width: none; white-space: nowrap; overflow: visible; }
+table.adaptive-table td[data-adaptive-alignment="center"] .student-set-badges { justify-content: center; }
+.course-details-table .salary-full-text { min-width: 0; }
+.course-details-table .salary-auto-button { padding: 4px 8px; }
+.course-details-table .price-inline { justify-content: flex-end; }
+.teacher-salary-table td:nth-child(3), .teacher-salary-table td:nth-child(6) { text-align: center !important; }
+.salary-coefficient-input { appearance: textfield; -moz-appearance: textfield; min-width: 0; width: 100%; text-align: center; }
+.salary-coefficient-input::-webkit-inner-spin-button, .salary-coefficient-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+@media (max-width: 600px) {
+  .salary-editor-controls > .filter-field { max-width: 100%; }
+  .salary-editor-controls > .filter-field:first-child { flex: 1 1 100%; }
+}

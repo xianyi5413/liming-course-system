@@ -622,7 +622,7 @@ function invalidateRequestCache(prefixes = []) {
 
 function cacheInvalidationPrefixes(path = "") {
   const base = String(path).split("?")[0];
-  if (/^\/api\/(salary-tables|teacher-monthly-performance|teacher-detail\/salary)/.test(base)) return ["/api/salary-tables", "/api/teacher-detail", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (/^\/api\/(salary-tables|salary-templates|class-groups\/course-type|teacher-monthly-performance|teacher-detail\/salary)/.test(base)) return ["/api/salary-tables", "/api/salary-templates", "/api/class-groups", "/api/teacher-detail", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
@@ -681,7 +681,7 @@ async function request(path, options = {}) {
     if (method !== "GET") {
       clearStudentQueryCache();
       SearchTools.clear();
-      if (state && /^\/api\/(salary-tables|teacher-monthly-performance|teacher-detail\/salary|recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
+      if (state && /^\/api\/(salary-tables|salary-templates|class-groups\/course-type|teacher-monthly-performance|teacher-detail\/salary|recharges|lessons|fee-overrides|student-pricing|pricing|opening-balances)/.test(String(path))) state.full_bootstrap_key = "";
       invalidateRequestCache(cacheInvalidationPrefixes(path));
       if (String(path).startsWith("/api/student-pricing")
         || String(path).startsWith("/api/students")
@@ -3714,7 +3714,7 @@ function adaptiveCellContentWidth(cell, definition, font) {
     return (definition.wrap ? Math.max(0, ...widths) : widths.reduce((sum, width) => sum + width + 6, 0)) + 20;
   }
   const currency = cell.querySelector(".currency-display");
-  if (currency) return measure(currency.textContent.trim()) + 56;
+  if (currency) return measure(currency.textContent.trim()) + 56 + (cell.querySelector(".salary-auto-button") ? measure("恢复自动") + 52 : 0);
   const input = cell.querySelector(":scope > .cell-input");
   if (input) return (definition.wrap ? wrapWidth(input.value || input.placeholder) : measure(input.value || input.placeholder || "")) + (input.type === "date" ? 52 : 36);
   const custom = cell.querySelector(".custom-select-value");
@@ -3842,7 +3842,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
 
   const wrapper = table.closest(".table-wrap");
   const availableWidth = wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0);
-  distributeAdaptiveGrowth(widths, definitions, availableWidth);
+  if (table.dataset.adaptiveNatural !== "true") distributeAdaptiveGrowth(widths, definitions, availableWidth);
 
   columns.forEach((column, index) => {
     const definition = definitions[index];
@@ -5645,6 +5645,7 @@ function passwordEyeIcon(visible) {
 
 function renderLogin(error = "") {
   SalaryUI.resetSession();
+  ClassCourseUI.close();
   dismissToast();
   closeSearchablePicker();
   cleanupCustomSelectPortals();
@@ -6486,10 +6487,10 @@ function validCourseTypeForGrade(grade, current = "") {
   return (state?.lookups?.course_types?.[state?.lookups?.course_type_grades?.[grade]] || []).includes(current) ? current : "";
 }
 
-function courseTypeSelectOptions(grade, current = "") {
+function courseTypeSelectOptions(grade, current = "", allowAutomatic = true) {
   const scope = state?.lookups?.course_type_grades?.[grade];
   const values = state?.lookups?.course_types?.[scope] || [];
-  return `<option value="">按人数默认</option>${options(current && !values.includes(current) ? [current, ...values] : values, current)}`;
+  return `${allowAutomatic ? '<option value="">按人数默认</option>' : ""}${options(values, current)}`;
 }
 
 function lessonReadonlyCells(row, visibleIndex, cumulative) {
@@ -6518,7 +6519,7 @@ function lessonEditCells(row, visibleIndex, cumulative) {
       <td class="readonly col-weekday">${escapeHtml(weekdayCn(row.date))}</td>
       ${lessonInlinePickerCell(row, "time_slot", "col-time")}
       ${lessonInlinePickerCell(row, "classroom", "col-room")}
-      ${lessonInlinePickerCell(row, "course_type", "col-type")}
+      ${lessonTextCell("col-type", row.course_type || "")}
       ${lessonInlinePickerCell(row, "status", "col-status")}
       ${lessonInlinePickerCell(row, "grade", "col-grade")}
       ${lessonInlinePickerCell(row, "subject", "col-subject")}
@@ -6939,7 +6940,6 @@ function lessonCreateCandidateFromModal(modal) {
     time_slot: lessonCreateFieldValue(modal, "time_slot"),
     teacher_name: lessonCreateFieldValue(modal, "teacher_name"),
     classroom: lessonCreateFieldValue(modal, "classroom"),
-    course_type: lessonCreateFieldValue(modal, "course_type"),
     student_names: normalizeLessonStudentNames([...selectedStudents, ...manualStudents].join("、")),
     status: lessonCreateFieldValue(modal, "status") || "待上",
   };
@@ -7105,7 +7105,6 @@ function lessonCreateModal() {
             </select>
             <input class="control lesson-create-manual-field hidden" data-manual-field="grade" type="text" placeholder="请输入新年级名称">
           </label>
-          <label class="filter-field"><span>类型</span><select class="control lesson-create-field" data-field="course_type">${courseTypeSelectOptions(draft.grade, draft.course_type)}</select></label>
           <label class="filter-field">
             <span>科目</span>
             <select class="control lesson-create-field" data-field="subject">
@@ -7806,7 +7805,6 @@ function scheduleConflictLessonDetail(row) {
     time_slot: row.time_slot || "",
     teacher_name: row.teacher_name || "",
     classroom: row.classroom || "",
-    course_type: row.course_type || "",
     grade: row.grade || "",
     subject: row.subject || "",
     student_names: row.student_names || "",
@@ -8214,7 +8212,6 @@ function lessonConflictEditModal() {
           <label class="filter-field"><span>时间</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="time_slot">${lessonCandidateSelectOptions({ field: "time_slot", values: getTimeOptions(draft.time_slot), current: draft.time_slot, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("time_slot") })}</select></label>
           <label class="filter-field"><span>教室</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="classroom">${lessonCandidateSelectOptions({ field: "classroom", values: getRoomOptions(draft.classroom), current: draft.classroom, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("classroom") })}</select></label>
           <label class="filter-field"><span>年级</span><select class="control conflict-edit-field" data-field="grade">${manualSelectOptions(getGradeOptions(draft.grade), draft.grade, lessonManualLabel("grade"))}</select></label>
-          <label class="filter-field"><span>类型</span><select class="control conflict-edit-field" data-field="course_type">${courseTypeSelectOptions(draft.grade, draft.course_type)}</select></label>
           <label class="filter-field"><span>科目</span><select class="control conflict-edit-field" data-field="subject">${manualSelectOptions(getSubjectOptions(draft.subject), draft.subject, lessonManualLabel("subject"))}</select></label>
           <label class="filter-field"><span>状态</span><select class="control conflict-edit-field" data-field="status">${manualSelectOptions(getStatusOptions(draft.status || rowStatus(draft)), draft.status || rowStatus(draft), lessonManualLabel("status"), { emptyText: "" })}</select></label>
           <label class="filter-field"><span>备注</span><textarea class="control conflict-edit-field" data-field="notes" rows="2">${escapeHtml(draft.notes || "")}</textarea></label>
@@ -11740,9 +11737,9 @@ function renderClassGroups() {
                 <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
-                <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"><span class="lesson-inline-picker">${escapeHtml(row.course_type || "按人数默认")}</span></td>
+                <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" ${row.course_count && ClassCourseUI.editable() ? 'role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"' : 'aria-readonly="true"'}><span class="lesson-inline-picker">${escapeHtml(row.course_type || "按人数默认")}</span></td>
                 <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
-                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="-"></td>
+                <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.metadata_id || row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="-"></td>
               </tr>
             `).join("") || `<tr><td colspan="7" class="empty">暂无班级候选</td></tr>`}
           </tbody>
@@ -12828,8 +12825,8 @@ function renderTeacherSalary() {
   const sum = field => rows.reduce((total, row) => total + numberValue(row[field]), 0);
   const pending = rows.some(row => row.total_salary == null);
   renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐规则或绩效系数" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
-  contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table"><colgroup>${rowIndexColumn()}${Array(8).fill("<col>").join("")}</colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>月度绩效</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
-    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="right">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="number" min="0" max="1" step="0.01" placeholder="未设置" value="${row.performance_coefficient == null ? "" : Number(row.performance_coefficient).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
+  contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>月度绩效</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
+    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${row.performance_coefficient == null ? "" : Number(row.performance_coefficient).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
     <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
 
@@ -14642,6 +14639,7 @@ function renderLoadFailure(error) {
 
 function render() {
   if (view !== "teacherDetail") SalaryUI.close();
+  if (view !== "classGroups") ClassCourseUI.close();
   if (auth.user && !ensureAccessibleView()) return;
   if (view !== "dashboard") disposeDashboardTrendChart();
   if (view !== "studentProfiles" && studentGradeStageModalDraft) {
@@ -18114,22 +18112,7 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".class-group-type-cell").forEach(cell => {
-    const open = () => {
-      const row = (state.class_groups || []).find(item => String(item.id) === cell.dataset.id);
-      if (!row) return;
-      openInlineCustomPicker(cell, { id: row.id, field: "course_type", choices: courseTypeSelectOptions(row.grade, row.course_type), onChange: async input => {
-        try {
-          const result = await request(`/api/class-groups/${row.id}`, { method: "PATCH", body: { course_type: input.value } });
-          Object.assign(row, result.row);
-          cell.querySelector(".lesson-inline-picker").textContent = row.course_type || "按人数默认";
-          scheduleAdaptiveTableColumns(); showToast("班级已保存");
-        } catch (error) { showToast(error.message || "类型保存失败", "error"); }
-      } });
-    };
-    cell.addEventListener("click", event => { if (!event.target.closest(".custom-select")) open(); });
-    cell.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); open(); } });
-  });
+  ClassCourseUI.bind();
 
   document.querySelectorAll(".class-group-field").forEach((input) => {
     input.addEventListener("change", async () => {
@@ -18141,13 +18124,13 @@ function wireEvents() {
           method: "PATCH",
           body: { [input.dataset.field]: input.value },
         });
-        state.class_groups = (state.class_groups || []).map((row) => Number(row.id) === id ? { ...row, ...(result.row || {}) } : row);
+        state.class_groups = (state.class_groups || []).map((row) => Number(row.metadata_id || row.id) === id ? { ...row, class_name: result.row?.class_name ?? row.class_name } : row);
         if (input.dataset.field === "course_type") rebuildLessonCreateSelect(input, courseTypeSelectOptions(result.row.grade, result.row.course_type));
         showToast("班级已保存");
         scheduleAdaptiveTableColumns();
       } catch (error) {
         showToast(error.message || "班级名保存失败", "error");
-        const row = (state.class_groups || []).find((item) => Number(item.id) === id);
+        const row = (state.class_groups || []).find((item) => Number(item.metadata_id || item.id) === id);
         input.value = row?.[input.dataset.field] || "";
       } finally {
         input.disabled = isReadonlyUser();
@@ -18899,7 +18882,6 @@ function wireEvents() {
           time_slot: timeSlot,
           teacher_name: teacherName,
           classroom,
-          course_type: modal.querySelector('[data-field="course_type"]')?.value || "",
           grade,
           subject,
           student_names: normalizeLessonStudentNames(studentNames.join("、")),
@@ -19659,8 +19641,8 @@ load().catch((error) => {
   renderLoadFailure(error);
 });
 
-const MONEY_INPUT_SELECTOR = 'input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value';
+const MONEY_INPUT_SELECTOR = 'input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value,input.salary-coefficient-input';
 document.addEventListener('wheel', event => {
   const input = event.target.closest?.(MONEY_INPUT_SELECTOR);
-  if (input && document.activeElement === input) { event.preventDefault(); input.blur(); }
-}, { passive: false });
+  if (input && document.activeElement === input) input.blur();
+}, { passive: true, capture: true });
