@@ -16,7 +16,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 6;
+const FORMAT_VERSION = 7;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -146,13 +146,14 @@ function sourceDataFromDb(db, options = {}) {
       : db.prepare(`SELECT * FROM ${definition.source_table}`).all();
     if (definition.source_table === "settings") rows = safeSettingRows(rows);
     result[definition.source_table] = rows;
+    options.onProgress?.('read', 10 + Math.round(Object.keys(result).length / SOURCE_TABLE_DEFINITIONS.length * 20), '正在读取数据库');
   }
   return result;
 }
 
 function excelBaseSalary(lesson, context) {
   if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return 0;
-  const table = SalaryWorkflow.matchTable(context.salaryContext, lesson.date);
+  const table = SalaryWorkflow.matchTable(context.salaryContext, lesson.date, context.salaryContext.teacherIds.get(lesson.teacher_name));
   const duration = parseTimeRange(lesson.time_slot);
   const rule = table ? SalaryWorkflow.tableRule(context.salaryContext, table, lesson, duration ? duration.end - duration.start : null) : null;
   const resolved = SalaryWorkflow.resolveBase(lesson, rule);
@@ -282,7 +283,7 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const createdAt = options.createdAt || new Date(); const allowedStatuses = new Set([...DEFAULT_COURSE_STATUSES, ...customStatuses(sourceData)]);
   const context = {
     lessons: sourceData.lessons,
-    salaryContext: SalaryWorkflow.tableContext(sourceData.salary_tables, sourceData.salary_table_rules),
+    salaryContext: SalaryWorkflow.tableContext(sourceData.salary_tables, sourceData.salary_table_rules, sourceData.teachers),
     allowedStatuses,
     staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])),
     feeOverrides: new Map(sourceData.fee_overrides.map((row) => [`${row.lesson_id}\u0001${text(row.student_name)}`, Number(row.unit_price)])),
@@ -293,6 +294,7 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   for (const definition of VISIBLE_SHEET_DEFINITIONS) {
     const records = visibleRecords(definition, sourceData, context); visibleCounts[definition.sheet_name] = records.length;
     visibleSheets.push(buildVisibleSheet(definition, records, mapping, chunks, mappedRows));
+    options.onProgress?.('sheets', 30 + Math.round(visibleSheets.length / VISIBLE_SHEET_DEFINITIONS.length * 50), `正在生成${definition.sheet_name}`);
   }
   for (const definition of SOURCE_TABLE_DEFINITIONS) for (const row of sourceData[definition.source_table]) {
     const key = recordKey(definition.source_table, row); if (mappedRows.has(`${definition.source_table}\u0000${key}`)) continue;
@@ -312,11 +314,13 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const metadataRows = [["类型", "名称", "值", "SHA-256"], ["元数据", "file_type", FILE_TYPE, ""], ["元数据", "format_version", FORMAT_VERSION, ""], ["元数据", "created_at_utc", createdAt.toISOString(), ""], ["元数据", "schema_version_source", "pragma_user_version", ""], ["元数据", "schema_version", schemaVersion, ""], ["元数据", "operation_logs_included", operationLogsIncluded ? "true" : "false", ""], ...digestSheets.map((sheet) => ["工作表", sheet.name, sheet.rows.length - 1, sha256(canonical(sheet.rows))])];
   const metadataSheet = { name: "__恢复元数据", state: "veryHidden", rows: metadataRows };
   const sheets = [info, ...visibleSheets, metadataSheet, mappingSheet, authSheet, chunkSheet];
-  const buffer = createWorkbook(sheets); const structure = validateWorkbookStructure(buffer);
+  options.onProgress?.('workbook', 85, '正在生成 Excel');
+  const buffer = createWorkbook(sheets); options.onProgress?.('verify_file', 95, '正在检查生成文件'); const structure = validateWorkbookStructure(buffer);
   return { buffer, counts: Object.fromEntries(SOURCE_TABLE_DEFINITIONS.map((item) => [item.source_table, sourceData[item.source_table].length])), visibleCounts, createdAt, schemaVersion, sheets: sheets.map((sheet) => sheet.name), structure };
 }
 
 function buildFullDataBuffer(db, options = {}) {
+  options.onProgress?.('preflight', 5, '正在执行数据预检');
   ensureSchemaCompatible(db);
   const preflight = assertDataPreflight(db);
   const integrity = db.prepare("PRAGMA integrity_check").all().map((row) => Object.values(row)[0]); const foreignKeys = db.prepare("PRAGMA foreign_key_check").all();
@@ -326,14 +330,14 @@ function buildFullDataBuffer(db, options = {}) {
   return { ...buildFullDataBufferFromSourceData(sourceData, { ...options, schemaVersion: Number(db.prepare("PRAGMA user_version").get().user_version || 0), excludedSettings: allSettingCount - sourceData.settings.length }), preflight };
 }
 
-function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date(), includeOperationLogs = true }) {
+function exportFullData({ dbPath, outputPath, appVersion = "unknown", appGitCommit = process.env.APP_GIT_COMMIT || "", createdAt = new Date(), includeOperationLogs = true, onProgress = () => {} }) {
   if (!dbPath || !outputPath) throw new FullExcelError("FULL_EXCEL_ARGUMENT_REQUIRED", "必须提供数据库和输出路径");
   const source = path.resolve(dbPath); const target = path.resolve(outputPath);
   if (!fs.existsSync(source)) throw new FullExcelError("FULL_EXCEL_SOURCE_NOT_FOUND", "源数据库不存在");
   if (fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_EXISTS", "目标文件已存在");
   fs.mkdirSync(path.dirname(target), { recursive: true }); const temporary = `${target}.partial-${process.pid}`; const db = new DatabaseSync(source, { readOnly: true });
   try {
-    db.exec("BEGIN"); let result; try { result = buildFullDataBuffer(db, { appVersion, appGitCommit, createdAt, includeOperationLogs }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+    db.exec("BEGIN"); let result; try { result = buildFullDataBuffer(db, { appVersion, appGitCommit, createdAt, includeOperationLogs, onProgress }); db.exec("COMMIT"); } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
     fs.writeFileSync(temporary, result.buffer, { flag: "wx", mode: 0o600 }); fs.renameSync(temporary, target); return { ...result, outputPath: target, filename: path.basename(target) };
   } catch (error) { try { fs.rmSync(temporary, { force: true }); } catch {} throw error; } finally { db.close(); }
 }
@@ -389,7 +393,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5 或 v6 完整数据文件");
+  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, 6, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 完整数据文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -443,13 +447,17 @@ function validateGradeStages(row) {
 function validateData(data, parsedVisible) {
   try {
     const ordered = [...data.salary_tables].sort((a, b) => String(a.effective_start).localeCompare(String(b.effective_start)));
-    const ids = new Set();
+    const ids = new Set(), teacherEnds = new Map(), teacherIds = new Set(data.teachers.map(row => row.id));
     for (let index = 0; index < ordered.length; index++) {
       const table = ordered[index];
       if (!Number.isSafeInteger(table.id) || table.id <= 0 || ids.has(table.id)) throw new Error("薪资表编号无效或重复");
       ids.add(table.id);
       SalaryWorkflow.normalizeTable({ ...table, rules: data.salary_table_rules.filter(rule => rule.salary_table_id === table.id) });
-      if (index && table.effective_start <= ordered[index - 1].effective_end) throw new Error("薪资表生效日期重叠");
+      if (table.teacher_id != null) {
+        if (!Number.isSafeInteger(table.teacher_id) || !teacherIds.has(table.teacher_id)) throw new Error("薪资表教师关联无效");
+        if (table.effective_start <= (teacherEnds.get(table.teacher_id) || '')) throw new Error("同一教师薪资表生效日期重叠");
+        teacherEnds.set(table.teacher_id, table.effective_end);
+      }
     }
     for (const rule of data.salary_table_rules) if (!ids.has(rule.salary_table_id)) throw new Error("薪资表规则缺少对应薪资表");
     const templateIds = new Set();
@@ -482,24 +490,27 @@ function validateData(data, parsedVisible) {
   for (const row of parsedVisible.students) validateGradeStages(row.value);
 }
 
-function verifyFullData(input) {
+function verifyFullData(input, { onProgress = () => {} } = {}) {
+  onProgress('read_workbook', 20, '正在读取工作簿');
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5 或 v6 完整数据文件");
+  onProgress('structure', 35, '正在校验结构');
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 完整数据文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
+  onProgress('parse', 55, '正在解析数据');
   const metadata = verifyMetadata(workbook);
   if (Number(metadata.get("format_version")) !== Number(infoMap.get("格式版本"))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "说明与恢复元数据的版本不一致");
   // v4 files created before this optional flag existed contained operation logs.
   const operationLogsIncluded = metadata.has("operation_logs_included") ? metadata.get("operation_logs_included") === "true" : true;
   if (!operationLogsIncluded && parsedVisible.operation_logs.length) throw new FullExcelError("FULL_EXCEL_OPERATION_LOGS_UNEXPECTED", "未包含操作日志的文件中存在操作日志数据");
-  const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); validateData(data, parsedVisible);
+  const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); onProgress('validate', 70, '正在执行数据预检'); validateData(data, parsedVisible);
   const counts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
   return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: Number(metadata.get("format_version")), operation_logs_included: operationLogsIncluded, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
 }
 
-function restoreFullData({ dbPath, inputPath }) {
-  const verified = verifyFullData(inputPath); const target = path.resolve(dbPath); if (!fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_DB_NOT_FOUND", "目标数据库不存在，请先初始化数据库结构"); const db = new DatabaseSync(target);
+function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
+  const verified = verifyFullData(inputPath, { onProgress }); const target = path.resolve(dbPath); if (!fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_DB_NOT_FOUND", "目标数据库不存在，请先初始化数据库结构"); const db = new DatabaseSync(target);
   try {
     db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
@@ -510,11 +521,17 @@ function restoreFullData({ dbPath, inputPath }) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         db.exec(`DELETE FROM ${definition.source_table}`);
       }
+      let written = 0;
+      const total = Object.values(verified.data).reduce((sum, rows) => sum + rows.length, 0);
+      onProgress('write', 75, '正在写入数据');
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => a.restore_order - b.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         const available = new Set(tableColumns(db, definition.source_table));
         for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); if (definition.source_table === "lessons" && !Object.hasOwn(row, "course_type_source")) row.course_type_source = row.course_type ? "legacy" : "auto"; const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
+        written += verified.data[definition.source_table].length;
+        onProgress('write', 75 + Math.round(written / Math.max(1, total) * 15), '正在写入数据');
       }
+      onProgress('integrity', 95, '正在进行一致性检查');
       const rechargeMigration = migrateRechargeDates(db);
       if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, recharge_migration: rechargeMigration, integrity_check: "ok", foreign_key_violation_count: 0 };
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }

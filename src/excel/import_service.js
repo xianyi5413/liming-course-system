@@ -12,7 +12,7 @@ const {
 } = require("./full_backup");
 
 const TEMPLATE_FILE_TYPE = "liming_full_data_template";
-const TEMPLATE_FILENAME = "黎明教育_全量数据导入模板_v6.xlsx";
+const TEMPLATE_FILENAME = "黎明教育_全量数据导入模板_v7.xlsx";
 const TEMPLATE_GUIDE_SHEET = "填写说明";
 
 function passwordHash(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -115,22 +115,22 @@ function parseTemplate(input) {
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const workbook = validateWorkbookStructure(buffer).workbook; const expected = [...VISIBLE_SHEET_NAMES, TEMPLATE_GUIDE_SHEET];
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_TEMPLATE_SHEET_ORDER_INVALID", "模板工作表名称或顺序不正确");
   if (workbook.sheets.some((sheet) => sheet.state !== "visible")) throw new FullExcelError("FULL_EXCEL_TEMPLATE_HIDDEN_SHEET_FORBIDDEN", "空白模板不得包含隐藏恢复表");
-  const info = new Map(workbook.sheetMap.get("导出说明").rows.slice(1).map((row) => [row[0], row[1]])); if (info.get("文件类型") !== TEMPLATE_FILE_TYPE || ![4, 5, FORMAT_VERSION].includes(Number(info.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请下载 v6 模板（兼容 v4/v5）");
+  const info = new Map(workbook.sheetMap.get("导出说明").rows.slice(1).map((row) => [row[0], row[1]])); if (info.get("文件类型") !== TEMPLATE_FILE_TYPE || ![4, 5, 6, FORMAT_VERSION].includes(Number(info.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请下载 v7 模板（兼容 v4/v5/v6）");
   return { workbook, parsed: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.key, parseTemplateRows(workbook.sheetMap.get(definition.sheet_name), definition)])) };
 }
 function templateToFullBuffer(input, options = {}) { const { parsed } = parseTemplate(input); const data = templateSourceData(parsed); return { ...buildFullDataBufferFromSourceData(data, { appVersion: options.appVersion || "template-import", createdAt: options.createdAt || new Date(), schemaVersion: 0 }), data }; }
-function normalizeImport(input, options = {}) { const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const workbook = validateWorkbookStructure(buffer).workbook; const info = workbook.sheetMap.get("导出说明"); const values = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, FORMAT_VERSION].includes(Number(values.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5 或 v6 文件"); if (workbook.sheetMap.has("__恢复元数据")) return { kind: "full_data", buffer }; if (values.get("文件类型") === TEMPLATE_FILE_TYPE) return { kind: "template", ...templateToFullBuffer(buffer, options) }; throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件类型不支持"); }
-function previewImport(input, options = {}) { const normalized = normalizeImport(input, options); const verified = verifyFullData(normalized.buffer); return { ok: true, kind: normalized.kind, file_type: FILE_TYPE, format_version: FORMAT_VERSION, counts: verified.counts, preview_counts: verified.visible_counts }; }
+function normalizeImport(input, options = {}) { const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const workbook = validateWorkbookStructure(buffer).workbook; const info = workbook.sheetMap.get("导出说明"); const values = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, FORMAT_VERSION].includes(Number(values.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 文件"); if (workbook.sheetMap.has("__恢复元数据")) return { kind: "full_data", buffer }; if (values.get("文件类型") === TEMPLATE_FILE_TYPE) return { kind: "template", ...templateToFullBuffer(buffer, options) }; throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件类型不支持"); }
+function previewImport(input, options = {}) { const normalized = normalizeImport(input, options); const verified = verifyFullData(normalized.buffer, options); return { ok: true, kind: normalized.kind, file_type: FILE_TYPE, format_version: FORMAT_VERSION, counts: verified.counts, preview_counts: verified.visible_counts }; }
 
 const BUSINESS_TABLES = SOURCE_TABLE_DEFINITIONS.filter((definition) => !["settings", "pricing_standards", "roles", "role_permissions", "role_filter_presets", "users", "user_teacher_bindings", "user_page_permissions", "user_filter_presets"].includes(definition.source_table)).map((definition) => definition.source_table);
 function assertBusinessEmpty(dbPath) { const db = new DatabaseSync(path.resolve(dbPath), { readOnly: true }); try { const occupied = [...new Set(BUSINESS_TABLES)].filter((table) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count) > 0); if (occupied.length) throw new FullExcelError("FULL_EXCEL_INITIALIZE_TARGET_NOT_EMPTY", "空系统初始化要求业务表为空", { table_count: occupied.length }); } finally { db.close(); } }
-function importFullExcel({ dbPath, inputPath, mode, preBackupDir = "", preBackupSatisfied = false, appVersion = "unknown" }) {
+function importFullExcel({ dbPath, inputPath, mode, preBackupDir = "", preBackupSatisfied = false, appVersion = "unknown", onProgress = () => {} }) {
   if (!dbPath || !inputPath || !["initialize", "overwrite"].includes(mode)) throw new FullExcelError("FULL_EXCEL_IMPORT_ARGUMENT_INVALID", "必须提供数据库、Excel和initialize/overwrite模式");
-  const normalized = normalizeImport(inputPath, { appVersion }); const verified = verifyFullData(normalized.buffer); let preBackup = null;
+  const normalized = normalizeImport(inputPath, { appVersion }); const verified = verifyFullData(normalized.buffer, { onProgress }); let preBackup = null;
   if (mode === "initialize") assertBusinessEmpty(dbPath);
   if (mode === "overwrite" && !preBackupSatisfied) { if (!preBackupDir) throw new FullExcelError("FULL_EXCEL_PRE_BACKUP_REQUIRED", "覆盖恢复必须先生成导入前备份"); fs.mkdirSync(path.resolve(preBackupDir), { recursive: true }); const outputPath = path.join(path.resolve(preBackupDir), `导入前_${Date.now()}.xlsx`); preBackup = exportFullData({ dbPath, outputPath, appVersion }); verifyFullData(outputPath); }
   const temporary = path.join(path.dirname(path.resolve(inputPath)), `.normalized-${process.pid}-${Date.now()}.xlsx`);
-  try { fs.writeFileSync(temporary, normalized.buffer, { flag: "wx", mode: 0o600 }); const result = restoreFullData({ dbPath, inputPath: temporary }); return { ...result, mode, input_kind: normalized.kind, preview_counts: verified.visible_counts, pre_backup: preBackup ? { filename: preBackup.filename, output_path: preBackup.outputPath } : null }; }
+  try { fs.writeFileSync(temporary, normalized.buffer, { flag: "wx", mode: 0o600 }); const result = restoreFullData({ dbPath, inputPath: temporary, onProgress }); return { ...result, mode, input_kind: normalized.kind, preview_counts: verified.visible_counts, pre_backup: preBackup ? { filename: preBackup.filename, output_path: preBackup.outputPath } : null }; }
   finally { try { fs.rmSync(temporary, { force: true }); } catch {} }
 }
 

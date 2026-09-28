@@ -8,12 +8,12 @@ const { createSalaryStore } = require('../src/domain/salary_store');
 function fixture(t) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  db.exec(`CREATE TABLE lessons(id INTEGER PRIMARY KEY,teacher_name TEXT,date TEXT,month_key TEXT,grade TEXT,subject TEXT,course_type TEXT,student_names TEXT,time_slot TEXT,status TEXT,teacher_salary REAL,teacher_salary_source TEXT);
+  db.exec(`CREATE TABLE teachers(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO teachers VALUES(1,'合成教师'); CREATE TABLE lessons(id INTEGER PRIMARY KEY,teacher_name TEXT,date TEXT,month_key TEXT,grade TEXT,subject TEXT,course_type TEXT,student_names TEXT,time_slot TEXT,status TEXT,teacher_salary REAL,teacher_salary_source TEXT);
     INSERT INTO lessons VALUES(1,'合成教师','2026-09-12','2026-09-01','高一','数学','小班课','甲、乙、丙、丁、戊、己','120','已上',99,'auto');`);
   W.migrateSalaryWorkflow(db);
   return { db, store: createSalaryStore(db, { minutes: Number, legacyRule: () => ({ calculation: { salary: 99 } }), eligible: row => row.status === '已上' }) };
 }
-const autumn = (formula = '60+30(n-1)+40K') => ({ effective_start: '2026-09-01', effective_end: '2027-01-31', rules: [{ grade: '高一', course_type: '小班课', formula }] });
+const autumn = (formula = '60+30(n-1)+40K') => ({ teacher_id: 1, effective_start: '2026-09-01', effective_end: '2027-01-31', rules: [{ grade: '高一', course_type: '小班课', formula }] });
 
 test('salary tables reject inclusive overlap, allow adjacent periods, and invalidate parsed context after edits', t => {
   const { store } = fixture(t);
@@ -23,9 +23,9 @@ test('salary tables reject inclusive overlap, allow adjacent periods, and invali
   store.save({ ...autumn(), effective_start: '2027-02-01', effective_end: '2027-02-28' });
   store.save(autumn('220+40K'), first.id);
   assert.equal(store.list()[0].rules[0].formula, '220+40*K');
-  assert.equal(W.matchTable(store.context(), '2027-01-31').id, first.id);
-  assert.notEqual(W.matchTable(store.context(), '2027-02-01').id, first.id);
-  assert.equal(W.matchTable(store.context(), '2026-08-31'), null);
+  assert.equal(W.matchTable(store.context(), '2027-01-31', 1).id, first.id);
+  assert.notEqual(W.matchTable(store.context(), '2027-02-01', 1).id, first.id);
+  assert.equal(W.matchTable(store.context(), '2026-08-31', 1), null);
 });
 
 test('automatic base follows rule, manual base survives edits and deletion, reset restores latest rule', t => {

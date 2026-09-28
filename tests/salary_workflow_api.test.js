@@ -22,7 +22,7 @@ let ownerCookie;
 let teacherCookie;
 let academicCookie;
 let tableId;
-const table = formula => ({ effective_start: '2026-09-01', effective_end: '2026-09-30', rules: [{ grade: '高一', course_type: '小班课', formula }] });
+const table = formula => ({ teacher_id: 9001, effective_start: '2026-09-01', effective_end: '2026-09-30', rules: [{ grade: '高一', course_type: '小班课', formula }] });
 const workflowPath = '/api/teacher-detail/workflow?start=2026-09-01&end=2026-09-30&teacher=' + encodeURIComponent('合成教师');
 async function summary() {
   const result = await api('/api/bootstrap?month=2026-09-01');
@@ -44,9 +44,10 @@ test('synthetic 6000-course workflow queries dates and teachers and stays respon
   }
   db.exec('COMMIT');
   const plan = db.prepare('EXPLAIN QUERY PLAN SELECT * FROM lessons WHERE teacher_name=? AND date BETWEEN ? AND ?').all('性能教师0', '2026-10-01', '2026-12-31');
+  const performanceTeacherId = db.prepare("SELECT id FROM teachers WHERE name='性能教师0'").get().id;
   assert.match(JSON.stringify(plan), /idx_lessons_teacher_date_salary/); db.close();
   for (const [start, end] of [['2026-10-01', '2026-10-31'], ['2026-11-01', '2026-11-30'], ['2026-12-01', '2026-12-31']]) {
-    const saved = await api('/api/salary-tables', { method: 'POST', body: { ...table('60+30(n-1)+40K'), effective_start: start, effective_end: end } });
+    const saved = await api('/api/salary-tables', { method: 'POST', body: { ...table('60+30(n-1)+40K'), teacher_id: performanceTeacherId, effective_start: start, effective_end: end } });
     assert.equal(saved.response.status, 200, JSON.stringify(saved.payload));
   }
   const started = performance.now();
@@ -97,8 +98,9 @@ test('new salary table drives class grouping, duration, missing K, travel and re
   assert.equal(grouped.payload.lessons[0].salary_rule_expression, '210+40K');
   let row = await summary();
   assert.equal(row.base_salary, 2100); assert.equal(row.performance_base, 400);
-  assert.equal(row.transport_total, 300); assert.equal(row.total_salary, null);
-  assert.equal(row.salary_pending_reason, '待设置系数');
+  assert.equal(row.transport_total, 300); assert.equal(row.total_salary, 2800);
+  assert.equal(row.performance_coefficient, 1);
+  assert.equal(row.salary_pending_reason, '');
   const changed = await api('/api/teacher-monthly-performance', { method: 'PUT', body: { teacher_name: '合成教师', month_key: '2026-09-01', coefficient: 0.85 } });
   assert.equal(changed.response.status, 200, JSON.stringify(changed.payload));
   row = await summary();
@@ -115,7 +117,7 @@ test('new salary table drives class grouping, duration, missing K, travel and re
 });
 
 test('new mutations honor readonly and teacher scope and never expose other teacher data', async () => {
-  assert.equal((await api('/api/salary-tables', { cookie: academicCookie, method: 'POST', body: table('300') })).response.status, 403);
+  assert.equal((await api('/api/salary-tables', { cookie: academicCookie, method: 'POST', body: { ...table('300'), teacher_id: 9002 } })).response.status, 403);
   assert.equal((await api('/api/salary-tables', { cookie: teacherCookie, method: 'POST', body: table('300') })).response.status, 403);
   assert.equal((await api('/api/teacher-detail/salary/1', { cookie: teacherCookie, method: 'PATCH', body: { source: 'manual', amount: 230 } })).response.status, 403);
   assert.equal((await api(workflowPath, { cookie: teacherCookie })).response.status, 200);

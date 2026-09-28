@@ -54,6 +54,8 @@ function migrateSalaryWorkflow(db) {
         PRIMARY KEY(teacher_name,month_key)
       );
     `);
+    if (!db.prepare('PRAGMA table_info(salary_tables)').all().some(row => row.name === 'teacher_id')) db.exec('ALTER TABLE salary_tables ADD COLUMN teacher_id INTEGER REFERENCES teachers(id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_salary_tables_teacher_dates ON salary_tables(teacher_id,effective_start,effective_end)');
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'").get()) {
       const columns = new Set(db.prepare('PRAGMA table_info(lessons)').all().map(row => row.name));
       if (!columns.has('teacher_base_salary_override')) db.exec('ALTER TABLE lessons ADD COLUMN teacher_base_salary_override REAL');
@@ -85,15 +87,26 @@ function normalizeTable(body) {
   if (name.length > 80) throw new Error('薪资表名称不得超过 80 字符');
   return { name, effective_start, effective_end, rules };
 }
-function tableContext(tables = [], rules = []) {
+function tableContext(tables = [], rules = [], teachers = []) {
   const ordered = [...tables].sort((a, b) => a.effective_start.localeCompare(b.effective_start));
   const byRule = new Map(rules.map(row => [`${row.salary_table_id}\0${row.grade}\0${row.course_type}`, row]));
-  return { tables: ordered, byRule };
+  const byTeacher = new Map(), teacherIds = new Map();
+  for (const teacher of teachers) {
+    const name = text(teacher.name);
+    teacherIds.set(name, teacherIds.has(name) ? null : teacher.id);
+  }
+  for (const table of ordered) {
+    if (!Number.isSafeInteger(table.teacher_id) || table.teacher_id <= 0) continue;
+    if (!byTeacher.has(table.teacher_id)) byTeacher.set(table.teacher_id, []);
+    byTeacher.get(table.teacher_id).push(table);
+  }
+  return { tables: ordered, byRule, byTeacher, teacherIds };
 }
-function matchTable(context, date) {
-  let low = 0, high = context.tables.length;
-  while (low < high) { const middle = (low + high) >> 1; if (context.tables[middle].effective_start <= date) low = middle + 1; else high = middle; }
-  const table = context.tables[low - 1];
+function matchTable(context, date, teacherId) {
+  const tables = context.byTeacher.get(Number(teacherId)) || [];
+  let low = 0, high = tables.length;
+  while (low < high) { const middle = (low + high) >> 1; if (tables[middle].effective_start <= date) low = middle + 1; else high = middle; }
+  const table = tables[low - 1];
   return table && table.effective_end >= date ? table : null;
 }
 function studentCount(lesson) { return splitStoredStudents(normalizeStoredStudentSet(lesson.student_names)).length; }

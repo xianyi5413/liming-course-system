@@ -1,19 +1,9 @@
+const BusinessTime = require('../../public/business-time');
 const BEIJING_TIME_ZONE = "Asia/Shanghai";
 const MINUTES_PER_DAY = 24 * 60;
 
 function beijingParts(now = new Date()) {
-  const instant = now instanceof Date ? now : new Date(now);
-  if (Number.isNaN(instant.getTime())) throw new TypeError("北京时间参数无效");
-  const values = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-    timeZone: BEIJING_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(instant).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  const values = BusinessTime.parts(now);
   const date = `${values.year}-${values.month}-${values.day}`;
   const time = `${values.hour}:${values.minute}:${values.second}`;
   return {

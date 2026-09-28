@@ -7,7 +7,7 @@ const SalaryUI = (() => {
   let modal = null, draft = null, tables = [], activeClass = '', returnFocus = null;
   let legacyDetail = false;
   let sessionGeneration = 0;
-  let tablesWritable = false, templateDialog = null;
+  let tablesWritable = false, templateDialog = null, tableTeacher = null;
   const tableDisabled = () => tablesWritable ? '' : 'disabled';
   const manager = () => ['owner', 'admin', 'boss', 'academic', 'jiaowu'].includes(auth.user?.role);
   const writable = () => manager() && canWriteData() && (['owner', 'admin', 'boss'].includes(auth.user?.role) || canView('teacherSalary'));
@@ -60,25 +60,28 @@ const SalaryUI = (() => {
     const ids = new Set(group.lesson_ids), rows = data.lessons.filter(row => ids.has(row.id));
     const salaryCells = row => {
       const special = ['manual', 'legacy', 'import'].includes(row.teacher_base_salary_source);
-      return `<td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge">${special ? '特' : row.teacher_base_salary_source === 'auto' ? '自' : '—'}</span></span>${writable() ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td>`;
+      return `<td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge salary-source-badge">${special ? '特' : row.teacher_base_salary_source === 'auto' ? '自' : '—'}</span>${writable() && special ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</span></td><td>${formatMoney(row.performance_base)}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td>`;
     };
-    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${group.course_type} · ${group.student_names}`, '<p class="section-subtitle">教师薪资为实际基础课薪，不含绩效；规则金额已按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
+    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${group.course_type} · ${group.student_names} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
   }
 
   async function showTables() {
+    const selected = (state.teacher_detail_teachers || []).find(row => row.name === selectedTeacherDetail);
+    if (!selected) { showToast('请先选择教师，再管理该教师的薪资表', 'error'); return; }
     draft = null; activeClass = '';
     const generation = sessionGeneration;
-    const result = await request('/api/salary-tables', { cache: false });
-    if (generation !== sessionGeneration || !auth.user) return;
+    const result = await request('/api/salary-tables?teacher_id=' + selected.id, { cache: false });
+    if (generation !== sessionGeneration || !auth.user || selectedTeacherDetail !== selected.name) return;
+    tableTeacher = result.teacher;
     tables = result.tables;
     tablesWritable = Boolean(result.can_manage) && writable();
     const today = todayDate();
-    show('薪资表', `<div class="salary-table-actions"><button class="btn primary" data-salary-action="new" ${tableDisabled()}>新增薪资表</button></div><div class="salary-table-cards">${tables.map(table => `<button class="salary-table-card btn" data-salary-action="edit" data-id="${table.id}"><b>${escapeHtml(table.name || '薪资表')}</b><span>${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}</span><span>更新：${escapeHtml(table.updated_at)}</span><span>${today < table.effective_start ? '未生效' : today > table.effective_end ? '已结束' : '生效中'}</span></button>`).join('') || '<p class="empty">暂无薪资表，未覆盖的课程继续使用历史薪资。</p>'}</div>`);
+    show(`${tableTeacher.name} · 薪资表`, `<div class="salary-table-actions"><button class="btn primary" data-salary-action="new" ${tableDisabled()}>新增薪资表</button><button class="btn" data-salary-action="text-export">导出</button><button class="btn" data-salary-action="text-import" ${tableDisabled()}>导入</button></div>${result.unassigned_count ? `<p class="muted-tip">另有 ${result.unassigned_count} 张历史未分配薪资表，未用于当前教师计算。</p>` : ''}<div class="salary-table-cards">${tables.map(table => `<button class="salary-table-card btn" data-salary-action="edit" data-id="${table.id}"><b>${escapeHtml(table.name || '薪资表')}</b><span>${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}</span><span>更新：${escapeHtml(formatBeijingTime(table.updated_at))}</span><span>${today < table.effective_start ? '未生效' : today > table.effective_end ? '已结束' : '生效中'}</span></button>`).join('') || '<p class="empty">暂无薪资表，未覆盖的课程继续使用历史薪资。</p>'}</div>`);
   }
   function editTable(id) {
-    draft = id ? structuredClone(tables.find(row => row.id === id)) : { name: '', effective_start: '', effective_end: '', rules: [] };
+    draft = id ? structuredClone(tables.find(row => row.id === id)) : { teacher_id: tableTeacher.id, name: '', effective_start: '', effective_end: '', rules: [] };
     const grades = ['初一', '初二', '初三', '高一', '高二', '高三'], types = ['1V1', '1V2', '1V3', '小班课'];
-    show(id ? '编辑薪资表' : '新增薪资表', `<div class="salary-editor-controls"><label class="filter-field"><span>名称（选填）</span><input class="control" id="salary-table-name" maxlength="80" value="${escapeHtml(draft.name)}" ${tableDisabled()}></label><label class="filter-field"><span>生效日期（必填）</span>${dateRangePickerControl({ scope: 'salary-table-editor', start: draft.effective_start, end: draft.effective_end, disabled: !tablesWritable })}</label><button class="btn" data-salary-action="template-add" ${tableDisabled()}>添加为模板</button><button class="btn" data-salary-action="template-use" ${tableDisabled()}>使用模板</button></div><p>每 2 小时计价；n 为实际学生人数，K 为教师当月绩效系数。留空表示未配置规则。</p><div class="table-wrap"><table class="uniform-table salary-formula-table"><thead><tr><th>年级</th><th>1V1</th><th>1V2</th><th>1V3</th><th>小班公式</th><th>小班6人</th></tr></thead><tbody>${grades.map(grade => `<tr><th>${grade}</th>${types.map(type => grade.startsWith('初') && type === '1V3' ? '<td>—</td>' : `<td><input class="cell-input salary-formula-input" data-grade="${grade}" data-type="${type}" aria-label="${grade}${type}薪资公式" value="${escapeHtml(draft.rules.find(rule => rule.grade === grade && rule.course_type === type)?.formula || '')}" ${tableDisabled()}></td>`).join('')}<td data-salary-preview="${grade}">—</td></tr>`).join('')}</tbody></table></div><p class="salary-editor-error" role="alert"></p><div class="salary-table-actions"><button class="btn primary" data-salary-action="save" ${tableDisabled()}>保存</button><button class="btn" data-salary-action="tables">返回列表</button>${id ? `<button class="btn danger" data-salary-action="delete" data-id="${id}" ${tableDisabled()}>删除薪资表</button>` : ''}</div>`);
+    show(`${tableTeacher.name} · ${id ? '编辑薪资表' : '新增薪资表'}`, `<div class="salary-editor-controls"><label class="filter-field"><span>名称（选填）</span><input class="control" id="salary-table-name" maxlength="80" value="${escapeHtml(draft.name)}" ${tableDisabled()}></label><label class="filter-field"><span>生效日期（必填）</span>${dateRangePickerControl({ scope: 'salary-table-editor', start: draft.effective_start, end: draft.effective_end, disabled: !tablesWritable })}</label><button class="btn" data-salary-action="template-add" ${tableDisabled()}>添加为模板</button><button class="btn" data-salary-action="template-use" ${tableDisabled()}>使用模板</button></div><p>每 2 小时计价；n 为实际学生人数，K 为教师当月绩效系数。留空表示未配置规则。</p><div class="table-wrap"><table class="uniform-table salary-formula-table"><thead><tr><th>年级</th><th>1V1</th><th>1V2</th><th>1V3</th><th>小班公式</th><th>小班6人</th></tr></thead><tbody>${grades.map(grade => `<tr><th>${grade}</th>${types.map(type => grade.startsWith('初') && type === '1V3' ? '<td>—</td>' : `<td><input class="cell-input salary-formula-input" data-grade="${grade}" data-type="${type}" aria-label="${grade}${type}薪资公式" value="${escapeHtml(draft.rules.find(rule => rule.grade === grade && rule.course_type === type)?.formula || '')}" ${tableDisabled()}></td>`).join('')}<td data-salary-preview="${grade}">—</td></tr>`).join('')}</tbody></table></div><p class="salary-editor-error" role="alert"></p><div class="salary-table-actions"><button class="btn primary" data-salary-action="save" ${tableDisabled()}>保存</button><button class="btn" data-salary-action="tables">返回列表</button>${id ? `<button class="btn danger" data-salary-action="delete" data-id="${id}" ${tableDisabled()}>删除薪资表</button>` : ''}</div>`);
     previews();
   }
   function gridRules() {
@@ -109,7 +112,7 @@ const SalaryUI = (() => {
     const generation = sessionGeneration, editor = modal;
     const result = await request('/api/salary-templates', { cache: false });
     if (generation !== sessionGeneration || editor !== modal || !draft) return;
-    templateDialog = CourseDetails.dialog('使用模板', `<div class="salary-table-cards">${result.templates.map(row => `<button class="btn salary-table-card" data-template-id="${row.id}"><b>${escapeHtml(row.name)}</b><span>更新：${escapeHtml(row.updated_at)}</span></button>`).join('') || '<p class="empty">暂无薪资模板</p>'}</div>`);
+    templateDialog = CourseDetails.dialog('使用模板', `<div class="salary-table-cards">${result.templates.map(row => `<button class="btn salary-table-card" data-template-id="${row.id}"><b>${escapeHtml(row.name)}</b><span>更新：${escapeHtml(formatBeijingTime(row.updated_at))}</span></button>`).join('') || '<p class="empty">暂无薪资模板</p>'}</div>`);
     templateDialog.element.classList.add('salary-template-dialog');
     const dialog = templateDialog;
     templateDialog.element.querySelectorAll('[data-template-id]').forEach(button => { button.onclick = async () => {
@@ -119,10 +122,44 @@ const SalaryUI = (() => {
         const result = await request(`/api/salary-templates/${button.dataset.templateId}/use`, { method: 'POST', body: {} });
         if (generation !== sessionGeneration || editor !== modal || templateDialog !== dialog || !dialog.element.isConnected) return;
         modal.querySelectorAll('.salary-formula-input').forEach(input => { input.value = result.template.rules.find(rule => rule.grade === input.dataset.grade && rule.course_type === input.dataset.type)?.formula || ''; });
+        modal.querySelector('#salary-table-name').value = result.template.name;
         previews(); templateDialog.close(); templateDialog = null;
       } catch (error) { showToast(error.message, 'error'); }
       finally { button.disabled = false; }
     }; });
+  }
+  async function transferDialog(importing) {
+    const generation = sessionGeneration, editor = modal, teacher = tableTeacher;
+    const exported = importing ? null : await request('/api/salary-tables/export?teacher_id=' + teacher.id, { cache: false });
+    if (generation !== sessionGeneration || editor !== modal) return;
+    templateDialog = CourseDetails.dialog(`${teacher.name} · ${importing ? '导入' : '导出'}薪资表`, `<div class="salary-template-form"><textarea class="control transfer-text" rows="14" aria-label="薪资表文本" ${importing ? '' : 'readonly'}>${escapeHtml(exported?.text || '')}</textarea><div class="transfer-preview" role="status"></div><p class="salary-editor-error" role="alert"></p><button class="btn primary transfer-submit">${importing ? '校验并导入' : '复制全部'}</button></div>`);
+    const dialog = templateDialog, area = dialog.element.querySelector('textarea'), button = dialog.element.querySelector('.transfer-submit'), preview = dialog.element.querySelector('.transfer-preview');
+    let pending = null, chosen = null;
+    const current = () => generation === sessionGeneration && editor === modal && templateDialog === dialog && dialog.element.isConnected;
+    area.oninput = () => { pending = null; chosen = null; preview.textContent = ''; button.textContent = '校验并导入'; };
+    button.onclick = async () => {
+      button.disabled = true; dialog.element.querySelector('[role=alert]').textContent = '';
+      try {
+        if (!importing) { await navigator.clipboard.writeText(area.value); showToast('薪资表文本已复制'); return; }
+        if (!pending) {
+          pending = await request('/api/salary-tables/import-preview', { method: 'POST', body: { text: area.value, teacher_id: chosen } });
+          if (!current()) return;
+          preview.innerHTML = `<p>${escapeHtml(pending.message)} · 共${pending.tables.length}张</p>${pending.tables.map(table => `<p>${escapeHtml(table.name || '薪资表')}：${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}，${table.rules.length}项规则</p>`).join('')}`;
+          area.readOnly = true; button.textContent = '确认导入';
+        } else {
+          await request('/api/salary-tables/import-confirm', { method: 'POST', body: { token: pending.token, confirm: true } });
+          if (!current()) return;
+          dialog.close(); templateDialog = null; await refresh(); await showTables(); showToast('薪资表已导入');
+        }
+      } catch (error) {
+        if (!current()) return;
+        dialog.element.querySelector('[role=alert]').textContent = error.message;
+        if (error.data?.candidates) {
+          preview.innerHTML = `<label class="filter-field"><span>选择同名教师</span><select class="control transfer-teacher"><option value="">请选择</option>${error.data.candidates.map(row => `<option value="${row.id}">${escapeHtml(row.name)}（编号${row.id}）</option>`).join('')}</select></label>`;
+          preview.querySelector('select').onchange = event => { chosen = Number(event.target.value) || null; };
+        }
+      } finally { button.disabled = false; }
+    };
   }
   function previews() {
     modal?.querySelectorAll('[data-salary-preview]').forEach(cell => {
@@ -142,6 +179,8 @@ const SalaryUI = (() => {
       if (task === 'legacy-detail' || task === 'classes') { legacyDetail = task === 'legacy-detail'; render(); return; }
       if (task === 'tables') return await showTables();
       if (task === 'legacy') { close(); setActiveView('teacherSalaryRules'); await load({ refreshGlobal: false }); return; }
+      if (task === 'text-export') return await transferDialog(false);
+      if (task === 'text-import' && tablesWritable) return await transferDialog(true);
       if (task === 'new' || task === 'edit') return editTable(Number(button.dataset.id) || null);
       if (!writable() || (['save', 'delete'].includes(task) && !tablesWritable)) return;
       if (task === 'template-add' && tablesWritable) return templateNameDialog();
