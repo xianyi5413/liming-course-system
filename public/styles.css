@@ -14432,7 +14432,14 @@ button.student-stage-conflict-check:is(.warning,.error) { color: var(--danger); 
 
 /* Salary workflow reuses the shared modal and outer table scroll. */
 .salary-workflow-panel { width: min(1100px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow-y: auto; }
-.salary-lessons-panel { width: calc(100vw - 32px); }
+.modal-backdrop:has(> .responsive-content-panel) { padding: 16px; grid-template-columns: minmax(0, 1fr); }
+.responsive-content-panel { width: fit-content; min-width: 0; max-width: 100%; justify-self: center; box-sizing: border-box; }
+.responsive-content-panel .modal-head { gap: 16px; }
+.responsive-content-panel .modal-head > button { flex: 0 0 auto; }
+.responsive-content-panel .modal-title { min-width: 0; overflow-wrap: anywhere; }
+.responsive-content-panel .table-wrap table { margin-inline: auto; }
+.inline-badges { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.inline-badges .status-badge { flex: 0 0 auto; width: auto; min-width: 0; }
 .salary-workflow-panel .table-wrap { max-width: 100%; overflow-x: auto; }
 .salary-table-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
 .salary-table-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 12px; }

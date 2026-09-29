@@ -457,6 +457,7 @@ const DATA_CENTER_DEFAULT_SETTINGS = Object.freeze({
   daily_retention: 14,
   monthly_retention: 12,
   manual_retention: 20,
+  total_retention: 50,
   retry_count: 3,
   local_include_operation_logs: false,
   remote_enabled: false,
@@ -3691,6 +3692,8 @@ function adaptiveCellContentWidth(cell, definition, font) {
     const widths = [...studentSet.querySelectorAll(".student-badge")].map(badge => measure(badge.textContent.trim()) + 24);
     return (definition.wrap ? Math.max(0, ...widths) : widths.reduce((sum, width) => sum + width + 6, 0)) + 20;
   }
+  const badges = cell.querySelector('.inline-badges');
+  if (badges) return [...badges.children].reduce((width,badge) => width + measure(badge.textContent.trim()) + 22, 20);
   const currency = cell.querySelector(".currency-display");
   if (currency) return measure(currency.textContent.trim()) + 56 + (cell.querySelector(".salary-auto-button") ? measure("恢复自动") + 52 : 0);
   const input = cell.querySelector(":scope > .cell-input");
@@ -5420,7 +5423,7 @@ function markBackupDraftFromDom() {
   const checked = (selector, fallback = false) => document.querySelector(selector)?.checked ?? fallback;
   Object.assign(draft, {
     enabled: checked(".data-backup-enabled", draft.enabled), time: read(".data-backup-time", draft.time), timezone: read(".data-backup-timezone", draft.timezone),
-    daily_retention: Number(read(".data-backup-daily", draft.daily_retention)), monthly_retention: Number(read(".data-backup-monthly", draft.monthly_retention)), manual_retention: Number(read(".data-backup-manual", draft.manual_retention)), retry_count: Number(read(".data-backup-retries", draft.retry_count)),
+    daily_retention: Number(read(".data-backup-daily", draft.daily_retention)), monthly_retention: Number(read(".data-backup-monthly", draft.monthly_retention)), manual_retention: Number(read(".data-backup-manual", draft.manual_retention)), total_retention: read(".data-backup-total", draft.total_retention), retry_count: Number(read(".data-backup-retries", draft.retry_count)),
     local_include_operation_logs: checked(".data-backup-local-logs", draft.local_include_operation_logs),
     remote_directory: read(".data-backup-remote-directory", draft.remote_directory), remote_plaintext_acknowledged: checked(".data-backup-remote-plaintext-ack", draft.remote_plaintext_acknowledged), remote_include_operation_logs: checked(".data-backup-remote-logs", draft.remote_include_operation_logs),
     remote_enabled: checked(".data-backup-remote-enabled", draft.remote_enabled), remote_frequency: read(".data-backup-remote-frequency", draft.remote_frequency), remote_time: read(".data-backup-remote-time", draft.remote_time), remote_timezone: read(".data-backup-remote-timezone", draft.remote_timezone),
@@ -10324,7 +10327,7 @@ function dataCenterBackupRows() {
       <td class="backup-filename-cell" title="${escapeHtml(row.filename || "")}">${escapeHtml(row.filename || "-")}</td>
       <td>${backupLocalStatusMarkup(row)}</td>
       <td><div>${escapeHtml(dataCenterRemoteLabel(row.remote_status))}</div>${legacy ? "" : dataCenterRemoteSummary(row)}</td>
-      <td class="backup-failure-cell">${backupFailureMarkup(row)}</td>
+      <td class="backup-failure-cell">${backupFailureMarkup(row)}${row.retention_warning ? `<div class="muted-tip">清理提示：${escapeHtml(row.retention_warning)}</div>` : ""}</td>
       <td class="right">${escapeHtml(formatFileSize(row.file_size))}</td>
       <td class="mono-cell" title="${escapeHtml(row.sha256 || "")}">${escapeHtml(row.sha256 ? `${row.sha256.slice(0, 12)}…` : "-")}</td>
       <td>${escapeHtml(row.created_by_label || "历史记录")}</td>
@@ -10653,10 +10656,11 @@ function renderAudit() {
             <label class="filter-field"><span>时区</span><select class="control data-backup-timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></label>
             <label class="history-toggle data-backup-checkbox-row"><input class="data-backup-local-logs" type="checkbox" ${draft.local_include_operation_logs ? "checked" : ""}><span>备份中包含操作日志</span></label>
           </div>
-          <p class="muted-tip">每日、月度、手动和百度副本分别计数；固定、运行中、失败、恢复前和旧体系记录不用于凑齐上限。总行数可能大于某一项保留数。成功备份后清理超额可清理副本；仅本地清理时保留仍有百度副本的记录。</p>
+          <p class="muted-tip">新备份成功后先按每日、月度、手动保留，再按本地总量上限清理最旧的可删除副本。固定、运行中、未验证、旧体系及最后有效备份受保护，可能暂时超额。保存设置不删除；需要立即清理请使用“删除多余文件”预览确认。本地上限不删除百度副本，远端索引继续保留。</p>
           <div class="data-backup-retention-grid">
             <label class="filter-field"><span>每日保留</span><input class="control data-backup-daily" type="number" min="1" max="365" value="${Number(draft.daily_retention || 14)}"></label>
             <label class="filter-field"><span>每月保留</span><input class="control data-backup-monthly" type="number" min="1" max="120" value="${Number(draft.monthly_retention || 12)}"></label>
+            <label class="filter-field"><span>总保留数量</span><input class="control data-backup-total" type="text" inputmode="numeric" pattern="[1-9][0-9]*" value="${escapeHtml(String(draft.total_retention ?? 50))}"></label>
             <label class="filter-field"><span>手动保留</span><input class="control data-backup-manual" type="number" min="1" max="200" value="${Number(draft.manual_retention || 20)}"></label>
             <label class="filter-field"><span>失败重试次数</span><input class="control data-backup-retries" type="number" min="0" max="10" value="${Number(draft.retry_count ?? 3)}"></label>
           </div>
@@ -11709,7 +11713,7 @@ function renderClassGroups() {
       </div>
       <div class="table-wrap smooth-table-wrap">
         <table class="class-group-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-flex-column="5">
-          <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="130"><col data-column-type="students"><col data-column-type="name" data-min-width="100" data-max-width="280" data-grow="0"></colgroup>
+          <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="students"><col data-column-type="name" data-min-width="100" data-max-width="280" data-grow="0"></colgroup>
           <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th class="wide">学生集合</th><th class="wide">班级名</th></tr></thead>
           <tbody>
             ${visibleRows.map((row, index) => `
@@ -11717,7 +11721,7 @@ function renderClassGroups() {
                 <td class="text-cell center adaptive-center">${escapeHtml(row.teacher)}</td>
                 <td class="text-cell center adaptive-center">${renderGradeBadge(row.grade)}</td>
                 <td class="text-cell center adaptive-center">${renderSubjectBadge(row.subject)}</td>
-                <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" ${row.course_count && ClassCourseUI.editable() ? 'role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"' : 'aria-readonly="true"'}><span class="lesson-inline-picker">${escapeHtml(row.course_type || "按人数默认")}</span></td>
+                <td class="adaptive-center class-group-type-cell" data-id="${row.id}" data-field="course_type" ${row.course_count && ClassCourseUI.editable() ? 'role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false"' : 'aria-readonly="true"'}><span class="lesson-inline-picker">${CourseDetails.types(row)}</span></td>
                 <td class="text-cell wide class-group-students-cell adaptive-left">${renderStudentSetBadges(row.students_display || row.students_key || "", { fallbackGrade: row.grade })}</td>
                 <td class="adaptive-left"><input class="cell-input wide class-group-field" data-id="${row.metadata_id || row.id}" data-field="class_name" value="${escapeHtml(row.class_name || "")}" placeholder="-"></td>
               </tr>
@@ -12805,7 +12809,7 @@ function renderTeacherSalary() {
   const sum = field => rows.reduce((total, row) => total + numberValue(row[field]), 0);
   const pending = rows.some(row => row.total_salary == null);
   renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐薪资规则" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
-  contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>月度绩效</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
+  contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>绩效基数</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
     ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
     <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
@@ -17300,7 +17304,7 @@ function wireEvents() {
         const draft = markBackupDraftFromDom();
         const result = await request("/api/data-center/settings", { method: "PUT", body: {
           enabled: draft.enabled, time: draft.time, timezone: draft.timezone, daily_retention: draft.daily_retention,
-          monthly_retention: draft.monthly_retention, manual_retention: draft.manual_retention, retry_count: draft.retry_count,
+          monthly_retention: draft.monthly_retention, manual_retention: draft.manual_retention, total_retention: draft.total_retention, retry_count: draft.retry_count,
           local_include_operation_logs: draft.local_include_operation_logs,
         } });
         backupState.settings = { ...backupState.settings, ...result.settings }; backupState.draft = { ...backupState.settings }; backupState.draftDirty = false; showToast("服务器备份设置已保存");
@@ -19620,7 +19624,7 @@ load().catch((error) => {
   renderLoadFailure(error);
 });
 
-const MONEY_INPUT_SELECTOR = 'input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value,input.salary-coefficient-input';
+const MONEY_INPUT_SELECTOR = 'input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value,input.salary-coefficient-input,input.data-backup-total';
 document.addEventListener('wheel', event => {
   const input = event.target.closest?.(MONEY_INPUT_SELECTOR);
   if (input && document.activeElement === input) input.blur();

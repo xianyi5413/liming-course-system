@@ -79,6 +79,11 @@ function normalizeRules(input) {
   }).filter(row => row.formula);
   return rules;
 }
+function normalizeTemplate(body) {
+  const name = text(body?.name);
+  if (!name || name.length > 80) throw new Error('模板名称必填，且不得超过 80 字符');
+  return { name, rules: normalizeRules(body.rules) };
+}
 function normalizeTable(body) {
   const effective_start = text(body.effective_start), effective_end = text(body.effective_end);
   if (!validDate(effective_start) || !validDate(effective_end) || effective_start > effective_end) throw new Error('请填写有效起止日期，结束日期不得早于开始日期');
@@ -110,7 +115,16 @@ function matchTable(context, date, teacherId) {
   return table && table.effective_end >= date ? table : null;
 }
 function studentCount(lesson) { return splitStoredStudents(normalizeStoredStudentSet(lesson.student_names)).length; }
-function classKey(lesson) { return JSON.stringify([text(lesson.teacher_name), text(lesson.grade), text(lesson.subject), text(lesson.course_type), normalizeStoredStudentSet(lesson.student_names)]); }
+function classKey(lesson) { return JSON.stringify([text(lesson.teacher_name), text(lesson.grade), text(lesson.subject), normalizeStoredStudentSet(lesson.student_names)]); }
+function courseTypes(values) {
+  return [...new Set(values.map(value => text(value && typeof value === 'object' ? value.course_type : value)).filter(Boolean))].sort((a, b) => (TYPES.includes(a) ? TYPES.indexOf(a) : TYPES.length) - (TYPES.includes(b) ? TYPES.indexOf(b) : TYPES.length) || a.localeCompare(b, 'zh-Hans-CN', { numeric: true }));
+}
+function addClassLesson(group, lesson) {
+  group.lesson_ids.push(lesson.id);
+  group.course_types = courseTypes([...(group.course_types || []), lesson.course_type]);
+  group.course_type = group.course_types.length === 1 ? group.course_types[0] : '';
+  group.course_count = group.lesson_ids.length;
+}
 function tableRule(context, table, lesson, minutes = 120) {
   const rule = context.byRule.get(`${table.id}\0${text(lesson.grade)}\0${text(lesson.course_type)}`);
   if (!rule) return { matched: false, reason: '薪资表未配置对应年级课型', table_id: table.id };
@@ -133,4 +147,4 @@ function resolveBase(lesson, newRule, legacyRule = null) {
   // Explicit restoration applies a legacy rule once in the storage layer.
   return { cents: lesson.teacher_salary == null ? null : Math.round(Number(lesson.teacher_salary) * 100), source: text(lesson.teacher_salary_source) || 'legacy' };
 }
-module.exports = { GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeRules, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, resolveBase, Formula };
+module.exports = { GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeRules, normalizeTemplate, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, courseTypes, addClassLesson, resolveBase, Formula };

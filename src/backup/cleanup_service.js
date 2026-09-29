@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { listManagedLocalExcel, normalizedManagedRelativePath } = require("./file_browser");
-const { localRetentionSelection, remoteRetentionSelection } = require("./retention");
+const { localRetentionSelection, remoteRetentionSelection, localPolicy } = require("./retention");
 const { safeRemotePath, verifyPayloadPair } = require("./baidu_provider");
 const fingerprint = value => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const recordFingerprint = row => fingerprint(Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("creator_"))));
@@ -23,6 +23,9 @@ function eligibleRecordIds(records, settings, service, db) {
     const hasRemote = Boolean(row.remote_path || row.remote_checksum_path) && row.remote_status !== "deleted";
     return (hasLocal || hasRemote) && (!hasLocal || local.has(row.id)) && (!hasRemote || remote.has(row.id)) && service.deletionPolicy(db, row).deletable;
   }).map(row => row.id));
+}
+function localCandidates(records, settings, service, db) {
+  return localRetentionSelection(records, localPolicy(settings), row => service.localDeletionPolicy(db,row).deletable);
 }
 class BackupCleanupService {
   constructor({ service, settings, remote }) { this.service = service; this.settings = settings; this.remote = remote; this.plans = new Map(); }
@@ -120,6 +123,20 @@ class BackupCleanupService {
           if (files.length) entries.push({ kind: "backup", backup_id: row.id, backup_type: row.retention_class, record_signature: recordFingerprint(row), reason: "超过现有保留策略，所有关联副本均允许清理", files });
         } catch { /* Unknown paths remain protected. */ }
       }
+      // Local-only cleanup uses the same planner/checker/executor as automatic
+      // retention. A remote copy and its index remain untouched.
+      if (settings.total_retention != null) {
+        const selection = localCandidates(records, settings, this.service, db);
+        const planned = new Set(entries.map(entry => entry.backup_id));
+        for (const row of selection.candidates.filter(row => !planned.has(row.id))) {
+          try {
+            this.assertExclusiveRecord(row,records);
+            const files = [this.localFile(row.managed_relative_path),this.localFile(row.managed_relative_path + '.sha256')].filter(Boolean);
+            entries.push({ kind:'backup_local', backup_id:row.id, backup_type:row.retention_class, record_signature:recordFingerprint(row), reason:'超过本地保留策略，仅清理本地副本，保留百度副本', files });
+          } catch { /* Unverifiable paths remain protected. */ }
+        }
+        if (selection.counted.length - selection.candidates.length > settings.total_retention) warnings.push('因存在受保护备份，当前保留数量暂时超过设置上限。');
+      }
       const localRecovery = this.hasRecoveryCopy(records, "local"), remoteRecovery = this.hasRecoveryCopy(records, "baidu", remote);
       for (const item of local.items.filter(item => localRecovery && !item.backup_record && knownName(item.filename))) {
         if (entries.length >= 100) break;
@@ -137,7 +154,7 @@ class BackupCleanupService {
       }
       if (entries.length > 100) warnings.push("单次最多预览100组，完成后可重新扫描");
       const chosen = entries.slice(0, 100), allFiles = chosen.flatMap(entry => entry.files);
-      const summary = { local_files: allFiles.filter(f => f.source === "local").length, remote_files: allFiles.filter(f => f.source === "baidu").length, local_bytes: allFiles.filter(f => f.source === "local").reduce((n,f) => n + f.size, 0), remote_bytes: allFiles.filter(f => f.source === "baidu").some(f => f.size == null) ? null : allFiles.filter(f => f.source === "baidu").reduce((n,f) => n + f.size, 0), backups: chosen.filter(e => e.kind === "backup").length, orphan_files: chosen.filter(e => e.kind === "orphan").reduce((n,e) => n + e.files.length, 0), scanned_files: local.items.reduce((count, item) => count + 1 + (item.checksum_status === "present" ? 1 : 0), 0) + remote.size };
+      const summary = { local_files: allFiles.filter(f => f.source === "local").length, remote_files: allFiles.filter(f => f.source === "baidu").length, local_bytes: allFiles.filter(f => f.source === "local").reduce((n,f) => n + f.size, 0), remote_bytes: allFiles.filter(f => f.source === "baidu").some(f => f.size == null) ? null : allFiles.filter(f => f.source === "baidu").reduce((n,f) => n + f.size, 0), backups: chosen.filter(e => e.kind === "backup" || e.kind === "backup_local").length, orphan_files: chosen.filter(e => e.kind === "orphan").reduce((n,e) => n + e.files.length, 0), scanned_files: local.items.reduce((count, item) => count + 1 + (item.checksum_status === "present" ? 1 : 0), 0) + remote.size };
       for (const [key, plan] of this.plans) if (plan.expires < Date.now() || plan.owner === owner) this.plans.delete(key);
       const token = crypto.randomBytes(24).toString("hex"), expires = Date.now() + 10 * 60_000;
       this.plans.set(token, { owner, expires, entries: chosen, root, summary });
@@ -160,7 +177,16 @@ class BackupCleanupService {
     for (const entry of plan.entries) {
       let cleanup = {}, reason = "";
       try {
-        if (entry.kind === "backup") {
+        if (entry.kind === 'backup_local') {
+          const result = await this.service.deleteLocalBackup(entry.backup_id, { beforeDelete: async (db,row) => {
+            const records = this.records(db);
+            this.assertExclusiveRecord(row,records);
+            if (recordFingerprint(row) !== entry.record_signature || !localCandidates(records,this.settings(),this.service,db).candidates.some(item => item.id === row.id)) throw error('CLEANUP_STALE_RECORD');
+            const current = [this.localFile(row.managed_relative_path),this.localFile(row.managed_relative_path + '.sha256')].filter(Boolean);
+            if (fingerprint(current.map(file => [file.relative_path,file.signature])) !== fingerprint(entry.files.map(file => [file.relative_path,file.signature]))) throw error('CLEANUP_STALE_FILE');
+          } });
+          cleanup = result.cleanup; if (!result.ok) reason = result.reason || 'CLEANUP_PARTIAL';
+        } else if (entry.kind === "backup") {
           const result = await this.service.deleteBackup(entry.backup_id, { remoteDeleter: row => this.remote.delete(row), beforeDelete: async (db,row) => {
             const records = this.records(db);
             this.assertExclusiveRecord(row, records);

@@ -4,6 +4,7 @@
   "private": true,
   "description": "黎明教育课程管理系统本地 MVP",
   "scripts": {
+    "test:class-template-retention": "node --test --test-concurrency=1 tests/class_group_template_refinement.test.js tests/backup_total_retention.test.js",
     "test:pinyin-log-layout-permission": "node --test --test-concurrency=1 tests/search_audit_units.test.js tests/pinyin_log_layout_permission.test.js",
     "test:ui-performance-recharge-backup": "node --test --test-concurrency=1 tests/ui_performance_recharge_backup.test.js tests/fee_details_performance.test.js tests/recharge_month.test.js tests/backup_cleanup.test.js",
     "test:table-index-compact": "node --test --test-concurrency=1 tests/table_index_compact.test.js",

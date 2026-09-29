@@ -132,7 +132,7 @@ test("fee and teacher detail headers and row cells share the approved column ord
   assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table thead th')].map(cell=>cell.textContent.trim())"), ["序号", "老师", "年级", "科目", "类型", "学生", "历史规则"]);
   await browser.click('[data-salary-class]');
   await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-class-lessons thead th')].map(cell=>cell.textContent.trim())"), ["序号", "老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "类型", "学生", "备注", "基础课薪", "月度绩效", "规则薪资"]);
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.teacher-class-lessons thead th')].map(cell=>cell.textContent.trim())"), ["序号", "老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "类型", "学生", "备注", "基础课薪", "绩效基数", "规则薪资"]);
   assert.equal(await browser.evaluate("document.querySelector('.teacher-class-lessons tbody tr')?.children.length"), 15);
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));

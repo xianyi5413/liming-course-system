@@ -13,13 +13,14 @@ const SalaryUI = (() => {
   const writable = () => manager() && canWriteData() && (['owner', 'admin', 'boss'].includes(auth.user?.role) || canView('teacherSalary'));
   const disabled = () => writable() ? '' : 'disabled';
   const bounds = () => range || monthBounds(state?.settings?.month_key || activeMonth);
+  const templateActions = () => `${manager() ? '<button class="btn" data-salary-action="template-export">导出模板</button>' : ''}${writable() ? '<button class="btn" data-salary-action="template-import">导入模板</button>' : ''}`;
   function close() { templateDialog?.close(); templateDialog = null; closeDateRangePicker(); modal?.remove(); modal = null; draft = null; activeClass = ''; returnFocus?.focus(); }
   function show(title, body, extra = '') {
     if (!modal) returnFocus = document.activeElement;
     modal?.remove();
     modal = document.createElement('div');
     modal.className = 'modal-backdrop salary-workflow-modal';
-    modal.innerHTML = `<div class="modal-panel salary-workflow-panel ${extra}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="modal-head"><div class="modal-title">${escapeHtml(title)}</div><button class="btn" data-salary-action="close">关闭</button></div>${body}</div>`;
+    modal.innerHTML = CourseDetails.shell(title, body, extra, '', 'data-salary-action="close"');
     document.body.appendChild(modal);
     bindDateRangePickerControls(modal);
     modal.querySelector('button')?.focus();
@@ -42,6 +43,7 @@ const SalaryUI = (() => {
       ${unifiedFilterField({ label: '教师', className: 'teacher-detail-teacher-select', field: 'teacher', value: selectedTeacherDetail, values: teachers, placeholder: '请选择教师', emptyLabel: '清空选择' })}
       <label class="filter-field"><span>教师范围</span><span class="control"><input type="checkbox" id="salary-hide-departed" ${hideDeparted ? 'checked' : ''}> 隐藏离职</span></label>
       ${manager() ? '<button class="btn" data-salary-action="tables">薪资表</button>' : ''}
+      ${templateActions()}
       ${canView('teacherSalaryRules') ? '<button class="btn" data-salary-action="legacy">历史规则</button>' : ''}
       ${manager() ? '<button class="btn" data-salary-action="legacy-detail">历史课时操作</button>' : ''}
       <label class="filter-field filter-date-range"><span>日期范围</span>${dateRangePickerControl({ scope: 'teacher-detail-salary', start: date.start, end: date.end })}</label>
@@ -49,9 +51,9 @@ const SalaryUI = (() => {
       ${unifiedFilterField({ label: '科目', className: 'teacher-detail-filter-input', field: 'subject', value: teacherDetailFilter.subject, values: options.subjects })}
       ${unifiedFilterField({ label: '学生', className: 'teacher-detail-filter-input', field: 'student', value: teacherDetailFilter.student, values: options.students })}
       </div><div class="filter-summary"><span>${classes.length} 个班级 · ${rows.length} 节课程</span><button class="btn reset-teacher-detail-filter">清空筛选</button></div></div>
-      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="full" data-alignment="center">${data.tables.map(() => '<col data-column-type="full" data-alignment="right">').join('')}${legacy ? '<col data-column-type="full" data-alignment="right">' : ''}</colgroup>
+      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="short"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="full" data-min-width="0" data-alignment="center">${data.tables.map(() => '<col data-column-type="full" data-alignment="right">').join('')}${legacy ? '<col data-column-type="full" data-alignment="right">' : ''}</colgroup>
       <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th>学生</th>${data.tables.map((table, i) => `<th>规则薪资${i + 1}<br><small>${escapeHtml(table.effective_start)}～${escapeHtml(table.effective_end)}</small></th>`).join('')}${legacy ? '<th>历史规则</th>' : ''}</tr></thead>
-      <tbody>${classes.map((row, i) => `<tr data-salary-class="${escapeHtml(row.key)}" tabindex="0" role="button" aria-label="查看${escapeHtml(row.student_names)}的课程">${renderRowIndex(i)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${escapeHtml(row.course_type)}</td><td class="student-set-cell">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>${data.tables.map(table => `<td>${escapeHtml(row.rules[table.id] || '—（无课程）')}</td>`).join('')}${legacy ? `<td>${escapeHtml(row.rules.legacy || '—（无课程）')}</td>` : ''}</tr>`).join('') || `<tr><td colspan="${6 + data.tables.length + Number(legacy)}" class="empty">${selectedTeacherDetail ? '此日期范围暂无课程' : '请先选择教师'}</td></tr>`}</tbody></table></div></div>`;
+      <tbody>${classes.map((row, i) => `<tr data-salary-class="${escapeHtml(row.key)}" tabindex="0" role="button" aria-label="查看${escapeHtml(row.student_names)}的课程">${renderRowIndex(i)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${CourseDetails.types(row)}</td><td class="student-set-cell">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>${data.tables.map(table => `<td>${escapeHtml(row.rules[table.id] || '—（无课程）')}</td>`).join('')}${legacy ? `<td>${row.has_legacy_rule && canView('teacherSalaryRules') ? '<button class="btn" data-salary-action="legacy">历史规则</button>' : escapeHtml(row.rules.legacy || '-')}</td>` : ''}</tr>`).join('') || `<tr><td colspan="${6 + data.tables.length + Number(legacy)}" class="empty">${selectedTeacherDetail ? '此日期范围暂无课程' : '请先选择教师'}</td></tr>`}</tbody></table></div></div>`;
   }
   function showClass(key) {
     const group = data.classes.find(row => row.key === key);
@@ -62,7 +64,7 @@ const SalaryUI = (() => {
       const special = ['manual', 'legacy', 'import'].includes(row.teacher_base_salary_source);
       return `<td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge salary-source-badge">${special ? '特' : row.teacher_base_salary_source === 'auto' ? '自' : '—'}</span>${writable() && special ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</span></td><td>${formatMoney(row.performance_base)}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td>`;
     };
-    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${group.course_type} · ${group.student_names} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
+    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${(group.course_types || [group.course_type]).join("、")} · ${group.student_names} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
   }
 
   async function showTables() {
@@ -76,7 +78,7 @@ const SalaryUI = (() => {
     tables = result.tables;
     tablesWritable = Boolean(result.can_manage) && writable();
     const today = todayDate();
-    show(`${tableTeacher.name} · 薪资表`, `<div class="salary-table-actions"><button class="btn primary" data-salary-action="new" ${tableDisabled()}>新增薪资表</button><button class="btn" data-salary-action="text-export">导出</button><button class="btn" data-salary-action="text-import" ${tableDisabled()}>导入</button></div>${result.unassigned_count ? `<p class="muted-tip">另有 ${result.unassigned_count} 张历史未分配薪资表，未用于当前教师计算。</p>` : ''}<div class="salary-table-cards">${tables.map(table => `<button class="salary-table-card btn" data-salary-action="edit" data-id="${table.id}"><b>${escapeHtml(table.name || '薪资表')}</b><span>${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}</span><span>更新：${escapeHtml(formatBeijingTime(table.updated_at))}</span><span>${today < table.effective_start ? '未生效' : today > table.effective_end ? '已结束' : '生效中'}</span></button>`).join('') || '<p class="empty">暂无薪资表，未覆盖的课程继续使用历史薪资。</p>'}</div>`);
+    show(`${tableTeacher.name} · 薪资表`, `<div class="salary-table-actions"><button class="btn primary" data-salary-action="new" ${tableDisabled()}>新增薪资表</button><button class="btn" data-salary-action="text-export">导出</button><button class="btn" data-salary-action="text-import" ${tableDisabled()}>导入</button>${templateActions()}</div>${result.unassigned_count ? `<p class="muted-tip">另有 ${result.unassigned_count} 张历史未分配薪资表，未用于当前教师计算。</p>` : ''}<div class="salary-table-cards">${tables.map(table => `<button class="salary-table-card btn" data-salary-action="edit" data-id="${table.id}"><b>${escapeHtml(table.name || '薪资表')}</b><span>${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}</span><span>更新：${escapeHtml(formatBeijingTime(table.updated_at))}</span><span>${today < table.effective_start ? '未生效' : today > table.effective_end ? '已结束' : '生效中'}</span></button>`).join('') || '<p class="empty">暂无薪资表，未覆盖的课程继续使用历史薪资。</p>'}</div>`);
   }
   function editTable(id) {
     draft = id ? structuredClone(tables.find(row => row.id === id)) : { teacher_id: tableTeacher.id, name: '', effective_start: '', effective_end: '', rules: [] };
@@ -109,9 +111,9 @@ const SalaryUI = (() => {
     };
   }
   async function templatePicker() {
-    const generation = sessionGeneration, editor = modal;
+    const generation = sessionGeneration, editor = modal, originView = view;
     const result = await request('/api/salary-templates', { cache: false });
-    if (generation !== sessionGeneration || editor !== modal || !draft) return;
+    if (generation !== sessionGeneration || editor !== modal || view !== originView || !draft) return;
     templateDialog = CourseDetails.dialog('使用模板', `<div class="salary-table-cards">${result.templates.map(row => `<button class="btn salary-table-card" data-template-id="${row.id}"><b>${escapeHtml(row.name)}</b><span>更新：${escapeHtml(formatBeijingTime(row.updated_at))}</span></button>`).join('') || '<p class="empty">暂无薪资模板</p>'}</div>`);
     templateDialog.element.classList.add('salary-template-dialog');
     const dialog = templateDialog;
@@ -128,28 +130,31 @@ const SalaryUI = (() => {
       finally { button.disabled = false; }
     }; });
   }
-  async function transferDialog(importing) {
-    const generation = sessionGeneration, editor = modal, teacher = tableTeacher;
-    const exported = importing ? null : await request('/api/salary-tables/export?teacher_id=' + teacher.id, { cache: false });
-    if (generation !== sessionGeneration || editor !== modal) return;
-    templateDialog = CourseDetails.dialog(`${teacher.name} · ${importing ? '导入' : '导出'}薪资表`, `<div class="salary-template-form"><textarea class="control transfer-text" rows="14" aria-label="薪资表文本" ${importing ? '' : 'readonly'}>${escapeHtml(exported?.text || '')}</textarea><div class="transfer-preview" role="status"></div><p class="salary-editor-error" role="alert"></p><button class="btn primary transfer-submit">${importing ? '校验并导入' : '复制全部'}</button></div>`);
+  async function transferDialog(importing, templatesMode = false, templateIds = null) {
+    const generation = sessionGeneration, editor = modal, teacher = tableTeacher, originView = view;
+    const label = templatesMode ? '薪资模板' : '薪资表', base = templatesMode ? '/api/salary-templates' : '/api/salary-tables';
+    const query = templatesMode ? (templateIds ? '?ids=' + templateIds.join(',') : '') : '?teacher_id=' + teacher.id;
+    const exported = importing ? null : await request(base + '/export' + query, { cache: false });
+    if (generation !== sessionGeneration || editor !== modal || view !== originView) return;
+    templateDialog = CourseDetails.dialog(`${templatesMode ? '机构共用' : teacher.name} · ${importing ? '导入' : '导出'}${label}`, `<div class="salary-template-form"><textarea class="control transfer-text" rows="14" aria-label="${label}文本" ${importing ? '' : 'readonly'}>${escapeHtml(exported?.text || '')}</textarea><div class="transfer-preview" role="status"></div><p class="salary-editor-error" role="alert"></p><button class="btn primary transfer-submit">${importing ? '校验并导入' : '复制全部'}</button></div>`);
     const dialog = templateDialog, area = dialog.element.querySelector('textarea'), button = dialog.element.querySelector('.transfer-submit'), preview = dialog.element.querySelector('.transfer-preview');
     let pending = null, chosen = null;
-    const current = () => generation === sessionGeneration && editor === modal && templateDialog === dialog && dialog.element.isConnected;
+    const current = () => generation === sessionGeneration && view === originView && editor === modal && templateDialog === dialog && dialog.element.isConnected;
     area.oninput = () => { pending = null; chosen = null; preview.textContent = ''; button.textContent = '校验并导入'; };
     button.onclick = async () => {
       button.disabled = true; dialog.element.querySelector('[role=alert]').textContent = '';
       try {
-        if (!importing) { await navigator.clipboard.writeText(area.value); showToast('薪资表文本已复制'); return; }
+        if (!importing) { await navigator.clipboard.writeText(area.value); showToast(label + '文本已复制'); return; }
         if (!pending) {
-          pending = await request('/api/salary-tables/import-preview', { method: 'POST', body: { text: area.value, teacher_id: chosen } });
+          pending = await request(base + '/import-preview', { method: 'POST', body: { text: area.value, teacher_id: chosen } });
           if (!current()) return;
-          preview.innerHTML = `<p>${escapeHtml(pending.message)} · 共${pending.tables.length}张</p>${pending.tables.map(table => `<p>${escapeHtml(table.name || '薪资表')}：${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}，${table.rules.length}项规则</p>`).join('')}`;
+          preview.innerHTML = templatesMode ? `<p>${escapeHtml(pending.message)}</p>${pending.templates.map(row => `<p>${escapeHtml(row.name)}：${row.rules.length}项规则 · ${escapeHtml(row.message)}</p>`).join('')}` : `<p>${escapeHtml(pending.message)} · 共${pending.tables.length}张</p>${pending.tables.map(table => `<p>${escapeHtml(table.name || '薪资表')}：${escapeHtml(table.effective_start)} ～ ${escapeHtml(table.effective_end)}，${table.rules.length}项规则</p>`).join('')}`;
+          if (templatesMode && !pending.allowed) { pending = null; return; }
           area.readOnly = true; button.textContent = '确认导入';
         } else {
-          await request('/api/salary-tables/import-confirm', { method: 'POST', body: { token: pending.token, confirm: true } });
+          await request(base + '/import-confirm', { method: 'POST', body: { token: pending.token, confirm: true } });
           if (!current()) return;
-          dialog.close(); templateDialog = null; await refresh(); await showTables(); showToast('薪资表已导入');
+          dialog.close(); templateDialog = null; if (!templatesMode) { await refresh(); await showTables(); } showToast(label + '已导入');
         }
       } catch (error) {
         if (!current()) return;
@@ -159,6 +164,21 @@ const SalaryUI = (() => {
           preview.querySelector('select').onchange = event => { chosen = Number(event.target.value) || null; };
         }
       } finally { button.disabled = false; }
+    };
+  }
+  async function templateExportPicker() {
+    const generation = sessionGeneration, editor = modal, originView = view;
+    const result = await request('/api/salary-templates', { cache: false });
+    if (generation !== sessionGeneration || editor !== modal || view !== originView) return;
+    templateDialog = CourseDetails.dialog('导出模板', `<div class="salary-template-form"><p>机构共用模板，可选择一项、多项或全部。</p><label><input type="checkbox" class="template-select-all" checked> 全部模板</label>${result.templates.map(row => `<label><input type="checkbox" class="template-export-choice" value="${row.id}" checked> ${escapeHtml(row.name)} · ${escapeHtml(formatBeijingTime(row.updated_at))}</label>`).join('')}<button class="btn primary template-export-confirm" ${result.templates.length ? '' : 'disabled'}>生成文本</button></div>`);
+    const dialog = templateDialog, choices = [...dialog.element.querySelectorAll('.template-export-choice')], all = dialog.element.querySelector('.template-select-all'), button = dialog.element.querySelector('.template-export-confirm');
+    const update = () => { const count = choices.filter(input => input.checked).length; all.checked = count === choices.length; all.indeterminate = count > 0 && count < choices.length; button.disabled = !count; };
+    all.onchange = () => { choices.forEach(input => { input.checked = all.checked; }); update(); };
+    choices.forEach(input => { input.onchange = update; });
+    button.onclick = async () => {
+      button.disabled = true;
+      try { const ids = choices.filter(input => input.checked).map(input => Number(input.value)); dialog.close(); templateDialog = null; await transferDialog(false, true, ids); }
+      catch (error) { showToast(error.message, 'error'); }
     };
   }
   function previews() {
@@ -179,6 +199,8 @@ const SalaryUI = (() => {
       if (task === 'legacy-detail' || task === 'classes') { legacyDetail = task === 'legacy-detail'; render(); return; }
       if (task === 'tables') return await showTables();
       if (task === 'legacy') { close(); setActiveView('teacherSalaryRules'); await load({ refreshGlobal: false }); return; }
+      if (task === 'template-export') return await templateExportPicker();
+      if (task === 'template-import' && writable()) return await transferDialog(true, true);
       if (task === 'text-export') return await transferDialog(false);
       if (task === 'text-import' && tablesWritable) return await transferDialog(true);
       if (task === 'new' || task === 'edit') return editTable(Number(button.dataset.id) || null);
