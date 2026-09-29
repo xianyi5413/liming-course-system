@@ -7,13 +7,13 @@ const CourseDetails = (() => {
       ? ['teacher_name', 'date', 'weekday', 'time_slot', 'classroom', 'status', 'grade', 'subject', 'course_type', 'student_names', 'notes']
       : ['teacher_name', 'date', 'weekday', 'time_slot', 'classroom', 'course_type', 'status', 'grade', 'subject', 'student_names', 'notes'];
     const labels = { teacher_name: salaryCells ? '老师' : '授课老师', date: '日期', weekday: '星期', time_slot: '时间', classroom: '教室', status: '状态', grade: '年级', subject: '科目', course_type: '类型', student_names: '学生', notes: '备注' };
-    const column = field => field === 'notes' ? '<col data-column-type="note">' : `<col data-column-type="full" data-min-width="0" data-alignment="center">`;
+    const column = field => field === 'notes' ? '<col data-column-type="full" data-alignment="left">' : `<col data-column-type="full" data-min-width="0" data-alignment="center">`;
     const cell = (row, field) => {
       if (field === 'course_type' && typeCell) return typeCell(row);
       const value = field === 'weekday' ? escapeHtml(weekdayCn(row.date)) : field === 'status' ? statusBadge(rowStatus(row)) : field === 'grade' ? renderGradeBadge(row.grade) : field === 'subject' ? renderSubjectBadge(row.subject) : field === 'student_names' ? renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade }) : escapeHtml(row[field] || '');
       return `<td>${value}</td>`;
     };
-    return `<div class="table-wrap business-table-scroll"><table class="uniform-table nowrap-table compact-rows business-sticky-table course-details-table ${className}" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}${fields.map(column).join('')}${salaryCells ? '<col data-column-type="full" data-alignment="right"><col data-column-type="full" data-alignment="right">' : ''}</colgroup><thead><tr>${rowIndexHeader()}${fields.map(field => `<th>${labels[field]}</th>`).join('')}${salaryCells ? '<th>教师薪资</th><th>规则薪资</th>' : ''}</tr></thead><tbody>${rows.map((row, index) => `<tr data-course-detail-id="${row.id}">${renderRowIndex(index)}${fields.map(field => cell(row, field)).join('')}${salaryCells ? salaryCells(row) : ''}</tr>`).join('')}</tbody></table></div>`;
+    return `<div class="table-wrap business-table-scroll"><table class="uniform-table nowrap-table compact-rows business-sticky-table course-details-table ${className}" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}${fields.map(column).join('')}${salaryCells ? '<col data-column-type="full" data-alignment="right"><col data-column-type="full" data-alignment="right"><col data-column-type="full" data-alignment="center">' : ''}</colgroup><thead><tr>${rowIndexHeader()}${fields.map(field => `<th>${labels[field]}</th>`).join('')}${salaryCells ? '<th>基础课薪</th><th>月度绩效</th><th>规则薪资</th>' : ''}</tr></thead><tbody>${rows.map((row, index) => `<tr data-course-detail-id="${row.id}">${renderRowIndex(index)}${fields.map(field => cell(row, field)).join('')}${salaryCells ? salaryCells(row) : ''}</tr>`).join('')}</tbody></table></div>`;
   }
   function dialog(title, body, { onClose = () => {} } = {}) {
     const focus = document.activeElement, element = document.createElement('div');
@@ -24,7 +24,7 @@ const CourseDetails = (() => {
     element.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.stopPropagation(); close(); }
       if (event.key === 'Tab') {
-        const items = [...element.querySelectorAll('button:not(:disabled),input:not(:disabled),[tabindex="0"]')].filter(node => node.getClientRects().length);
+        const items = [...element.querySelectorAll('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]')].filter(node => node.getClientRects().length);
         if (event.shiftKey && document.activeElement === items[0]) { event.preventDefault(); items.at(-1)?.focus(); }
         else if (!event.shiftKey && document.activeElement === items.at(-1)) { event.preventDefault(); items[0]?.focus(); }
       }
@@ -45,7 +45,7 @@ const ClassCourseUI = (() => {
     const result = await request('/api/class-groups/courses?' + new URLSearchParams({ key: group.group_key }), { cache: false });
     if (token !== generation || !auth.user || view !== 'classGroups' || !result.lessons.length) return;
     const typeCell = row => `<td class="class-course-type" data-id="${row.id}" ${editable() ? 'role="button" tabindex="0" aria-haspopup="listbox"' : ''}><span class="lesson-inline-picker">${escapeHtml(row.course_type)}</span></td>`;
-    active = CourseDetails.dialog(`${group.teacher} · ${group.grade} · ${group.subject} · ${group.course_type}`, CourseDetails.table(result.lessons, { typeCell, className: 'class-course-details' }), { onClose: () => { active = null; generation++; } });
+    active = CourseDetails.dialog(`${group.teacher} · ${group.grade} · ${group.subject} · ${group.course_type} · 共${result.lessons.length}节课`, CourseDetails.table(result.lessons, { typeCell, className: 'class-course-details' }), { onClose: () => { active = null; generation++; } });
     active.element.querySelectorAll('.class-course-type').forEach(cell => {
       const row = result.lessons.find(row => row.id === Number(cell.dataset.id));
       const open = () => { if (editable()) openInlineCustomPicker(cell, { id: row.id, field: 'course_type', choices: courseTypeSelectOptions(row.grade, row.course_type, false), onChange: async input => { try { await change(group, [row.id], input.value, 'lesson'); await details(group); } catch (error) { showToast(error.message, 'error'); } } }); };

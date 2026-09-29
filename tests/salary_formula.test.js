@@ -45,10 +45,10 @@ test('table rules use strict grades, forbid junior 1V3, validate calendar dates 
   const lesson={teacher_name:'合成老师',grade:'高一',subject:'数学',course_type:'小班课',student_names:'甲、乙、丙'};
   assert.equal(S.classKey(lesson),S.classKey({...lesson,student_names:'丙,甲,乙,甲'}));
   assert.notEqual(S.classKey(lesson),S.classKey({...lesson,student_names:'甲、乙'}));
-  const context=S.tableContext([{id:1,effective_start:'2026-07-01',effective_end:'2026-08-31'},{id:2,effective_start:'2026-09-01',effective_end:'2026-10-31'}],[]);
-  assert.equal(S.matchTable(context,'2026-08-31').id,1);
-  assert.equal(S.matchTable(context,'2026-09-01').id,2);
-  assert.equal(S.matchTable(context,'2026-11-01'),null);
+  const context=S.tableContext([{id:1,teacher_id:1,effective_start:'2026-07-01',effective_end:'2026-08-31'},{id:2,teacher_id:1,effective_start:'2026-09-01',effective_end:'2026-10-31'}],[]);
+  assert.equal(S.matchTable(context,'2026-08-31',1).id,1);
+  assert.equal(S.matchTable(context,'2026-09-01',1).id,2);
+  assert.equal(S.matchTable(context,'2026-11-01',1),null);
 });
 test('explicit salary source protects manual and imported amounts without comparing values', () => {
   assert.deepEqual(S.resolveBase({teacher_base_salary_source:'manual',teacher_base_salary_override:230},{matched:true,base_cents:22000}),{cents:23000,source:'manual'});

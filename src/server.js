@@ -1,3 +1,4 @@
+const { WorkerJobs } = require('./backup/worker_jobs');
 const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
 const SalaryWorkflow = require("./domain/salary_workflow");
 const { createSalaryStore } = require("./domain/salary_store");
@@ -49,7 +50,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260928-salary-template-course-type-ui-fixes";
+const APP_VERSION = process.env.APP_VERSION || "20260928-salary-teacher-scope-progress-import-fixes";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1077,6 +1078,11 @@ function backupCleanupService() {
 let baiduBackupManagerInstance = null;
 const pendingDataImports = new Map();
 let dataImportMaintenance = false;
+let dataJobs = null;
+function dataJobManager() {
+  if (!dataJobs) dataJobs = new WorkerJobs({ workerPath: path.join(__dirname, 'backup/data_worker.js'), onExpire: job => { if (job.artifact) { try { fs.rmSync(job.artifact, { force: true }); } catch {} } } });
+  return dataJobs;
+}
 function backupService() {
   if (!backupServiceInstance) backupServiceInstance = new BackupService({ dbPath, dataDir, appVersion: APP_VERSION, remoteUploader: (options) => baiduBackupManager().upload({ ...options, remoteDirectory: options.remoteDirectory || loadFullBackupSettings(dbPath).remote_directory }) });
   return backupServiceInstance;
@@ -1163,6 +1169,8 @@ const REAL_RECHARGE_SQL = "(COALESCE(cur_recharge, 0) <> 0 OR COALESCE(cur_gift,
 const DERIVED_CACHE_LOG_THRESHOLD_MS = Number(process.env.DERIVED_CACHE_LOG_THRESHOLD_MS || 120);
 const DERIVED_CACHE_DEBUG = process.env.DERIVED_CACHE_DEBUG === "1";
 const DERIVED_CACHE_LOG_ENABLED = process.env.PERF_LOG === "1" || DERIVED_CACHE_DEBUG;
+const SalaryTransfer = require('./domain/salary_transfer');
+const pendingSalaryImports = new Map();
 const salaryStore = createSalaryStore(db, {
   minutes: slot => { const hours = parseLessonHours(slot); return hours == null ? null : Math.round(hours * 60); },
   legacyRule: resolveTeacherSalaryRuleForLesson,
@@ -2665,7 +2673,7 @@ function studentsForMonth(monthKey, includeInactive = false) {
 }
 
 function todayKey() {
-  return dateKey(new Date());
+  return beijingDateKey();
 }
 
 function firstTeacherLessonDate(name) {
@@ -2720,6 +2728,20 @@ function teacherDetailTeacherCandidates(user, includeInactive = false) {
   return activeRows
     .filter((row) => allowedNames == null || allowedNames.has(text(row.name)))
     .sort((left, right) => text(left.name).localeCompare(text(right.name), "zh-Hans-CN"));
+}
+
+function salaryTableTeacher(user, id, write) {
+  const teacher = teacherDetailTeacherCandidates(user, true).find(row => row.id === id);
+  if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("请先选择教师，再管理该教师的薪资表"), { status: 400 });
+  if (!teacher) throw Object.assign(new Error("教师不在可管理范围内"), { status: 403 });
+  if (write && !isSuperRole(user.role)) {
+    for (const view of ["teacherDetail", "teacherSalary", "teacherSalaryRules"]) {
+      const preset = rolePrefilterForView(user, view);
+      const scopedNames = normalizeTeacherNameList(preset.teacher_names || preset.teacher || []);
+      if ((scopedNames.length && !scopedNames.includes(teacher.name)) || Object.keys(preset).some(key => !["teacher", "teacher_names"].includes(key))) throw Object.assign(new Error("薪资表需要该教师完整薪资管理范围"), { status: 403 });
+    }
+  }
+  return { id: teacher.id, name: teacher.name };
 }
 
 function studentProfiles() {
@@ -3130,7 +3152,7 @@ function deleteTeacherProfile(id) {
   if (!row) return null;
   return withTransaction(() => {
     const disabledAccounts = disableTeacherAccountsByName(row.name);
-    if (teacherHasHistory(row.name)) {
+    if (teacherHasHistory(row.name) || get("SELECT id FROM salary_tables WHERE teacher_id=? LIMIT 1", [row.id])) {
       const exitDateResolution = resolveTeacherExitDate(db, row.name);
       db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?")
         .run(exitDateResolution.found ? exitDateResolution.date : "", Number(id));
@@ -4367,10 +4389,10 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
       salary_total: moneyRound(row.salary_total),
       base_salary: moneyRound(row.salary_total),
       performance_base: num(row.performance_base),
-      performance_coefficient: coefficients.get(row.teacher_name) ?? null,
-      performance_actual: num(row.performance_base) && !coefficients.has(row.teacher_name) ? null : SalaryWorkflow.Formula.total(0, Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? null) / 100,
-      salary_pending_reason: row.missing_salary_rules ? "待补齐规则" : num(row.performance_base) && !coefficients.has(row.teacher_name) ? "待设置系数" : "",
-      total_salary: row.missing_salary_rules || (num(row.performance_base) && !coefficients.has(row.teacher_name)) ? null : SalaryWorkflow.Formula.total(Math.round(row.salary_total * 100), Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? null, Math.round(transportTotal * 100)) / 100,
+      performance_coefficient: coefficients.get(row.teacher_name) ?? 1,
+      performance_actual: SalaryWorkflow.Formula.total(0, Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? 1) / 100,
+      salary_pending_reason: row.missing_salary_rules ? "待补齐规则" : "",
+      total_salary: row.missing_salary_rules ? null : SalaryWorkflow.Formula.total(Math.round(row.salary_total * 100), Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? 1, Math.round(transportTotal * 100)) / 100,
       notes: adj.notes || "",
     };
     for (const week of travelWeeks) {
@@ -6469,16 +6491,7 @@ function normalizeExportMonthKey(value) {
 }
 
 function exportTimestamp(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-    "_",
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds()),
-  ].join("");
+  return require('../public/business-time').formatTimestamp(date).replace(/[-:]/g, '').replace(' ', '_');
 }
 
 function backupDirPath() {
@@ -7800,7 +7813,7 @@ function applyTeacherSalaryRulesToLessons(lessonIds, user) {
         });
         continue;
       }
-      if (SalaryWorkflow.matchTable(salaryStore.context(), lesson.date)) {
+      if (SalaryWorkflow.matchTable(salaryStore.context(), lesson.date, salaryStore.context().teacherIds.get(lesson.teacher_name))) {
         results.push({ lesson_id: id, status: "skipped", old_salary: lesson.teacher_salary, new_salary: null, rule_id: null, reason: "已由薪资表管理，请在班级课程中恢复自动薪资" });
         continue;
       }
@@ -8775,7 +8788,7 @@ function deleteTeacherProfileCore(id) {
   const row = get("SELECT * FROM teachers WHERE id = ?", [Number(id)]);
   if (!row) return null;
   const disabledAccounts = disableTeacherAccountsByName(row.name);
-  if (teacherHasHistory(row.name)) {
+  if (teacherHasHistory(row.name) || get("SELECT id FROM salary_tables WHERE teacher_id=? LIMIT 1", [row.id])) {
     const exitDateResolution = resolveTeacherExitDate(db, row.name);
     db.prepare("UPDATE teachers SET status = '离职', left_at = COALESCE(NULLIF(left_at, ''), ?) WHERE id = ?")
       .run(exitDateResolution.found ? exitDateResolution.date : "", Number(id));
@@ -10072,6 +10085,8 @@ function isReadonlySafeMutation(req, url) {
     "POST /api/data-center/baidu/authorize",
     "POST /api/data-center/baidu/test",
     "POST /api/data-center/baidu/backups",
+    "POST /api/data-center/jobs/export",
+    "POST /api/data-center/jobs/preflight",
   ]);
   return dataCenterManagerMutations.has(`${method} ${url.pathname}`);
 }
@@ -12321,8 +12336,15 @@ async function handleApi(req, res, url) {
     try { await baiduBackupManager().finishAuthorization(url.searchParams.get("code"), url.searchParams.get("state")); res.writeHead(302, { location: "/?baidu=connected", "cache-control": "no-store" }); return res.end(); }
     catch { res.writeHead(302, { location: "/?baidu=failed", "cache-control": "no-store" }); return res.end(); }
   }
+  const terminalJobMatch = url.pathname.match(/^\/api\/data-center\/jobs\/([a-f0-9-]+)$/);
+  if (req.method === 'GET' && terminalJobMatch && req.headers['x-task-receipt']) {
+    dataJobs?.prune();
+    const job = dataJobs?.jobs.get(terminalJobMatch[1]);
+    if (job?.kind === 'restore' && job.status === 'success' && req.headers['x-task-receipt'] === job.receipt) return sendJson(res, dataJobs.public(job));
+  }
   const user = currentUser(req);
   if (!user) return sendError(res, 401, "请先登录");
+  if (dataImportMaintenance && isWriteMethod(req.method) && !url.pathname.startsWith('/api/data-center/jobs/')) return sendError(res, 409, '系统正在恢复数据，请稍后再修改');
   if (req.method === "POST" && url.pathname === "/api/operation-logs/client") {
     const body = await readBody(req);
     const action = text(body.action);
@@ -13052,33 +13074,77 @@ async function handleApi(req, res, url) {
       return sendJson(res, { ok: true, template });
     } catch (error) { return sendError(res, 400, error.message); }
   }
+  const salaryTransferMatch = url.pathname.match(/^\/api\/salary-tables\/(export|import-preview|import-confirm)$/);
+  if (salaryTransferMatch) {
+    if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或教务可管理薪资表");
+    try {
+      const action = salaryTransferMatch[1];
+      if (action === "export" && req.method === "GET") {
+        const teacher = salaryTableTeacher(user, Number(url.searchParams.get("teacher_id")), false);
+        const bundle = SalaryTransfer.exportTables(salaryStore, teacher);
+        writeOperationLog(user, { operation_type: "导出薪资表", operation_content: `导出“${teacher.name}”的 ${bundle.tables.length} 张薪资表`, target_type: "salary_tables", target_id: String(teacher.id) });
+        return sendJson(res, { text: JSON.stringify(bundle, null, 2) });
+      }
+      if (req.method !== "POST") return sendError(res, 405, "不支持的薪资表传输操作");
+      const body = await readBody(req);
+      for (const [token, item] of pendingSalaryImports) if (item.expires < Date.now()) pendingSalaryImports.delete(token);
+      if (action === "import-preview") {
+        const preview = SalaryTransfer.previewTables(salaryStore, all("SELECT id,name FROM teachers"), body.text, body.teacher_id);
+        salaryTableTeacher(user, preview.teacher.id, true);
+        const token = crypto.randomUUID();
+        pendingSalaryImports.set(token, { owner: user.id, expires: Date.now() + 10 * 60_000, preview });
+        return sendJson(res, { ...preview, token });
+      }
+      if (action === "import-confirm") {
+        const pending = pendingSalaryImports.get(text(body.token));
+        if (!pending || pending.owner !== user.id || body.confirm !== true) return sendError(res, 400, "导入预览已失效，请重新校验并确认");
+        const teacher = salaryTableTeacher(user, pending.preview.teacher.id, true);
+        if (teacher.name !== pending.preview.teacher.name) return sendError(res, 400, "教师信息已变化，请重新校验薪资表");
+        const tables = SalaryTransfer.importTables(salaryStore, pending.preview);
+        pendingSalaryImports.delete(text(body.token)); clearDerivedCache("salary table import");
+        writeOperationLog(user, { operation_type: "导入薪资表", operation_content: `为“${teacher.name}”导入${tables.length}张薪资表`, target_type: "salary_tables", target_id: String(teacher.id) });
+        return sendJson(res, { ok: true, teacher, count: tables.length });
+      }
+    } catch (error) { return sendJson(res, { error: error.message, candidates: error.candidates }, error.status || 400); }
+  }
   const salaryTableMatch = url.pathname.match(/^\/api\/salary-tables(?:\/(\d+)(?:\/(impact))?)?$/);
   const baseSalaryMatch = url.pathname.match(/^\/api\/teacher-detail\/salary\/(\d+)$/);
   const monthlyPerformance = url.pathname === "/api/teacher-monthly-performance";
   if (salaryTableMatch || baseSalaryMatch || monthlyPerformance) {
-    // Institution-wide rules and payroll changes remain manager-only, in addition
-    // to the global page-permission and readonly checks above.
+    // Teacher ownership is checked on every read and mutation, including IDs.
     if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或有薪资权限的教务可管理薪资");
-    const canManageInstitutionTable = isSuperRole(user.role) || ["teacherDetail", "teacherSalary", "teacherSalaryRules"].every(key => Object.keys(rolePrefilterForView(user, key)).length === 0);
-    if (salaryTableMatch && req.method !== "GET" && !canManageInstitutionTable) return sendError(res, 403, "机构薪资表会影响所有教师，需要完整薪资管理范围");
     try {
       const id = Number(salaryTableMatch?.[1] || baseSalaryMatch?.[1] || 0);
-      if (salaryTableMatch && req.method === "GET") return sendJson(res, salaryTableMatch[2] ? salaryStore.impact(id) : id ? salaryStore.list().find(row => row.id === id) || {} : { tables: salaryStore.list(), can_manage: canManageInstitutionTable });
+      if (salaryTableMatch && req.method === "GET") {
+        const stored = id ? get("SELECT * FROM salary_tables WHERE id=?", [id]) : null;
+        if (id && !stored) return sendError(res, 404, "薪资表不存在");
+        const teacher = salaryTableTeacher(user, stored?.teacher_id || Number(url.searchParams.get("teacher_id")), false);
+        let canManage = true; try { salaryTableTeacher(user, teacher.id, true); } catch { canManage = false; }
+        return sendJson(res, salaryTableMatch[2] ? salaryStore.impact(id) : id ? salaryStore.list(teacher.id).find(row => row.id === id) : { teacher, tables: salaryStore.list(teacher.id), can_manage: canManage, unassigned_count: isSuperRole(user.role) ? get("SELECT COUNT(*) n FROM salary_tables WHERE teacher_id IS NULL").n : 0 });
+      }
       const body = await readBody(req);
+      let tableTeacher = null;
+      if (salaryTableMatch) {
+        const stored = id ? get("SELECT * FROM salary_tables WHERE id=?", [id]) : null;
+        if (id && !stored) return sendError(res, 404, "薪资表不存在");
+        tableTeacher = salaryTableTeacher(user, stored?.teacher_id || Number(body.teacher_id), true);
+        if (body.teacher_id != null && Number(body.teacher_id) !== tableTeacher.id) return sendError(res, 400, "不可改变薪资表教师归属");
+        body.teacher_id = tableTeacher.id;
+      }
       let result, operation, target;
       if (salaryTableMatch && !salaryTableMatch[2] && ((req.method === "POST" && !id) || (["PATCH", "PUT"].includes(req.method) && id))) {
         result = salaryStore.save(body, id || null);
-        operation = `${id ? "修改" : "新增"}薪资表：${result.effective_start} 至 ${result.effective_end}`;
+        operation = `为“${tableTeacher.name}”${id ? "修改" : "新增"}薪资表：${result.effective_start} 至 ${result.effective_end}`;
         target = "salary_tables";
       } else if (salaryTableMatch && id && req.method === "DELETE") {
         result = salaryStore.remove(id, body);
-        operation = `删除薪资表：${result.effective_start} 至 ${result.effective_end}，影响 ${result.affected} 节课程，保留特殊薪资`;
+        operation = `删除“${tableTeacher.name}”薪资表：${result.effective_start} 至 ${result.effective_end}，影响 ${result.affected} 节课程，保留特殊薪资`;
         target = "salary_tables";
       } else if (monthlyPerformance && ["PUT", "PATCH"].includes(req.method)) {
         const teacher = text(body.teacher_name), month = text(body.month_key);
         if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可管理范围内");
         result = salaryStore.coefficient(teacher, month, body.coefficient);
-        const kText = value => value == null ? "未设置" : Number(value).toFixed(2);
+        const kText = value => value == null ? "默认1.00" : Number(value).toFixed(2);
         operation = `修改${teacher}${month.slice(0, 7)}绩效系数：${kText(result.before)} → ${kText(result.coefficient)}`;
         target = "teacher_monthly_performance";
       } else if (baseSalaryMatch && req.method === "PATCH") {
@@ -13092,7 +13158,7 @@ async function handleApi(req, res, url) {
       clearDerivedCache("salary workflow mutation");
       writeOperationLog(user, { operation_type: operation.split("：")[0], operation_content: operation, target_type: target, target_id: String(result.id || result.teacher_name || "") });
       return sendJson(res, { ok: true, ...result, before: undefined });
-    } catch (error) { return sendError(res, 400, error.message); }
+    } catch (error) { return sendError(res, error.status || 400, error.message); }
   }
   if (req.method === "GET" && url.pathname === "/api/teacher-detail/workflow") {
     const start = text(url.searchParams.get("start")), end = text(url.searchParams.get("end")), teacher = text(url.searchParams.get("teacher"));
@@ -13100,14 +13166,15 @@ async function handleApi(req, res, url) {
     if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可查看范围内");
     const lessons = teacherDetailLessonRows(filterLessonsByRolePrefilter(all("SELECT * FROM lessons WHERE teacher_name=? AND date BETWEEN ? AND ? ORDER BY date,time_slot,id", [teacher, start, end]), user, "teacherDetail"));
     const ctx = salaryStore.context();
-    const tables = ctx.tables.filter(table => table.effective_start <= end && table.effective_end >= start).map(({ id, name, effective_start, effective_end }) => ({ id, name, effective_start, effective_end }));
+    const teacherId = ctx.teacherIds.get(teacher);
+    const tables = ctx.tables.filter(table => table.teacher_id === teacherId && table.effective_start <= end && table.effective_end >= start).map(({ id, name, effective_start, effective_end }) => ({ id, name, effective_start, effective_end }));
     const groups = new Map();
     for (const lesson of lessons) {
       const key = SalaryWorkflow.classKey(lesson);
       if (!groups.has(key)) groups.set(key, { key, teacher_name: lesson.teacher_name, grade: lesson.grade, subject: lesson.subject, course_type: lesson.course_type, student_names: normalizeStoredStudentSet(lesson.student_names), lesson_ids: [], rules: {} });
       const group = groups.get(key);
       group.lesson_ids.push(lesson.id);
-      const table = SalaryWorkflow.matchTable(ctx, lesson.date);
+      const table = SalaryWorkflow.matchTable(ctx, lesson.date, teacherId);
       const column = table ? String(table.id) : "legacy";
       if (!group.rules[column]) {
         // Class columns quote the two-hour tariff; individual lessons show their
@@ -13353,6 +13420,70 @@ async function handleApi(req, res, url) {
     const result = auditedDelete(req, user, "operating_expenses", "id", Number(expenseMatch[1]), "operating_expenses");
     writeOperationLog(user, { operation_type: "删除日常开销", operation_content: `${before?.expense_date || ""} ${before?.category || ""} ¥${before?.amount || 0}`, target_type: "operating_expenses", target_id: String(expenseMatch[1]) });
     return sendJson(res, { deleted: (result.changes || 0) > 0 });
+  }
+
+  const dataJobRoute = url.pathname.match(/^\/api\/data-center\/jobs\/([a-z0-9-]+)(?:\/(download))?$/);
+  if (dataJobRoute) {
+    const manager = dataJobManager(), action = dataJobRoute[1];
+    if (req.method === 'GET') {
+      const job = manager.get(user.id, action);
+      if (!job) return sendError(res, 404, '任务不存在或已过期');
+      if (dataJobRoute[2]) {
+        const internal = manager.jobs.get(action);
+        if (job.kind !== 'export' || job.status !== 'success' || !internal.artifact) return sendError(res, 409, '文件尚未生成');
+        return sendBuffer(res, await fs.promises.readFile(internal.artifact), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', job.result.filename);
+      }
+      return sendJson(res, job);
+    }
+    if (req.method !== 'POST' || !['export', 'preview', 'restore', 'preflight'].includes(action)) return sendError(res, 405, '不支持的任务操作');
+    let pending, uploadId, inputPath, key, body;
+    try {
+      if (action === 'preview') {
+        cleanupPendingDataImports();
+        const parts = parseMultipart(req, await readRawBody(req)); const file = parts.file;
+        if (!file?.content?.length || !/\.xlsx$/i.test(file.filename || '')) return sendError(res, 400, '必须上传xlsx文件');
+        key = 'preview:' + crypto.createHash('sha256').update(file.content).digest('hex');
+        const active = [...manager.jobs.values()].find(job => job.owner === user.id && job.key === key && ['pending', 'running'].includes(job.status));
+        if (active) return sendJson(res, manager.public(active), 202);
+        uploadId = crypto.randomUUID();
+        const dir = path.join(dataDir, 'uploads', 'data-center'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        inputPath = path.join(dir, uploadId + '.xlsx'); await fs.promises.writeFile(inputPath, file.content, { flag: 'wx', mode: 0o600 });
+        const duplicate = [...manager.jobs.values()].find(job => job.owner === user.id && job.key === key && ['pending', 'running'].includes(job.status));
+        if (duplicate) { await fs.promises.unlink(inputPath); return sendJson(res, manager.public(duplicate), 202); }
+        pendingDataImports.set(uploadId, { path: inputPath, user_id: user.id, created_at: Date.now(), preview: null });
+        body = {};
+      } else body = await readBody(req);
+      if (action === 'restore') {
+        uploadId = text(body.upload_id); pending = pendingDataImports.get(uploadId);
+        if (!pending || pending.user_id !== user.id || !pending.preview) return sendError(res, 404, '请先上传并完成预检');
+        if (!['initialize', 'overwrite'].includes(body.mode)) return sendError(res, 400, '导入模式无效');
+        const expected = body.mode === 'overwrite' ? '覆盖导入' : '初始化导入';
+        const account = get('SELECT password_hash FROM users WHERE id=?', [user.id]);
+        if (!account || !verifyPassword(body.password, account.password_hash)) return sendError(res, 401, '密码验证失败');
+        if (text(body.confirmation) !== expected) return sendError(res, 400, `请输入确认文字：${expected}`);
+        key = 'restore:' + uploadId; inputPath = pending.path;
+        const active = [...manager.jobs.values()].find(job => job.owner === user.id && job.key === key && ['pending', 'running'].includes(job.status));
+        if (active) return sendJson(res, manager.public(active), 202);
+        if (dataImportMaintenance) return sendError(res, 409, '系统正在恢复数据');
+      }
+      const job = manager.start(user.id, key || action + ':' + (body.include_operation_logs !== false), { kind: action, owner: user.id, dbPath, dataDir, appVersion: APP_VERSION, inputPath, uploadId, mode: body.mode, includeOperationLogs: body.include_operation_logs !== false }, {
+        success: (job) => {
+          if (action === 'preview') pendingDataImports.get(uploadId).preview = job.result;
+          if (action === 'restore') { sessions.clear(); pendingSalaryImports.clear(); clearDerivedCache('data job restore'); clearStudentPricingPageCache('data job restore'); }
+          if (action === 'export' || action === 'restore') writeOperationLog(user, { operation_type: action === 'export' ? '导出全量数据Excel' : '导入全量数据', operation_content: action === 'export' ? '后台导出完整 Excel 成功' : '后台导入成功，已清除登录会话', target_type: 'data_center', target_id: job.id });
+        },
+        finish: job => {
+          if (action === 'restore') dataImportMaintenance = false;
+          if ((action === 'preview' && job.status === 'failed') || action === 'restore') { if (inputPath) { try { fs.rmSync(inputPath, { force: true }); } catch {} } pendingDataImports.delete(uploadId); }
+          if (job.status === 'failed') writeOperationLog(user, { operation_type: '数据中心任务失败', operation_content: job.error.message, target_type: 'data_center', target_id: job.id, result_status: 'failure' });
+        },
+      });
+      if (action === 'restore' && ['pending', 'running'].includes(job.status)) dataImportMaintenance = true;
+      return sendJson(res, job, 202);
+    } catch (error) {
+      if (action === 'preview' && inputPath) { try { fs.rmSync(inputPath, { force: true }); } catch {} pendingDataImports.delete(uploadId); }
+      return sendError(res, error.code === 'JOB_BUSY' ? 409 : 400, error.message || '任务创建失败');
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/data-center/export.xlsx") {
@@ -13823,7 +13954,7 @@ async function handleApi(req, res, url) {
       importLock = service.acquireLock();
       const result = importFullExcel({ dbPath, inputPath: pending.path, mode, preBackupSatisfied: !!before, appVersion: APP_VERSION });
       writeOperationLog(user, { operation_type: mode === "overwrite" ? "覆盖导入全量数据" : "初始化导入全量数据", operation_content: `全量数据导入成功，模式 ${mode}`, target_type: "data_center", target_id: mode, details: { counts: result.preview_counts, pre_backup_id: before?.record?.id || null } }, req);
-      sessions.clear(); clearSessionCookie(res); return sendJson(res, { ...result, pre_backup: before?.record || result.pre_backup, sessions_cleared: true });
+      sessions.clear(); pendingSalaryImports.clear(); clearSessionCookie(res); return sendJson(res, { ...result, pre_backup: before?.record || result.pre_backup, sessions_cleared: true });
     } catch (error) {
       writeOperationLog(user, { operation_type: "导入全量数据", operation_content: "全量数据导入失败并回滚", target_type: "data_center", target_id: mode, result_status: "failure", details: { code: error.code || "FULL_EXCEL_IMPORT_FAILED" } }, req); return sendError(res, 400, error.message || "导入失败");
     } finally { if (importLock) backupService().releaseLock(importLock); dataImportMaintenance = false; try { fs.rmSync(pending.path, { force: true }); } catch {} pendingDataImports.delete(text(body.upload_id)); }
@@ -14160,7 +14291,7 @@ async function handleApi(req, res, url) {
       payload.teacher_salary = manualSalary;
       payload.teacher_salary_source = manualSalary === null ? "empty" : "manual";
       payload.teacher_salary_rule_id = null;
-      if (current.teacher_base_salary_source || SalaryWorkflow.matchTable(salaryStore.context(), payload.date || current.date)) {
+      if (current.teacher_base_salary_source || SalaryWorkflow.matchTable(salaryStore.context(), payload.date || current.date, salaryStore.context().teacherIds.get(payload.teacher_name || current.teacher_name))) {
         if (!["owner", "academic"].includes(canonicalRole(user.role)) || !roleCan(user, "teacherSalary", "write")) return sendError(res, 403, "无权调整教师基础课薪");
         try {
           payload.teacher_base_salary_override = manualSalary == null ? null : SalaryWorkflow.Formula.cents(manualSalary) / 100;

@@ -9,31 +9,33 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
   const rows = (sql, ...params) => db.prepare(sql).all(...params);
   function invalidate() { cached = null; }
   function context() {
-    if (!cached) cached = W.tableContext(rows('SELECT * FROM salary_tables ORDER BY effective_start,id'), rows('SELECT * FROM salary_table_rules ORDER BY id'));
+    if (!cached) cached = W.tableContext(rows('SELECT * FROM salary_tables ORDER BY effective_start,id'), rows('SELECT * FROM salary_table_rules ORDER BY id'), rows('SELECT id,name FROM teachers'));
     return cached;
   }
-  function list() {
+  function list(teacherId = null) {
     const ctx = context();
-    return ctx.tables.map(table => ({ ...table, rules: [...ctx.byRule.values()].filter(rule => rule.salary_table_id === table.id) }));
+    return ctx.tables.filter(table => teacherId == null || table.teacher_id === Number(teacherId)).map(table => ({ ...table, rules: [...ctx.byRule.values()].filter(rule => rule.salary_table_id === table.id) }));
   }
   function atomic(work) {
     db.exec('SAVEPOINT salary_change');
     try { const result = work(); db.exec('RELEASE salary_change'); invalidate(); return result; }
-    catch (error) { db.exec('ROLLBACK TO salary_change; RELEASE salary_change'); throw error; }
+    catch (error) { db.exec('ROLLBACK TO salary_change; RELEASE salary_change'); invalidate(); throw error; }
   }
   function save(body, id = null) {
-    const value = W.normalizeTable(body);
+    const value = { ...W.normalizeTable(body), teacher_id: Number(body.teacher_id) };
+    const teacher = db.prepare('SELECT id,name FROM teachers WHERE id=?').get(value.teacher_id);
+    if (!Number.isSafeInteger(value.teacher_id) || !teacher) throw new Error('请选择有效教师');
     return atomic(() => {
-      if (id != null && !db.prepare('SELECT id FROM salary_tables WHERE id=?').get(id)) throw new Error('薪资表不存在');
-      const conflict = db.prepare('SELECT * FROM salary_tables WHERE effective_start <= ? AND effective_end >= ? AND id <> ? LIMIT 1').get(value.effective_end, value.effective_start, id || 0);
+      if (id != null && !db.prepare('SELECT id FROM salary_tables WHERE id=? AND teacher_id=?').get(id, value.teacher_id)) throw new Error('薪资表不存在或教师归属不匹配');
+      const conflict = db.prepare('SELECT * FROM salary_tables WHERE teacher_id=? AND effective_start <= ? AND effective_end >= ? AND id <> ? LIMIT 1').get(value.teacher_id, value.effective_end, value.effective_start, id || 0);
       if (conflict) throw new Error(`日期与薪资表 ${conflict.name || conflict.id}（${conflict.effective_start} 至 ${conflict.effective_end}）重叠`);
       // Validate actual class sizes as well as the parser's common-size checks.
-      const classes = rows('SELECT DISTINCT grade,course_type,student_names FROM lessons WHERE date BETWEEN ? AND ?', value.effective_start, value.effective_end);
+      const classes = rows('SELECT DISTINCT grade,course_type,student_names FROM lessons WHERE teacher_name=? AND date BETWEEN ? AND ?', teacher.name, value.effective_start, value.effective_end);
       for (const lesson of classes) {
         const rule = value.rules.find(rule => rule.grade === lesson.grade && rule.course_type === lesson.course_type);
         if (rule) W.Formula.evaluate(rule.formula, Math.max(1, W.studentCount(lesson)), 120, { allowN: rule.course_type === '小班课' });
       }
-      if (id == null) id = Number(db.prepare('INSERT INTO salary_tables(name,effective_start,effective_end) VALUES(?,?,?)').run(value.name, value.effective_start, value.effective_end).lastInsertRowid);
+      if (id == null) id = Number(db.prepare('INSERT INTO salary_tables(name,effective_start,effective_end,teacher_id) VALUES(?,?,?,?)').run(value.name, value.effective_start, value.effective_end, value.teacher_id).lastInsertRowid);
       else db.prepare("UPDATE salary_tables SET name=?,effective_start=?,effective_end=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?").run(value.name, value.effective_start, value.effective_end, id);
       db.prepare('DELETE FROM salary_table_rules WHERE salary_table_id=?').run(id);
       const insert = db.prepare('INSERT INTO salary_table_rules(salary_table_id,grade,course_type,formula) VALUES(?,?,?,?)');
@@ -43,7 +45,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
   }
   function templates() {
     const rules = rows('SELECT * FROM salary_table_template_rules ORDER BY id');
-    return rows('SELECT * FROM salary_table_templates ORDER BY updated_at DESC,id DESC').map(row => ({ ...row, rules: rules.filter(rule => rule.template_id === row.id) }));
+    return rows('SELECT * FROM salary_table_templates').sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id).map(row => ({ ...row, rules: rules.filter(rule => rule.template_id === row.id) }));
   }
   function saveTemplate(body) {
     const name = String(body.name || '').trim();
@@ -59,7 +61,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
   function impact(id) {
     const table = db.prepare('SELECT * FROM salary_tables WHERE id=?').get(id);
     if (!table) throw new Error('薪资表不存在');
-    const affected = db.prepare('SELECT COUNT(*) AS count FROM lessons WHERE date BETWEEN ? AND ?').get(table.effective_start, table.effective_end).count;
+    const affected = db.prepare('SELECT COUNT(*) AS count FROM lessons WHERE teacher_name=(SELECT name FROM teachers WHERE id=?) AND date BETWEEN ? AND ?').get(table.teacher_id, table.effective_start, table.effective_end).count;
     return { ...table, affected };
   }
   function remove(id, confirmation = {}) {
@@ -83,18 +85,18 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     return { teacher_name: teacher, month_key: month, before, coefficient: value == null ? null : Number(value) };
   }
   function resolve(lesson, oldRules) {
-    const ctx = context(), table = W.matchTable(ctx, lesson.date);
+    const ctx = context(), table = W.matchTable(ctx, lesson.date, ctx.teacherIds.get(lesson.teacher_name));
     const rule = table ? W.tableRule(ctx, table, lesson, minutes(lesson.time_slot)) : null;
     const legacy = !table && oldRules !== false ? legacyRule(lesson, oldRules) : null;
     const base = W.resolveBase(lesson, rule, legacy);
     return {
-      teacher_base_salary: base.cents == null ? null : base.cents / 100,
+      teacher_base_salary: !eligible(lesson) ? 0 : base.cents == null ? null : base.cents / 100,
       teacher_base_salary_source: base.source,
       salary_table_id: table?.id ?? null,
       salary_rule_expression: rule ? (rule.matched ? rule.expression : '无规则') : (legacy?.calculation ? String(legacy.calculation.salary) : '无规则'),
       salary_rule_reason: rule?.reason || legacy?.reason || '',
       salary_rule_missing: Boolean(table && !rule.matched),
-      performance_base: rule?.matched ? rule.performance_cents / 100 : 0,
+      performance_base: eligible(lesson) && rule?.matched ? rule.performance_cents / 100 : 0,
       rule_base_salary: rule?.matched ? rule.base_cents / 100 : legacy?.calculation?.salary ?? null,
       payroll_eligible: eligible(lesson),
     };
@@ -107,9 +109,9 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     const amount = automatic ? null : W.Formula.cents(body.amount) / 100;
     if (amount > 100000) throw new Error('单节基础课薪不得超过 100000 元');
     atomic(() => {
-      if (automatic && !W.matchTable(context(), before.date)) {
+      if (automatic && !W.matchTable(context(), before.date, context().teacherIds.get(before.teacher_name))) {
         const legacy = legacyRule(before);
-        if (!legacy?.calculation || !eligible(before)) throw new Error('当前课程没有可应用的历史规则');
+        if (!legacy?.calculation) throw new Error('当前课程没有可应用的历史规则');
         db.prepare("UPDATE lessons SET teacher_salary=?,teacher_salary_source='auto' WHERE id=?").run(legacy.calculation.salary, id);
       }
       db.prepare('UPDATE lessons SET teacher_base_salary_override=?,teacher_base_salary_source=? WHERE id=?').run(amount, automatic ? 'auto' : 'manual', id);
@@ -121,7 +123,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     for (const lesson of lessons) {
       const resolved = resolve(lesson, oldRules);
       const key = JSON.stringify([lesson.teacher_name, lesson.month_key]);
-      const k = coefficients.get(key) ?? null;
+      const k = coefficients.get(key) ?? 1;
       const previous = running.get(key) || 0;
       const performance = eligible(lesson) ? Math.round(resolved.performance_base * 100) : 0;
       running.set(key, previous + performance);
@@ -133,7 +135,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     }
     return result;
   }
-  return { context, list, save, templates, saveTemplate, impact, remove, coefficient, resolve, override, allocate, invalidate };
+  return { context, list, atomic, save, templates, saveTemplate, impact, remove, coefficient, resolve, override, allocate, invalidate };
 }
 
 module.exports = { createSalaryStore };

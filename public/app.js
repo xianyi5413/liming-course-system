@@ -1415,7 +1415,7 @@ function customDateMonthFor(input) {
   const current = parseDateValue(input.value);
   if (current) return new Date(current.getFullYear(), current.getMonth(), 1);
   const month = parseDateValue(state?.settings?.month_key || activeMonth);
-  const fallback = month || new Date();
+  const fallback = month || parseDateValue(todayDate());
   return new Date(fallback.getFullYear(), fallback.getMonth(), 1);
 }
 
@@ -2048,31 +2048,9 @@ function yuan2(value) {
   return formatMoney(value);
 }
 
-function todayDate() {
-  const date = new Date();
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
+function todayDate() { return BusinessTime.dateKey(); }
 
-function formatBeijingTime(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const source = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(raw)
-    ? `${raw.replace(" ", "T")}Z`
-    : (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/[zZ]|[+-]\d{2}:\d{2}$/.test(raw) ? `${raw}Z` : raw);
-  const date = new Date(source);
-  if (Number.isNaN(date.getTime())) return raw;
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(date).map((part) => [part.type, part.value]));
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
-}
+function formatBeijingTime(value) { return BusinessTime.formatTimestamp(value); }
 
 function currentWeekRange() {
   const today = new Date(`${todayDate()}T00:00:00`);
@@ -2286,7 +2264,7 @@ function closeDateRangePicker() {
 
 function dateRangeBaseMonth(start, end) {
   const value = isDateValue(start) ? start : (isDateValue(end) ? end : todayDate());
-  const date = parseDateValue(value) || new Date();
+  const date = parseDateValue(value) || parseDateValue(todayDate());
   return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
@@ -3460,7 +3438,7 @@ function financeRangeQuery() {
 }
 
 function semesterBounds() {
-  const now = new Date();
+  const now = parseDateValue(todayDate());
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
   if (month <= 2) return { start: `${year}-01-01`, end: monthBounds(`${year}-02-01`).end };
@@ -5644,6 +5622,7 @@ function passwordEyeIcon(visible) {
 }
 
 function renderLogin(error = "") {
+  DataWorkflows.resetSession();
   SalaryUI.resetSession();
   ClassCourseUI.close();
   dismissToast();
@@ -10243,7 +10222,7 @@ function backupCleanupMarkup() {
     ${dialog.error ? `<p class="danger">${escapeHtml(dialog.error)}</p>` : ""}
     ${preview ? `<p>本地 ${summary.local_files} 个文件（${formatFileSize(summary.local_bytes)}），百度 ${summary.remote_files} 个文件（${summary.remote_bytes == null ? "空间未知" : formatFileSize(summary.remote_bytes)}）；关联 ${summary.backups} 条备份，孤立 ${summary.orphan_files} 个文件。</p>${preview.warnings.map(w => `<p class="muted-tip">${escapeHtml(w)}</p>`).join("")}` : ""}
     ${dialog.result ? `<p>实际删除 ${dialog.result.deleted_files} 个，失败/跳过 ${dialog.result.failed_files} 个；本地释放 ${formatFileSize(dialog.result.local_bytes)}，百度释放 ${formatFileSize(dialog.result.remote_bytes)}。</p>` : ""}
-    <div class="table-wrap managed-file-browser-table-wrap"><table class="uniform-table managed-file-browser-table"><thead><tr><th>来源</th><th>文件</th><th>备份</th><th>类型</th><th>时间</th><th>大小</th><th>原因/结果</th></tr></thead><tbody>${entries.flatMap(entry => entry.files.map(file => `<tr><td>${file.source === "local" ? "本地" : "百度"}</td><td>${escapeHtml(file.relative_path)}</td><td>${entry.backup_id || "无记录"}</td><td>${escapeHtml(entry.backup_type || entry.kind)}</td><td>${escapeHtml(file.created_at || "未知")}</td><td>${file.size == null ? "未知" : formatFileSize(file.size)}</td><td>${escapeHtml(file.status || entry.reason || "已完成")}${entry.reason && file.status ? ` · ${escapeHtml(entry.reason)}` : ""}</td></tr>`)).join("") || '<tr><td colspan="7">没有已确认可清理的文件</td></tr>'}</tbody></table></div>
+    <div class="table-wrap managed-file-browser-table-wrap"><table class="uniform-table managed-file-browser-table"><thead><tr><th>来源</th><th>文件</th><th>备份</th><th>类型</th><th>时间</th><th>大小</th><th>原因/结果</th></tr></thead><tbody>${entries.flatMap(entry => entry.files.map(file => `<tr><td>${file.source === "local" ? "本地" : "百度"}</td><td>${escapeHtml(file.relative_path)}</td><td>${entry.backup_id || "无记录"}</td><td>${escapeHtml(entry.backup_type || entry.kind)}</td><td>${escapeHtml(formatBeijingTime(file.created_at) || "未知")}</td><td>${file.size == null ? "未知" : formatFileSize(file.size)}</td><td>${escapeHtml(file.status || entry.reason || "已完成")}${entry.reason && file.status ? ` · ${escapeHtml(entry.reason)}` : ""}</td></tr>`)).join("") || '<tr><td colspan="7">没有已确认可清理的文件</td></tr>'}</tbody></table></div>
     <div class="modal-actions"><button class="btn backup-cleanup-close" type="button" ${dialog.busy && dialog.preview ? "disabled" : ""}>关闭</button>${!dialog.result ? `<button class="btn danger backup-cleanup-confirm" type="button" ${dialog.busy || !preview?.entries.length ? "disabled" : ""}>确认删除</button>` : ""}</div>
   </div></div>`;
 }
@@ -10568,7 +10547,7 @@ function managedExcelBrowserMarkup() {
             <td class="managed-file-name">${escapeHtml(item.filename)}</td>
             <td class="managed-file-relative-path">${escapeHtml(item.relative_path)}</td>
             <td class="right">${escapeHtml(formatFileSize(item.size))}</td>
-            <td>${escapeHtml(item.modified_at || "—")}</td>
+            <td>${escapeHtml(formatBeijingTime(item.modified_at) || "—")}</td>
             ${local ? "" : `<td class="managed-file-id">${escapeHtml(item.fs_id || "—")}</td>`}
             <td><span class="status-badge ${item.checksum_status === "present" ? "success" : "warning"}">${item.checksum_status === "present" ? "已找到" : "缺失"}</span></td>
             <td>${item.backup_record ? `#${Number(item.backup_record.id)} · ${escapeHtml(item.backup_record.status || "—")}` : '<span class="status-badge warning">孤立文件</span>'}</td>
@@ -10643,6 +10622,7 @@ function renderAudit() {
   contentEl.innerHTML = `
     ${backupState.loadError ? `<div class="audit-inline-notice danger data-center-load-error"><span>数据中心加载失败：${escapeHtml(backupState.loadError)}</span><button class="btn data-center-reload" type="button">重新加载</button></div>` : ""}
     ${backupState.error ? `<div class="audit-inline-notice danger">${escapeHtml(backupState.error)}</div>` : ""}
+    ${DataWorkflows.markup()}
     ${dataPreflightMarkup()}
     <section class="band audit-panel data-center-section" data-region="import-export">
       <div class="section-head"><div><div class="section-title">数据导入导出</div><div class="section-subtitle">完整备份含 22 张可见业务表和 4 张 veryHidden 恢复表；空白模板不含内部恢复数据。覆盖导入会先创建服务器备份。</div></div></div>
@@ -12824,9 +12804,9 @@ function renderTeacherSalary() {
   const rows = state.derived.teacher_summary;
   const sum = field => rows.reduce((total, row) => total + numberValue(row[field]), 0);
   const pending = rows.some(row => row.total_salary == null);
-  renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐规则或绩效系数" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
+  renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐薪资规则" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
   contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>月度绩效</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
-    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${row.performance_coefficient == null ? "" : Number(row.performance_coefficient).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
+    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
     <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
 
@@ -17183,7 +17163,8 @@ function wireEvents() {
       render();
       try {
         const includeLogs = Boolean(backupState.exportIncludeOperationLogs);
-        await downloadBlob(`/api/data-center/export.xlsx?include_operation_logs=${includeLogs ? "1" : "0"}`, `黎明教育_全量数据_${Date.now()}.xlsx`);
+        const job = await DataWorkflows.run("export", { include_operation_logs: includeLogs });
+        await downloadBlob(`/api/data-center/jobs/${job.job_id}/download`, job.result.filename);
       } catch (error) {
         if (error.data?.preflight) backupState.preflight = error.data.preflight;
         showToast(error.message || "导出全部数据失败", "error");
@@ -17200,7 +17181,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v5.xlsx");
+        await downloadBlob("/api/data-center/template.xlsx", "黎明教育_全量数据导入模板_v7.xlsx");
       } catch (error) {
         showToast(error.message || "下载模板失败", "error");
       } finally {
@@ -17246,10 +17227,8 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        const form = new FormData(); form.append("file", file, file.name);
-        const response = await fetch("/api/data-center/import/preview", { method: "POST", body: form, cache: "no-store" });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        const job = await DataWorkflows.run('preview', {}, file);
+        const data = job.result;
         backupState.importPreview = data; backupState.error = "";
       } catch (error) {
         backupState.importPreview = null; backupState.error = error.message || "Excel 预检失败";
@@ -17267,7 +17246,7 @@ function wireEvents() {
       backupState.busy = true;
       render();
       try {
-        await request("/api/data-center/import/execute", { method: "POST", body: { upload_id: backupState.importPreview?.upload_id, mode: backupState.importMode, password, confirmation } });
+        await DataWorkflows.run("restore", { upload_id: backupState.importPreview?.upload_id, mode: backupState.importMode, password, confirmation });
         backupState.importPreview = null; backupState.importFile = null;
         alert("导入成功。所有登录会话已清除，请重新登录。");
         window.location.reload();
@@ -17423,7 +17402,7 @@ function wireEvents() {
 
   document.querySelectorAll(".data-preflight-recheck").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true;
-    try { backupState.preflight = await request("/api/data-center/preflight"); backupState.error = ""; }
+    try { backupState.preflight = (await DataWorkflows.run("preflight")).result; backupState.error = ""; }
     catch (error) { backupState.error = error.message || "重新检查失败"; }
     finally { render(); }
   }));

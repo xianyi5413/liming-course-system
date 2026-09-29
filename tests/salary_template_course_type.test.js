@@ -35,7 +35,7 @@ test('templates validate formulas, persist separately without dates and enforce 
   assert.equal(result.response.status,200,JSON.stringify(result.payload));
   assert.equal(Object.hasOwn(result.payload.template,'effective_start'),false);
   assert.equal(Object.hasOwn(result.payload.template,'effective_end'),false);
-  assert.equal((await api('/api/salary-tables')).payload.tables.length,0);
+  assert.equal((await api('/api/salary-tables?teacher_id=9001')).payload.tables.length,0);
   assert.equal((await api('/api/salary-templates')).payload.templates[0].name,'合成模板');
   assert.equal((await api('/api/salary-templates',{method:'POST',body:{name:'坏公式',rules:table('eval(1)').rules}})).response.status,400);
   assert.equal((await api('/api/salary-templates',{cookie:teacherCookie})).response.status,403);
@@ -99,7 +99,7 @@ test('custom course types cannot inject attributes into grouped row identifiers'
 test('complete Excel preserves templates and manual course type sources',()=>{
   const {exportFullData,verifyFullData,restoreFullData}=require('../src/excel/full_backup');
   const file=path.join(tempRoot,'templates.xlsx');exportFullData({dbPath:databasePath,outputPath:file});
-  const verified=verifyFullData(file);assert.equal(verified.version,6);assert.equal(verified.data.salary_table_templates.length,1);
+  const verified=verifyFullData(file);assert.equal(verified.version,7);assert.equal(verified.data.salary_table_templates.length,1);
   assert.ok(verified.data.lessons.some(row=>row.course_type_source==='manual'));
   const target=path.join(tempRoot,'restored.sqlite');
   const init=spawnSync(process.execPath,[path.join(root,'src/server.js'),'--init-db'],{env:{...process.env,DATA_DIR:tempRoot,DB_PATH:target},encoding:'utf8',windowsHide:true});assert.equal(init.status,0,init.stderr);
@@ -139,6 +139,7 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
   try{
     await browser.send('Page.navigate',{url:'http://127.0.0.1:'+port+'/'});await browser.login('boss','123456');
     await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('[data-salary-action=tables]')");
+    await browser.evaluate("selectedTeacherDetail='合成教师';load({refreshGlobal:false})");await browser.waitFor("document.querySelectorAll('[data-salary-class]').length>0");
     await browser.click('[data-salary-action=tables]');await browser.waitFor("!!document.querySelector('[data-salary-action=new]')");await browser.click('[data-salary-action=new]');
     await browser.evaluate("document.querySelector('#salary-table-name').value='未保存名称';applyDateRangePickerValue(document.querySelector('[data-range-scope=salary-table-editor]'),'2027-01-01','2027-01-31')");
     for(const width of [1440,1280,1024,390]){
@@ -149,9 +150,9 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     await browser.send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await browser.click('[data-salary-action=template-use]');await browser.waitFor("!!document.querySelector('[data-template-id]')");await browser.click('[data-template-id]');
     await browser.waitFor("document.querySelector('.salary-formula-input[data-grade=高一][data-type=小班课]').value.includes('40')");
-    assert.equal(await browser.evaluate("document.querySelector('#salary-table-name').value"),'未保存名称');
+    assert.equal(await browser.evaluate("document.querySelector('#salary-table-name').value"),'合成模板');
     assert.equal(await browser.evaluate("document.querySelector('[data-range-scope=salary-table-editor]').dataset.start"),'2027-01-01');
-    assert.equal((await api('/api/salary-tables')).payload.tables.length,0);
+    assert.equal((await api('/api/salary-tables?teacher_id=9001')).payload.tables.length,0);
     await browser.evaluate("window.templateConfirm=[];window.confirm=message=>{templateConfirm.push(message);return false;}");
     await browser.click('[data-salary-action=template-use]');await browser.waitFor("!!document.querySelector('[data-template-id]')");await browser.click('[data-template-id]');
     assert.match((await browser.evaluate('templateConfirm'))[0],/覆盖当前已填写/);await browser.click('.salary-template-dialog .dialog-close');
@@ -200,7 +201,7 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     }
     await browser.click('[data-salary-class]');await browser.waitFor("!!document.querySelector('.teacher-class-lessons')");
     const salaries=await browser.evaluate("(()=>{const t=document.querySelector('.teacher-class-lessons');applyAdaptiveTableColumns({table:t});return [...t.querySelector('tbody tr').cells].map(x=>getComputedStyle(x).textAlign)})()");
-    assert.deepEqual(salaries,Array(11).fill('center').concat('left','right','right'));await browser.click('[data-salary-action=close]');
+    assert.deepEqual(salaries,Array(11).fill('center').concat('left','right','right','center'));await browser.click('[data-salary-action=close]');
     await browser.evaluate("setActiveView('lessons');scheduleMode=true;load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.lesson-table')");
     assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
     await browser.evaluate('scheduleMode=false;render()');assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
