@@ -2,6 +2,7 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureBackupColumns } = require("./backup_service");
+const { ensureLocalRetentionSetting } = require("./retention");
 const { BaiduBackupManager } = require("./baidu_provider");
 
 const REMOTE_NOT_READY_COOLDOWN_MS = 10 * 60_000;
@@ -14,7 +15,7 @@ const REMOTE_READINESS_MESSAGES = Object.freeze({
 
 const DEFAULT_BACKUP_SETTINGS = Object.freeze({
   enabled: false, time: "02:30", timezone: "Asia/Shanghai", daily_retention: 14,
-  monthly_retention: 12, manual_retention: 20, retry_count: 3,
+  monthly_retention: 12, manual_retention: 20, total_retention: 50, retry_count: 3,
   local_include_operation_logs: false,
   remote_enabled: false, remote_frequency: "weekly", remote_time: "03:30", remote_timezone: "Asia/Shanghai",
   remote_weekday: 3, remote_monthday: 1, remote_retention: 20, remote_retry_count: 3,
@@ -23,7 +24,7 @@ const DEFAULT_BACKUP_SETTINGS = Object.freeze({
 const SETTING_KEYS = Object.freeze({
   enabled: "full_backup_auto_enabled", time: "full_backup_time", timezone: "full_backup_timezone",
   daily_retention: "full_backup_daily_retention", monthly_retention: "full_backup_monthly_retention",
-  manual_retention: "full_backup_manual_retention", retry_count: "full_backup_retry_count",
+  total_retention: "full_backup_total_retention", manual_retention: "full_backup_manual_retention", retry_count: "full_backup_retry_count",
   local_include_operation_logs: "full_backup_local_include_operation_logs",
   remote_enabled: "full_backup_remote_enabled", remote_directory: "full_backup_remote_directory",
   remote_frequency: "full_backup_remote_frequency", remote_time: "full_backup_remote_time",
@@ -44,6 +45,7 @@ function normalizeSettings(values = {}) {
     daily_retention: bounded(values.daily_retention, DEFAULT_BACKUP_SETTINGS.daily_retention, 1, 365),
     monthly_retention: bounded(values.monthly_retention, DEFAULT_BACKUP_SETTINGS.monthly_retention, 1, 120),
     manual_retention: bounded(values.manual_retention, DEFAULT_BACKUP_SETTINGS.manual_retention, 1, 200),
+    total_retention: Number.isSafeInteger(Number(values.total_retention)) && Number(values.total_retention) > 0 ? Number(values.total_retention) : DEFAULT_BACKUP_SETTINGS.total_retention,
     retry_count: bounded(values.retry_count, DEFAULT_BACKUP_SETTINGS.retry_count, 0, 10),
     local_include_operation_logs: values.local_include_operation_logs === true || values.local_include_operation_logs === 1 || values.local_include_operation_logs === "1" || values.local_include_operation_logs === "true",
     remote_enabled: values.remote_enabled === true || values.remote_enabled === 1 || values.remote_enabled === "1" || values.remote_enabled === "true",
@@ -62,6 +64,7 @@ function normalizeSettings(values = {}) {
 function loadBackupSettings(dbPath) {
   const db = new DatabaseSync(path.resolve(dbPath));
   try {
+    ensureLocalRetentionSetting(db);
     const rows = Object.entries(SETTING_KEYS).map(([field, key]) => [field, db.prepare("SELECT value FROM settings WHERE key=?").get(key)?.value]);
     return normalizeSettings(Object.fromEntries(rows));
   } finally { db.close(); }

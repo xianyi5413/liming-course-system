@@ -48,9 +48,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     return rows('SELECT * FROM salary_table_templates').sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }) || b.updated_at.localeCompare(a.updated_at) || b.id - a.id).map(row => ({ ...row, rules: rules.filter(rule => rule.template_id === row.id) }));
   }
   function saveTemplate(body) {
-    const name = String(body.name || '').trim();
-    if (!name || name.length > 80) throw new Error('模板名称必填，且不得超过 80 字符');
-    const rules = W.normalizeRules(body.rules);
+    const { name, rules } = W.normalizeTemplate(body);
     return atomic(() => {
       const id = Number(db.prepare('INSERT INTO salary_table_templates(name) VALUES(?)').run(name).lastInsertRowid);
       const insert = db.prepare('INSERT INTO salary_table_template_rules(template_id,grade,course_type,formula) VALUES(?,?,?,?)');

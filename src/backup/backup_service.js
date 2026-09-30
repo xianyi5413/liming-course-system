@@ -8,7 +8,7 @@ const { FORMAT_VERSION, exportFullData, fullDataFilename, verifyFullData } = req
 
 const BACKUP_FORMAT = "full_data_excel";
 const MANAGED_SUBDIR = path.join("backups", "full-excel");
-const { ACTIVE_BACKUP_JOB_STATUSES, localRetentionSelection, remoteRetentionSelection } = require("./retention");
+const { ACTIVE_BACKUP_JOB_STATUSES, localRetentionSelection, remoteRetentionSelection, localPolicy, localCounted, ensureLocalRetentionSetting } = require("./retention");
 const BACKUP_COLUMNS = {
   backup_format: "TEXT DEFAULT 'legacy_core_zip'", format_version: "INTEGER DEFAULT 0", trigger: "TEXT DEFAULT ''",
   retention_class: "TEXT DEFAULT ''", managed_relative_path: "TEXT DEFAULT ''", sha256: "TEXT DEFAULT ''",
@@ -26,6 +26,7 @@ class BackupError extends Error { constructor(code, message, details = {}) { sup
 function ensureBackupColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(backup_records)").all().map((column) => column.name));
   for (const [column, definition] of Object.entries(BACKUP_COLUMNS)) if (!existing.has(column)) db.exec(`ALTER TABLE backup_records ADD COLUMN ${column} ${definition}`);
+  ensureLocalRetentionSetting(db);
   db.exec("DROP INDEX IF EXISTS idx_backup_records_schedule_key; CREATE UNIQUE INDEX idx_backup_records_schedule_key ON backup_records(schedule_key) WHERE TRIM(COALESCE(schedule_key,'')) <> '' AND status='success'; CREATE INDEX IF NOT EXISTS idx_backup_records_managed ON backup_records(backup_format,status,backup_time DESC);");
 }
 function sha256File(filename) { const hash = crypto.createHash("sha256"); const fd = fs.openSync(filename, "r"); const chunk = Buffer.allocUnsafe(1024 * 1024); try { let length; while ((length = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, length)); return hash.digest("hex"); } finally { fs.closeSync(fd); } }
@@ -96,7 +97,7 @@ class BackupService {
     }
     return { created_by_label: "历史记录", created_by_type: "historical" };
   }
-  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, ...this.creator(row), note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "", job_status: row.job_status || "", job_error_code: row.job_error_code || "", job_started_at: row.job_started_at || "", job_updated_at: row.job_updated_at || "", job_completed_at: row.job_completed_at || "", job_pid: Number(row.job_pid || 0) }; return { ...dto, failure: backupFailureDisplay(dto) }; }
+  dto(row) { const dto = { id: row.id, backup_time: row.backup_time || row.created_at || "", backup_format: row.backup_format || "legacy_core_zip", format_version: Number(row.format_version || 0), backup_type: row.backup_type || "", trigger: row.trigger || row.backup_type || "", retention_class: row.retention_class || "", filename: row.filename || "", managed_relative_path: row.managed_relative_path || "", file_size: Number(row.file_size || 0), sha256: row.sha256 || "", status: row.status || "", verified_at: row.verified_at || "", schedule_key: row.schedule_key || "", created_by_user_id: row.created_by_user_id || null, ...this.creator(row), note: row.note || "", pinned: Number(row.pinned || 0), operation_logs_included: Number(row.operation_logs_included ?? 1) === 1, remote_attempt_count: Number(row.remote_attempt_count || 0), remote_status: (row.backup_format || "legacy_core_zip") === BACKUP_FORMAT ? (row.remote_status || "not_configured") : "legacy", remote_file_id: row.remote_file_id || "", remote_path: row.remote_path || "", remote_checksum_file_id: row.remote_checksum_file_id || "", remote_checksum_path: row.remote_checksum_path || "", remote_file_status: row.remote_file_status || "", remote_checksum_status: row.remote_checksum_status || "", remote_integrity_status: row.remote_integrity_status || "", remote_error_safe: row.remote_error_safe || "", remote_updated_at: row.remote_updated_at || "", deleted_at: row.deleted_at || "", message: row.message || "", job_status: row.job_status || "", job_error_code: row.job_error_code || "", job_started_at: row.job_started_at || "", job_updated_at: row.job_updated_at || "", job_completed_at: row.job_completed_at || "", job_pid: Number(row.job_pid || 0) }; return { ...dto, failure: backupFailureDisplay(dto), retention_warning: ["因存在受保护备份或清理失败，当前保留数量暂时超过设置上限。", "本地备份已成功，保留清理未完成", "部分本地备份未完成清理，请查看清理结果。"].includes(row.message) ? row.message : "" }; }
   activeRemoteJob(db) {
     return db.prepare("SELECT * FROM backup_records WHERE trigger='remote_manual' AND job_status IN ('queued','preflight','exporting','hashing','uploading_excel','uploading_checksum','verifying_metadata','downloading_for_verification','integrity_check') ORDER BY id DESC LIMIT 1").get();
   }
@@ -228,7 +229,7 @@ class BackupService {
   managedPath(row) { if (row.backup_format !== BACKUP_FORMAT || !row.managed_relative_path || path.isAbsolute(row.managed_relative_path)) throw new BackupError("BACKUP_PATH_UNMANAGED", "记录不是受管全量备份"); const target = path.resolve(this.dataDir, row.managed_relative_path); if (!inside(this.root, target)) throw new BackupError("BACKUP_PATH_INVALID", "备份相对路径无效"); if (!fs.existsSync(target)) throw new BackupError("BACKUP_FILE_MISSING", "备份文件不存在"); if (fs.lstatSync(target).isSymbolicLink() || !inside(this.root, fs.realpathSync(target))) throw new BackupError("BACKUP_PATH_SYMLINK", "备份文件路径无效"); return target; }
   verify(id) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); const filename = this.managedPath(row); verifyFullData(filename); const digest = sha256File(filename); if (digest !== row.sha256) throw new BackupError("BACKUP_SHA256_MISMATCH", "备份SHA-256不匹配"); db.prepare("UPDATE backup_records SET verified_at=CURRENT_TIMESTAMP,message='' WHERE id=?").run(id); return this.dto(this.record(db, id)); } catch (error) { try { db.prepare("UPDATE backup_records SET message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error)), id); } catch {} throw error; } finally { db.close(); } }
   async create(options = {}) {
-    const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false;
+    const lock = this.acquireLock(); const db = this.database(); const trigger = options.trigger === "automatic" ? "automatic" : (options.trigger || "manual"); const retentionClass = options.retentionClass || (trigger === "automatic" ? "daily" : "manual"); const filename = fullDataFilename(options.createdAt || new Date()); let id; let staging = ""; let published = ""; let checksumFile = ""; let publishedByThisRun = false; let checksumPublishedByThisRun = false; let result;
     try {
       if (options.scheduleKey && db.prepare("SELECT 1 FROM backup_records WHERE schedule_key=? AND status='success' LIMIT 1").get(options.scheduleKey)) throw new BackupError("BACKUP_SCHEDULE_ALREADY_SUCCESSFUL", "该计划日期已经成功备份");
       if (options.existingRecordId) {
@@ -255,13 +256,29 @@ class BackupService {
       } else if (options.remoteEnabled) { const failure = safeBackupFailure("BAIDU_NOT_CONFIGURED", { stage: "remote" }); db.prepare("UPDATE backup_records SET remote_status='failed',remote_error_safe=?,message=?,remote_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(failure.code, serializeBackupFailure(failure), id); }
       row = this.record(db, id);
       if (options.existingRecordId) this.markJobStage(id, row.remote_status === "success" ? "success" : (row.remote_status === "partial_failed" ? "partial_failed" : "failed"), row.remote_error_safe || "", 0);
-      return { ok: true, record: this.dto(this.record(db, id)) };
+      result = { ok: true, record: this.dto(this.record(db, id)) };
     } catch (error) {
       if (id) try { db.prepare("UPDATE backup_records SET status='failed',message=? WHERE id=?").run(serializeBackupFailure(safeBackupFailure(error, { stage: "local" })), id); } catch {}
       if (id && options.existingRecordId) try { this.markJobStage(id, "failed", error.code || "BACKUP_JOB_FAILED", 0); } catch {}
       if (publishedByThisRun && published) try { fs.rmSync(published, { force: true }); } catch {} if (checksumPublishedByThisRun && checksumFile) try { fs.rmSync(checksumFile, { force: true }); } catch {}
       throw error;
     } finally { if (staging && inside(this.root, staging)) try { fs.rmSync(staging, { recursive: true, force: true }); } catch {} db.close(); this.releaseLock(lock); }
+    // Only a newly published successful local backup triggers cleanup. Settings
+    // saves/startup never do. Keep the new file, especially a pre-restore copy.
+    try {
+      if (trigger === 'automatic' && options.scheduleKey?.startsWith('full-data:')) result.record = this.promoteMonthly(id, options.scheduledDate || options.scheduleKey.slice(10));
+      const { loadBackupSettings } = require('./scheduler');
+      result.retention = this.applyRetention({ ...localPolicy(loadBackupSettings(this.dbPath)), protectedIds: [id] });
+      if (result.retention.warning) {
+        const reportDb = this.database();
+        try { reportDb.prepare("UPDATE backup_records SET message=CASE WHEN COALESCE(message,'')='' THEN ? ELSE message END WHERE id=?").run(result.retention.warning, id); result.record = this.dto(this.record(reportDb,id)); } finally { reportDb.close(); }
+      }
+    } catch (error) {
+      result.retention = { removed: [], skipped: [{ reason: safeMessage(error) }], warning: '本地备份已成功，保留清理未完成' };
+      const reportDb = this.database();
+      try { reportDb.prepare("UPDATE backup_records SET message=CASE WHEN COALESCE(message,'')='' THEN ? ELSE message END WHERE id=?").run(result.retention.warning, id); } finally { reportDb.close(); }
+    }
+    return result;
   }
   updateMetadata(id, values = {}) { const db = this.database(); try { const row = this.record(db, id); if (!row) throw new BackupError("BACKUP_NOT_FOUND", "备份记录不存在"); db.prepare("UPDATE backup_records SET note=?,pinned=? WHERE id=?").run(String(values.note ?? row.note ?? "").slice(0, 500), values.pinned === undefined ? Number(row.pinned || 0) : values.pinned ? 1 : 0, id); return this.dto(this.record(db, id)); } finally { db.close(); } }
   promoteMonthly(id, monthKey) {
@@ -286,31 +303,81 @@ class BackupService {
     }
     return result;
   }
+  localDeletionPolicy(db, row, protectedIds = []) {
+    const base = this.deletionPolicy(db, row);
+    if (!base.deletable) return base;
+    if (protectedIds.includes(row.id)) return { deletable: false, code: 'BACKUP_IN_USE', reason: '本次新建备份受保护' };
+    if (!row.verified_at || !['success','delete_partial'].includes(row.status) || !['daily','monthly','manual','remote','pre_restore'].includes(row.retention_class)) return { deletable: false, code: 'BACKUP_UNVERIFIED', reason: '未知或未验证备份受保护' };
+    if (/\.enc$/i.test(row.remote_path || '')) return { deletable: false, code: 'BACKUP_LEGACY_ENCRYPTED', reason: '旧加密备份受保护' };
+    const valid = db.prepare("SELECT COUNT(*) n FROM backup_records WHERE backup_format=? AND status='success' AND COALESCE(verified_at,'')<>'' AND COALESCE(deleted_at,'')='' AND COALESCE(managed_relative_path,'')<>''").get(BACKUP_FORMAT).n;
+    if (row.status === 'success' && valid <= 1) return { deletable: false, code: 'BACKUP_LAST_VALID', reason: '不能删除最后一份有效全量备份' };
+    const references = db.prepare("SELECT managed_relative_path FROM backup_records WHERE id<>?").all(row.id);
+    const target = path.resolve(this.dataDir, row.managed_relative_path || '');
+    if (references.some(other => other.managed_relative_path && path.resolve(this.dataDir,other.managed_relative_path) === target)) return { deletable: false, code: 'CLEANUP_SHARED_REFERENCE', reason: '共用文件引用受保护' };
+    if (!inside(this.root,target) || path.isAbsolute(row.managed_relative_path || '') || !/\.xlsx$/i.test(target)) return { deletable: false, code: 'BACKUP_PATH_UNMANAGED', reason: '未知路径受保护' };
+    // Check both files before removing either one, including parent symlinks.
+    for (const file of [target, target + '.sha256']) {
+      let current = this.root;
+      for (const part of ['', ...path.relative(this.root,file).split(path.sep)]) {
+        if (part) current = path.join(current,part);
+        if (part.startsWith('.')) return { deletable: false, code: 'BACKUP_PATH_UNMANAGED', reason: '隐藏路径受保护' };
+        try { if (fs.lstatSync(current).isSymbolicLink()) return { deletable: false, code: 'BACKUP_PATH_SYMLINK', reason: '符号链接受保护' }; }
+        catch (error) { if (error.code !== 'ENOENT') return { deletable: false, code: 'BACKUP_PATH_UNAVAILABLE', reason: '路径不可核实' }; }
+      }
+    }
+    return { deletable: true };
+  }
+  cleanupLocalRecord(db, row) {
+    const cleanup = this.cleanupLocalFiles(row);
+    if (!Object.values(cleanup).every(value => ['deleted','already_absent'].includes(value))) {
+      db.prepare("UPDATE backup_records SET status='delete_partial',message='BACKUP_LOCAL_DELETE_PARTIAL' WHERE id=?").run(row.id);
+      return { ok: false, cleanup, reason: 'BACKUP_LOCAL_DELETE_PARTIAL' };
+    }
+    const hasRemote = (row.remote_path || row.remote_checksum_path) && row.remote_status !== 'deleted';
+    if (hasRemote) db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='retention_cleanup' WHERE id=?").run(row.id);
+    else db.prepare('DELETE FROM backup_records WHERE id=?').run(row.id);
+    return { ok: true, cleanup, deleted: !hasRemote, backup_id: row.id };
+  }
+  async deleteLocalBackup(id, { beforeDelete = null } = {}) {
+    const lock = this.acquireLock(); let db;
+    try {
+      db = this.database(); const row = this.record(db,id), policy = this.localDeletionPolicy(db,row);
+      if (!policy.deletable) throw new BackupError(policy.code,policy.reason);
+      if (beforeDelete) await beforeDelete(db,row);
+      const latest = this.record(db,id), recheck = this.localDeletionPolicy(db,latest);
+      if (!recheck.deletable) throw new BackupError(recheck.code,recheck.reason);
+      return this.cleanupLocalRecord(db,latest);
+    } finally { db?.close(); this.releaseLock(lock); }
+  }
   applyRetention(policy = {}) {
-    const lock = this.acquireLock();
-    let db;
-    const removed = []; const skipped = [];
+    const lock = this.acquireLock(); let db;
+    const removed = [], skipped = [], attempted = new Set();
     try {
       db = this.database();
-      const { limits, successful, candidates } = localRetentionSelection(db.prepare("SELECT * FROM backup_records").all(), policy);
-      let remaining = successful.filter(row => row.status === "success").length;
-      for (const row of candidates) {
-        if (row.status === "success" && remaining <= 1) { skipped.push({ id: row.id, reason: "last_valid_backup" }); continue; }
+      const rows = () => db.prepare('SELECT * FROM backup_records').all();
+      const allowed = row => !attempted.has(row.id) && this.localDeletionPolicy(db,row,policy.protectedIds || []).deletable;
+      const selection = localRetentionSelection(rows(), policy, allowed);
+      const remove = (row,reason) => {
+        attempted.add(row.id);
+        const check = this.localDeletionPolicy(db,row,policy.protectedIds || []);
+        if (!check.deletable) { skipped.push({ id:row.id, reason:check.code }); return; }
         try {
-          const cleanup = this.cleanupLocalFiles(row);
-          if (!Object.values(cleanup).every(value => ["deleted", "already_absent"].includes(value))) {
-            db.prepare("UPDATE backup_records SET status='delete_partial',message='BACKUP_LOCAL_DELETE_PARTIAL' WHERE id=?").run(row.id);
-            if (row.status === "success") remaining -= 1;
-            skipped.push({ id: row.id, reason: "BACKUP_LOCAL_DELETE_PARTIAL" }); continue;
-          }
-          const hasRemote = (row.remote_path || row.remote_checksum_path) && row.remote_status !== "deleted";
-          if (hasRemote) db.prepare("UPDATE backup_records SET status='deleted',deleted_at=CURRENT_TIMESTAMP,message='retention_cleanup' WHERE id=?").run(row.id);
-          else db.prepare("DELETE FROM backup_records WHERE id=?").run(row.id);
-          if (row.status === "success") remaining -= 1;
-          removed.push({ id: row.id, bytes: Number(row.file_size || 0), reason: `${row.retention_class}_limit` });
-        } catch (error) { skipped.push({ id: row.id, reason: safeMessage(error) }); }
+          const result = this.cleanupLocalRecord(db,row);
+          if (result.ok) removed.push({ id:row.id, bytes:Number(row.file_size || 0), reason });
+          else skipped.push({ id:row.id, reason:result.reason });
+        } catch (error) { skipped.push({ id:row.id, reason:safeMessage(error) }); }
+      };
+      for (const row of selection.categoryCandidates) remove(row, row.retention_class + '_limit');
+      // Replan after every attempt so failed/protected records do not make us
+      // falsely believe the cap has been reached or endanger the last copy.
+      while (true) {
+        const candidate = localRetentionSelection(rows(), { ...policy, totalOnly:true }, allowed).totalCandidates[0];
+        if (!candidate) break;
+        remove(candidate, 'total_limit');
       }
-      return { removed, skipped, policy: limits };
+      const count = rows().filter(localCounted).length;
+      const warning = count > selection.limits.total ? '因存在受保护备份或清理失败，当前保留数量暂时超过设置上限。' : skipped.length ? '部分本地备份未完成清理，请查看清理结果。' : '';
+      return { removed, skipped, policy:selection.limits, local_count:count, warning };
     } finally { try { db?.close(); } finally { this.releaseLock(lock); } }
   }
   async retryRemote(id, remoteDirectory) {

@@ -35,6 +35,7 @@ const SETTING_LABELS = Object.freeze({
   full_backup_timezone: "自动备份时区",
   full_backup_daily_retention: "每日保留份数",
   full_backup_monthly_retention: "每月保留份数",
+  full_backup_total_retention: "本地总保留数量",
   full_backup_manual_retention: "手动保留份数",
   full_backup_retry_count: "失败重试次数",
   full_backup_local_include_operation_logs: "服务器备份包含操作日志",

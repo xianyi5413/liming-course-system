@@ -1,6 +1,7 @@
 const FAILURE_PREFIX = "BACKUP_FAILURE_V1:";
 
 const FAILURE_MESSAGES = Object.freeze({
+  BACKUP_LOCAL_DELETE_PARTIAL: "本地 Excel 或校验文件删除未完成，请重试清理",
   BACKUP_DATA_PREFLIGHT_FAILED: "数据完整性预检未通过",
   DATA_PREFLIGHT_FAILED: "数据完整性预检未通过",
   STUDENT_GRADE_STAGE_OVERLAP: "学生年级阶段时间冲突",

@@ -13,18 +13,18 @@ async function main() {
   if (kind === "remote") {
     const readinessReason = remoteReadinessReason(settings, remote.configurationStatus());
     if (readinessReason) throw Object.assign(new Error("百度自动备份未就绪"), { code: "BAIDU_AUTOMATIC_BACKUP_NOT_READY" });
-    const record = retryBackupId
-      ? await service.retryRemote(retryBackupId, settings.remote_directory)
-      : (await service.create({ trigger: "remote_automatic", retentionClass: "remote", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs })).record;
+    const result = retryBackupId
+      ? { record: await service.retryRemote(retryBackupId, settings.remote_directory) }
+      : await service.create({ trigger: "remote_automatic", retentionClass: "remote", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: true, includeOperationLogs: settings.remote_include_operation_logs });
+    const record = result.record;
     if (record.remote_status !== "success") throw Object.assign(new Error("百度网盘上传或远端校验失败"), { code: record.remote_error_safe || "BAIDU_REMOTE_BACKUP_FAILED" });
     const retention = await service.applyRemoteRetention(settings.remote_retention, (item) => remote.delete(item));
-    const localRetention = service.applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
+    const localRetention = result.retention || null;
     process.stdout.write(`${JSON.stringify({ ok: true, kind, backup_id: record.id, schedule_key: scheduleKey, retention, localRetention })}\n`);
     return;
   }
   const result = await service.create({ trigger: "automatic", retentionClass: "daily", scheduledDate: scheduledFor, scheduleKey, remoteEnabled: false, includeOperationLogs: settings.local_include_operation_logs });
-  service.promoteMonthly(result.record.id, scheduledFor);
-  const retention = service.applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
+  const retention = result.retention;
   process.stdout.write(`${JSON.stringify({ ok: true, kind, backup_id: result.record.id, schedule_key: scheduleKey, retention })}\n`);
 }
 main().catch((error) => { process.stderr.write(`${JSON.stringify({ ok: false, code: error.code || "BACKUP_JOB_FAILED" })}\n`); process.exitCode = 1; });

@@ -50,7 +50,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260928-salary-teacher-scope-progress-import-fixes";
+const APP_VERSION = process.env.APP_VERSION || "20260929-class-group-salary-template-backup-retention";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -1112,14 +1112,15 @@ function startRemoteManualBackupWorker(backupId) {
   return child.pid || 0;
 }
 function validateBackupSettingsPatch(body = {}, scope = "all") {
-  const localKeys = ["enabled", "time", "timezone", "daily_retention", "monthly_retention", "manual_retention", "retry_count", "local_include_operation_logs"];
+  const localKeys = ["enabled", "time", "timezone", "daily_retention", "monthly_retention", "manual_retention", "total_retention", "retry_count", "local_include_operation_logs"];
   const remoteKeys = ["remote_enabled", "remote_frequency", "remote_time", "remote_timezone", "remote_weekday", "remote_monthday", "remote_retention", "remote_retry_count", "remote_include_operation_logs", "remote_directory", "remote_plaintext_acknowledged"];
   const checkBoolean = (key) => { if (Object.hasOwn(body, key) && typeof body[key] !== "boolean") throw Object.assign(new Error(`${key} 必须为布尔值`), { code: "BACKUP_SETTING_TYPE_INVALID" }); };
   const checkInteger = (key, min, max) => { if (Object.hasOwn(body, key) && (!Number.isInteger(Number(body[key])) || Number(body[key]) < min || Number(body[key]) > max)) throw Object.assign(new Error(`${key} 超出允许范围`), { code: "BACKUP_SETTING_RANGE_INVALID" }); };
   const checkTime = (key) => { if (Object.hasOwn(body, key) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(body[key] || ""))) throw Object.assign(new Error(`${key} 时间格式无效`), { code: "BACKUP_SETTING_TIME_INVALID" }); };
   if (scope !== "remote") {
+    if (Object.hasOwn(body, "total_retention") && !/^[1-9]\d*$/.test(String(body.total_retention))) throw Object.assign(new Error("总保留数量必须为正整数"), { code:"BACKUP_SETTING_RANGE_INVALID" });
     ["enabled", "local_include_operation_logs"].forEach(checkBoolean); checkTime("time");
-    [["daily_retention", 1, 365], ["monthly_retention", 1, 120], ["manual_retention", 1, 200], ["retry_count", 0, 10]].forEach(([key, min, max]) => checkInteger(key, min, max));
+    [["daily_retention", 1, 365], ["monthly_retention", 1, 120], ["manual_retention", 1, 200], ["total_retention", 1, Number.MAX_SAFE_INTEGER], ["retry_count", 0, 10]].forEach(([key, min, max]) => checkInteger(key, min, max));
   }
   if (scope !== "local") {
     ["remote_enabled", "remote_include_operation_logs", "remote_plaintext_acknowledged"].forEach(checkBoolean); checkTime("remote_time");
@@ -6539,7 +6540,7 @@ function teacherSalaryRows(monthKey) {
   const sum = field => moneyRound(rows.reduce((total, row) => total + num(row[field]), 0));
   return [
     [`${monthKey} 薪资汇总`],
-    ["序号", "教师姓名", "上课课时数", "基础课薪", "月度绩效", "绩效系数", "车票合计", "薪资合计", "备注"],
+    ["序号", "教师姓名", "上课课时数", "基础课薪", "绩效基数", "绩效系数", "车票合计", "薪资合计", "备注"],
     ...rows.map((row, index) => [index + 1, row.teacher_name, row.lesson_count, row.base_salary, row.performance_base, row.performance_coefficient == null ? "未设置" : row.performance_coefficient.toFixed(2), row.transport_total, row.total_salary == null ? row.salary_pending_reason : row.total_salary, row.notes]),
     ["", "合计", sum("lesson_count"), sum("base_salary"), sum("performance_base"), "", sum("transport_total"), rows.some(row => row.total_salary == null) ? "待完成核算" : sum("total_salary"), ""],
   ];
@@ -7208,9 +7209,9 @@ function classGroupRows(user = null) {
     const record = byIdentity.get(classGroupLookupKey(lesson));
     if (!record) continue;
     const key = SalaryWorkflow.classKey(lesson);
-    if (!groups.has(key)) groups.set(key, { ...record, id: String(record.id) + ":" + encodeURIComponent(lesson.course_type || ""), metadata_id: record.id, course_type: lesson.course_type, group_key: key, lesson_ids: [], course_count: 0 });
+    if (!groups.has(key)) groups.set(key, { ...record, id: String(record.id), metadata_id: record.id, course_type: lesson.course_type, group_key: key, lesson_ids: [], course_count: 0 });
     const group = groups.get(key);
-    group.lesson_ids.push(lesson.id); group.course_count++;
+    SalaryWorkflow.addClassLesson(group, lesson);
   }
   // Name metadata stays persisted, but the management view contains actual course groups only.
   return [...groups.values()];
@@ -12933,7 +12934,7 @@ async function handleApi(req, res, url) {
       for (const row of selected) update.run(type, row.id);
       const first = selected[0];
       const description = body.mode === "class"
-        ? `修改班级类型：${first.grade}${first.subject}班由“${first.course_type}”调整为“${type}”，共更新${selected.length}节课程`
+        ? `修改班级类型：${first.grade}${first.subject}班由“${SalaryWorkflow.courseTypes(selected).join("、")}”调整为“${type}”，共更新${selected.length}节课程`
         : `修改课程类型：${first.date} ${first.grade}${first.subject}由“${first.course_type}”调整为“${type}”`;
       writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(",") });
     });
@@ -13057,6 +13058,36 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/teachers") {
     return sendJson(res, { teachers: teacherProfiles() });
   }
+  const templateTransferMatch = url.pathname.match(/^\/api\/salary-templates\/(export|import-preview|import-confirm)$/);
+  if (templateTransferMatch) {
+    if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或有薪资权限的教务可使用薪资模板");
+    const fullScope = isSuperRole(user.role) || ["teacherDetail", "teacherSalary", "teacherSalaryRules"].every(key => Object.keys(rolePrefilterForView(user, key)).length === 0);
+    try {
+      const action = templateTransferMatch[1];
+      if (action === "export" && req.method === "GET") {
+        const ids = url.searchParams.has("ids") ? url.searchParams.get("ids").split(",").map(Number) : null;
+        const bundle = SalaryTransfer.exportTemplates(salaryStore, ids);
+        writeOperationLog(user, { operation_type: "导出薪资模板", operation_content: `导出${bundle.templates.length}个机构薪资模板`, target_type: "salary_table_templates" });
+        return sendJson(res, { text: JSON.stringify(bundle, null, 2) });
+      }
+      if (req.method !== "POST") return sendError(res, 405, "不支持的模板操作");
+      if (!fullScope) return sendError(res, 403, "薪资模板需要完整薪资管理范围");
+      const body = await readBody(req);
+      for (const [token, item] of pendingSalaryImports) if (item.expires < Date.now()) pendingSalaryImports.delete(token);
+      if (action === "import-preview") {
+        const preview = SalaryTransfer.previewTemplates(salaryStore, body.text);
+        const token = preview.allowed ? crypto.randomUUID() : null;
+        if (token) pendingSalaryImports.set(token, { kind: "templates", owner: user.id, expires: Date.now() + 10 * 60_000, preview });
+        return sendJson(res, { ...preview, token });
+      }
+      const pending = pendingSalaryImports.get(text(body.token));
+      if (!pending || pending.kind !== "templates" || pending.owner !== user.id || body.confirm !== true) return sendError(res, 400, "导入预览已失效，请重新校验并确认");
+      const result = SalaryTransfer.importTemplates(salaryStore, pending.preview);
+      pendingSalaryImports.delete(text(body.token)); clearDerivedCache("salary template import");
+      writeOperationLog(user, { operation_type: "导入薪资模板", operation_content: `导入${result.count}个机构薪资模板，跳过${result.skipped}个相同模板`, target_type: "salary_table_templates" });
+      return sendJson(res, { ok: true, ...result });
+    } catch (error) { return sendError(res, 400, error.message); }
+  }
   const templateMatch = url.pathname.match(/^\/api\/salary-templates(?:\/(\d+)\/(use))?$/);
   if (templateMatch) {
     if (!["owner", "academic"].includes(canonicalRole(user.role))) return sendError(res, 403, "仅负责人或有薪资权限的教务可使用薪资模板");
@@ -13097,7 +13128,7 @@ async function handleApi(req, res, url) {
       }
       if (action === "import-confirm") {
         const pending = pendingSalaryImports.get(text(body.token));
-        if (!pending || pending.owner !== user.id || body.confirm !== true) return sendError(res, 400, "导入预览已失效，请重新校验并确认");
+        if (!pending || pending.kind || pending.owner !== user.id || body.confirm !== true) return sendError(res, 400, "导入预览已失效，请重新校验并确认");
         const teacher = salaryTableTeacher(user, pending.preview.teacher.id, true);
         if (teacher.name !== pending.preview.teacher.name) return sendError(res, 400, "教师信息已变化，请重新校验薪资表");
         const tables = SalaryTransfer.importTables(salaryStore, pending.preview);
@@ -13173,14 +13204,22 @@ async function handleApi(req, res, url) {
       const key = SalaryWorkflow.classKey(lesson);
       if (!groups.has(key)) groups.set(key, { key, teacher_name: lesson.teacher_name, grade: lesson.grade, subject: lesson.subject, course_type: lesson.course_type, student_names: normalizeStoredStudentSet(lesson.student_names), lesson_ids: [], rules: {} });
       const group = groups.get(key);
-      group.lesson_ids.push(lesson.id);
+      SalaryWorkflow.addClassLesson(group, lesson);
+      // The existing resolver reports missing/unavailable/ambiguous rules; do
+      // not infer history from uncovered dates or persisted salary amounts.
+      if (lesson.rule_match_status !== "not_matched") group.has_legacy_rule = true;
+      group.rules.legacy = group.has_legacy_rule ? "历史规则" : "-";
       const table = SalaryWorkflow.matchTable(ctx, lesson.date, teacherId);
-      const column = table ? String(table.id) : "legacy";
-      if (!group.rules[column]) {
-        // Class columns quote the two-hour tariff; individual lessons show their
-        // own duration. No class/table cell is populated without actual lessons.
-        const rule = table ? SalaryWorkflow.tableRule(ctx, table, lesson, 120) : null;
-        group.rules[column] = rule ? (rule.matched ? rule.expression : "无规则") : "历史规则";
+      if (table) {
+        const column = String(table.id);
+        group.rule_types ||= Object.create(null);
+        group.rule_types[column] ||= Object.create(null);
+        if (!Object.hasOwn(group.rule_types[column], lesson.course_type)) {
+          const rule = SalaryWorkflow.tableRule(ctx, table, lesson, 120);
+          group.rule_types[column][lesson.course_type] = rule.matched ? rule.expression : "无规则";
+          const types = SalaryWorkflow.courseTypes(Object.keys(group.rule_types[column]));
+          group.rules[column] = types.map(type => `${types.length > 1 ? type + "：" : ""}${group.rule_types[column][type]}`).join("；");
+        }
       }
     }
     return sendJson(res, { tables, classes: [...groups.values()], lessons: sanitizeLessonRows(lessons, user) });
@@ -13654,7 +13693,7 @@ async function handleApi(req, res, url) {
     try {
       const body = validateBackupSettingsPatch(await readBody(req), "local");
       const settings = saveFullBackupSettings(dbPath, body);
-      writeOperationLog(user, { operation_type: "修改服务器备份设置", operation_content: `本地自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "local_backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, retry_count: settings.retry_count, operation_logs_included: settings.local_include_operation_logs } }, req);
+      writeOperationLog(user, { operation_type: "修改服务器备份设置", operation_content: `本地自动备份${settings.enabled ? "已启用" : "已关闭"}，时间 ${settings.time} ${settings.timezone}`, target_type: "data_center", target_id: "local_backup_settings", details: { enabled: settings.enabled, time: settings.time, timezone: settings.timezone, daily_retention: settings.daily_retention, monthly_retention: settings.monthly_retention, manual_retention: settings.manual_retention, total_retention: settings.total_retention, retry_count: settings.retry_count, operation_logs_included: settings.local_include_operation_logs } }, req);
       return sendJson(res, { ok: true, settings });
     } catch (error) { return sendJson(res, { error: error.message || "本地备份设置无效", code: error.code || "BACKUP_SETTINGS_INVALID" }, 400); }
   }
@@ -13682,7 +13721,6 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/data-center/backups") {
     try {
       const settings = loadFullBackupSettings(dbPath); const result = await backupService().create({ trigger: "manual", retentionClass: "manual", createdByUserId: user.id, remoteEnabled: false, includeOperationLogs: settings.local_include_operation_logs });
-      result.retention = backupService().applyRetention({ daily: settings.daily_retention, monthly: settings.monthly_retention, manual: settings.manual_retention });
       writeOperationLog(user, { operation_type: "创建全量数据备份", operation_content: `服务器备份成功：${result.record.filename}`, target_type: "backup_records", target_id: String(result.record.id), details: { id: result.record.id, backup_format: result.record.backup_format, sha256: result.record.sha256 } }, req);
       return sendJson(res, { ...result, records: backupService().list() }, 201);
     } catch (error) {

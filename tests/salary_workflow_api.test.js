@@ -112,7 +112,7 @@ test('new salary table drives class grouping, duration, missing K, travel and re
   const exported = await fetch(`http://127.0.0.1:${port}/api/export/teacher-salary.xlsx?month=2026-09-01`, { headers: { cookie: ownerCookie } });
   assert.equal(exported.status, 200);
   const workbook = require('../src/excel/xlsx_codec').parseWorkbook(Buffer.from(await exported.arrayBuffer()));
-  assert.deepEqual(workbook.sheets[0].rows[1], ['序号','教师姓名','上课课时数','基础课薪','月度绩效','绩效系数','车票合计','薪资合计','备注']);
+  assert.deepEqual(workbook.sheets[0].rows[1], ['序号','教师姓名','上课课时数','基础课薪','绩效基数','绩效系数','车票合计','薪资合计','备注']);
   assert.equal(workbook.sheets[0].rows[2][7], 2740);
 });
 

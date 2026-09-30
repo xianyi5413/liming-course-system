@@ -39,4 +39,39 @@ function importTables(store, preview) {
   return store.atomic(() => preview.tables.map(table => store.save({ ...table, teacher_id: preview.teacher.id })));
 }
 
-module.exports = { TYPE, VERSION, exportTables, previewTables, importTables };
+const TEMPLATE_TYPE = 'liming_salary_templates';
+const BusinessTime = require('../../public/business-time');
+function exportTemplates(store, ids = null, now = new Date()) {
+  const available = store.templates();
+  if (ids != null && (!Array.isArray(ids) || !ids.length || ids.some(id => !Number.isSafeInteger(id) || !available.some(row => row.id === id)))) throw new Error('请选择有效薪资模板');
+  return { type: TEMPLATE_TYPE, version: VERSION, exported_at: BusinessTime.formatTimestamp(now).replace(' ', 'T') + '+08:00', templates: available.filter(row => ids == null || ids.includes(row.id)).map(W.normalizeTemplate) };
+}
+const rulesKey = rules => JSON.stringify([...rules].sort((a, b) => a.grade.localeCompare(b.grade) || a.course_type.localeCompare(b.course_type)));
+function previewTemplates(store, input) {
+  let bundle;
+  try { bundle = typeof input === 'string' ? JSON.parse(input) : input; } catch { throw new Error('薪资模板文本不是有效 JSON'); }
+  if (!bundle || bundle.type !== TEMPLATE_TYPE || bundle.version !== VERSION) throw new Error('薪资模板文本类型或版本不支持');
+  if (!Array.isArray(bundle.templates) || !bundle.templates.length || bundle.templates.length > 100) throw new Error('每次请导入 1～100 个模板');
+  const templates = bundle.templates.map(W.normalizeTemplate);
+  const existing = store.templates().map(W.normalizeTemplate), seen = [...existing];
+  const items = templates.map(template => {
+    const matches = seen.filter(row => row.name === template.name);
+    const conflict = matches.some(row => rulesKey(row.rules) !== rulesKey(template.rules));
+    const status = conflict ? 'conflict' : matches.length ? 'skip' : 'create';
+    seen.push(template);
+    return { ...template, status, message: conflict ? '同名模板规则不同，禁止覆盖' : matches.length ? '已存在，可跳过' : '将新增' };
+  });
+  return { templates: items, allowed: items.every(row => row.status !== 'conflict'), message: '机构共用模板，不改变教师薪资表' };
+}
+function importTemplates(store, preview) {
+  return store.atomic(() => {
+    // Revalidate names and contents under the same write transaction: a preview
+    // never authorizes overwriting a template added or changed in the meantime.
+    const current = previewTemplates(store, { type: TEMPLATE_TYPE, version: VERSION, templates: preview.templates });
+    if (!current.allowed) throw new Error('同名模板规则冲突，请重新预览；本批未导入');
+    const created = current.templates.filter(row => row.status === 'create').map(row => store.saveTemplate(row));
+    return { count: created.length, skipped: current.templates.length - created.length };
+  });
+}
+
+module.exports = { TYPE, TEMPLATE_TYPE, VERSION, exportTables, previewTables, importTables, exportTemplates, previewTemplates, importTemplates };

@@ -59,8 +59,8 @@ test('class IDs batch update, single course update, regrouping and manual priori
   let result=await change(group,group.lesson_ids,'1V2');assert.equal(result.response.status,200,JSON.stringify(result.payload));
   group=result.payload.class_groups.find(row=>row.teacher==='合成教师'&&row.course_type==='1V2');assert.equal(group.course_count,10);
   result=await change(group,[first],'小班课','lesson');assert.equal(result.response.status,200);
-  assert.deepEqual(result.payload.class_groups.filter(row=>row.teacher==='合成教师').map(row=>row.course_count).sort((a,b)=>a-b),[1,9]);
-  assert.equal((await api('/api/class-groups/courses?'+new URLSearchParams({key:group.group_key}))).payload.lessons.length,9);
+  assert.deepEqual(result.payload.class_groups.filter(row=>row.teacher==='合成教师').map(row=>row.course_count).sort((a,b)=>a-b),[10]);
+  assert.equal((await api('/api/class-groups/courses?'+new URLSearchParams({key:group.group_key}))).payload.lessons.length,10);
   const one=result.payload.class_groups.find(row=>row.lesson_ids.includes(first));
   result=await change(one,[first],'1V2','lesson');assert.equal(result.payload.class_groups.filter(row=>row.teacher==='合成教师').length,1);
   assert.equal((await api('/api/lessons/'+first,{method:'PATCH',body:{student_names:'甲、乙'}})).payload.course_type,'1V2');
@@ -92,7 +92,7 @@ test('custom course types cannot inject attributes into grouped row identifiers'
   const result=await api('/api/class-groups/course-type',{method:'PATCH',body:{group_key:group.group_key,lesson_ids:group.lesson_ids,mode:'class',course_type:type}});
   assert.equal(result.response.status,200,JSON.stringify(result.payload));
   const updated=result.payload.class_groups.find(row=>row.course_type===type);assert.ok(updated);
-  assert.doesNotMatch(updated.id,/["<>]/);assert.ok(updated.id.includes(encodeURIComponent(type)));
+  assert.doesNotMatch(updated.id,/["<>]/);assert.equal(updated.id, String(updated.metadata_id));
   assert.equal((await api('/api/class-groups/course-type',{cookie:academicCookie,method:'PATCH',body:{group_key:updated.group_key,lesson_ids:updated.lesson_ids,mode:'class',course_type:'1V1'}})).response.status,409);
 });
 
@@ -216,11 +216,11 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
       assert.equal(layout.overflow,false);assert.equal(layout.headers,true);assert.equal(layout.sticky,'sticky');assert.deepEqual(layout.align,Array(11).fill('center').concat('left'));
     }
     const beforeSingle=await browser.evaluate("(()=>{window.confirm=()=>true;const cell=document.querySelector('.class-course-type');const id=Number(cell.dataset.id);cell.click();const picker=activeScheduleInlinePicker.select;const value=picker.value==='1V1'?'小班课':'1V1';picker.value=value;picker.dispatchEvent(new Event('change'));return {id,value}})()");
-    await browser.waitFor("!document.querySelector('.class-course-type[data-id=\""+beforeSingle.id+"\"]')");
+    await browser.waitFor("document.querySelector('.class-course-type[data-id=\""+beforeSingle.id+"\"]')?.textContent.trim() === " + JSON.stringify(beforeSingle.value));
     const savedDb=new DatabaseSync(databasePath);assert.equal(savedDb.prepare('SELECT course_type FROM lessons WHERE id=?').get(beforeSingle.id).course_type,beforeSingle.value);savedDb.close();
     if(await browser.evaluate("document.querySelectorAll('.class-course-type').length===1")){
       await browser.evaluate("(()=>{document.querySelector('.class-course-type').click();const input=activeScheduleInlinePicker.select;input.value=input.value==='1V1'?'小班课':'1V1';input.dispatchEvent(new Event('change'));})()");
-      await browser.waitFor("!document.querySelector('.class-course-details')");
+      await browser.waitFor("!!document.querySelector('.class-course-details')");
     }
     assert.equal(await browser.evaluate("state.class_groups.some(row=>!row.course_count)"),false);
     assert.deepEqual(browser.exceptions,[]);
