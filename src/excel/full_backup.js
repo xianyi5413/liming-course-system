@@ -1,3 +1,4 @@
+const StudentDisplay = require('../../public/student-display');
 const { parseTimeRange } = require("../domain/lesson_time");
 const SalaryWorkflow = require("../domain/salary_workflow");
 const SALARY_TABLES = new Set(["salary_tables", "salary_table_rules", "teacher_monthly_performance", "salary_table_templates", "salary_table_template_rules"]);
@@ -247,7 +248,7 @@ function buildVisibleSheet(definition, records, mapping, chunks, mappedRows) {
     for (const [field, value] of Object.entries(source)) {
       if (definition.key === "operation_logs" && FORBIDDEN_OPERATION_FIELDS.has(field)) continue;
       if (definition.key === "users" && field === "password_hash") continue;
-      if (!represented.has(field)) addMapping(mapping, chunks, definition.sheet_name, rowNumber, definition.source_table, key, field, value);
+      if (!represented.has(field) || (['student_names', 'students_display', 'students_key'].includes(field) && record.visible[field] !== value)) addMapping(mapping, chunks, definition.sheet_name, rowNumber, definition.source_table, key, field, value);
     }
   });
   return {
@@ -294,6 +295,9 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const mapping = []; const chunks = []; const mappedRows = new Set(); const visibleCounts = {}; const visibleSheets = [];
   for (const definition of VISIBLE_SHEET_DEFINITIONS) {
     const records = visibleRecords(definition, sourceData, context); visibleCounts[definition.sheet_name] = records.length;
+    for (const record of records) for (const field of ['student_names', 'students_display', 'students_key']) {
+      if (Object.hasOwn(record.visible, field)) record.visible[field] = StudentDisplay.text(record.visible[field]);
+    }
     visibleSheets.push(buildVisibleSheet(definition, records, mapping, chunks, mappedRows));
     options.onProgress?.('sheets', 30 + Math.round(visibleSheets.length / VISIBLE_SHEET_DEFINITIONS.length * 50), `正在生成${definition.sheet_name}`);
   }

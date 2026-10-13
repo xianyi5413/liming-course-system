@@ -2681,23 +2681,7 @@ function numberValue(value) {
 }
 
 function splitStudents(value) {
-  let source = value;
-  if (typeof source === "string") {
-    const raw = source.trim();
-    if (raw.startsWith("[") && raw.endsWith("]")) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) source = parsed;
-      } catch {
-        // Historical delimiter strings continue through the normal parser.
-      }
-    }
-  }
-  if (Array.isArray(source)) return source.flatMap((item) => splitStudents(item));
-  return String(source || "")
-    .split(/[、,，;；\n\r]/)
-    .map((name) => name.trim())
-    .filter(Boolean);
+  return StudentDisplay.names(value);
 }
 
 function studentSetInlineText(value) {
@@ -2705,14 +2689,7 @@ function studentSetInlineText(value) {
 }
 
 function studentSetNames(value) {
-  const seen = new Set();
-  const names = [];
-  for (const name of splitStudents(value)) {
-    if (seen.has(name)) continue;
-    seen.add(name);
-    names.push(name);
-  }
-  return names;
+  return StudentDisplay.names(value);
 }
 
 function renderStudentSetBadges(value, options = {}) {
@@ -5789,7 +5766,6 @@ function renderUserMenu() {
             <span>${escapeHtml(role)}</span>
           </div>
           <div class="user-menu-divider"></div>
-          ${canView("appearance") ? '<button class="user-menu-item appearance-settings-link" type="button" role="menuitem">外观设置</button>' : ""}
           <button class="user-menu-item open-password-modal" type="button" role="menuitem">修改密码</button>
           <button class="user-menu-item logout-btn danger" type="button" role="menuitem">退出系统</button>
         </div>
@@ -6553,6 +6529,32 @@ function lessonRowsHtml(rows) {
   }).join("");
 }
 
+function openBatchLessonEdit() {
+  const ids = [...selectedLessonIds];
+  if (!ids.length || !canWriteData()) return;
+  const fields = [['teacher_name', '授课老师'], ['date', '日期'], ['time_slot', '时间'], ['classroom', '教室'], ['status', '状态'], ['grade', '年级'], ['subject', '科目'], ['notes', '备注']];
+  const dialog = CourseDetails.dialog('批量修改课程', `<p>已选择 ${ids.length} 节课程。仅修改勾选字段；勾选备注并留空会清空备注。</p><form class="batch-lesson-edit-form">${fields.map(([field, label]) => `<div class="batch-edit-field"><label><input type="checkbox" data-enable="${field}"> ${label}</label>${field === 'notes' ? `<textarea class="control" name="${field}" disabled></textarea>` : field === 'date' ? `<input class="control" type="date" name="${field}" disabled>` : `<select class="control" name="${field}" disabled>${filterSelectOptions(lessonFieldOptionValues(field), '', '请选择')}</select>`}</div>`).join('')}<p role="alert" class="batch-edit-error"></p><button type="submit" class="btn primary">核对并保存</button></form>`);
+  const form = dialog.element.querySelector('form');
+  enhanceCustomSelects(); enhanceCustomDateInputs();
+  form.querySelectorAll('[data-enable]').forEach(input => input.onchange = () => { const control = form.elements[input.dataset.enable]; control.disabled = !input.checked; const wrapper = control.nextElementSibling?.matches('.custom-select') ? control.nextElementSibling : null; if (wrapper) { syncCustomSelect(control, wrapper); const button = wrapper.querySelector('.custom-select-button'); button.disabled = control.disabled; button.setAttribute('aria-disabled', String(control.disabled)); } });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const changes = Object.fromEntries(fields.filter(([field]) => form.querySelector(`[data-enable="${field}"]`).checked).map(([field]) => [field, form.elements[field].value]));
+    const error = form.querySelector('[role=alert]');
+    if (!Object.keys(changes).length) { error.textContent = '请至少勾选一个字段'; return; }
+    const description = fields.filter(([field]) => Object.hasOwn(changes, field)).map(([field, label]) => `${label}：${changes[field] || '（清空）'}`).join('\n');
+    if (!confirm(`将修改 ${ids.length} 节课程：\n${description}\n确认保存？`)) return;
+    const submit = form.querySelector('[type=submit]'); submit.disabled = true;
+    const scroll = captureLessonScroll();
+    try {
+      await request('/api/lessons/batch', { method: 'PATCH', body: { ids, changes } });
+      selectedLessonIds.clear(); markLessonDerivedDataDirty(); dialog.close();
+      await refreshLessonsView({ reloadRange: true }); restoreLessonScroll(scroll);
+      showToast(`已修改 ${ids.length} 节课程`);
+    } catch (failure) { error.textContent = failure.message; submit.disabled = false; }
+  };
+}
+
 function lessonToolbarHtml(rows) {
   const selectedCount = selectedLessonIds.size;
   return `
@@ -6563,6 +6565,7 @@ function lessonToolbarHtml(rows) {
         <button class="btn week-copy-btn" type="button">整周复制</button>
         <button class="btn batch-copy-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量复制${selectedCount ? `（${selectedCount}）` : ""}</button>
         <button class="btn batch-complete-lessons" type="button" ${selectedCount ? "" : "disabled"}>批量已上${selectedCount ? `（${selectedCount}）` : ""}</button>
+        <button class="btn batch-edit-lessons" type="button" ${selectedCount && canWriteData() ? "" : "disabled"}>批量修改</button>
         <button class="btn danger batch-delete-lessons" type="button" ${selectedCount && !lessonBatchDeleting ? "" : "disabled"}>
           ${lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`}
         </button>
@@ -6594,6 +6597,8 @@ function updateLessonSelectionControls(rows = visibleLessonRows()) {
     batchButton.disabled = !selectedCount || lessonBatchDeleting;
     batchButton.textContent = lessonBatchDeleting ? "删除中…" : `批量删除${selectedCount ? `（${selectedCount}）` : ""}`;
   }
+  const editButton = document.querySelector(".batch-edit-lessons");
+  if (editButton) editButton.disabled = !selectedCount || !canWriteData();
   const batchCopyButton = document.querySelector(".batch-copy-lessons");
   if (batchCopyButton) {
     batchCopyButton.disabled = !selectedCount;
@@ -7512,7 +7517,7 @@ function normalizeTimeSlot(value) {
 }
 
 function normalizeLessonStudentNames(value) {
-  return uniqueSorted(splitStudents(value)).join("、");
+  return StudentDisplay.text(value);
 }
 
 function isLessonConflictActive(row = {}) {
@@ -7679,7 +7684,7 @@ function lessonStudentPickerMarkup({
   hiddenClass = "",
   hiddenAttrs = "",
 } = {}) {
-  const selectedNames = normalizeNameList(selected);
+  const selectedNames = StudentDisplay.names(selected);
   const candidateNames = optionValuesWithCurrent(values, selectedNames, true);
   return `
     <span class="multi-select schedule-student-popover ${escapeHtml(className)}" data-placeholder="选择学生" data-student-fallback-grade="${escapeHtml(fallbackGrade)}">
@@ -7701,7 +7706,7 @@ function lessonStudentPickerMarkup({
 }
 
 function lessonScheduleStudentCell(row) {
-  const selected = normalizeNameList(splitStudents(row.student_names));
+  const selected = StudentDisplay.names(splitStudents(row.student_names));
   const values = getActiveStudentOptions(selected, { includeCurrent: true });
   return `
     <td class="col-students lesson-schedule-students">
@@ -7749,7 +7754,7 @@ function bindScheduleStudentPopover(select) {
   if (!select || select.dataset.studentPopoverBound === "true") return;
   select.dataset.studentPopoverBound = "true";
   const hidden = select.querySelector(".multi-select-value");
-  select._studentDraft = normalizeNameList(hidden?.value || "");
+  select._studentDraft = StudentDisplay.names(hidden?.value || "");
   select._studentCandidates = getActiveStudentOptions(select._studentDraft, { includeCurrent: true });
   select._studentSync = () => renderLessonStudentCandidateList(select, select._studentDraft || []);
   select._studentClose = () => {
@@ -7758,7 +7763,7 @@ function bindScheduleStudentPopover(select) {
     const newNames = menu?.querySelector(".schedule-student-new-names");
     if (search) search.value = "";
     if (newNames) newNames.value = "";
-    select._studentDraft = normalizeNameList(hidden?.value || "");
+    select._studentDraft = StudentDisplay.names(hidden?.value || "");
     select._studentSync();
     closeMultiSelectMenu(select);
   };
@@ -7766,7 +7771,7 @@ function bindScheduleStudentPopover(select) {
     const menu = multiSelectMenuFor(select);
     const newNames = menu?.querySelector(".schedule-student-new-names");
     const added = parseLessonCreateStudents(newNames?.value || "");
-    const next = normalizeNameList([...(select._studentDraft || []), ...added]);
+    const next = StudentDisplay.names([...(select._studentDraft || []), ...added]);
     select._studentDraft = next;
     select._studentCandidates = getActiveStudentOptions(next, { includeCurrent: true });
     if (newNames) newNames.value = "";
@@ -9924,7 +9929,7 @@ function teacherDetailCanvas(teacherName = selectedTeacherDetail) {
     { label: "状态", value: (row) => rowStatus(row) },
     { label: "年级", value: (row) => row.grade },
     { label: "科目", value: (row) => row.subject },
-    { label: "学生", value: (row) => row.student_names, align: "left" },
+    { label: "学生", value: (row) => StudentDisplay.text(row.student_names), align: "left" },
     { label: "备注", value: (row) => row.notes || "", align: "left" },
     { label: "教师薪资", value: (row) => formatMoney(displayTeacherSalaryForLesson(row)), align: "right" },
     { label: "规则薪资", value: (row) => { if (row.salary_rule_expression) return row.salary_rule_expression; const amount = displayTeacherRuleSalaryForLesson(row); return amount == null ? "" : formatMoney(amount); }, align: "right" },
@@ -13041,7 +13046,7 @@ function teacherSalaryBatchResultMarkup(result) {
                   <td>${escapeHtml(item.teacher_name || "-")}</td>
                   <td>${escapeHtml(item.grade || "-")}</td>
                   <td>${escapeHtml(item.subject || "-")}</td>
-                  <td>${escapeHtml(item.student_names || "-")}</td>
+                  <td>${escapeHtml(studentSetInlineText(item.student_names))}</td>
                   <td>${escapeHtml(teacherSalaryBatchStatusLabel(item.status))}</td>
                   <td>${escapeHtml(item.reason || "-")}</td>
                 </tr>
@@ -13205,7 +13210,7 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
 
 function courseNoticeCellValue(row = {}, key = "") {
   if (key === "weekday") return row.weekday || weekdayCn(row.date);
-  if (key === "student_names") return row.display_student_names || row.student_names || "";
+  if (key === "student_names") return row.display_student_names || StudentDisplay.text(row.student_names || "");
   if (key === "status") return String(row.status || rowStatus(row) || "").trim();
   return row[key] || "";
 }
@@ -13249,8 +13254,8 @@ function stableUniqueValues(values = []) {
 function courseNoticeObjectStudents(item = {}) {
   const explicit = splitStudents(item.students || "");
   const lessonStudents = (item.lessons || [])
-    .flatMap((lesson) => splitStudents(lesson.display_student_names || lesson.student_names || ""));
-  const students = stableUniqueValues(explicit.length ? explicit : lessonStudents);
+    .flatMap((lesson) => splitStudents(lesson.student_names || ""));
+  const students = StudentDisplay.names(explicit.length ? explicit : lessonStudents);
   if (!isPersonalCourseNoticeObject(item)) return students;
   const objectName = String(item.send_object_name || "").replace(/个人课程$/, "").trim();
   return [students[0] || objectName].filter(Boolean);
@@ -14516,7 +14521,7 @@ function renderDashboard({ currentMessage = "", currentSubtitle = "" } = {}) {
 function applyReadonlyUi() {
   if (!isReadonlyUser()) return;
   const selectors = [
-    ".new-month", ".delete-month", ".add-lesson", ".lesson-field", ".delete-lesson", ".batch-delete-lessons", ".batch-complete-lessons",
+    ".new-month", ".delete-month", ".add-lesson", ".lesson-field", ".delete-lesson", ".batch-delete-lessons", ".batch-complete-lessons", ".batch-edit-lessons",
     ".batch-copy-lessons", ".week-copy-btn", ".schedule-add-btn", ".student-badge-removable", ".lesson-create-confirm", ".lesson-create-field",
     ".lesson-create-manual-field", ".lesson-create-student-existing", ".lesson-create-new-students",
     ".batch-copy-confirm", ".batch-copy-field", ".profile-field", ".delete-profile", ".profile-modal-save",
@@ -15576,7 +15581,7 @@ function wireEvents() {
           if (select.classList.contains("open")) {
             select._studentClose?.();
           } else {
-            select._studentDraft = normalizeNameList(select.querySelector(".multi-select-value")?.value || "");
+            select._studentDraft = StudentDisplay.names(select.querySelector(".multi-select-value")?.value || "");
             const search = menu?.querySelector(".multi-select-search");
             if (search) search.value = "";
             select.classList.add("open");
@@ -15607,7 +15612,7 @@ function wireEvents() {
         if (option) {
           const value = option.dataset.value || "";
           const draft = select._studentDraft || [];
-          select._studentDraft = draft.includes(value) ? draft.filter((name) => name !== value) : normalizeNameList([...draft, value]);
+          select._studentDraft = draft.includes(value) ? draft.filter((name) => name !== value) : StudentDisplay.names([...draft, value]);
           select._studentSync?.();
           refreshScheduleStudentPopoverLayout(select);
           return;
@@ -18510,6 +18515,7 @@ function wireEvents() {
     });
   });
 
+  document.querySelectorAll(".batch-edit-lessons").forEach(button => { button.onclick = openBatchLessonEdit; });
   document.querySelectorAll(".batch-delete-lessons").forEach((button) => {
     button.addEventListener("click", async () => {
       const ids = [...selectedLessonIds].map(Number).filter(Boolean);

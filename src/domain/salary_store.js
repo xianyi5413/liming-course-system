@@ -90,6 +90,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     return {
       teacher_base_salary: !eligible(lesson) ? 0 : base.cents == null ? null : base.cents / 100,
       teacher_base_salary_source: base.source,
+      teacher_base_salary_display_source: base.cents != null && (rule?.matched || legacy?.calculation) && base.cents === (rule?.matched ? rule.base_cents : W.Formula.cents(legacy.calculation.salary)) ? 'auto' : base.source,
       salary_table_id: table?.id ?? null,
       salary_rule_expression: rule ? (rule.matched ? rule.expression : '无规则') : (legacy?.calculation ? String(legacy.calculation.salary) : '无规则'),
       salary_rule_reason: rule?.reason || legacy?.reason || '',
@@ -102,9 +103,11 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
   function override(id, body) {
     const before = db.prepare('SELECT * FROM lessons WHERE id=?').get(id);
     if (!before) throw new Error('课程不存在');
-    const automatic = body.source === 'auto';
+    let automatic = body.source === 'auto';
     if (!automatic && body.source !== 'manual') throw new Error('薪资来源必须为自动或特殊');
-    const amount = automatic ? null : W.Formula.cents(body.amount) / 100;
+    let amount = automatic ? null : W.Formula.cents(body.amount) / 100;
+    const resolved = resolve(before);
+    if (!automatic && resolved.rule_base_salary != null && W.Formula.cents(amount) === W.Formula.cents(resolved.rule_base_salary)) { automatic = true; amount = null; }
     if (amount > 100000) throw new Error('单节基础课薪不得超过 100000 元');
     atomic(() => {
       if (automatic && !W.matchTable(context(), before.date, context().teacherIds.get(before.teacher_name))) {
@@ -114,7 +117,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
       }
       db.prepare('UPDATE lessons SET teacher_base_salary_override=?,teacher_base_salary_source=? WHERE id=?').run(amount, automatic ? 'auto' : 'manual', id);
     });
-    return { before, id, source: body.source, amount };
+    return { before, id, source: automatic ? 'auto' : 'manual', amount };
   }
   function allocate(lessons, coefficients, oldRules) {
     const running = new Map(), result = new Map();

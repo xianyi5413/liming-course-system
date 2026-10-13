@@ -180,7 +180,7 @@ test('Chromium salary workflow renders four widths and supports table editor and
     assert.equal(await browser.evaluate("document.querySelectorAll('.salary-formula-table tbody tr').length"), 6);
     assert.equal(await browser.evaluate("document.querySelectorAll('.salary-formula-input[data-type=\"1V3\"]').length"), 3);
     await browser.evaluate(`(()=>{const input=document.querySelector('.salary-formula-input[data-grade="高一"][data-type="小班课"]');input.value='60+30(n-1)+40K';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-    assert.equal(await browser.evaluate("document.querySelector('[data-salary-preview=\"高一\"]').textContent"), '210+40K');
+    assert.equal(await browser.evaluate("document.querySelector('[data-salary-preview=\"高一\"][data-count=\"6\"]').textContent"), '210+40K');
     await browser.evaluate("request('/api/auth/logout',{method:'POST'}).then(()=>{auth.user=null;renderLogin();})");
     assert.equal(await browser.evaluate("document.querySelectorAll('.salary-workflow-modal').length"), 0, 'salary dialog must not survive logout');
   } finally { browser.close(); chrome.child.kill('SIGTERM'); }

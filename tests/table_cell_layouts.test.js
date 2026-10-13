@@ -236,7 +236,7 @@ test("target tables keep short fields complete, wrap bounded long fields and del
   assert.equal(pricing.missing, undefined, JSON.stringify(pricing.missing || []));
   assert.equal(pricing.text, STUDENTS.join(""));
   assert.equal(pricing.empty, "—");
-  assert.deepEqual(pricing.normalizedCases, ["甲、乙", "甲、乙", "甲、乙、丙"]);
+  assert.deepEqual(pricing.normalizedCases, ["甲、乙", "甲、乙", "丙、甲、乙"]);
   assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, flexWrap: pricing.flexWrap, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "normal", flexWrap: "wrap", overflowX: "hidden", complete: true });
   assert.notEqual(pricing.textOverflow, "ellipsis");
   await browser.click(".student-pricing-select-row");
