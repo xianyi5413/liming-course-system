@@ -889,6 +889,7 @@ function setActiveView(nextView) {
   }
   if (nextView !== view) backupCleanupDialog = null;
   const previousView = view;
+  if (previousView === "lessons" && nextView !== previousView) lessonRangeRequest += 1;
   view = nextView || "";
   if (previousView === "studentPricing" && view !== "studentPricing") {
     cancelStudentPricingPageRequest();
@@ -2674,8 +2675,14 @@ function numberValue(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+const studentDisplayCache = new Map();
 function splitStudents(value) {
-  return StudentDisplay.names(value);
+  if (typeof value !== "string") return StudentDisplay.names(value);
+  if (!studentDisplayCache.has(value)) {
+    if (studentDisplayCache.size >= 4096) studentDisplayCache.clear();
+    studentDisplayCache.set(value, StudentDisplay.names(value));
+  }
+  return studentDisplayCache.get(value).slice();
 }
 
 function studentSetInlineText(value) {
@@ -3607,11 +3614,11 @@ function adaptiveColumnDefinition(column, header) {
     money: { minWidth: 128, maxWidth: 168, grow: 0, wrap: false, alignment: "right" },
     action: { minWidth: 92, maxWidth: 250, grow: 0, wrap: false, alignment: "center" },
     account: { minWidth: 132, maxWidth: 220, grow: 0, wrap: false, alignment: "center" },
-    long: { minWidth: 160, maxWidth: 360, grow: 1, wrap: true, alignment: "left" },
-    students: { minWidth: 220, maxWidth: 480, grow: 2, wrap: true, alignment: "left" },
+    long: { minWidth: 160, maxWidth: 360, grow: 0, wrap: false, alignment: "left" },
+    students: { minWidth: 220, maxWidth: 480, grow: 0, wrap: false, alignment: "left" },
     full: { minWidth: 96, maxWidth: Number.MAX_SAFE_INTEGER, grow: 0, wrap: false, alignment: "left" },
-    note: { minWidth: 76, maxWidth: 360, grow: 1, wrap: true, alignment: "left" },
-    permissions: { minWidth: 220, maxWidth: 420, grow: 1, wrap: true, alignment: "left" },
+    note: { minWidth: 76, maxWidth: 360, grow: 0, wrap: false, alignment: "left" },
+    permissions: { minWidth: 220, maxWidth: 420, grow: 0, wrap: false, alignment: "left" },
   };
   const preset = presets[type] || presets.short;
   const numeric = (key, fallback) => {
@@ -3621,9 +3628,10 @@ function adaptiveColumnDefinition(column, header) {
   return {
     type,
     minWidth: numeric("minWidth", preset.minWidth),
-    maxWidth: numeric("maxWidth", preset.maxWidth),
-    grow: numeric("grow", preset.grow),
-    wrap: column.dataset.wrap === "" ? true : column.dataset.wrap == null ? preset.wrap : column.dataset.wrap === "true",
+    // Legacy wrap/grow/student caps must not split or clip business values.
+    maxWidth: ["note", "long"].includes(type) ? numeric("maxWidth", preset.maxWidth) : type === "select" ? 44 : Number.MAX_SAFE_INTEGER,
+    grow: 0,
+    wrap: false,
     alignment: column.dataset.alignment || preset.alignment,
     header,
   };
@@ -3651,8 +3659,9 @@ function adaptiveCellContentWidth(cell, definition, font) {
 
 function resizeAdaptiveTextarea(textarea) {
   if (!textarea) return;
-  textarea.style.height = "auto";
-  textarea.style.height = `${Math.max(textarea.closest(".compact-rows, .teacher-profile-table") ? 32 : 38, textarea.scrollHeight)}px`;
+  textarea.style.height = "32px";
+  textarea.setAttribute("wrap", "off");
+  textarea.title = textarea.value;
   if (textarea.dataset.adaptiveTextareaBound !== "1") {
     textarea.dataset.adaptiveTextareaBound = "1";
     textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea));
@@ -3670,26 +3679,6 @@ function adaptiveTextWidthForData(value, font) {
   return width;
 }
 
-function distributeAdaptiveGrowth(widths, definitions, availableWidth) {
-  let remaining = Math.max(0, availableWidth - widths.reduce((sum, width) => sum + width, 0));
-  let growIndexes = definitions.map((definition, index) => ({ ...definition, index }))
-    .filter((definition) => definition.grow > 0 && widths[definition.index] < definition.maxWidth);
-  while (remaining > 0.5 && growIndexes.length) {
-    const growTotal = growIndexes.reduce((sum, definition) => sum + definition.grow, 0);
-    let distributed = 0;
-    for (const definition of growIndexes) {
-      const share = remaining * (definition.grow / growTotal);
-      const addition = Math.min(share, definition.maxWidth - widths[definition.index]);
-      widths[definition.index] += addition;
-      distributed += addition;
-    }
-    if (distributed < 0.5) break;
-    remaining -= distributed;
-    growIndexes = growIndexes.filter((definition) => widths[definition.index] < definition.maxWidth - 0.5);
-  }
-  return widths;
-}
-
 function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions) {
   const started = performance.now();
   const style = getComputedStyle(table);
@@ -3701,8 +3690,6 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
     adaptiveTextWidthForData(fallback, font),
     ...unique(values).map((value) => adaptiveTextWidthForData(value, font)),
   );
-  const noteTokens = unique(rows.flatMap((row) => String(row.notes || "").split(/[\s,，、;；/|]+/).filter(Boolean)));
-  const studentLabels = unique(rows.flatMap((row) => row._students || splitStudents(row.student_names)));
   const rawWidths = fee ? [44, 48, ...['student_name','teacher_name','date','weekday','time_slot','classroom','status','grade','subject','notes','unit_price','rule_price'].map((key, index) => measured(rows.map(row => row[key])) + (index >= 10 ? 64 : 36))] : [
     44,
     adaptiveTextWidthForData(String(Math.max(1, rows.length)), font) + 20,
@@ -3710,20 +3697,18 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
     measured(rows.map((row) => row.grade)) + 34,
     measured(rows.map((row) => row.subject)) + 34,
     Math.max(48, ...rows.map(row => (row.course_types || []).reduce((sum, type) => sum + adaptiveTextWidthForData(type, font) + 22, 20))),
-    measured(studentLabels) + 42,
+    Math.max(42, ...rows.map(row => splitStudents(row.student_names).reduce((sum, name) => sum + adaptiveTextWidthForData(name, font) + 30, 20))),
     measured(rows.map(row => row.start_date)) + 30,
     measured(rows.map(row => row.end_date)) + 30,
     measured(rows.map(row => row.total_lessons)) + 30,
     measured(rows.map((row) => moneyInput(row.custom_price))) + 56,
     measured(rows.map((row) => studentPricingVisibleStatus(row))) + 34,
-    measured(noteTokens) + 38,
+    measured(rows.map(row => row.notes)) + 38,
   ];
   const widths = rawWidths.map((width, index) => Math.ceil(Math.min(
     definitions[index].maxWidth,
     Math.max(definitions[index].minWidth, width, adaptiveTextWidthForData(headerCells[index].textContent.trim(), font) + 24),
   )));
-  const wrapper = table.closest(".table-wrap");
-  if (table.dataset.adaptiveNatural !== "true") distributeAdaptiveGrowth(widths, definitions, wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0));
   columns.forEach((column, index) => {
     column.style.width = `${Math.ceil(widths[index])}px`;
     headerCells[index].classList.toggle("adaptive-wrap", definitions[index].wrap);
@@ -3761,7 +3746,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   const measureFont = tableStyle.font || `${tableStyle.fontWeight} ${tableStyle.fontSize} ${tableStyle.fontFamily}`;
   const widths = headerCells.map((header, index) => {
     const definition = definitions[index];
-    const headerLines = [...header.childNodes].map(node => node.nodeName === "BR" ? "\n" : node.textContent).join("").split("\n");
+    const headerLines = header.querySelector(".salary-rule-heading") ? [...header.querySelector(".salary-rule-heading").children].map(node => node.textContent) : [...header.childNodes].map(node => node.nodeName === "BR" ? "\n" : node.textContent).join("").split("\n");
     let width = Math.max(...headerLines.map(line => adaptiveTableTextWidth(line.trim(), header))) + adaptiveHorizontalBox(header);
     for (const row of bodyRows) {
       const cell = row.children[index];
@@ -3770,10 +3755,6 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     }
     return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
   });
-
-  const wrapper = table.closest(".table-wrap");
-  const availableWidth = wrapper?.clientWidth || widths.reduce((sum, width) => sum + width, 0);
-  if (table.dataset.adaptiveNatural !== "true") distributeAdaptiveGrowth(widths, definitions, availableWidth);
 
   columns.forEach((column, index) => {
     const definition = definitions[index];
@@ -3784,6 +3765,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
       cell.classList.toggle("adaptive-wrap", definition.wrap);
       cell.classList.toggle("adaptive-full", definition.type === "full");
       cell.dataset.adaptiveAlignment = definition.alignment;
+      if (["note", "long"].includes(definition.type)) { cell.classList.add("single-line-note"); cell.title = cell.querySelector("input,textarea")?.value || cell.textContent.trim(); }
     });
   });
   const tableWidth = widths.reduce((sum, width) => sum + width, 0);
@@ -3794,13 +3776,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   table.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
   table.dataset.adaptiveLayoutReads = "0";
   table.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
-  const textareas = [...table.querySelectorAll("textarea.adaptive-textarea")];
-  textareas.forEach(textarea => { textarea.style.height = "auto"; });
-  const heights = textareas.map(textarea => Math.max(table.matches(".compact-rows, .teacher-profile-table") ? 32 : 38, textarea.scrollHeight));
-  textareas.forEach((textarea, index) => {
-    textarea.style.height = `${heights[index]}px`;
-    if (textarea.dataset.adaptiveTextareaBound !== "1") { textarea.dataset.adaptiveTextareaBound = "1"; textarea.addEventListener("input", () => resizeAdaptiveTextarea(textarea)); }
-  });
+  table.querySelectorAll("textarea.adaptive-textarea").forEach(resizeAdaptiveTextarea);
   return widths;
 }
 
@@ -4272,13 +4248,19 @@ function lessonRangeLoaded() {
   return loaded.start <= desired.start && loaded.end >= desired.end;
 }
 
+let lessonRangeRequest = 0;
 async function loadLessonRangeOnly() {
+  const requestId = ++lessonRangeRequest;
+  const requestedView = view;
   const range = lessonLoadRange();
   if (!range) return;
-  const result = await request(lessonsRangeUrl(range));
+  const requestUrl = lessonsRangeUrl(range);
+  const result = await request(requestUrl);
+  if (requestId !== lessonRangeRequest || view !== requestedView || requestUrl !== lessonsRangeUrl(lessonLoadRange() || {})) return false;
   state.lessons = result.lessons || [];
   state.week_lessons = result.lessons || [];
   state.lesson_loaded_range = range;
+  return true;
 }
 
 function resetLessonFilter() {
@@ -5795,24 +5777,10 @@ function historyToggleAction() {
   `;
 }
 
+const lessonSortCollator = new Intl.Collator("zh-Hans-CN");
 function sortLessons(rows) {
-  return [...(rows || [])].sort((a, b) => {
-    const av = [
-      a.date || "",
-      a.teacher_name || "",
-      a.time_slot || "",
-      String(a.sort_order ?? 0).padStart(8, "0"),
-      String(a.id).padStart(8, "0"),
-    ].join("|");
-    const bv = [
-      b.date || "",
-      b.teacher_name || "",
-      b.time_slot || "",
-      String(b.sort_order ?? 0).padStart(8, "0"),
-      String(b.id).padStart(8, "0"),
-    ].join("|");
-    return av.localeCompare(bv, "zh-Hans-CN");
-  });
+  return (rows || []).map(row => ({ row, key: [row.date || "", row.teacher_name || "", row.time_slot || "", String(row.sort_order ?? 0).padStart(8, "0"), String(row.id).padStart(8, "0")].join("|") }))
+    .sort((a, b) => lessonSortCollator.compare(a.key, b.key)).map(item => item.row);
 }
 
 function sortedLessons() {
@@ -6006,7 +5974,10 @@ function reRenderLessonsTbody() {                        /* [B档] 只重绘 tbo
   table?.classList.toggle("is-editing", scheduleMode);
   table?.classList.toggle("is-browsing", !scheduleMode);
   closeScheduleInlinePicker();
+  tbody.querySelectorAll(".multi-select.open").forEach(closeMultiSelectMenu);
   tbody.innerHTML = lessonRowsHtml(rows);
+  const pagination = document.querySelector(".lesson-pagination");
+  if (pagination) pagination.outerHTML = lessonPaginationHtml(rows);
   applyLessonTableStudentColumnWidth(measureVisibleStudentColumnWidth(rows));
   updateLessonSelectionControls(rows);
   cleanupCustomSelectPortals();
@@ -6107,7 +6078,7 @@ async function refreshLessonsView({
 } = {}) {
   ensureLessonFilterDates();
   if (reloadRange || !lessonRangeLoaded()) {
-    await loadLessonRangeOnly();
+    if (await loadLessonRangeOnly() === false) return;
     await refreshLessonConflicts();
   }
   if (full || view !== "lessons" || !document.querySelector("#lessons-tbody")) {
@@ -6263,13 +6234,20 @@ async function handleLessonFieldChange(input) {          /* [约束2/3/4/5] 事�
   }
 }
 
+let lessonConflictIndexSource = null;
+let lessonConflictIndex = new Map();
 function lessonInlineConflict(row = {}, field = "") {
-  const lessonId = Number(row.id);
-  if (!lessonId || !["time_slot", "classroom"].includes(field)) return false;
-  return (state.schedule_conflicts?.issues || []).some((issue) => {
-    if (!(issue.lesson_ids || []).map(Number).includes(lessonId)) return false;
-    return field === "classroom" ? issue.type === "classroom" : ["teacher", "student", "classroom", "invalid_time"].includes(issue.type);
-  });
+  const issues = state.schedule_conflicts?.issues;
+  if (issues !== lessonConflictIndexSource) {
+    lessonConflictIndexSource = issues;
+    lessonConflictIndex = new Map();
+    for (const issue of issues || []) for (const id of issue.lesson_ids || []) {
+      const flags = lessonConflictIndex.get(Number(id)) || new Set();
+      flags.add(issue.type); lessonConflictIndex.set(Number(id), flags);
+    }
+  }
+  const flags = lessonConflictIndex.get(Number(row.id));
+  return field === "classroom" ? Boolean(flags?.has("classroom")) : field === "time_slot" && ["teacher", "student", "classroom", "invalid_time"].some(type => flags?.has(type));
 }
 
 function lessonInlinePickerDisplay(row = {}, field = "") {
@@ -6395,7 +6373,7 @@ function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
   const badgeGap = 5;
   const cellPadding = 16;
   const contentWidth = Math.max(0, ...(lessons || []).map((row) => splitStudents(row.student_names || "").reduce((sum, value, index) => (
-    sum + probe.measureText(value).width + badgePadding + (index ? badgeGap : 0)
+    sum + adaptiveTextWidthForData(value, probe.font) + badgePadding + (index ? badgeGap : 0)
   ), 0)));
   // 文字宽度加上单元格内边距；排课态另为按钮预留下拉箭头空间。
   const width = Math.max(156, Math.ceil(contentWidth + cellPadding));
@@ -6406,7 +6384,7 @@ function measureVisibleStudentColumnWidth(lessons = visibleLessonRows()) {
 function measureLessonNoteWidth(rows = visibleLessonRows()) {
   const style = getComputedStyle(document.body);
   const font = `400 ${getComputedStyle(document.documentElement).getPropertyValue('--text-table').trim() || '13px'} ${style.fontFamily}`;
-  return Math.ceil(Math.max(96, ...rows.map(row => adaptiveTextWidthForData(String(row.notes || '').replace(/\n/g, ' '), font) + 36)));
+  return Math.min(480, Math.ceil(Math.max(96, ...rows.map(row => adaptiveTextWidthForData(String(row.notes || '').replace(/\n/g, ' '), font) + 36))));
 }
 
 function applyLessonTableStudentColumnWidth(width = measureVisibleStudentColumnWidth()) {
@@ -6489,10 +6467,26 @@ function lessonScheduleAddRow(row) {
   `;
 }
 
+const LESSON_PAGE_SIZE = 100;
+let lessonPage = 1;
+let lessonPageFilterKey = "";
+function lessonPageBounds(rows) {
+  const key = JSON.stringify([lessonFilter, focusedLessonIds]);
+  if (key !== lessonPageFilterKey) { lessonPage = 1; lessonPageFilterKey = key; }
+  const pages = Math.max(1, Math.ceil(rows.length / LESSON_PAGE_SIZE));
+  lessonPage = Math.max(1, Math.min(pages, lessonPage));
+  return { start: (lessonPage - 1) * LESSON_PAGE_SIZE, end: Math.min(rows.length, lessonPage * LESSON_PAGE_SIZE), pages };
+}
+function lessonPaginationHtml(rows) {
+  const { start, end, pages } = lessonPageBounds(rows);
+  return `<div class="lesson-pagination" role="navigation" aria-label="课程分页"><span>共 ${rows.length} 节，显示 ${rows.length ? start + 1 : 0}–${end} 节；全选作用于全部筛选结果</span><button type="button" class="btn" data-lesson-page="1" ${lessonPage === 1 ? "disabled" : ""}>首页</button><button type="button" class="btn" data-lesson-page="${lessonPage - 1}" ${lessonPage === 1 ? "disabled" : ""}>上一页</button><span>${lessonPage} / ${pages}</span><button type="button" class="btn" data-lesson-page="${lessonPage + 1}" ${lessonPage === pages ? "disabled" : ""}>下一页</button><button type="button" class="btn" data-lesson-page="${pages}" ${lessonPage === pages ? "disabled" : ""}>末页</button></div>`;
+}
 function lessonRowsHtml(rows) {
   if (!rows.length) return `<tr><td colspan="14" class="empty">暂无课程记录</td></tr>`;
-  let cumulative = 0;
-  return rows.map((row, index) => {
+  const { start, end } = lessonPageBounds(rows);
+  let cumulative = rows.slice(0, start).reduce((sum, row) => sum + splitStudents(row.student_names).length, 0);
+  return rows.slice(start, end).map((row, offset) => {
+    const index = start + offset;
     cumulative += splitStudents(row.student_names).length;
     const currentGroup = `${row.date || ""}|${row.teacher_name || ""}`;
     const next = rows[index + 1];
@@ -7431,6 +7425,7 @@ function renderLessons() {
         </table>
       </div>
     </div>
+    ${lessonPaginationHtml(rows)}
     <div class="lesson-modal-region">${lessonModalsHtml(rows)}</div>
   `;
   updateLessonSelectionControls(rows);
@@ -7833,16 +7828,20 @@ function localScheduleConflicts(rows) {
       });
       continue;
     }
-    parsed.push({ row, ...range });
+    parsed.push({ row, ...range, students: splitStudents(row.student_names), studentSet: new Set(splitStudents(row.student_names)) });
   }
-  for (let i = 0; i < parsed.length; i += 1) {
-    for (let j = i + 1; j < parsed.length; j += 1) {
-      const a = parsed[i];
-      const b = parsed[j];
-      if (a.row.date !== b.row.date) continue;
+  const byDate = new Map();
+  for (const item of parsed) {
+    if (!byDate.has(item.row.date)) byDate.set(item.row.date, []);
+    byDate.get(item.row.date).push(item);
+  }
+  // Only courses on the same date can overlap. Avoid all-year quadratic comparisons.
+  for (const dayRows of byDate.values()) for (let i = 0; i < dayRows.length; i += 1) {
+    for (let j = i + 1; j < dayRows.length; j += 1) {
+      const a = dayRows[i];
+      const b = dayRows[j];
       if (!(a.start < b.end && b.start < a.end)) continue;
-      const sharedStudents = splitStudents(a.row.student_names)
-        .filter((name) => splitStudents(b.row.student_names).includes(name));
+      const sharedStudents = a.students.filter(name => b.studentSet.has(name));
       const lessonIds = [a.row.id, b.row.id].map(Number).filter(Boolean);
       const lessonDetails = [scheduleConflictLessonDetail(a.row), scheduleConflictLessonDetail(b.row)];
       if (a.row.teacher_name && a.row.teacher_name === b.row.teacher_name) {
@@ -7973,8 +7972,11 @@ function scheduleConflictPanel(issues) {
   `;
 }
 
+let lessonConflictCache = { key: "", value: null };
 function lessonConflictState(rows = visibleLessonRows()) {
-  return calculateVisibleLessonConflicts(rows);
+  const key = JSON.stringify([ignoreRoomOneConflict, statusValues(), rows.map(row => [row.id, row.date, row.time_slot, row.teacher_name, row.classroom, row.student_names, row.status, row.lesson_status, row.course_status, row.grade, row.subject, row.notes])]);
+  if (key !== lessonConflictCache.key) lessonConflictCache = { key, value: calculateVisibleLessonConflicts(rows) };
+  return lessonConflictCache.value;
 }
 
 // 课程总表的冲突提示必须与表格使用同一份可见课程集合；服务端全月冲突报告
@@ -8601,7 +8603,7 @@ function feeDetailRowMarkup(row, index) {
                 <td class="text-cell">${statusBadge(rowStatus(row))}</td>
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
-                <td class="text-cell content-wrap">${escapeHtml(row.notes)}</td>
+                <td class="text-cell single-line-note" title="${escapeHtml(row.notes || '')}">${escapeHtml(row.notes)}</td>
                 ${editablePriceCell(row)}
                 <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
               </tr>
@@ -11611,11 +11613,11 @@ function studentPricingRowMarkup(row, index = 0) {
       <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderGradeBadge(row.grade)}</td>
       <td class="text-cell adaptive-center" data-adaptive-alignment="center">${renderSubjectBadge(row.subject)}</td>
       <td class="adaptive-center">${row.course_types?.length ? CourseDetails.types(row) : "-"}</td>
-      <td class="text-cell wide student-set-cell adaptive-left adaptive-wrap" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
+      <td class="text-cell wide student-set-cell adaptive-left" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
       <td class="adaptive-center">${escapeHtml(row.start_date || "-")}</td><td class="adaptive-center">${escapeHtml(row.end_date || "-")}</td><td class="adaptive-center">${row.total_lessons || 0}</td>
       <td class="currency-input-cell student-pricing-value-cell adaptive-right" data-adaptive-alignment="right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"${readonly}` })}</td>
       <td class="text-cell adaptive-center student-pricing-status-cell" data-adaptive-alignment="center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
-      <td class="adaptive-left adaptive-wrap" data-adaptive-alignment="left"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft" placeholder="-"${readonly}>${escapeHtml(row.notes)}</textarea></td>
+      <td class="adaptive-left single-line-note" data-adaptive-alignment="left" title="${escapeHtml(row.notes || '')}"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft" placeholder="-"${readonly}>${escapeHtml(row.notes)}</textarea></td>
     </tr>
   `;
 }
@@ -18497,6 +18499,16 @@ function wireEvents() {
         hidden.value = normalizeLessonStudentNames(normalizeNameList(hidden.value).filter((name) => name !== studentName).join("、"));
         studentBadge.remove();
         hidden.dispatchEvent(new Event("change", { bubbles: true }));
+        return;
+      }
+      const pageButton = event.target.closest("[data-lesson-page]");
+      if (pageButton) {
+        if (pageButton.disabled) return;
+        lessonPage = Number(pageButton.dataset.lessonPage);
+        reRenderLessonsTbody();
+        applyReadonlyUi();
+        const wrap = document.querySelector(".lesson-table-scroll");
+        if (wrap) wrap.scrollTop = 0;
         return;
       }
       const scheduleButton = event.target.closest(".schedule-add-btn");

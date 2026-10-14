@@ -14457,3 +14457,57 @@ table.adaptive-table td[data-adaptive-alignment="center"] .student-set-badges { 
 .batch-conflict-details { min-width: 0; max-width: 100%; }
 .batch-conflict-item { border-top: 1px solid var(--line); padding-block: var(--space-2); }
 .batch-conflict-editor { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
+/* Ordinary business rows stay on one line. Matrix cards retain their own flow. */
+:is(#content, body) table:not(.week-grid):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) :is(th, td) {
+  white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+}
+:is(#content, body) table:not(.week-grid):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) :is(.student-set-badges, .lesson-student-badges, .inline-badges) {
+  display: inline-flex !important;
+  flex-wrap: nowrap !important;
+  width: max-content !important;
+  max-width: none !important;
+  gap: 5px;
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+:is(#content, body) table:not(.week-grid):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) :is(.student-badge, .entity-badge, .content-wrap, .cell-input, .lesson-cell-text) {
+  white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+}
+:is(#content, body) table:not(.week-grid):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) textarea.cell-input {
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  resize: none;
+  overflow: hidden;
+}
+:is(#content, body) table:not(.week-grid):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) :is(td.right, td.adaptive-right, td[data-adaptive-alignment="right"]) {
+  padding-right: 14px !important;
+  text-align: right !important;
+}
+.salary-rule-heading { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; line-height: 1.25; }
+.salary-rule-heading > * { display: block; white-space: nowrap; }
+.salary-rule-heading > small { font-size: 11px; font-weight: 400; color: var(--muted); }
+.lesson-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+table.adaptive-table td.single-line-note,
+.course-table.lesson-table td.col-note .lesson-cell-text {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  max-width: 480px;
+}
+
+#content .course-table.lesson-table td.col-students { text-align: left !important; }
+
+.staff-attendance-table th :is(span, small) { display: inline; }
+
+/* Native tables use content widths too; shared adaptive tables retain their colgroup. */
+:is(#content, body) table:not([data-adaptive-table]):not(.lesson-table):not(.week-grid-table):not(.matrix-dimension-table):not(.notice-shot-table) {
+  width: max-content;
+  min-width: 0;
+  max-width: none;
+  table-layout: auto;
+}
+#content .student-profile-table .student-name-with-conflict { flex-wrap: nowrap; }

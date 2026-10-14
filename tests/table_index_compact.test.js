@@ -135,13 +135,13 @@ test('filters, history, teacher changes and real recharge deletion regenerate di
   assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
 }));
 
-test('compact rows grow with notes, salary state stays one line and activation retains matching semantics',async()=>browserRun(async browser=>{
+test('compact rows retain their height with notes, salary state stays one line and activation retains matching semantics',async()=>browserRun(async browser=>{
   for(const [page,selector] of [['feeDetails','.fee-detail-table'],['teacherDetail','.teacher-class-lessons'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
     await show(browser,page);if(page==='teacherDetail'){await browser.click('[data-salary-class]');await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");}
     await browser.evaluate('new Promise(requestAnimationFrame)');
-    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.teacher-detail-notes,.course-details-table td:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
+    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.single-line-note,.teacher-detail-notes,.course-details-table td:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
     const short=heights.find(row=>!row.note),long=heights.find(row=>row.note);
-    assert.ok(short&&long,JSON.stringify({page,heights}));assert.ok(short.height<=55,JSON.stringify({page,short}));assert.ok(long.height>=short.height,JSON.stringify({page,heights}));assert.ok(heights.every(row=>!row.scroll));if(page==='teacherDetail')await browser.click('[data-salary-action=close]');
+    assert.ok(short&&long,JSON.stringify({page,heights}));assert.ok(short.height<=55,JSON.stringify({page,short}));assert.ok(Math.abs(long.height-short.height)<=1,JSON.stringify({page,heights}));assert.ok(heights.every(row=>!row.scroll));if(page==='teacherDetail')await browser.click('[data-salary-action=close]');
   }
   const rule=await browser.evaluate(`(()=>{const row=[...document.querySelectorAll('.teacher-salary-rule-row')].find(row=>row.querySelector('.rule-activation').textContent.includes('已停用')),cell=row.querySelector('.rule-status-cell');return {id:Number(row.dataset.ruleId),text:cell.textContent.trim(),badges:cell.querySelectorAll('.visible-price-status').length,inputs:cell.querySelectorAll('input').length};})()`);
   assert.equal(rule.badges,1);assert.equal(rule.inputs,0);assert.equal(rule.text,'已停用');

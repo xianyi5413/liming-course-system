@@ -144,6 +144,7 @@ async function inspectTable(browser, selector) {
       const input=cell.querySelector(':scope > .cell-input');
       const set=cell.querySelector('.student-set-badges');
       if (set) return set.getBoundingClientRect().right<=cell.getBoundingClientRect().right+1;
+      if (cell.classList.contains('single-line-note')) return cell.title === (input?.value || cell.textContent.trim()) && (!input || getComputedStyle(input).whiteSpace === 'nowrap');
       if (input) {
         if (cell.classList.contains('adaptive-wrap')) return input.scrollWidth<=input.clientWidth+1&&input.clientWidth<=cell.clientWidth+1;
         const style=getComputedStyle(input);
@@ -164,7 +165,7 @@ async function inspectTable(browser, selector) {
       cellFits,
       cellFailures:cellFitsDetails.map((ok,index)=>ok?null:{index,html:cells[index].outerHTML.slice(0,240),cell:[cells[index].clientWidth,cells[index].scrollWidth],input:cells[index].querySelector(':scope > .cell-input')?[cells[index].querySelector(':scope > .cell-input').clientWidth,cells[index].querySelector(':scope > .cell-input').scrollWidth]:null}).filter(Boolean),
       headers:headers.map((cell)=>{const style=getComputedStyle(cell);return {textAlign:style.textAlign,verticalAlign:style.verticalAlign,whiteSpace:style.whiteSpace};}),
-      cells:rows[0]?[...rows[0].cells].map((cell)=>{const style=getComputedStyle(cell);return {textAlign:style.textAlign,whiteSpace:style.whiteSpace,overflowX:style.overflowX,textOverflow:style.textOverflow,resize:style.resize};}):[],
+      cells:rows[0]?[...rows[0].cells].map((cell)=>{const style=getComputedStyle(cell);return {textAlign:style.textAlign,whiteSpace:style.whiteSpace,overflowX:style.overflowX,textOverflow:style.textOverflow,resize:style.resize,note:cell.classList.contains('single-line-note'),fullText:cell.title};}):[],
       badges:table.querySelectorAll('.student-set-badges .student-badge').length,
       badgeRows:[...table.querySelectorAll('.student-set-badges')].map((set)=>({
         whiteSpace:getComputedStyle(set).whiteSpace,
@@ -194,7 +195,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   for (const [group, view, selector, alignments] of pages) {
     await openView(browser, group, view, selector);
     results[view] = {};
-    for (const width of [1440, 1280, 1024, 390]) {
+    for (const width of [1920, 1440, 1280, 1024, 390]) {
       await viewport(browser, width);
       const layout = await inspectTable(browser, selector);
       results[view][width] = layout.widths;
@@ -205,8 +206,8 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
       assert.equal(layout.cellFits, true, `${view}/${width}: cell fit ${JSON.stringify(layout.cellFailures)}`);
       assert.equal(layout.headers.every((item, index) => item.textAlign === "center" && item.verticalAlign === "middle" && item.whiteSpace === (layout.config[index].wrap ? "normal" : "nowrap")), true, `${view}/${width}: headers ${JSON.stringify(layout.headers)}`);
       assert.deepEqual(layout.cells.map((item) => item.textAlign), alignments, `${view}/${width}: body alignment`);
-      assert.equal(layout.cells.every((item, index) => item.whiteSpace === (layout.config[index].wrap ? "normal" : "nowrap") && !/auto|scroll/.test(item.overflowX) && item.textOverflow !== "ellipsis" && item.resize === "none"), true, `${view}/${width}: cell overflow`);
-      assert.equal(layout.badgeRows.every((item) => item.whiteSpace === "normal" && item.flexWrap === "wrap" && item.complete), true, `${view}/${width}: badge rows`);
+      assert.equal(layout.cells.every((item, index) => item.whiteSpace === (layout.config[index].wrap ? "normal" : "nowrap") && !/auto|scroll/.test(item.overflowX) && (item.textOverflow !== "ellipsis" || item.note) && item.resize === "none"), true, `${view}/${width}: cell overflow`);
+      assert.equal(layout.badgeRows.every((item) => item.whiteSpace === "nowrap" && item.flexWrap === "nowrap" && item.complete), true, `${view}/${width}: badge rows`);
       assert.equal(layout.pageOverflow, false, `${view}/${width}: body overflow ${JSON.stringify(layout.overflowSources)}`);
       if (width === 390) {
         assert.equal(layout.outerScrollable, true, `${view}: outer scroll`);

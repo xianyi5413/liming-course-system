@@ -142,7 +142,7 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     await browser.evaluate("selectedTeacherDetail='合成教师';load({refreshGlobal:false})");await browser.waitFor("document.querySelectorAll('[data-salary-class]').length>0");
     await browser.click('[data-salary-action=tables]');await browser.waitFor("!!document.querySelector('[data-salary-action=new]')");await browser.click('[data-salary-action=new]');
     await browser.evaluate("document.querySelector('#salary-table-name').value='未保存名称';applyDateRangePickerValue(document.querySelector('[data-range-scope=salary-table-editor]'),'2027-01-01','2027-01-31')");
-    for(const width of [1440,1280,1024,390]){
+    for(const width of [1920,1440,1280,1024,390]){
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       const layout=await browser.evaluate("(()=>{const children=[...document.querySelector('.salary-editor-controls').children].map(x=>x.getBoundingClientRect().bottom);return {children,overflow:document.documentElement.scrollWidth>innerWidth}})()");
       assert.equal(layout.overflow,false,JSON.stringify({width,layout}));if(width>=1280)assert.ok(Math.max(...layout.children)-Math.min(...layout.children)<3,JSON.stringify(layout));
@@ -190,15 +190,19 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     // above asserts no cancellation; verify that its enclosing page can scroll.
     const scrolling=await browser.evaluate("(()=>{const space=document.createElement('div');space.style.height='2000px';contentEl.appendChild(space);const input=document.querySelector('.salary-coefficient-input');const value=input.value;contentEl.scrollTop=160;const result={type:input.type,scroll:contentEl.scrollTop,same:input.value===value};space.remove();contentEl.scrollTop=0;return result})()");
     assert.equal(scrolling.type,'text');assert.ok(scrolling.scroll>0);assert.equal(scrolling.same,true);
+    assert.equal((await api('/api/salary-tables',{method:'POST',body:{...table('60+30(n-1)+40K'),teacher_id:9001,name:'三行表头合成薪资表'}})).response.status,200);
     await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('input.teacher-detail-teacher-select')");
     await browser.evaluate("(()=>{const input=document.querySelector('input.teacher-detail-teacher-select');input.value='合成教师';input.dispatchEvent(new Event('change',{bubbles:true}));})()");
     await browser.waitFor("document.querySelectorAll('[data-salary-class]').length>=5");
-    for(const width of [1440,1280,1024,390]){
+    for(const width of [1920,1440,1280,1024,390]){
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       const students=await browser.evaluate("(()=>{const t=document.querySelector('.teacher-class-summary-table');applyAdaptiveTableColumns({table:t});return [...t.querySelectorAll('tbody tr')].filter(row=>row.cells[3]?.textContent.startsWith('布局')).map(row=>{const cell=row.cells[5],badges=[...cell.querySelectorAll('.student-badge')];return {count:badges.length,tops:badges.map(x=>x.getBoundingClientRect().top),intact:badges.every(x=>getComputedStyle(x).whiteSpace==='nowrap'&&x.scrollWidth<=x.clientWidth+1),clipped:cell.scrollWidth>cell.clientWidth+1,nowrap:getComputedStyle(cell).whiteSpace,overflow:document.documentElement.scrollWidth>innerWidth}});})()")
       assert.deepEqual(students.map(row=>row.count).sort((a,b)=>a-b),[1,2,3,6,10]);
-      for(const row of students){assert.equal(row.intact,true);assert.equal(row.clipped,false,JSON.stringify({width,row}));assert.equal(row.nowrap,'normal');assert.equal(row.overflow,false);}
+      for(const row of students){assert.equal(row.intact,true);assert.equal(row.clipped,false,JSON.stringify({width,row}));assert.equal(row.nowrap,'nowrap');assert.equal(new Set(row.tops).size,1);assert.equal(row.overflow,false);}
     }
+    const headings=await browser.evaluate(`(()=>{const t=document.querySelector('.teacher-class-summary-table');return [...t.querySelectorAll('.salary-rule-heading')].map((head,i)=>({lines:[...head.children].map(e=>e.textContent),tops:[...head.children].map(e=>e.getBoundingClientRect().top),center:getComputedStyle(head.closest('th')).textAlign,body:[...t.tBodies[0].rows].map(row=>({align:getComputedStyle(row.cells[9+i]).textAlign,padding:parseFloat(getComputedStyle(row.cells[9+i]).paddingRight),white:getComputedStyle(row.cells[9+i]).whiteSpace}))}));})()`);
+    assert.ok(headings.length>0);
+    headings.forEach((head,i)=>{assert.equal(head.lines.length,3);assert.equal(head.lines[0],`规则薪资${i+1}`);assert.ok(head.lines[1]);assert.match(head.lines[2],/^\d{4}-\d{2}-\d{2}～\d{4}-\d{2}-\d{2}$/);assert.equal(new Set(head.tops).size,3);assert.equal(head.center,'center');head.body.forEach(cell=>{assert.equal(cell.align,'right');assert.equal(cell.padding,14);assert.equal(cell.white,'nowrap');});});
     await browser.click('[data-salary-class]');await browser.waitFor("!!document.querySelector('.teacher-class-lessons')");
     const salaries=await browser.evaluate("(()=>{const t=document.querySelector('.teacher-class-lessons');applyAdaptiveTableColumns({table:t});return [...t.querySelector('tbody tr').cells].map(x=>getComputedStyle(x).textAlign)})()");
     assert.deepEqual(salaries,Array(11).fill('center').concat('left','right','right','center'));await browser.click('[data-salary-action=close]');
@@ -210,7 +214,7 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     assert.equal(browser.responses.slice(classRequests).filter(row=>row.url.includes('/api/class-groups/courses')).length,0);
     await browser.click('.class-group-row td:nth-child(2)');await browser.waitFor("!!document.querySelector('.class-course-details')");
     assert.equal(browser.responses.slice(classRequests).filter(row=>row.url.includes('/api/class-groups/courses')).length,1);
-    for(const width of [1440,1280,1024,390]){
+    for(const width of [1920,1440,1280,1024,390]){
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       const layout=await browser.evaluate("(()=>{const t=document.querySelector('.class-course-details');applyAdaptiveTableColumns({table:t});return {overflow:document.documentElement.scrollWidth>innerWidth,headers:[...t.querySelectorAll('th')].every(x=>getComputedStyle(x).textAlign==='center'),sticky:getComputedStyle(t.querySelector('th')).position,align:[...t.querySelector('tbody tr').cells].map(x=>getComputedStyle(x).textAlign)}})()");
       assert.equal(layout.overflow,false);assert.equal(layout.headers,true);assert.equal(layout.sticky,'sticky');assert.deepEqual(layout.align,Array(11).fill('center').concat('left'));

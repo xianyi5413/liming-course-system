@@ -119,7 +119,7 @@ async function viewport(browser, width) {
   await new Promise((resolve) => setTimeout(resolve, 80));
 }
 
-test("target tables keep short fields complete, wrap bounded long fields and delegate narrow overflow to the outer wrapper", async () => withBrowser(async (browser) => {
+test("target tables keep short fields complete, keep bounded notes single-line with complete hover text and delegate narrow overflow to the outer wrapper", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
 
   await openView(browser, "students", "feeDetails", ".fee-detail-table tbody tr");
@@ -176,6 +176,7 @@ test("target tables keep short fields complete, wrap bounded long fields and del
       const textWidth=context.measureText(input.value).width;
       return {
         value:input.value,
+        title:input.title,
         cellWidth:cell.getBoundingClientRect().width,
         textFits:textWidth+20<=input.clientWidth+1,
         wrappedComplete:input.scrollWidth<=input.clientWidth+1,
@@ -190,10 +191,9 @@ test("target tables keep short fields complete, wrap bounded long fields and del
       };
     })()`);
     assert.equal(layout.value, MIGRATION_NOTE);
-    assert.equal(layout.textFits, false);
-    assert.equal(layout.wrappedComplete, true);
-    assert.equal(layout.whiteSpace, "pre-wrap");
-    assert.notEqual(layout.textOverflow, "ellipsis");
+    assert.equal(layout.title, MIGRATION_NOTE);
+    assert.equal(layout.whiteSpace, "nowrap");
+    assert.equal(layout.textOverflow, "ellipsis");
     assert.doesNotMatch(layout.cellOverflow, /auto|scroll/);
     assert.ok(layout.rowHeight >= 36);
     if (width === 390) {
@@ -235,8 +235,9 @@ test("target tables keep short fields complete, wrap bounded long fields and del
   assert.equal(pricing.text, STUDENTS.join(""));
   assert.equal(pricing.empty, "—");
   assert.deepEqual(pricing.normalizedCases, ["甲、乙", "甲、乙", "丙、甲、乙"]);
-  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, flexWrap: pricing.flexWrap, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "normal", flexWrap: "wrap", overflowX: "hidden", complete: true });
+  assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, flexWrap: pricing.flexWrap, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", flexWrap: "nowrap", overflowX: "visible", complete: true });
   assert.notEqual(pricing.textOverflow, "ellipsis");
+  assert.ok(pricing.heightDelta <= 1);
   await browser.click(".student-pricing-select-row");
   assert.equal(await browser.evaluate("document.querySelector('.open-student-pricing-batch-modal').disabled"), false);
   await viewport(browser, 390);
@@ -266,8 +267,9 @@ test("target tables keep short fields complete, wrap bounded long fields and del
   })()`);
   assert.equal(salary.missing, undefined, JSON.stringify(salary.missing || []));
   assert.equal(salary.text, STUDENTS.join(""));
-  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, flexWrap: salary.flexWrap, overflowX: salary.overflowX, complete: salary.complete }, { badges: STUDENTS.length, whiteSpace: "normal", flexWrap: "wrap", overflowX: "hidden", complete: true });
+  assert.deepEqual({ badges: salary.badges, whiteSpace: salary.whiteSpace, flexWrap: salary.flexWrap, overflowX: salary.overflowX, complete: salary.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", flexWrap: "nowrap", overflowX: "visible", complete: true });
   assert.notEqual(salary.textOverflow, "ellipsis");
+  assert.ok(salary.heightDelta <= 1);
   await browser.click(".teacher-salary-rule-select-row");
   assert.equal(await browser.evaluate("document.querySelector('.open-teacher-salary-rule-batch-modal').disabled"), false);
   await viewport(browser, 390);
