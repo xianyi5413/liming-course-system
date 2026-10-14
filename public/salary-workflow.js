@@ -5,7 +5,6 @@
 const SalaryUI = (() => {
   let range = null, hideDeparted = true, data = { tables: [], classes: [], lessons: [] };
   let modal = null, draft = null, tables = [], activeClass = '', returnFocus = null;
-  let legacyDetail = false;
   let sessionGeneration = 0;
   let tablesWritable = false, templateDialog = null, tableTeacher = null;
   const tableDisabled = () => tablesWritable ? '' : 'disabled';
@@ -31,7 +30,6 @@ const SalaryUI = (() => {
     if (activeClass) showClass(activeClass);
   }
   function renderDetail() {
-    if (legacyDetail) return renderLegacyTeacherDetail();
     const teachers = (state.teacher_detail_teachers || []).map(row => row.name);
     const rows = data.lessons || [], options = dynamicTeacherDetailFilterOptions(rows);
     const visibleIds = new Set(rows.filter(row => teacherDetailMatchesFilter(row)).map(row => row.id));
@@ -47,7 +45,6 @@ const SalaryUI = (() => {
     const baseTotal = eligible.reduce((sum, row) => sum + Math.round((row.teacher_base_salary || 0) * 100), 0) / 100;
     const payrollTotal = eligible.reduce((sum, row) => sum + Math.round((row.teacher_payroll_amount || 0) * 100), 0) / 100;
     const pending = eligible.some(row => row.teacher_payroll_pending);
-    const legacy = classes.some(row => row.rules.legacy);
     const date = bounds();
     renderTopbar('课时明细', '按班级查看课程与基础课薪；规则金额按每 2 小时计价', '<button class="btn export-teacher-detail-image" type="button">复制图片</button>');
     contentEl.innerHTML = `<div class="band"><div class="filter-bar compact unified-filter-bar"><div class="filter-controls">
@@ -55,19 +52,17 @@ const SalaryUI = (() => {
       <label class="filter-field"><span>教师范围</span><span class="control"><input type="checkbox" id="salary-hide-departed" ${hideDeparted ? 'checked' : ''}> 隐藏离职</span></label>
       ${manager() ? '<button class="btn" data-salary-action="tables">薪资表</button>' : ''}
       ${templateActions()}
-      ${canView('teacherSalaryRules') ? '<button class="btn" data-salary-action="legacy">历史规则</button>' : ''}
-      ${manager() ? '<button class="btn" data-salary-action="legacy-detail">历史课时操作</button>' : ''}
       <label class="filter-field filter-date-range"><span>日期范围</span>${dateRangePickerControl({ scope: 'teacher-detail-salary', start: date.start, end: date.end })}</label>
       ${unifiedFilterField({ label: '年级', className: 'teacher-detail-filter-input', field: 'grade', value: teacherDetailFilter.grade, values: options.grades })}
       ${unifiedFilterField({ label: '科目', className: 'teacher-detail-filter-input', field: 'subject', value: teacherDetailFilter.subject, values: options.subjects })}
       ${unifiedFilterField({ label: '学生', className: 'teacher-detail-filter-input', field: 'student', value: teacherDetailFilter.student, values: options.students })}
       </div><div class="filter-summary"><span>${classes.length} 个班级 · ${visibleRows.length} 节课程</span><button class="btn reset-teacher-detail-filter">清空筛选</button></div></div>
       <div class="summary-grid lesson-summary-grid">
-        ${[['总课时数（节）', visibleRows.length], ['有效课时数（节）', eligible.length], ['基础课薪合计', formatMoney(baseTotal)], ['总薪资（不含车费）', pending ? '待完善规则' : formatMoney(payrollTotal)]].map(([label, value]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join('')}
+        ${[['有效课时/总课时数', `${eligible.length} / ${visibleRows.length} 节`], ['基础课薪合计', formatMoney(baseTotal)], ['绩效基数合计', formatMoney(eligible.reduce((sum, row) => sum + Math.round((row.performance_base || 0) * 100), 0) / 100)], ['总薪资（不含车费）', pending ? '待完善规则' : formatMoney(payrollTotal)]].map(([label, value]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join('')}
       </div><p class="muted-tip">工资按各月绩效系数及月度舍入分摊到课程；不含车费。缺少规则时总薪资待完善。</p>
-      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="short"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="date"><col data-column-type="date"><col data-column-type="short">${data.tables.map(() => '<col data-column-type="full" data-alignment="right">').join('')}${legacy ? '<col data-column-type="full" data-alignment="right">' : ''}</colgroup>
-      <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th>学生</th><th>起始日期</th><th>结束日期</th><th>节数</th>${data.tables.map((table, i) => `<th>规则薪资${i + 1}（${escapeHtml(table.name || '未命名薪资表')}）<br><small>${escapeHtml(table.effective_start)}～${escapeHtml(table.effective_end)}</small></th>`).join('')}${legacy ? '<th>历史规则</th>' : ''}</tr></thead>
-      <tbody>${classes.map((row, i) => `<tr data-salary-class="${escapeHtml(row.key)}" tabindex="0" role="button" aria-label="查看${escapeHtml(row.student_names)}的课程">${renderRowIndex(i)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${CourseDetails.types(row)}</td><td class="student-set-cell">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td><td>${escapeHtml(row.start_date || '—')}</td><td>${escapeHtml(row.end_date || '—')}</td><td>${row.visible_count}</td>${data.tables.map(table => `<td>${escapeHtml(row.rules[table.id] || '—（无课程）')}</td>`).join('')}${legacy ? `<td>${row.has_legacy_rule && canView('teacherSalaryRules') ? '<button class="btn" data-salary-action="legacy">历史规则</button>' : escapeHtml(row.rules.legacy || '-')}</td>` : ''}</tr>`).join('') || `<tr><td colspan="${9 + data.tables.length + Number(legacy)}" class="empty">${selectedTeacherDetail ? '此日期范围暂无课程' : '请先选择教师'}</td></tr>`}</tbody></table></div></div>`;
+      <div class="table-wrap"><table class="teacher-detail-table teacher-class-summary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="short"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="students" data-min-width="0" data-max-width="320" data-alignment="center"><col data-column-type="date"><col data-column-type="date"><col data-column-type="short">${data.tables.map(() => '<col data-column-type="full" data-alignment="right">').join('')}</colgroup>
+      <thead><tr>${rowIndexHeader()}<th>老师</th><th>年级</th><th>科目</th><th>类型</th><th>学生</th><th>起始日期</th><th>结束日期</th><th>节数</th>${data.tables.map((table, i) => `<th>规则薪资${i + 1}（${escapeHtml(table.name || '未命名薪资表')}）<br><small>${escapeHtml(table.effective_start)}～${escapeHtml(table.effective_end)}</small></th>`).join('')}</tr></thead>
+      <tbody>${classes.map((row, i) => `<tr data-salary-class="${escapeHtml(row.key)}" tabindex="0" role="button" aria-label="查看${escapeHtml(row.student_names)}的课程">${renderRowIndex(i)}<td>${escapeHtml(row.teacher_name)}</td><td>${escapeHtml(row.grade)}</td><td>${escapeHtml(row.subject)}</td><td>${CourseDetails.types(row)}</td><td class="student-set-cell">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td><td>${escapeHtml(row.start_date || '—')}</td><td>${escapeHtml(row.end_date || '—')}</td><td>${row.visible_count}</td>${data.tables.map(table => `<td>${escapeHtml(row.rules[table.id] || '—（无课程）')}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${9 + data.tables.length}" class="empty">${selectedTeacherDetail ? '此日期范围暂无课程' : '请先选择教师'}</td></tr>`}</tbody></table></div></div>`;
   }
   function showClass(key) {
     const group = data.classes.find(row => row.key === key);
@@ -211,9 +206,7 @@ const SalaryUI = (() => {
     const task = button.dataset.salaryAction;
     try {
       if (task === 'close') return close();
-      if (task === 'legacy-detail' || task === 'classes') { legacyDetail = task === 'legacy-detail'; render(); return; }
       if (task === 'tables') return await showTables();
-      if (task === 'legacy') { close(); setActiveView('teacherSalaryRules'); await load({ refreshGlobal: false }); return; }
       if (task === 'template-export') return await templateExportPicker();
       if (task === 'template-import' && writable()) return await transferDialog(true, true);
       if (task === 'text-export') return await transferDialog(false);
@@ -258,14 +251,21 @@ const SalaryUI = (() => {
     try {
       if (input.id === 'salary-hide-departed') { hideDeparted = input.checked; await load({ refreshGlobal: false }); }
       if (input.matches('.salary-base-input')) { await request(`/api/teacher-detail/salary/${input.dataset.id}`, { method: 'PATCH', body: { source: 'manual', amount: input.value } }); await refresh(); }
+      if (input.matches('.salary-score-input')) { const score = PerformanceScore.normalize(input.value.trim()); await request('/api/teacher-monthly-performance', { method: 'PUT', body: { teacher_name: input.dataset.teacher, month_key: state.settings.month_key, performance_score: score } }); await refresh(); }
       if (input.matches('.salary-coefficient-input')) { if (input.validity.badInput) throw new Error('绩效系数必须为 0.00～1.00 的数字'); await request('/api/teacher-monthly-performance', { method: 'PUT', body: { teacher_name: input.dataset.teacher, month_key: state.settings.month_key, coefficient: input.value.trim() === '' ? null : input.value } }); await refresh(); }
-    } catch (error) { showToast(error.message, 'error'); }
+     } catch (error) {
+      if (input.matches('.salary-score-input,.salary-coefficient-input')) {
+        const saved = state.derived.teacher_summary.find(row => row.teacher_name === input.dataset.teacher);
+        input.value = input.matches('.salary-score-input') ? (saved?.performance_score ?? '') : (saved?.performance_coefficient ?? 1).toFixed(2);
+      }
+      showToast(error.message, 'error');
+    }
   });
   return {
     renderDetail, bounds, manager, writable,
-    resetView: () => { legacyDetail = false; close(); },
+    resetView: () => { close(); },
     close,
-    resetSession: () => { sessionGeneration++; legacyDetail = false; close(); data = { tables: [], classes: [], lessons: [] }; tables = []; range = null; hideDeparted = true; },
+    resetSession: () => { sessionGeneration++; close(); data = { tables: [], classes: [], lessons: [] }; tables = []; range = null; hideDeparted = true; },
     candidatesUrl: () => `/api/teacher-detail/teachers?include_inactive=${hideDeparted ? 0 : 1}`,
     setData: value => { data = value || { tables: [], classes: [], lessons: [] }; },
     applyRange: async (scope, start, end) => {

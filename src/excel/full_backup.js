@@ -473,9 +473,11 @@ function validateData(data, parsedVisible) {
       SalaryWorkflow.normalizeRules(data.salary_table_template_rules.filter(rule => rule.template_id === template.id));
     }
     for (const rule of data.salary_table_template_rules) if (!templateIds.has(rule.template_id)) throw new Error("模板规则缺少对应模板");
+    const PerformanceScore = require('../../public/performance-score');
     const coefficients = new Set();
     for (const row of data.teacher_monthly_performance) {
       if (!text(row.teacher_name) || !SalaryWorkflow.validDate(row.month_key) || !row.month_key.endsWith("-01") || SalaryWorkflow.Formula.cents(row.coefficient) > 100) throw new Error("教师月度绩效系数无效");
+      if (row.performance_score != null && PerformanceScore.coefficient(row.performance_score) !== Number(row.coefficient)) throw new Error("绩效分数与系数不一致");
       const key = JSON.stringify([row.teacher_name, row.month_key]);
       if (coefficients.has(key)) throw new Error("教师月度绩效系数重复");
       coefficients.add(key);

@@ -161,7 +161,7 @@ test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and 
   assert.equal(cold.payload.diagnostics.sql_query_count, 6);
   const allowedFields = new Set([
     "id", "student_name", "grade", "subject", "student_names", "custom_price",
-    "price_status", "notes", "current_month_lessons", "total_lessons",
+    "price_status", "notes", "current_month_lessons", "total_lessons", "course_types", "start_date", "end_date",
   ]);
   assert.deepEqual(Object.keys(cold.payload.rules[0]).filter((field) => !allowedFields.has(field)), []);
   assert.doesNotMatch(JSON.stringify(cold.payload), /guardian|phone|balance|recharge|teacher_salary|password|token|secret/i);

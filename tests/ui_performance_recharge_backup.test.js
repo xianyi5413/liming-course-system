@@ -85,7 +85,7 @@ test('empty values, single-line lesson rows, wrapping tasks and screenshot-only 
  assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.lesson-table .col-note')).whiteSpace"),'nowrap');
  assert.ok(await browser.evaluate("[...document.querySelectorAll('.lesson-table td.col-note .lesson-cell-text')].every(e=>getComputedStyle(e).whiteSpace==='nowrap')"));
  await show(browser,'teacherDetail');
- assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table tbody td')].every(e=>getComputedStyle(e).whiteSpace==='nowrap')"));
+ assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table tbody td')].every(e=>getComputedStyle(e).whiteSpace===(e.classList.contains('student-set-cell')?'normal':'nowrap'))"));
  const teacherLabels=await browser.evaluate(`(()=>{const texts=[],original=CanvasRenderingContext2D.prototype.fillText;CanvasRenderingContext2D.prototype.fillText=function(text,...args){texts.push(text);return original.call(this,text,...args);};try{teacherDetailCanvas('合成老师');}finally{CanvasRenderingContext2D.prototype.fillText=original;}return texts;})()`);assert.ok(teacherLabels.includes('备注'));
  await show(browser,'studentQuery');
  assert.ok(await browser.evaluate("document.querySelector('.student-query-detail-slot').textContent.includes('明细课时表')&&document.querySelector('.student-query-detail-table thead').textContent.includes('备注')"));

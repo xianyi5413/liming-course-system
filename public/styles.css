@@ -2515,67 +2515,12 @@ td.text-cell {
   line-height: 1.5;
 }
 
-.teacher-salary-select-cell {
-  padding: 9px 12px;
-  text-align: center;
-}
-
-.teacher-detail-table .select-col {
-  width: 40px;
-  min-width: 40px;
-  max-width: 40px;
-  padding: 6px 4px;
-  text-align: center;
-}
-
 .fee-detail-table .select-col {
   width: 40px;
   min-width: 40px;
   max-width: 40px;
   padding: 6px 4px;
   text-align: center;
-}
-
-.teacher-detail-bulkbar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  margin: 0 0 var(--space-4);
-}
-
-.teacher-salary-batch-result {
-  display: grid;
-  gap: var(--space-3);
-  margin: 0 0 var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
-  background: var(--surface-soft);
-}
-
-.teacher-salary-batch-details summary {
-  width: fit-content;
-  color: var(--brand);
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.teacher-salary-batch-details .table-wrap {
-  max-width: 100%;
-  margin-top: var(--space-3);
-  overflow-x: auto;
-}
-
-.teacher-salary-lesson-select:not(:disabled),
-.teacher-salary-select-all:not(:disabled) {
-  cursor: pointer;
-}
-
-.teacher-salary-lesson-select:disabled,
-.teacher-salary-select-all:disabled {
-  cursor: not-allowed;
-  opacity: 0.35;
 }
 
 tr.abnormal td {
@@ -14495,3 +14440,20 @@ table.adaptive-table td[data-adaptive-alignment="center"] .student-set-badges { 
 .teacher-class-summary-table thead small { white-space: nowrap; }
 
 .batch-edit-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; align-items: center; margin: 10px 0; }
+
+/* 2026-10-14: content-sized tables and continuous recharge breakdowns. */
+.recharge-page .recharge-analysis-breakdowns { display: flex; flex-wrap: wrap; align-items: center; }
+.recharge-page .recharge-analysis-split,
+.recharge-page .recharge-analysis-chip-list { display: contents; }
+.recharge-page .recharge-analysis-chip { flex: 0 0 auto; }
+.recharge-table.adaptive-table :is(th, td):nth-child(8),
+.recharge-table.adaptive-table td:nth-child(8) .lesson-inline-picker { white-space: nowrap !important; overflow: visible; text-overflow: clip; }
+.profile-table.adaptive-table col { min-width: 0; max-width: none; }
+.profile-table.adaptive-table :is(th, td) { min-width: 0; }
+.student-pricing-table.adaptive-table :is(th, td) { min-width: 0; }
+.student-pricing-table.adaptive-table td.adaptive-center { text-align: center !important; }
+.student-pricing-table.adaptive-table td.adaptive-right { text-align: right !important; }
+.student-pricing-table.adaptive-table td.adaptive-left { text-align: left !important; }
+.batch-conflict-details { min-width: 0; max-width: 100%; }
+.batch-conflict-item { border-top: 1px solid var(--line); padding-block: var(--space-2); }
+.batch-conflict-editor { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }

@@ -182,9 +182,7 @@ test("real Chromium batch selection, indeterminate state, modal update and 390px
   const browser = chrome.session;
   const openView = async (group, view, rowSelector) => {
     if (view === "teacherSalaryRules") {
-    await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");
-    await browser.waitFor("Boolean(document.querySelector('[data-salary-action=legacy]'))");
-    await browser.click('[data-salary-action=legacy]');
+    await browser.evaluate("setActiveView('teacherSalaryRules');load({refreshGlobal:false})");
   } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) {
       await browser.click(`.nav-btn[data-nav-group="${group}"]`);
