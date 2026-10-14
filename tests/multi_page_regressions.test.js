@@ -54,7 +54,7 @@ test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.match(app, /function scheduleAdaptiveTableColumns\(/);
   assert.match(app, /function renderStudentSetBadges\(value, options = \{\}\)/);
   assert.match(app, /function studentSetInlineText\(value\)/);
-  assert.match(app, /student-pricing-rule-row[\s\S]{0,900}renderStudentSetBadges/);
+  assert.match(app.slice(app.indexOf("function studentPricingRowMarkup"), app.indexOf("function cancelStudentPricingProgressiveRender")), /renderStudentSetBadges\(row.student_names/);
   assert.match(app, /class-group-row[\s\S]{0,900}renderStudentSetBadges/);
   assert.match(app, /teacher-salary-rule-row[\s\S]{0,900}renderStudentSetBadges/);
   assert.doesNotMatch(css, /516px/);

@@ -55,6 +55,7 @@ function migrateSalaryWorkflow(db) {
       );
     `);
     if (!db.prepare('PRAGMA table_info(salary_tables)').all().some(row => row.name === 'teacher_id')) db.exec('ALTER TABLE salary_tables ADD COLUMN teacher_id INTEGER REFERENCES teachers(id)');
+    if (!db.prepare('PRAGMA table_info(teacher_monthly_performance)').all().some(row => row.name === 'performance_score')) db.exec('ALTER TABLE teacher_monthly_performance ADD COLUMN performance_score INTEGER CHECK(performance_score IS NULL OR (typeof(performance_score)=\'integer\' AND performance_score BETWEEN 0 AND 100))');
     db.exec('CREATE INDEX IF NOT EXISTS idx_salary_tables_teacher_dates ON salary_tables(teacher_id,effective_start,effective_end)');
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'").get()) {
       const columns = new Set(db.prepare('PRAGMA table_info(lessons)').all().map(row => row.name));

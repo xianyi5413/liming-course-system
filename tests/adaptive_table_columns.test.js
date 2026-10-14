@@ -100,9 +100,7 @@ async function withBrowser(action) {
 
 async function openView(browser, group, view, tableSelector) {
   if (view === "teacherSalaryRules") {
-    await browser.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");
-    await browser.waitFor("Boolean(document.querySelector('[data-salary-action=legacy]'))");
-    await browser.click('[data-salary-action=legacy]');
+    await browser.evaluate("setActiveView('teacherSalaryRules');load({refreshGlobal:false})");
   } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) {
     await browser.click(`.nav-btn[data-nav-group="${group}"]`);
@@ -186,7 +184,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   const pages = [
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "center", "right", "right", "center", "center", "left"]],
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "center", "right", "right", "left"]],
-    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
+    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "center", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],
@@ -219,10 +217,11 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
 
   assert.ok(results.recharges[1440][7] > results.recharges[1440][3], "long custom channel must drive its column");
   assert.ok(results.openingBalances[1440][6] > results.openingBalances[1440][3], "long opening note must drive its column");
-  assert.ok(results.studentPricing[1440][5] > results.studentPricing[1440][3], "student badges must drive the set column");
+  assert.ok(results.studentPricing[1440][6] > results.studentPricing[1440][3], "student badges must drive the set column");
   assert.ok(results.classGroups[1440][5] > results.classGroups[1440][3], "class badges must drive the set column");
   assert.ok(results.teacherSalaryRules[1440][5] > results.teacherSalaryRules[1440][3], "salary badges must drive the set column");
-  assert.ok(results.teacherProfiles[1440][7] > results.teacherProfiles[1440][2], "teacher notes must be the bounded flexible column");
+  assert.equal(results.teacherProfiles[1440][7], 76, "empty teacher notes retain compact content width");
+  assert.equal(results.teacherProfiles[390][7], results.teacherProfiles[1440][7], "empty notes do not grow with spare viewport space");
   assert.ok(results.userAdmin[1440][4] > results.userAdmin[1440][3], "bound teachers must be the bounded flexible column");
 
   await browser.click('.user-admin-tab[data-tab="roles"]');

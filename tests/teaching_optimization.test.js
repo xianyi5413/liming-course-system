@@ -110,7 +110,7 @@ test('Chromium sorting, workflow counts, metric cards, 1–7 previews and respon
     await browser.waitFor("document.querySelectorAll('[data-salary-class]').length===1");
     const text=await browser.evaluate("document.querySelector('.teacher-class-summary-table').textContent");
     assert.match(text,/起始日期/);assert.match(text,/结束日期/);assert.match(text,/真实表名09/);
-    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.lesson-summary-grid .metric-value')].map(e=>e.textContent)"),['2','1','¥200.00','¥240.00']);
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.lesson-summary-grid .metric-value')].map(e=>e.textContent)"),['1 / 2 节','¥200.00','¥40.00','¥240.00']);
     for(const width of [1920,1440,1280,1024,390]) {
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       await browser.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');

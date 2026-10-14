@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261013-teaching-workflow";
+const APP_VERSION = process.env.APP_VERSION || "20261014-teaching-consistency";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -4331,7 +4331,9 @@ function studentSummaryToDate(monthKey, includeInactive = false) {
 }
 
 function buildTeacherSummary(monthKey, includeInactive = false) {
-  const coefficients = new Map(all("SELECT teacher_name, coefficient FROM teacher_monthly_performance WHERE month_key=?", [monthKey]).map(row => [row.teacher_name, row.coefficient]));
+  const monthlyPerformance = all("SELECT teacher_name, coefficient, performance_score FROM teacher_monthly_performance WHERE month_key=?", [monthKey]);
+  const coefficients = new Map(monthlyPerformance.map(row => [row.teacher_name, row.coefficient]));
+  const scores = new Map(monthlyPerformance.map(row => [row.teacher_name, row.performance_score]));
   const lessons = all("SELECT * FROM lessons WHERE month_key = ? ORDER BY date, teacher_name, time_slot, sort_order, id", [monthKey]);
   const weeks = teacherMonthWeeks(monthKey);
   const adjustments = new Map(all(
@@ -4392,6 +4394,7 @@ function buildTeacherSummary(monthKey, includeInactive = false) {
       base_salary: moneyRound(row.salary_total),
       performance_base: num(row.performance_base),
       performance_coefficient: coefficients.get(row.teacher_name) ?? 1,
+      performance_score: scores.get(row.teacher_name) ?? null,
       performance_actual: SalaryWorkflow.Formula.total(0, Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? 1) / 100,
       salary_pending_reason: row.missing_salary_rules ? "待补齐规则" : "",
       total_salary: row.missing_salary_rules ? null : SalaryWorkflow.Formula.total(Math.round(row.salary_total * 100), Math.round(num(row.performance_base) * 100), coefficients.get(row.teacher_name) ?? 1, Math.round(transportTotal * 100)) / 100,
@@ -6541,9 +6544,9 @@ function teacherSalaryRows(monthKey) {
   const sum = field => moneyRound(rows.reduce((total, row) => total + num(row[field]), 0));
   return [
     [`${monthKey} 薪资汇总`],
-    ["序号", "教师姓名", "上课课时数", "基础课薪", "绩效基数", "绩效系数", "车票合计", "薪资合计", "备注"],
-    ...rows.map((row, index) => [index + 1, row.teacher_name, row.lesson_count, row.base_salary, row.performance_base, row.performance_coefficient == null ? "未设置" : row.performance_coefficient.toFixed(2), row.transport_total, row.total_salary == null ? row.salary_pending_reason : row.total_salary, row.notes]),
-    ["", "合计", sum("lesson_count"), sum("base_salary"), sum("performance_base"), "", sum("transport_total"), rows.some(row => row.total_salary == null) ? "待完成核算" : sum("total_salary"), ""],
+    ["序号", "教师姓名", "上课课时数", "基础课薪", "绩效基数", "绩效分数", "绩效系数", "车票合计", "薪资合计", "备注"],
+    ...rows.map((row, index) => [index + 1, row.teacher_name, row.lesson_count, row.base_salary, row.performance_base, row.performance_score ?? "未填写", row.performance_coefficient == null ? "未设置" : row.performance_coefficient.toFixed(2), row.transport_total, row.total_salary == null ? row.salary_pending_reason : row.total_salary, row.notes]),
+    ["", "合计", sum("lesson_count"), sum("base_salary"), sum("performance_base"), "", "", sum("transport_total"), rows.some(row => row.total_salary == null) ? "待完成核算" : sum("total_salary"), ""],
   ];
 }
 
@@ -6755,12 +6758,27 @@ function studentHistoryRows(studentName) {
   return rows.sort((a, b) => b.month_key.localeCompare(a.month_key));
 }
 
-function studentPricingRows(monthKey, metrics = null) {
+function studentPricingScopedLessons(rows, user) {
+  if (!user) return rows;
+  const scoped = filterLessonsByRolePrefilter(rows, user, "studentPricing");
+  const teachers = uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]);
+  return canonicalRole(user.role) === "teacher" ? scoped.filter(row => teachers.includes(row.teacher_name)) : scoped;
+}
+
+function studentPricingLessonMatches(rule, lesson, knownStatuses = new Set(courseStatusValues())) {
+  return deriveStatus(lesson, knownStatuses) === "已上"
+    && splitStudents(lesson.student_names).includes(text(rule.student_name))
+    && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...lesson, student_name: rule.student_name });
+}
+
+function studentPricingRows(monthKey, metrics = null, user = null) {
   const readRows = (sql, params = []) => {
     if (metrics) metrics.sql_queries += 1;
     return all(sql, params);
   };
-  const lessons = readRows("SELECT id, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, teacher_name, time_slot, id");
+  const lessons = studentPricingScopedLessons(readRows("SELECT id, date, time_slot, teacher_name, course_type, classroom, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, time_slot, id"), user);
+  const visibleRuleKeys = user && canonicalRole(user.role) === "teacher"
+    ? new Set(lessons.flatMap(lesson => splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name })))) : null;
   const matchesByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
   const knownStatuses = new Set(courseStatusValues());
@@ -6789,12 +6807,12 @@ function studentPricingRows(monthKey, metrics = null) {
     }
   }
   const pricingLookups = feePricingLookups(readRows);
-  const rows = readRows("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).map((row) => {
+  const rows = readRows("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).filter(row => !visibleRuleKeys || visibleRuleKeys.has(studentPricingRuleKey(row))).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
     const studentNames = normalizedStudents(row.student_names);
-    const matches = matchesByRule.get(studentPricingRuleKey(row)) || [];
+    const matches = (matchesByRule.get(studentPricingRuleKey(row)) || []).filter(lesson => studentPricingLessonMatches(row, lesson, knownStatuses));
     const rulePrice = num(row.custom_price);
     const mismatchCount = rulePrice > 0
       ? matches.filter((lesson) => {
@@ -6817,6 +6835,9 @@ function studentPricingRows(monthKey, metrics = null) {
       lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"),
       current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length,
       total_lessons: matches.length,
+      start_date: matches[0]?.date || "",
+      end_date: matches.at(-1)?.date || "",
+      course_types: SalaryWorkflow.courseTypes(matches),
       rule_source: rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto"),
       price_status: studentPriceStatus(rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto")),
       mismatch_lessons: mismatchCount,
@@ -6841,7 +6862,7 @@ function studentPricingPagePayload(monthKey, user) {
   }
   const started = performance.now();
   const metrics = { sql_queries: 0 };
-  const rules = studentPricingRows(monthKey, metrics).map((row) => ({
+  const rules = studentPricingRows(monthKey, metrics, user).map((row) => ({
     id: Number(row.id),
     student_name: text(row.student_name),
     grade: text(row.grade),
@@ -6852,6 +6873,7 @@ function studentPricingPagePayload(monthKey, user) {
     notes: text(row.notes),
     current_month_lessons: Number(row.current_month_lessons || 0),
     total_lessons: Number(row.total_lessons || 0),
+    start_date: row.start_date, end_date: row.end_date, course_types: row.course_types,
   }));
   const payload = {
     month_key: monthKey,
@@ -10258,6 +10280,7 @@ function sanitizeBootstrap(data, user) {
           base_salary: 0,
           performance_base: 0,
           performance_coefficient: null,
+          performance_score: null,
           performance_actual: null,
           salary_pending_reason: "",
           missing_salary_rules: 0,
@@ -10268,6 +10291,7 @@ function sanitizeBootstrap(data, user) {
   };
   if (role === "teacher") {
     const allowedTeachers = new Set(uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]));
+    if (permissions.has("studentPricing") && data.student_pricing) sanitized.student_pricing = studentPricingRows(data.settings?.month_key || "", null, user);
     sanitized.teachers = (sanitized.teachers || []).filter((row) => allowedTeachers.has(text(row.name)));
     sanitized.derived.teacher_summary = (sanitized.derived.teacher_summary || []).filter((row) => allowedTeachers.has(text(row.teacher_name)));
   }
@@ -12901,6 +12925,22 @@ async function handleApi(req, res, url) {
     const sanitized = sanitizeBootstrap({ lessons: [], derived: { fee_details: feeDetails(monthKey) } }, user);
     return sendJson(res, { month_key: monthKey, fee_details: sanitized.derived.fee_details.map(({ teacher_salary, ...row }) => row) });
   }
+  const studentPricingCoursesMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)\/courses$/);
+  if (req.method === "GET" && studentPricingCoursesMatch) {
+    const rule = get("SELECT * FROM student_pricing WHERE id=?", [Number(studentPricingCoursesMatch[1])]);
+    if (!rule || !isCompleteStudentPricingRule(rule)) return sendError(res, 404, "学生单价规则不存在");
+    const statuses = new Set(courseStatusValues()), lookups = feePricingLookups();
+    const candidates = all("SELECT * FROM lessons WHERE grade=? AND subject=? ORDER BY date,time_slot,id", [rule.grade, rule.subject]);
+    const scoped = studentPricingScopedLessons(candidates, user);
+    if (canonicalRole(user.role) === "teacher" && !scoped.some(row => splitStudents(row.student_names).includes(rule.student_name) && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...row, student_name: rule.student_name }))) return sendError(res, 404, "规则不在可见课程范围内");
+    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses)).map(row => ({
+      id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
+      status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
+      student_names: row.student_names, notes: row.notes,
+      unit_price: unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade, studentCount: splitStudents(row.student_names).length, lessonId: row.id, status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups).unit_price,
+    }));
+    return sendJson(res, { rule_id: rule.id, scope: "全历史已上课程", lessons });
+  }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
     const monthKey = resolveMonthKey(url);
     return sendJson(res, studentPricingPagePayload(monthKey, user));
@@ -13192,9 +13232,12 @@ async function handleApi(req, res, url) {
       } else if (monthlyPerformance && ["PUT", "PATCH"].includes(req.method)) {
         const teacher = text(body.teacher_name), month = text(body.month_key);
         if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可管理范围内");
-        result = salaryStore.coefficient(teacher, month, body.coefficient);
+        const hasScore = Object.hasOwn(body, "performance_score");
+        if (hasScore === Object.hasOwn(body, "coefficient")) return sendError(res, 400, "请仅提交绩效分数或系数其中一项");
+        result = hasScore ? salaryStore.score(teacher, month, body.performance_score) : salaryStore.coefficient(teacher, month, body.coefficient);
         const kText = value => value == null ? "默认1.00" : Number(value).toFixed(2);
         operation = `修改${teacher}${month.slice(0, 7)}绩效系数：${kText(result.before)} → ${kText(result.coefficient)}`;
+        if (hasScore) operation += `；绩效分数 ${result.previous_score ?? "未填写"} → ${result.performance_score ?? "清空（保留系数）"}`;
         target = "teacher_monthly_performance";
       } else if (baseSalaryMatch && req.method === "PATCH") {
         const lesson = get("SELECT * FROM lessons WHERE id=?", [id]);
@@ -14334,28 +14377,45 @@ async function handleApi(req, res, url) {
     if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 500 || body.ids.some(id => !Number.isSafeInteger(id) || id <= 0)) return sendError(res, 400, '请选择 1～500 个有效课程 ID');
     const ids = [...new Set(body.ids)];
     const changes = body.changes;
-    if (!changes || Array.isArray(changes) || typeof changes !== 'object' || !Object.keys(changes).length || Object.keys(changes).some(key => !allowed.includes(key)) || Object.keys(body).some(key => !['ids', 'changes'].includes(key))) return sendError(res, 400, '请选择允许修改的公共字段');
-    if (Object.values(changes).some(value => typeof value !== 'string')) return sendError(res, 400, '字段值必须为文本');
-    const normalized = normalizeLessonPersistenceInput(changes);
-    if (normalized.error) return sendError(res, 400, normalized.error);
-    const incoming = normalized.data;
-    for (const key of Object.keys(incoming)) incoming[key] = text(incoming[key]);
+    if (Object.keys(body).some(key => !['ids', 'changes', 'lesson_changes', 'allow_conflicts', 'conflict_token'].includes(key))) return sendError(res, 400, '不允许的批量字段');
+    if (Object.hasOwn(body, 'allow_conflicts') && typeof body.allow_conflicts !== 'boolean') return sendError(res, 400, '忽略冲突必须明确确认');
+    if (Object.hasOwn(body, 'conflict_token') && (typeof body.conflict_token !== 'string' || !/^[a-f0-9]{64}$/.test(body.conflict_token))) return sendError(res, 400, '冲突确认无效');
     const lookups = bootstrapLookups();
     lookups.classrooms = uniqueNames([...lookups.classrooms, ...mergeLookupValues([], 'custom_classrooms')]);
     lookups.subjects = uniqueNames([...lookups.subjects, ...mergeLookupValues([], 'custom_subjects')]);
-    if (Object.hasOwn(incoming, 'date') && !SalaryWorkflow.validDate(incoming.date)) return sendError(res, 400, '日期无效');
-    if (Object.hasOwn(incoming, 'time_slot') && !incoming.time_slot) return sendError(res, 400, '时间不能为空');
-    if (Object.hasOwn(incoming, 'teacher_name') && (!incoming.teacher_name || teacherNameError(incoming.teacher_name) || !get('SELECT id FROM teachers WHERE name=?', [incoming.teacher_name]))) return sendError(res, 400, '请选择有效教师');
-    for (const [field, values] of [['classroom', lookups.classrooms], ['grade', lookups.grades], ['subject', lookups.subjects], ['status', courseStatusValues()]]) {
-      if (Object.hasOwn(incoming, field) && !(values || []).includes(incoming[field])) return sendError(res, 400, `${field} 不在可选范围内`);
-    }
-    if (incoming.notes?.length > 5000) return sendError(res, 400, '备注不得超过 5000 字符');
+    const validateChanges = value => {
+      if (!value || Array.isArray(value) || typeof value !== 'object' || !Object.keys(value).length || Object.keys(value).some(key => !allowed.includes(key))) throw new Error('请选择允许修改的公共字段');
+      if (Object.values(value).some(item => typeof item !== 'string')) throw new Error('字段值必须为文本');
+      const normalized = normalizeLessonPersistenceInput(value);
+      if (normalized.error) throw new Error(normalized.error);
+      const incoming = normalized.data;
+      for (const key of Object.keys(incoming)) incoming[key] = text(incoming[key]);
+      if (Object.hasOwn(incoming, 'date') && !SalaryWorkflow.validDate(incoming.date)) throw new Error('日期无效');
+      if (Object.hasOwn(incoming, 'time_slot') && !incoming.time_slot) throw new Error('时间不能为空');
+      if (Object.hasOwn(incoming, 'teacher_name') && (!incoming.teacher_name || teacherNameError(incoming.teacher_name) || !get('SELECT id FROM teachers WHERE name=?', [incoming.teacher_name]))) throw new Error('请选择有效教师');
+      for (const [field, values] of [['classroom', lookups.classrooms], ['grade', lookups.grades], ['subject', lookups.subjects], ['status', courseStatusValues()]]) {
+        if (Object.hasOwn(incoming, field) && !(values || []).includes(incoming[field])) throw new Error(`${field} 不在可选范围内`);
+      }
+      if (incoming.notes?.length > 5000) throw new Error('备注不得超过 5000 字符');
+      return incoming;
+    };
+    let incoming, localChanges;
+    try {
+      incoming = validateChanges(changes);
+      if (body.lesson_changes != null && (!Array.isArray(body.lesson_changes) || body.lesson_changes.length > ids.length)) throw new Error('逐课草稿无效');
+      localChanges = new Map();
+      for (const item of body.lesson_changes || []) {
+        if (!item || !ids.includes(item.id) || localChanges.has(item.id) || Object.keys(item).some(key => !['id', 'changes'].includes(key))) throw new Error('仅可编辑本次选中的课程');
+        localChanges.set(item.id, validateChanges(item.changes));
+      }
+    } catch (error) { return sendError(res, 400, error.message); }
     db.exec('SAVEPOINT batch_lesson_edit');
     try {
       const patches = ids.map(id => {
         const current = get('SELECT * FROM lessons WHERE id=?', [id]);
         if (!current) throw new Error(`课程 #${id} 不存在`);
-        const payload = { ...incoming, ...commonLessonPatch(current, incoming) };
+        const individual = { ...incoming, ...(localChanges.get(id) || {}) };
+        const payload = { ...individual, ...commonLessonPatch(current, individual) };
         if (canonicalRole(user.role) === 'teacher' && ![current.teacher_name, payload.teacher_name || current.teacher_name].every(name => uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]).includes(name))) throw Object.assign(new Error('课程超出教师范围'), { status: 403 });
         if (!filterLessonsByRolePrefilter([current], user, 'lessons').length || !filterLessonsByRolePrefilter([{ ...current, ...payload }], user, 'lessons').length) throw Object.assign(new Error('课程超出可修改范围'), { status: 403 });
         return { id, current, payload };
@@ -14363,17 +14423,40 @@ async function handleApi(req, res, url) {
       // Uncommitted final state is visible only inside this synchronous transaction.
       // Checking this state catches conflicts among selected rows as well as other rows.
       for (const patch of patches) patchTable('lessons', 'id', patch.id, [...allowed, 'course_type', 'month_key', 'updated_at', 'lesson_status', 'course_status', 'teacher_salary', 'teacher_salary_source', 'teacher_salary_rule_id'], patch.payload);
-      if (Object.keys(incoming).some(key => key !== 'notes')) {
-        for (const patch of patches) if (lessonSaveConflicts({ ...patch.current, ...patch.payload }, { excludeLessonId: patch.id }).issue_count) throw Object.assign(new Error(`课程 #${patch.id} 存在排课冲突，整批未保存`), { status: 409 });
+      const issues = [], seen = new Set();
+      if ([incoming, ...localChanges.values()].some(change => Object.keys(change).some(key => key !== 'notes'))) {
+        for (const patch of patches) {
+          const candidate = { ...patch.current, ...patch.payload };
+          for (const issue of lessonSaveConflicts(candidate, { excludeLessonId: patch.id }).issues) {
+            if (!['teacher', 'classroom', 'student'].includes(issue.type)) throw new Error(issue.message);
+            const lessonIds = [patch.id, ...issue.lesson_ids].sort((a, b) => a - b);
+            const key = JSON.stringify([issue.type, issue.entity, lessonIds]);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            issues.push({ ...issue, lesson_ids: lessonIds, lesson_details: [conflictLessonDetail(candidate), ...issue.lesson_details].map(row => ({ ...row, selected: ids.includes(Number(row.id)) })) });
+          }
+        }
       }
-      recordAuditEvent(req, user, { action: 'batch_update', entity_type: 'lessons', entity_id: 'batch', before: { ids }, after: { fields: Object.keys(incoming), count: ids.length } });
-      writeOperationLog(user, { operation_type: '批量修改课程', operation_content: `修改 ${ids.length} 节课程：${Object.keys(incoming).join('、')}`, target_type: 'lessons', target_id: ids.join(','), details: { ids, fields: Object.keys(incoming) } }, req);
+      const counts = { teacher: 0, classroom: 0, student: 0 };
+      for (const issue of issues) counts[issue.type]++;
+      const report = { issue_count: issues.length, counts, issues };
+      const relatedIds = [...new Set(issues.flatMap(issue => issue.lesson_ids))].filter(id => !ids.includes(id)).sort((a, b) => a - b);
+      // Original selected records and related persisted records make confirmation
+      // stale after any concurrent edit; computed updated_at is deliberately excluded.
+      const token = crypto.createHash('sha256').update(JSON.stringify({ user: user.id, patches: patches.map(patch => ({ id: patch.id, before: patch.current })), changes: incoming, local: [...localChanges], related: relatedIds.map(id => get('SELECT * FROM lessons WHERE id=?', [id])), issues })).digest('hex');
+      if (issues.length && (body.allow_conflicts !== true || body.conflict_token !== token)) {
+        throw Object.assign(new Error(body.allow_conflicts ? '冲突或课程内容已变化，请重新核对并确认，整批未保存' : '存在排课冲突，整批未保存'), { status: 409, report, token });
+      }
+      const details = { ids, fields: Object.keys(incoming), lesson_changes: [...localChanges.keys()], conflict_types: Object.keys(counts).filter(type => counts[type]), conflict_count: issues.length, conflict_confirmed: issues.length > 0 && body.allow_conflicts === true };
+      recordAuditEvent(req, user, { action: 'batch_update', entity_type: 'lessons', entity_id: 'batch', before: { ids }, after: { ...details, count: ids.length } });
+      writeOperationLog(user, { operation_type: '批量修改课程', operation_content: `修改 ${ids.length} 节课程：${Object.keys(incoming).join('、')}；确认忽略冲突 ${issues.length} 项`, target_type: 'lessons', target_id: ids.join(','), details }, req);
       db.exec('RELEASE batch_lesson_edit');
       clearDerivedCache('batch lesson edit');
       salaryStore.invalidate();
       return sendJson(res, { updated: ids.length, ids });
     } catch (error) {
       db.exec('ROLLBACK TO batch_lesson_edit; RELEASE batch_lesson_edit');
+      if (error.report) return sendJson(res, { error: error.message, schedule_conflicts: error.report, conflict_token: error.token }, 409);
       return sendError(res, error.status || 400, error.message);
     }
   }

@@ -1,6 +1,7 @@
 'use strict';
 
 const W = require('./salary_workflow');
+const PerformanceScore = require('../../public/performance-score');
 
 // Storage operations stay synchronous and atomic. The HTTP layer owns permissions
 // and audit logs; all readers share the same date/formula/base resolution.
@@ -78,9 +79,18 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     else {
       const k = W.Formula.cents(value);
       if (k > 100) throw new Error('绩效系数必须在 0.00～1.00 之间');
-      db.prepare("INSERT INTO teacher_monthly_performance(teacher_name,month_key,coefficient) VALUES(?,?,?) ON CONFLICT(teacher_name,month_key) DO UPDATE SET coefficient=excluded.coefficient,updated_at=CURRENT_TIMESTAMP").run(teacher, month, k / 100);
+      db.prepare("INSERT INTO teacher_monthly_performance(teacher_name,month_key,coefficient) VALUES(?,?,?) ON CONFLICT(teacher_name,month_key) DO UPDATE SET coefficient=excluded.coefficient,performance_score=NULL,updated_at=CURRENT_TIMESTAMP").run(teacher, month, k / 100);
     }
     return { teacher_name: teacher, month_key: month, before, coefficient: value == null ? null : Number(value) };
+  }
+  function score(teacher, month, value) {
+    const score = PerformanceScore.normalize(value);
+    return atomic(() => {
+      const previous = db.prepare('SELECT * FROM teacher_monthly_performance WHERE teacher_name=? AND month_key=?').get(teacher, month);
+      const result = coefficient(teacher, month, score === null ? (previous?.coefficient ?? 1) : PerformanceScore.coefficient(score));
+      db.prepare('UPDATE teacher_monthly_performance SET performance_score=? WHERE teacher_name=? AND month_key=?').run(score, teacher, month);
+      return { ...result, performance_score: score, previous_score: previous?.performance_score ?? null };
+    });
   }
   function resolve(lesson, oldRules) {
     const ctx = context(), table = W.matchTable(ctx, lesson.date, ctx.teacherIds.get(lesson.teacher_name));
@@ -136,7 +146,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     }
     return result;
   }
-  return { context, list, atomic, save, templates, saveTemplate, impact, remove, coefficient, resolve, override, allocate, invalidate };
+  return { context, list, atomic, save, templates, saveTemplate, impact, remove, coefficient, score, resolve, override, allocate, invalidate };
 }
 
 module.exports = { createSalaryStore };
