@@ -1,3 +1,4 @@
+const StudentDisplay = require('../public/student-display');
 const { WorkerJobs } = require('./backup/worker_jobs');
 const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
 const SalaryWorkflow = require("./domain/salary_workflow");
@@ -50,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20260929-class-group-salary-template-backup-retention";
+const APP_VERSION = process.env.APP_VERSION || "20261013-teaching-workflow";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -7266,7 +7267,7 @@ function updateClassGroupName(body = {}) {
 
 function decorateLessonClassName(lesson = {}, classMap = classGroupLookupMap()) {
   const className = classMap.get(classGroupLookupKey(lesson)) || "";
-  const students = text(lesson.student_names);
+  const students = StudentDisplay.text(lesson.student_names);
   return className ? `${className}：${students}` : students;
 }
 
@@ -10204,6 +10205,9 @@ function sanitizeLessonRows(rows, user) {
     teacher_base_salary: null,
     teacher_base_salary_override: null,
     teacher_base_salary_source: "",
+    teacher_base_salary_display_source: "",
+    teacher_payroll_amount: null,
+    teacher_payroll_pending: null,
     performance_base: null,
     salary_table_id: null,
     salary_rule_expression: "",
@@ -12105,6 +12109,20 @@ function lessonStatusPatchPayload(current, nextData) {
   return payload;
 }
 
+// Shared derived-field preparation for ordinary single and batch edits.
+function commonLessonPatch(current, incoming) {
+  const payload = { updated_at: new Date().toISOString() };
+  payload.course_type = resolveCourseType({ ...current, ...incoming }, current);
+  if (Object.hasOwn(incoming, 'date')) payload.month_key = monthKeyFromDate(incoming.date);
+  const matching = ['teacher_name', 'date', 'grade', 'subject', 'student_names', 'time_slot'];
+  if (matching.some(field => Object.hasOwn(incoming, field)) && ['', 'empty', 'auto'].includes(text(current.teacher_salary_source))) {
+    Object.assign(payload, resolvedTeacherSalaryForLesson({ ...current, ...incoming, teacher_salary_present: false }));
+    delete payload.warning;
+  }
+  Object.assign(payload, lessonStatusPatchPayload(current, incoming));
+  return payload;
+}
+
 function batchMarkLessonsCompleted(ids) {
   const lessonIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
   if (!lessonIds.length) return { error: "ids required", status: 400 };
@@ -13196,6 +13214,11 @@ async function handleApi(req, res, url) {
     if (!SalaryWorkflow.validDate(start) || !SalaryWorkflow.validDate(end) || start > end) return sendError(res, 400, "请选择有效的日期范围");
     if (!teacherDetailTeacherCandidates(user, true).some(row => row.name === teacher)) return sendError(res, 403, "教师不在可查看范围内");
     const lessons = teacherDetailLessonRows(filterLessonsByRolePrefilter(all("SELECT * FROM lessons WHERE teacher_name=? AND date BETWEEN ? AND ? ORDER BY date,time_slot,id", [teacher, start, end]), user, "teacherDetail"));
+    // Allocate complete months first so partial-range totals retain monthly rounding.
+    const payrollRows = all("SELECT * FROM lessons WHERE teacher_name=? AND month_key BETWEEN ? AND ? ORDER BY date,teacher_name,time_slot,sort_order,id", [teacher, monthKeyFromDate(start), monthKeyFromDate(end)]);
+    const coefficients = new Map(all("SELECT * FROM teacher_monthly_performance WHERE teacher_name=? AND month_key BETWEEN ? AND ?", [teacher, monthKeyFromDate(start), monthKeyFromDate(end)]).map(row => [JSON.stringify([row.teacher_name, row.month_key]), row.coefficient]));
+    const allocated = salaryStore.allocate(payrollRows, coefficients);
+    for (const lesson of lessons) Object.assign(lesson, allocated.get(lesson.id));
     const ctx = salaryStore.context();
     const teacherId = ctx.teacherIds.get(teacher);
     const tables = ctx.tables.filter(table => table.teacher_id === teacherId && table.effective_start <= end && table.effective_end >= start).map(({ id, name, effective_start, effective_end }) => ({ id, name, effective_start, effective_end }));
@@ -14304,6 +14327,57 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ...lesson, warnings: lessonWarnings(lesson), schedule_conflicts: conflictReport }, 201);
   }
 
+  if (req.method === "PATCH" && url.pathname === "/api/lessons/batch") {
+    const body = await readBody(req);
+    const allowed = ['teacher_name', 'date', 'time_slot', 'classroom', 'status', 'grade', 'subject', 'notes'];
+    if (userReadonly(user) || !roleCan(user, 'lessons', 'write')) return sendError(res, 403, '无权修改课程');
+    if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 500 || body.ids.some(id => !Number.isSafeInteger(id) || id <= 0)) return sendError(res, 400, '请选择 1～500 个有效课程 ID');
+    const ids = [...new Set(body.ids)];
+    const changes = body.changes;
+    if (!changes || Array.isArray(changes) || typeof changes !== 'object' || !Object.keys(changes).length || Object.keys(changes).some(key => !allowed.includes(key)) || Object.keys(body).some(key => !['ids', 'changes'].includes(key))) return sendError(res, 400, '请选择允许修改的公共字段');
+    if (Object.values(changes).some(value => typeof value !== 'string')) return sendError(res, 400, '字段值必须为文本');
+    const normalized = normalizeLessonPersistenceInput(changes);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+    const incoming = normalized.data;
+    for (const key of Object.keys(incoming)) incoming[key] = text(incoming[key]);
+    const lookups = bootstrapLookups();
+    lookups.classrooms = uniqueNames([...lookups.classrooms, ...mergeLookupValues([], 'custom_classrooms')]);
+    lookups.subjects = uniqueNames([...lookups.subjects, ...mergeLookupValues([], 'custom_subjects')]);
+    if (Object.hasOwn(incoming, 'date') && !SalaryWorkflow.validDate(incoming.date)) return sendError(res, 400, '日期无效');
+    if (Object.hasOwn(incoming, 'time_slot') && !incoming.time_slot) return sendError(res, 400, '时间不能为空');
+    if (Object.hasOwn(incoming, 'teacher_name') && (!incoming.teacher_name || teacherNameError(incoming.teacher_name) || !get('SELECT id FROM teachers WHERE name=?', [incoming.teacher_name]))) return sendError(res, 400, '请选择有效教师');
+    for (const [field, values] of [['classroom', lookups.classrooms], ['grade', lookups.grades], ['subject', lookups.subjects], ['status', courseStatusValues()]]) {
+      if (Object.hasOwn(incoming, field) && !(values || []).includes(incoming[field])) return sendError(res, 400, `${field} 不在可选范围内`);
+    }
+    if (incoming.notes?.length > 5000) return sendError(res, 400, '备注不得超过 5000 字符');
+    db.exec('SAVEPOINT batch_lesson_edit');
+    try {
+      const patches = ids.map(id => {
+        const current = get('SELECT * FROM lessons WHERE id=?', [id]);
+        if (!current) throw new Error(`课程 #${id} 不存在`);
+        const payload = { ...incoming, ...commonLessonPatch(current, incoming) };
+        if (canonicalRole(user.role) === 'teacher' && ![current.teacher_name, payload.teacher_name || current.teacher_name].every(name => uniqueNames([...(user.bound_teacher_names || []), user.teacher_name]).includes(name))) throw Object.assign(new Error('课程超出教师范围'), { status: 403 });
+        if (!filterLessonsByRolePrefilter([current], user, 'lessons').length || !filterLessonsByRolePrefilter([{ ...current, ...payload }], user, 'lessons').length) throw Object.assign(new Error('课程超出可修改范围'), { status: 403 });
+        return { id, current, payload };
+      });
+      // Uncommitted final state is visible only inside this synchronous transaction.
+      // Checking this state catches conflicts among selected rows as well as other rows.
+      for (const patch of patches) patchTable('lessons', 'id', patch.id, [...allowed, 'course_type', 'month_key', 'updated_at', 'lesson_status', 'course_status', 'teacher_salary', 'teacher_salary_source', 'teacher_salary_rule_id'], patch.payload);
+      if (Object.keys(incoming).some(key => key !== 'notes')) {
+        for (const patch of patches) if (lessonSaveConflicts({ ...patch.current, ...patch.payload }, { excludeLessonId: patch.id }).issue_count) throw Object.assign(new Error(`课程 #${patch.id} 存在排课冲突，整批未保存`), { status: 409 });
+      }
+      recordAuditEvent(req, user, { action: 'batch_update', entity_type: 'lessons', entity_id: 'batch', before: { ids }, after: { fields: Object.keys(incoming), count: ids.length } });
+      writeOperationLog(user, { operation_type: '批量修改课程', operation_content: `修改 ${ids.length} 节课程：${Object.keys(incoming).join('、')}`, target_type: 'lessons', target_id: ids.join(','), details: { ids, fields: Object.keys(incoming) } }, req);
+      db.exec('RELEASE batch_lesson_edit');
+      clearDerivedCache('batch lesson edit');
+      salaryStore.invalidate();
+      return sendJson(res, { updated: ids.length, ids });
+    } catch (error) {
+      db.exec('ROLLBACK TO batch_lesson_edit; RELEASE batch_lesson_edit');
+      return sendError(res, error.status || 400, error.message);
+    }
+  }
+
   const lessonMatch = url.pathname.match(/^\/api\/lessons\/(\d+)$/);
   if (lessonMatch && req.method === "PATCH") {
     const body = await readBody(req);
@@ -14338,19 +14412,7 @@ async function handleApi(req, res, url) {
         payload.teacher_base_salary_source = manualSalary == null ? "auto" : "manual";
       }
     } else {
-      const salaryMatchFields = ["teacher_name", "grade", "subject", "student_names", "time_slot"];
-      const matchFieldsChanged = salaryMatchFields.some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
-      const currentSource = text(current.teacher_salary_source);
-      if (matchFieldsChanged && (!currentSource || currentSource === "empty" || currentSource === "auto")) {
-        const resolvedSalary = resolvedTeacherSalaryForLesson({
-          ...current,
-          ...incoming,
-          teacher_salary_present: false,
-        });
-        payload.teacher_salary = resolvedSalary.teacher_salary;
-        payload.teacher_salary_source = resolvedSalary.teacher_salary_source;
-        payload.teacher_salary_rule_id = resolvedSalary.teacher_salary_rule_id;
-      }
+      Object.assign(payload, commonLessonPatch(current, incoming));
     }
     Object.assign(payload, lessonStatusPatchPayload(current, incoming));
     const conflictReport = lessonSaveConflicts({ ...current, ...payload }, { excludeLessonId: Number(lessonMatch[1]) });

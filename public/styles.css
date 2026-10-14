@@ -14486,3 +14486,12 @@ table.adaptive-table td[data-adaptive-alignment="center"] .student-set-badges { 
 .transfer-text { width: 100%; resize: vertical; font-family: monospace; }
 
 .task-progress progress { display: block; width: 100%; height: 14px; margin: 8px 0; accent-color: var(--primary, #2563eb); }
+
+/* Shared outer scrolling and compact dates for the teacher workflow. */
+.salary-formula-table { min-width: 1420px; }
+.salary-formula-table [data-salary-preview] { min-width: 105px; white-space: normal; overflow-wrap: anywhere; }
+.teacher-class-summary-table td:nth-child(7), .teacher-class-summary-table td:nth-child(8), .teacher-class-summary-table td:nth-child(9) { text-align: center; vertical-align: middle; white-space: nowrap; }
+.teacher-class-summary-table thead th { white-space: normal; overflow-wrap: anywhere; }
+.teacher-class-summary-table thead small { white-space: nowrap; }
+
+.batch-edit-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; align-items: center; margin: 10px 0; }

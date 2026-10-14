@@ -169,8 +169,8 @@ test("detailed screenshots remove duplicate identity summaries while simple iden
   })()`);
   assert.deepEqual(result.personal.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["张小明", "初一", "数学"]]);
   assert.doesNotMatch(result.personal.simpleHtml, /李小红|王小强/);
-  assert.deepEqual(result.klass.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["张小明", "李小红", "王小强"], ["初一", "数学"]]);
-  assert.deepEqual(result.merged.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["张小明", "李小红", "王小强"], ["初一", "初二", "数学", "物理"]]);
+  assert.deepEqual(result.klass.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["李小红", "王小强", "张小明"], ["初一", "数学"]]);
+  assert.deepEqual(result.merged.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["李小红", "王小强", "张小明"], ["初一", "初二", "数学", "物理"]]);
   assert.deepEqual(result.teacher.simpleRows.map((row) => row.badges.map((badge) => badge.label)), [["矩阵老师"], ["初一"]]);
   assert.deepEqual(result.personal.detailedRows, []);
   assert.deepEqual(result.klass.detailedRows, []);

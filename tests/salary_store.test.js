@@ -80,3 +80,32 @@ test('small class actual headcounts and normalized student sets preserve class i
     assert.equal(W.classKey(row), W.classKey({ ...row, student_names: row.student_names.split('、').reverse().join(',') }));
   }
 });
+
+test('equal manual and historical amounts display automatic without read writes; saving equal clears overrides', t => {
+  const { db, store } = fixture(t), table = store.save(autumn('200+40K'));
+  const lesson = () => db.prepare('SELECT * FROM lessons WHERE id=1').get();
+  db.exec("UPDATE lessons SET teacher_base_salary_source='manual', teacher_base_salary_override=200 WHERE id=1");
+  assert.equal(store.resolve(lesson()).teacher_base_salary_display_source, 'auto');
+  assert.equal(lesson().teacher_base_salary_source, 'manual');
+  store.save(autumn('220+40K'), table.id);
+  assert.equal(store.resolve(lesson()).teacher_base_salary_display_source, 'manual');
+  store.override(1, {source:'manual',amount:'220.00'});
+  assert.equal(lesson().teacher_base_salary_override,null);
+  assert.equal(lesson().teacher_base_salary_source,'auto');
+  store.save(autumn('0'),table.id);store.override(1,{source:'manual',amount:0});
+  assert.equal(lesson().teacher_base_salary_source,'auto');
+  assert.throws(()=>store.override(1,{source:'manual',amount:'0.001'}));
+});
+
+test('legacy comparison uses actual fallback and allocation retains monthly fractional rounding', t => {
+  const { db, store } = fixture(t);
+  const lesson = db.prepare('SELECT * FROM lessons WHERE id=1').get();
+  const historic = {...lesson, teacher_salary:99, teacher_salary_source:'import'};
+  assert.equal(store.resolve(historic).teacher_base_salary_display_source,'auto');
+  assert.equal(store.resolve({...historic,teacher_salary:100}).teacher_base_salary_display_source,'legacy');
+  store.save(autumn('0+0.01K'));
+  const rows = [1,2,3].map(id => ({...lesson,id}));
+  const allocated = store.allocate(rows,new Map([[JSON.stringify(['合成教师','2026-09-01']),0.5]]));
+  assert.deepEqual([...allocated.values()].map(row=>row.teacher_payroll_amount),[0.01,0,0.01]);
+  assert.equal(store.resolve({...lesson,status:'请假'}).teacher_base_salary,0);
+});
