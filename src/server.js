@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261015-course-backed-lists";
+const APP_VERSION = process.env.APP_VERSION || "20261015-fee-reconciliation";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -148,7 +148,6 @@ const PERMISSION_TREE = [
     label: "学生",
     children: [
       { key: "summary", label: "费用汇总" },
-      { key: "feeDetails", label: "费用明细" },
       { key: "recharges", label: "充值记录" },
       { key: "openingBalances", label: "期初余额" },
       { key: "studentQuery", label: "学生查询" },
@@ -206,7 +205,6 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "weekMatrix",
   "courseNotice",
   "teacherCourseNotice",
-  "feeDetails",
   "summary",
   "recharges",
   "openingBalances",
@@ -1552,7 +1550,7 @@ function isSuperRole(role) {
 }
 
 function permissionKeySet() {
-  return new Set(PAGE_PERMISSION_KEYS);
+  return new Set([...PAGE_PERMISSION_KEYS, "feeDetails"]); // Legacy persisted financial permission; no page entry.
 }
 
 function normalizePermissionKeys(keys) {
@@ -2440,6 +2438,8 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
     unit_price: currentPrice,
     source,
     rule_price: rule ? rulePrice : null,
+    // Removing a lesson override falls back to standards; custom prices require explicit application.
+    baseline_price: standard ? moneyRound(standard.unit_price) : null,
     pricing_rule_id: rule ? Number(rule.id) : null,
   };
 }
@@ -5676,7 +5676,7 @@ function dashboardTodos(monthKey, user, monthData = dashboardMonthData(monthKey,
     const missingPriceStudents = new Set(details.filter((row) => row.price_source === "pending").map((row) => row.student_name)).size;
     todos.push(
       { key: "debt_students", label: "欠费学生数", count: debtStudents, view: "summary", filter: { balance: "actual" } },
-      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "feeDetails", filter: { source: "pending" } },
+      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "studentPricing", filter: { price: "unset" } },
     );
   }
   if (role !== "teacher") {
@@ -6779,7 +6779,6 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
   const lessons = studentPricingScopedLessons(readRows("SELECT id, date, time_slot, teacher_name, course_type, classroom, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, time_slot, id"), user);
   const storedRules = readRows("SELECT * FROM student_pricing ORDER BY id");
   const { createdRules } = syncStudentPricingCandidatesFromLessons({ lessons, rules: storedRules });
-  const visibleRuleKeys = new Set();
   const matchesByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
   const knownStatuses = new Set(courseStatusValues());
@@ -6802,14 +6801,13 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
         subject: lesson.subject,
         student_names: normalizedStudentNames,
       });
-      visibleRuleKeys.add(key);
       if (effectiveStatus !== "已上") continue;
       if (!matchesByRule.has(key)) matchesByRule.set(key, []);
       matchesByRule.get(key).push({ ...lesson, effective_status: effectiveStatus, normalized_student_names: normalizedStudentNames, student_count: students.length });
     }
   }
   const pricingLookups = feePricingLookups(readRows);
-  const rows = [...storedRules, ...createdRules].filter(isCompleteStudentPricingRule).filter(row => visibleRuleKeys.has(studentPricingRuleKey(row))).map((row) => {
+  const rows = [...storedRules, ...createdRules].filter(isCompleteStudentPricingRule).filter(row => matchesByRule.has(studentPricingRuleKey(row))).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
@@ -6909,8 +6907,9 @@ function studentPricingRow(monthKey, id) {
   const subject = text(row.subject);
   const studentNames = normalizedStudents(row.student_names);
   const key = studentPricingRuleKey(row);
-  const matches = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY id")
-    .filter(isCompletedLesson)
+  const statuses = new Set(courseStatusValues());
+  const matches = all("SELECT id, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY id")
+    .filter(lesson => deriveStatus(lesson, statuses) === "已上")
     .map((lesson) => {
       const students = splitStudents(lesson.student_names);
       return { ...lesson, normalized_student_names: normalizedStudents(lesson.student_names), student_count: students.length, students };
@@ -6919,7 +6918,7 @@ function studentPricingRow(monthKey, id) {
   const rulePrice = num(row.custom_price);
   const pricingLookups = feePricingLookups();
   const mismatchCount = rulePrice > 0 ? matches.filter((lesson) => {
-    const price = unitPriceFor({ studentName, subject: lesson.subject, grade: lesson.grade, studentCount: lesson.student_count, lessonId: lesson.id, status: deriveStatus(lesson), studentNames: lesson.normalized_student_names }, pricingLookups);
+    const price = unitPriceFor({ studentName, subject: lesson.subject, grade: lesson.grade, studentCount: lesson.student_count, lessonId: lesson.id, status: deriveStatus(lesson, statuses), studentNames: lesson.normalized_student_names }, pricingLookups);
     return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
   }).length : 0;
   const source = rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto");
@@ -10031,7 +10030,6 @@ function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
   if ((p.startsWith("/api/salary-tables") || p.startsWith("/api/salary-templates"))) return ["teacherDetail"];
   if (p === "/api/teacher-monthly-performance") return ["teacherSalary"];
-  if (p === "/api/fee-details-page") return ["feeDetails"];
   if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
   if (p === "/api/teacher-salary-rules/apply-selected") return ["teacherDetail"];
   if (p.startsWith("/api/data-center")) return ["audit"];
@@ -12922,11 +12920,6 @@ async function handleApi(req, res, url) {
       : bootstrap(monthKey, includeInactiveRows);
     return sendJson(res, sanitizeBootstrap(payload, user));
   }
-  if (req.method === "GET" && url.pathname === "/api/fee-details-page") {
-    const monthKey = resolveMonthKey(url);
-    const sanitized = sanitizeBootstrap({ lessons: [], derived: { fee_details: feeDetails(monthKey) } }, user);
-    return sendJson(res, { month_key: monthKey, fee_details: sanitized.derived.fee_details.map(({ teacher_salary, ...row }) => row) });
-  }
   const studentPricingCoursesMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)\/courses$/);
   if (req.method === "GET" && studentPricingCoursesMatch) {
     const rule = get("SELECT * FROM student_pricing WHERE id=?", [Number(studentPricingCoursesMatch[1])]);
@@ -12935,12 +12928,16 @@ async function handleApi(req, res, url) {
     const candidates = all("SELECT * FROM lessons WHERE grade=? AND subject=? ORDER BY date,time_slot,id", [rule.grade, rule.subject]);
     const scoped = studentPricingScopedLessons(candidates, user);
     if (canonicalRole(user.role) === "teacher" && !scoped.some(row => splitStudents(row.student_names).includes(rule.student_name) && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...row, student_name: rule.student_name }))) return sendError(res, 404, "规则不在可见课程范围内");
-    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses)).map(row => ({
-      id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
-      status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
-      student_names: row.student_names, notes: row.notes,
-      unit_price: unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade, studentCount: splitStudents(row.student_names).length, lessonId: row.id, status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups).unit_price,
-    }));
+    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses)).map(row => {
+      const price = unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade,
+        studentCount: splitStudents(row.student_names).length, lessonId: row.id,
+        status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups);
+      return {
+        id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
+        status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
+        student_names: row.student_names, notes: row.notes, unit_price: price.unit_price, rule_fee: price.baseline_price,
+      };
+    });
     return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: "全历史已上课程", lessons });
   }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
@@ -14776,12 +14773,13 @@ async function handleApi(req, res, url) {
       SELECT teacher_name, grade, subject, student_names, date, time_slot,
              classroom, status, course_status, lesson_status FROM lessons
     `), user);
-    const courseKeys = new Set(scopedLessons.flatMap(lesson =>
+    const completedStatuses = new Set(courseStatusValues());
+    const courseKeys = new Set(scopedLessons.filter(lesson => deriveStatus(lesson, completedStatuses) === "已上").flatMap(lesson =>
       splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name }))));
     if (before.some(row => !courseKeys.has(studentPricingRuleKey(row)))) {
       return sendJson(res, {
         ok: false, processed: ids.length, success: 0,
-        failed: [{ code: "RULE_NO_COURSES", message: "所选规则已无可见关联课程，请刷新列表" }], rows: [],
+        failed: [{ code: "RULE_NO_COURSES", message: "所选规则已无可见已上课程，请刷新列表" }], rows: [],
       }, 409);
     }
     withTransaction(() => {

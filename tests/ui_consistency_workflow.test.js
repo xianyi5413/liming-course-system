@@ -123,7 +123,7 @@ test('gift visibility, dynamic count alignment, shared adaptive tables, compact 
   assert.equal(counts.length,5);for(const cell of counts){assert.equal(cell.head,'center');assert.equal(cell.align,'center');assert.equal(cell.vertical,'middle');}
   for(const width of [1440,1280,1024,390]){
     await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
-    for(const [page,selector] of [['feeDetails','.fee-detail-table'],['recharges','.recharge-table'],['classGroups','.class-group-table'],['teacherSalaryRules','.teacher-salary-rule-table'],['teacherProfiles','.teacher-profile-table']]){
+    for(const [page,selector] of [['recharges','.recharge-table'],['classGroups','.class-group-table'],['teacherSalaryRules','.teacher-salary-rule-table'],['teacherProfiles','.teacher-profile-table']]){
       await show(browser,page);
       const result=await browser.evaluate(`(async()=>{await new Promise(requestAnimationFrame);const table=document.querySelector(${JSON.stringify(selector)});applyAdaptiveTableColumns({table});return {columns:table.querySelectorAll('col').length,heads:table.querySelectorAll('thead th').length,adaptive:table.classList.contains('adaptive-table'),reads:table.dataset.adaptiveLayoutReads,sticky:[...table.querySelectorAll('thead th')].every(th=>getComputedStyle(th).position==='sticky'),overflow:document.documentElement.scrollWidth>innerWidth};})()`);
       assert.equal(result.columns,result.heads,`${page}/${width}`);assert.ok(result.adaptive);assert.equal(result.reads,'0');assert.ok(result.sticky);assert.equal(result.overflow,false,`${page}/${width}`);

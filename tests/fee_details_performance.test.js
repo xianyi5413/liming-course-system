@@ -155,37 +155,22 @@ after(async () => {
   }
 });
 
-test("fee details synthetic performance and amount equivalence", async () => {
+test("shared fee calculation retains large-volume amounts after the standalone page is retired", async () => {
   const full = await api(`/api/bootstrap?month=${MONTH}`);
   assert.equal(full.response.status, 200);
   const expected = full.payload.derived.fee_details;
   assert.ok(expected.length >= 2000);
-  const chrome = await launchChrome(path.join(tempRoot, "fee-chrome"));
-  const browser = chrome.session;
+  const total = expected.filter(row=>row.effective).reduce((sum,row)=>sum+row.unit_price,0);
+  assert.equal(Math.round(full.payload.derived.student_summary.reduce((sum,row)=>sum+row.total_fee,0)*100),Math.round(total*100));
+  assert.equal((await api(`/api/fee-details-page?month=${MONTH}`)).response.status,404);
+  const chrome=await launchChrome(path.join(tempRoot,'retired-fee-page')),browser=chrome.session;
   try {
-    await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
-    await browser.login("boss", "123456");
-    await browser.evaluate(`window.feeLongTasks=[];new PerformanceObserver(list=>window.feeLongTasks.push(...list.getEntries().map(e=>e.duration))).observe({entryTypes:['longtask']});`);
-    const started = performance.now();
-    const initial = await browser.evaluate(`(async()=>{setActiveView('feeDetails');activeMonth='${MONTH}';await load({refreshGlobal:false});return {rows:document.querySelectorAll('.fee-detail-table td.row-index').length,nodes:document.querySelectorAll('*').length};})()`);
-    const operable = performance.now()-started;
-    await browser.waitFor(`document.querySelectorAll('.fee-detail-table td.row-index').length===${expected.length}`,30000);
-    const complete=performance.now()-started;
-    const metrics=await browser.evaluate(`({nodes:document.querySelectorAll('*').length,maxLong:Math.max(0,...window.feeLongTasks),adaptive:document.querySelector('.fee-detail-table').dataset.adaptiveMeasurementMs})`);
-    assert.deepEqual(await browser.evaluate("state.derived.fee_details.map(r=>[r.id,r.unit_price,r.rule_price])"),expected.map(r=>[r.id,r.unit_price,r.rule_price]));
-    console.log(feeServerMetrics.split("\n").filter(line=>line.includes("[fee-details-perf]")).join("\n"));
-    console.log(JSON.stringify({label:process.env.FEE_BASELINE?'before':'after',count:expected.length,bootstrapMs:full.elapsed,bytes:full.bytes,operable,complete,initial,...metrics}));
-    if(!process.env.FEE_BASELINE){assert.ok(initial.rows<=36);const lite=await api(`/api/fee-details-page?month=${MONTH}`);assert.equal((await api(`/api/fee-details-page?month=${MONTH}`,{cookie:academicCookie})).response.status,403);assert.equal(lite.response.status,200);assert.deepEqual(lite.payload.fee_details.map(r=>[r.id,r.unit_price,r.rule_price]),expected.map(r=>[r.id,r.unit_price,r.rule_price]));console.log(JSON.stringify({feeApiMs:lite.elapsed,feeBytes:lite.bytes}));}
-    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-detail-select-all,.fee-detail-select-row,.fee-override,.apply-selected-student-pricing-rules').length"),0);
-    const filtered=await browser.evaluate("(()=>{feeDetailsFilter.student=state.derived.fee_details[0].student_name;render();feeDetailsFilter.student=state.derived.fee_details.at(-1).student_name;render();return state.derived.fee_details.filter(r=>feeDetailMatchesFilter(r)).length;})()");
-    await browser.waitFor(`document.querySelectorAll('.fee-detail-table td.row-index').length===${filtered}`);
-    await browser.evaluate("new Promise(resolve=>setTimeout(resolve,150))");
-    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-detail-table td.row-index').length"),filtered);
-    assert.ok(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table td.row-index')].every((e,i)=>Number(e.textContent)===i+1)"));
-    await browser.evaluate("resetFeeDetailsFilter();render()");
-    await browser.waitFor(`document.querySelectorAll('.fee-detail-table td.row-index').length===${expected.length}`,30000);
-    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-detail-table .price-amount').length"),expected.length);
-    assert.deepEqual(await browser.evaluate("Promise.all([loadFeeDetailsPage(),loadFeeDetailsPage()])"),[false,true]);
+    await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
+    await browser.evaluate(`setActiveView('feeDetails');activeMonth='${MONTH}';load({refreshGlobal:false})`);
+    await browser.waitFor("!!document.querySelector('.student-summary-table')");
+    assert.equal(await browser.evaluate("document.querySelectorAll('[data-view=feeDetails],.fee-detail-table').length"),0);
+    assert.deepEqual(await browser.evaluate("state.derived.fee_details.map(row=>[row.lesson_id,row.student_name,row.unit_price])"),expected.map(row=>[row.lesson_id,row.student_name,row.unit_price]));
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
-  } finally {await browser.close();if(chrome.child.exitCode==null){const done=new Promise(r=>chrome.child.once('exit',r));chrome.child.kill();await done;}}
+    console.log(JSON.stringify({count:expected.length,bootstrapMs:full.elapsed,bytes:full.bytes}));
+  }finally{await browser.close();if(chrome.child.exitCode==null)chrome.child.kill();}
 });

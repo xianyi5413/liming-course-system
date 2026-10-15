@@ -5,7 +5,7 @@ const navGroups = [
   {
     key: "students",
     label: "学生",
-    views: [["summary", "费用汇总"], ["feeDetails", "费用明细"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
+    views: [["summary", "费用汇总"], ["recharges", "充值记录"], ["openingBalances", "期初余额"], ["studentQuery", "学生查询"]],
     moreViews: [["studentPricing", "学生单价"], ["classGroups", "班级管理"], ["studentProfiles", "学生档案"]],
   },
   { key: "teachers", label: "教师", views: [["teacherSalary", "薪资汇总"], ["teacherTravelFees", "车费明细"], ["teacherDetail", "课时明细"], ["teacherProfiles", "教师档案"]] },
@@ -297,6 +297,7 @@ if (shouldMigrateDashboardDefault) {
 let lastRenderedView = "";
 if (view === "staffProfiles") view = "staffPayroll";
 if (view === "week") view = "lessons";
+if (view === "feeDetails") view = "summary";
 let activeWeek = readActiveWeek();
 let matrixRange = readMatrixRange();
 let matrixView = localStorage.getItem(MATRIX_VIEW_KEY) || "time";
@@ -373,7 +374,6 @@ let rechargeChannelEventsBound = false;
 let openingBalanceFilter = { student: "", grade: "" };
 let openingBalanceModalOpen = false;
 let selectedOpeningBalanceIds = new Set();
-let feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
 let summaryFilter = { student: "", grade: "", balance: "" };
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
@@ -884,6 +884,7 @@ function firstAllowedView() {
 }
 
 function setActiveView(nextView) {
+  if (nextView === "feeDetails") nextView = "summary";
   if ((nextView || "") !== view) {
     closeAllFloatingOverlays();
     dismissToast();
@@ -1757,22 +1758,6 @@ async function loadStudentPricingPage({ force = false } = {}) {
   return promise;
 }
 
-let feeDetailsRequest = null;
-async function loadFeeDetailsPage() {
-  feeDetailsRequest?.abort();
-  const controller = new AbortController(); feeDetailsRequest = controller;
-  const month = activeMonth;
-  try {
-    const result = await request(`/api/fee-details-page?month=${encodeURIComponent(month)}`, { cache: false, signal: controller.signal });
-    if (view !== "feeDetails" || month !== activeMonth || controller.signal.aborted) return false;
-    state.derived.fee_details = result.fee_details || [];
-    return true;
-  } catch (error) {
-    if (controller.signal.aborted) return false;
-    throw error;
-  } finally { if (feeDetailsRequest === controller) feeDetailsRequest = null; }
-}
-
 function primeSearchData() {
   const values = new Set();
   for (const rows of [state.profile_students, state.profile_teachers, state.student_pricing, state.class_groups, state.lessons, state.teacher_salary_rules]) {
@@ -1782,7 +1767,6 @@ function primeSearchData() {
 }
 
 async function loadActiveViewData({ refreshGlobal = false, fullBootstrap = false, generation = loadGeneration } = {}) {
-  if (view === "feeDetails" && !await loadFeeDetailsPage()) return false;
   const stillCurrent = () => loadGeneration === generation;
   const stageConflictsPromise = view === "studentProfiles" && canView("studentProfiles")
     ? refreshStudentGradeStageConflicts({ renderStatus: false, generation })
@@ -2474,11 +2458,6 @@ async function applyDateRangeToScope(scope, start, end) {
     lessonFilter = { ...lessonFilter, start_date: start, end_date: end, date_preset_initialized: true };
     saveLessonFilter();
     await refreshLessonsView({ reloadRange: !lessonRangeLoaded() });
-    return;
-  }
-  if (scope === "fee-details") {
-    feeDetailsFilter = { ...feeDetailsFilter, start, end };
-    render();
     return;
   }
   if (scope === "recharges") {
@@ -3694,14 +3673,13 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
   const started = performance.now();
   const style = getComputedStyle(table);
   const font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const fee = table.dataset.adaptiveSource === "fee-details";
-  const rows = fee ? feeDetailsVisibleRows : studentPricingVisibleRows.length ? studentPricingVisibleRows : (state?.student_pricing || []);
+  const rows = studentPricingVisibleRows.length ? studentPricingVisibleRows : (state?.student_pricing || []);
   const unique = (values) => [...new Set(values.map((value) => String(value || "")).filter(Boolean))];
   const measured = (values, fallback = "—") => Math.max(
     adaptiveTextWidthForData(fallback, font),
     ...unique(values).map((value) => adaptiveTextWidthForData(value, font)),
   );
-  const rawWidths = fee ? [48, ...['student_name','teacher_name','date','weekday','time_slot','classroom','status','grade','subject','notes','unit_price','rule_price'].map((key, index) => measured(rows.map(row => row[key])) + (index >= 10 ? 64 : 36))] : [
+  const rawWidths = [
     44,
     adaptiveTextWidthForData(String(Math.max(1, rows.length)), font) + 20,
     measured(rows.map((row) => row.student_name)) + 36,
@@ -3713,7 +3691,6 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
     measured(rows.map(row => row.end_date)) + 30,
     measured(rows.map(row => row.total_lessons)) + 30,
     measured(rows.map((row) => moneyInput(row.custom_price))) + 56,
-    measured(rows.map((row) => studentPricingVisibleStatus(row))) + 34,
     measured(rows.map(row => row.notes)) + 38,
   ];
   const widths = rawWidths.map((width, index) => Math.ceil(Math.min(
@@ -3748,7 +3725,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   columns.forEach((column) => { column.style.width = "auto"; });
 
   const definitions = columns.map((column, index) => adaptiveColumnDefinition(column, headerCells[index]));
-  if (["student-pricing", "fee-details"].includes(table.dataset.adaptiveSource)) {
+  if (table.dataset.adaptiveSource === "student-pricing") {
     return applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions);
   }
   const started = performance.now();
@@ -4905,82 +4882,6 @@ function lessonDateShortcutActive(preset) {
   return Boolean(range && lessonFilter.start_date === range.start && lessonFilter.end_date === range.end);
 }
 
-function ensureFeeDetailsFilterMonth() {
-  const monthKey = state?.settings?.month_key || activeMonth;
-  if (feeDetailsFilter.month_key !== monthKey) {
-    feeDetailsFilter = { ...feeDetailsFilter, month_key: monthKey, start: "", end: "" };
-  }
-}
-
-function resetFeeDetailsFilter() {
-  feeDetailsFilter = { month_key: state?.settings?.month_key || activeMonth, student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
-}
-
-function priceSourceFilterValue(source) {
-  if (source === "manual" || source === "override") return "manual";
-  if (source === "pending") return "pending";
-  return "auto";
-}
-
-function feeDetailStatusOptions() {
-  return uniqueSorted([...statusValues(), "未上", "暂停", "调课"]);
-}
-
-function feeDetailMatchesFilter(row, filter = feeDetailsFilter) {
-  if (filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
-  if (filter.teacher && !textContains(row.teacher_name, filter.teacher)) return false;
-  if (filter.grade && !textContains(row.grade, filter.grade)) return false;
-  if (filter.status) {
-    const status = rowStatus(row);
-    const match = textContains(status, filter.status)
-      || (textContains("未上", filter.status) && (status === "待上" || row.course_status === "未上"))
-      || (textContains("暂停", filter.status) && String(row.course_status || "").startsWith("暂停"))
-      || (textContains("调课", filter.status) && String(row.notes || "").includes("调课"));
-    if (!match) return false;
-  }
-  if (filter.source) {
-    const source = priceSourceFilterValue(row.price_source);
-    if (!textContains(source, filter.source) && !textContains(priceSourceLabel(source), filter.source)) return false;
-  }
-  if (filter.start && (!row.date || row.date < filter.start)) return false;
-  if (filter.end && (!row.date || row.date > filter.end)) return false;
-  return true;
-}
-
-function dynamicFeeDetailsFilterOptions(rows, filter = feeDetailsFilter) {
-  const rowsFor = (field) => rowsForFilterOption(rows, filter, field, feeDetailMatchesFilter);
-  return {
-    students: uniqueSorted(rowsFor("student").map((row) => row.student_name)),
-    teachers: uniqueSorted(rowsFor("teacher").map((row) => row.teacher_name)),
-    grades: uniqueSorted(rowsFor("grade").map((row) => row.grade)),
-    statuses: uniqueSorted(rowsFor("status").map((row) => rowStatus(row))),
-    sources: uniqueSorted(rowsFor("source").map((row) => priceSourceLabel(priceSourceFilterValue(row.price_source)))),
-  };
-}
-
-function renderFeeDetailsFilterBar(rows, filteredRows) {
-  const opts = dynamicFeeDetailsFilterOptions(rows);
-  return `
-    <div class="filter-bar">
-      <div class="filter-controls">
-        ${unifiedFilterField({ label: "学生", className: "fee-details-filter-input", field: "student", value: feeDetailsFilter.student, values: opts.students })}
-        ${unifiedFilterField({ label: "教师", className: "fee-details-filter-input", field: "teacher", value: feeDetailsFilter.teacher, values: opts.teachers })}
-        ${unifiedFilterField({ label: "年级", className: "fee-details-filter-input", field: "grade", value: feeDetailsFilter.grade, values: opts.grades })}
-        ${unifiedFilterField({ label: "状态", className: "fee-details-filter-input", field: "status", value: feeDetailsFilter.status, values: opts.statuses })}
-        ${unifiedFilterField({ label: "价格状态", className: "fee-details-filter-input", field: "source", value: feeDetailsFilter.source, values: opts.sources, placeholder: "全部价格状态" })}
-        <label class="filter-field filter-date-range">
-          <span>日期</span>
-          ${dateRangePickerControl({ scope: "fee-details", start: feeDetailsFilter.start, end: feeDetailsFilter.end, placeholder: "选择费用日期范围" })}
-        </label>
-      </div>
-      <div class="filter-summary">
-        <span>已筛选 <b>${filteredRows.length}</b> / 共 ${rows.length} 条</span>
-        <button class="btn reset-fee-details-filter" type="button">清空筛选</button>
-      </div>
-    </div>
-  `;
-}
-
 function summaryMatchesFilter(row, filter = summaryFilter) {
   if (filter.student && !matchesSearchQuery(row.student_name, filter.student)) return false;
   if (filter.grade && !textContains(row.grade, filter.grade)) return false;
@@ -5211,12 +5112,14 @@ function priceSourceBadge(row) {
 
 function showStudentPricingCourses(rule, result) {
   const editable = result.can_edit_fee && canWriteData();
-  const feeCell = row => `<td class="right pricing-course-fee" data-lesson-id="${row.id}">${editable ? `<button class="btn pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : formatMoney(row.unit_price)}</td>`;
-  const dialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { feeCells: feeCell }));
+  const feeDiffers = row => row.rule_fee != null && row.unit_price != null && Math.round(Number(row.rule_fee) * 100) !== Math.round(Number(row.unit_price) * 100);
+  const feeCell = row => `<td class="right pricing-course-fee ${feeDiffers(row) ? 'negative' : ''}" data-lesson-id="${row.id}">${editable ? `<button class="btn pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : formatMoney(row.unit_price)}</td>`;
+  const dialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { feeCells: row => feeCell(row) + `<td class="right pricing-course-rule-fee">${row.rule_fee == null ? "—" : formatMoney(row.rule_fee)}</td>` }));
   let active = null;
   const restore = () => {
     if (!active || active.busy) return;
     const { cell, row } = active;
+    cell.classList.toggle('negative', feeDiffers(row));
     cell.innerHTML = feeCell(row).replace(/^<td[^>]*>|<\/td>$/g, '');
     applyAdaptiveTableColumns({table:cell.closest("table")});
     active = null;
@@ -8599,7 +8502,6 @@ async function refreshWeekMatrixView({ reloadRange = false } = {}) {
   wireEvents();
 }
 
-let feeDetailsVisibleRows = [];
 function appendProgressiveRows(table, rows, markup, offset, batchSize = 72, { isCurrent = () => true, onProgress = () => {}, schedule: scheduler = null } = {}) {
   table.dataset.renderComplete = String(offset >= rows.length);
   const append = () => {
@@ -8612,60 +8514,6 @@ function appendProgressiveRows(table, rows, markup, offset, batchSize = 72, { is
   };
   const schedule = () => scheduler ? scheduler(append) : window.requestIdleCallback ? window.requestIdleCallback(append, {timeout:80}) : window.setTimeout(append, 0);
   if (offset < rows.length) schedule();
-}
-
-function feeDetailRowMarkup(row, index) {
-              return `
-              <tr class="${detailRowClass(row)}">
-                ${renderRowIndex(index)}
-                <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
-                <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
-                <td class="text-cell">${escapeHtml(row.date)}</td>
-                <td class="text-cell">${escapeHtml(row.weekday)}</td>
-                <td class="text-cell">${escapeHtml(row.time_slot)}</td>
-                <td class="text-cell">${escapeHtml(row.classroom)}</td>
-                <td class="text-cell">${statusBadge(rowStatus(row))}</td>
-                <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
-                <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
-                <td class="text-cell single-line-note" title="${escapeHtml(row.notes || '')}">${escapeHtml(row.notes)}</td>
-                ${readonlyPriceCell(row)}
-                <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
-              </tr>
-            `;
-
-}
-
-function renderFeeDetails() {
-  ensureFeeDetailsFilterMonth();
-  const rows = state.derived.fee_details;
-  const visibleRows = rows.filter((row) => feeDetailMatchesFilter(row));
-  feeDetailsVisibleRows = visibleRows;
-  const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
-  renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${formatMoney(total)}`);
-  contentEl.innerHTML = `
-    <div class="band">
-      ${renderFeeDetailsFilterBar(rows, visibleRows)}
-      <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
-        <table class="fee-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true" data-adaptive-source="fee-details">
-          <colgroup>
-            ${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
-            <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
-          </colgroup>
-          <thead>
-            <tr>
-              ${rowIndexHeader()}
-              <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${visibleRows.slice(0, 36).map(feeDetailRowMarkup).join("") || `<tr><td colspan="13" class="empty">暂无费用明细</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  const table = contentEl.querySelector('.fee-detail-table');
-  appendProgressiveRows(table, visibleRows, feeDetailRowMarkup, 36);
 }
 
 function renderSummary() {
@@ -10035,7 +9883,7 @@ function studentQueryResultsMarkup(report = studentStatementReport()) {
     <div class="student-query-detail-slot">
       <div class="band">${studentQuerySectionHeader("明细课时表", report)}
         <div class="table-wrap smooth-table-wrap">
-          <table class="fee-detail-table student-query-detail-table uniform-table nowrap-table" data-adaptive-table="true">
+          <table class="student-query-detail-table uniform-table nowrap-table" data-adaptive-table="true">
             <colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date"><col data-column-type="status"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="short"><col data-column-type="note"><col data-column-type="money"></colgroup>
             <thead>
               <tr>${rowIndexHeader()}<th>学生姓名</th><th>授课老师</th><th>日期</th><th>状态</th><th>星期</th><th>时间</th><th>教室</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th></tr>
@@ -11622,7 +11470,6 @@ function studentPricingRowMarkup(row, index = 0) {
       <td class="text-cell wide student-set-cell adaptive-left" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
       <td class="adaptive-center">${escapeHtml(row.start_date || "-")}</td><td class="adaptive-center">${escapeHtml(row.end_date || "-")}</td><td class="adaptive-center">${row.total_lessons || 0}</td>
       <td class="currency-input-cell student-pricing-value-cell adaptive-right" data-adaptive-alignment="right">${currencyInputMarkup(row.custom_price, { className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"${readonly}` })}</td>
-      <td class="text-cell adaptive-center student-pricing-status-cell" data-adaptive-alignment="center">${visiblePriceStatusBadge(studentPricingVisibleStatus(row))}</td>
       <td class="adaptive-left single-line-note" data-adaptive-alignment="left" title="${escapeHtml(row.notes || '')}"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft" placeholder="-"${readonly}>${escapeHtml(row.notes)}</textarea></td>
     </tr>
   `;
@@ -11678,10 +11525,10 @@ function renderStudentPricing() {
       </div>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-natural="true" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
-          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name" data-min-width="0"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="students" data-min-width="0" data-max-width="360"><col data-column-type="date"><col data-column-type="date"><col data-column-type="short" data-min-width="0"><col data-column-type="money" data-min-width="0"><col data-column-type="status"><col data-column-type="note" data-max-width="480"></colgroup>
-          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th>${rowIndexHeader()}<th>学生</th><th>年级</th><th>科目</th><th>类型</th><th>学生集合</th><th>起始日期</th><th>结束日期</th><th>节数</th><th>单价</th><th>价格状态</th><th class="wide">备注</th></tr></thead>
+          <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name" data-min-width="0"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="students" data-min-width="0" data-max-width="360"><col data-column-type="date"><col data-column-type="date"><col data-column-type="short" data-min-width="0"><col data-column-type="money" data-min-width="0"><col data-column-type="note" data-max-width="480"></colgroup>
+          <thead><tr><th class="select-col"><input class="student-pricing-select-all" type="checkbox" ${allVisibleSelected ? "checked" : ""} ${visibleRows.length && canWriteData() ? "" : "disabled"} aria-label="全选当前可见学生单价规则"></th>${rowIndexHeader()}<th>学生</th><th>年级</th><th>科目</th><th>类型</th><th>学生集合</th><th>起始日期</th><th>结束日期</th><th>节数</th><th>单价</th><th class="wide">备注</th></tr></thead>
           <tbody>
-            ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="13" class="empty">暂无学生单价规则</td></tr>`}
+            ${initialRows.map(studentPricingRowMarkup).join("") || `<tr><td colspan="12" class="empty">暂无学生单价规则</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -14082,6 +13929,7 @@ function dashboardSelectedShortcutKeys(source = storedJsonArray(DASHBOARD_SHORTC
 }
 
 function dashboardGoTo(viewKey, filter = {}) {
+  if (viewKey === "feeDetails") { viewKey = "summary"; filter = {}; }
   if (!canView(viewKey)) return alert("无权限访问");
   if (viewKey === "lessons") {
     const nextFilter = { ...lessonFilter, month_key: state.settings.month_key, ...filter, date_preset_initialized: true };
@@ -14091,7 +13939,7 @@ function dashboardGoTo(viewKey, filter = {}) {
     saveLessonFilter();
   }
   if (viewKey === "summary") summaryFilter = { ...summaryFilter, ...filter };
-  if (viewKey === "feeDetails") feeDetailsFilter = { ...feeDetailsFilter, ...filter };
+  if (viewKey === "studentPricing") studentPricingFilter = { ...studentPricingFilter, ...filter };
   view = viewKey;
   activeNavGroup = groupForView(viewKey).key;
   localStorage.setItem("liming:view", view);
@@ -14541,7 +14389,6 @@ function render() {
     weekMatrix: renderWeekMatrix,
     courseNotice: renderCourseNotice,
     teacherCourseNotice: renderTeacherCourseNotice,
-    feeDetails: renderFeeDetails,
     summary: renderSummary,
     finance: renderFinance,
     recharges: renderRecharges,
@@ -14907,7 +14754,6 @@ async function refreshMonthRelatedActiveView() {
   if (view === "finance") return refreshFinanceForActiveMonth({ resetToActiveMonth: true });
   if (view === "recharges") return refreshRechargesForActiveMonth();
   if (view === "summary") return refreshDerivedForActiveMonth(renderSummary);
-  if (view === "feeDetails") { if (await loadFeeDetailsPage()) return rerenderCurrentView(renderFeeDetails); return; }
   if (view === "studentPricing") return refreshStudentPricingModule();
   if (view === "classGroups") return refreshDerivedForActiveMonth(renderClassGroups);
   if (view === "teacherSalary") return refreshDerivedForActiveMonth(renderTeacherSalary);
@@ -14934,7 +14780,6 @@ async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
     rechargeGradeFilter = "";
     rechargeDateFilter = { start: "", end: "" };
   } else if (view === "summary") summaryFilter = { student: "", grade: "", balance: "" };
-  else if (view === "feeDetails") feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
   else if (view === "studentPricing") studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
   else if (view === "classGroups") classGroupFilter = { teacher: "", grade: "", subject: "", student: "" };
   else if (view === "teacherDetail") teacherDetailFilter = { grade: "", subject: "", student: "", source: "", rule_status: "" };
@@ -15158,12 +15003,18 @@ function patchStudentPricingRowDom(row) {
   if (priceInput && document.activeElement !== priceInput) priceInput.value = moneyInput(row.custom_price);
   const notesInput = element.querySelector('.student-pricing-field[data-field="notes"]');
   if (notesInput && document.activeElement !== notesInput) notesInput.value = String(row.notes || "");
-  const status = element.querySelector(".student-pricing-status-cell");
-  if (status) status.innerHTML = visiblePriceStatusBadge(studentPricingVisibleStatus(row));
 }
 
 function mergeStudentPricingResponseRow(row) {
   const prepared = prepareStudentPricingRule(row);
+  if (!(prepared.total_lessons > 0)) {
+    state.student_pricing = (state.student_pricing || []).filter(item => Number(item.id) !== Number(prepared.id));
+    studentPricingVisibleRows = studentPricingVisibleRows.filter(item => Number(item.id) !== Number(prepared.id));
+    selectedStudentPricingIds.delete(Number(prepared.id));
+    studentPricingPageCache.clear();
+    if (view === "studentPricing") rerenderContent(renderStudentPricing);
+    return prepared;
+  }
   state.student_pricing = upsertById(state.student_pricing || [], prepared);
   const visibleIndex = studentPricingVisibleRows.findIndex((item) => Number(item.id) === Number(prepared.id));
   if (visibleIndex >= 0) studentPricingVisibleRows[visibleIndex] = { ...studentPricingVisibleRows[visibleIndex], ...prepared };
@@ -15356,7 +15207,7 @@ function wireEvents() {
     } catch (error) { dialog.error = error.message; }
     finally { dialog.busy = false; if (view === "audit" && backupCleanupDialog === dialog) rerenderContent(renderAudit); }
   });
-  document.querySelectorAll(".lesson-table,.fee-detail-table,.recharge-table,.student-history-table,.student-pricing-table,.class-group-table,.student-profile-table,.teacher-salary-table,.teacher-detail-table,.teacher-salary-rule-table,.teacher-profile-table,.student-summary-table,.user-admin-panel:not(.role-admin-panel) .user-table").forEach(table => {
+  document.querySelectorAll(".lesson-table,.student-query-detail-table,.recharge-table,.student-history-table,.student-pricing-table,.class-group-table,.student-profile-table,.teacher-salary-table,.teacher-detail-table,.teacher-salary-rule-table,.teacher-profile-table,.student-summary-table,.user-admin-panel:not(.role-admin-panel) .user-table").forEach(table => {
     table.classList.add("business-sticky-table");
     table.closest(".table-wrap")?.classList.add("business-table-scroll");
   });
@@ -17819,31 +17670,6 @@ function wireEvents() {
     }, async () => {
       await refreshLessonsView({ reloadRange: (input.dataset.filterField === "start_date" || input.dataset.filterField === "end_date") && !lessonRangeLoaded() });
     }, 650);
-  });
-
-  document.querySelectorAll("input.fee-details-filter-input").forEach((input) => {
-    const applyFeeDetailsFilter = (value) => {
-      feeDetailsFilter = {
-        ...feeDetailsFilter,
-        month_key: state.settings.month_key,
-        [input.dataset.filterField]: value,
-      };
-    };
-    if (input.tagName === "SELECT" || input.type === "date") {
-      input.addEventListener("change", () => {
-        applyFeeDetailsFilter(input.value);
-        render();
-      });
-      return;
-    }
-    bindSafeTextInput(input, applyFeeDetailsFilter, () => render());
-  });
-
-  document.querySelectorAll(".reset-fee-details-filter").forEach((button) => {
-    button.addEventListener("click", () => {
-      resetFeeDetailsFilter();
-      render();
-    });
   });
 
   document.querySelectorAll("input.summary-filter-input").forEach((input) => {

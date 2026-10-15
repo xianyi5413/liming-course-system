@@ -127,22 +127,22 @@ async function create(day,fields={}) {
  const result=await api('/api/lessons',{method:'POST',body:{teacher_name:'合成教师',date:`2031-01-${day}`,time_slot:'15:00-17:00',classroom:'存在性教室',grade:'高一',subject:'数学',student_names:people,status:'待上',...fields}});
  assert.equal(result.response.status,201,JSON.stringify(result.payload));return result.payload.id;
 }
-test('all-status cross-month existence is independent of completed statistics and mixed class types',async()=>{
+test('class existence keeps all statuses while pricing requires completed courses and preserves historical rules',async()=>{
  const a=await create('01'),b=await create('02',{status:'请假'});
  const initialGroup=(await groups()).payload.class_groups.find(row=>row.students_key.includes('存在性'));
  for (const [id,type] of [[a,'1V1'],[b,'小班课']]) {
   assert.equal((await api('/api/class-groups/course-type',{method:'PATCH',body:{group_key:initialGroup.group_key,lesson_ids:[id],course_type:type,mode:'lesson'}})).response.status,200);
  }
- const pricing=await page(),rules=ownRules(pricing.payload);assert.equal(rules.length,2);
+ const pricing=await page(),rules=ownRules(pricing.payload);assert.equal(rules.length,0);
  assert.ok(rules.every(row=>row.total_lessons===0&&row.start_date===''&&row.end_date===''));
- retainedRule=rules.find(row=>row.student_name==='存在性甲');
+ const rulesDb=new DatabaseSync(databasePath);try{retainedRule=rulesDb.prepare("SELECT * FROM student_pricing WHERE student_name='存在性甲'").get();}finally{rulesDb.close();}
  assert.equal((await api(`/api/student-pricing/${retainedRule.id}/courses`)).payload.lessons.length,0);
  const group=(await groups()).payload.class_groups.find(row=>row.students_key.includes('存在性'));
  assert.equal(group.course_count,2);assert.deepEqual(group.course_types,['1V1','小班课']);retainedGroup=group;
  assert.equal((await api(`/api/student-pricing/${retainedRule.id}`,{method:'PATCH',body:{custom_price:240}})).response.status,200);
  await api(`/api/lessons/${a}`,{method:'DELETE'});
  assert.equal((await groups()).payload.class_groups.find(row=>row.id===group.id).course_count,1);
- assert.equal(ownRules((await page()).payload).length,2);
+ assert.equal(ownRules((await page()).payload).length,0);
  const originalDb=new DatabaseSync(databasePath);
  try { originalDb.prepare('INSERT INTO fee_overrides(lesson_id,student_name,unit_price) VALUES(?,?,?)').run(9001,'张三',220.25); } finally { originalDb.close(); }
  await api('/api/lessons/batch-delete',{method:'POST',body:{ids:[b]}});
@@ -151,7 +151,7 @@ test('all-status cross-month existence is independent of completed statistics an
  const db=new DatabaseSync(databasePath);try {assert.equal(db.prepare('SELECT custom_price FROM student_pricing WHERE id=?').get(retainedRule.id).custom_price,240);assert.ok(db.prepare('SELECT id FROM class_groups WHERE id=?').get(group.id));assert.equal(db.prepare('SELECT unit_price FROM fee_overrides WHERE lesson_id=?').get(9001).unit_price,220.25);}finally{db.close();}
  const batch=await api('/api/student-pricing/batch',{method:'PATCH',body:{ids:[retainedRule.id],price:999}});assert.equal(batch.response.status,409);
  const id=await create('03',{student_names:'存在性乙、存在性甲'});
- assert.equal(ownRules((await page()).payload).find(row=>row.id===retainedRule.id).custom_price,240);
+ assert.equal(ownRules((await page()).payload).length,0);
  assert.equal((await groups()).payload.class_groups.find(row=>row.id===group.id).course_count,1);
  await api(`/api/lessons/${id}`,{method:'PATCH',body:{status:'已上'}});
  assert.equal(ownRules((await page()).payload).find(row=>row.id===retainedRule.id).total_lessons,1);
@@ -161,15 +161,15 @@ test('all-status cross-month existence is independent of completed statistics an
  assert.equal((await page()).payload.rules.find(row=>row.student_name==='存在性甲').grade,'高二');
 });
 
-test('Chromium five widths keeps only real-course groups, pending rules, exact details and refreshed cache',async()=>{
- await create('05');
+test('Chromium five widths keeps only real-course groups, completed rules, exact details and refreshed cache',async()=>{
+ await create('05',{status:'已上'});
  const chrome=await launchChrome(path.join(tempRoot,'existence-browser')),browser=chrome.session;
  try {
   await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
   for(const width of [1920,1440,1280,1024,390]) {
    await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
    await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
-   assert.ok(await browser.evaluate("state.student_pricing.some(row=>row.student_name==='存在性乙'&&row.total_lessons===0)"));
+   assert.ok(await browser.evaluate("state.student_pricing.some(row=>row.student_name==='存在性乙'&&row.total_lessons===1)"));
    assert.ok(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth&&[...document.querySelectorAll('.student-set-badges')].every(node=>getComputedStyle(node).flexWrap==='nowrap')"));
    await browser.evaluate("setActiveView('classGroups');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.class-group-table')");
    assert.ok(await browser.evaluate('state.class_groups.every(row=>row.course_count>0)'));

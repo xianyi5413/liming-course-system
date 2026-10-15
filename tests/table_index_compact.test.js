@@ -64,7 +64,7 @@ async function show(browser, page) {
   if(page==='teacherSalaryRules') await browser.waitFor('teacherSalaryRuleCandidateSync.requested && !teacherSalaryRuleCandidateSync.busy');
 }
 const pages = [
-  ['summary','.student-summary-table',0], ['feeDetails','.fee-detail-table',0],
+  ['summary','.student-summary-table',0],
   ['recharges','.recharge-table',1], ['openingBalances','.opening-balance-table',1],
   ['studentQuery','.student-query-detail-table',0], ['studentPricing','.student-pricing-table',1],
   ['classGroups','.class-group-table',0], ['studentProfiles','.student-profile-table',1],
@@ -105,7 +105,6 @@ test('thirteen pages use continuous display indexes and keep responsive sticky t
 test('filters, history, teacher changes and real recharge deletion regenerate display order',async()=>browserRun(async browser=>{
   const filters=[
     ['summary','.student-summary-table',0,"summaryFilter={...summaryFilter,grade:'高二'};"],
-    ['feeDetails','.fee-detail-table',0,"feeDetailsFilter={...feeDetailsFilter,grade:'高二'};"],
     ['recharges','.recharge-table',1,"rechargeStudentFilter='合成学生乙';"],
     ['openingBalances','.opening-balance-table',1,"openingBalanceFilter={...openingBalanceFilter,student:'合成学生乙'};"],
     ['studentPricing','.student-pricing-table',1,"studentPricingFilter={...studentPricingFilter,student:'合成学生乙'};"],
@@ -136,7 +135,7 @@ test('filters, history, teacher changes and real recharge deletion regenerate di
 }));
 
 test('compact rows retain their height with notes, salary state stays one line and activation retains matching semantics',async()=>browserRun(async browser=>{
-  for(const [page,selector] of [['feeDetails','.fee-detail-table'],['teacherDetail','.teacher-class-lessons'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
+  for(const [page,selector] of [['teacherDetail','.teacher-class-lessons'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
     await show(browser,page);if(page==='teacherDetail'){await browser.click('[data-salary-class]');await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");}
     await browser.evaluate('new Promise(requestAnimationFrame)');
     const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.single-line-note,.teacher-detail-notes,.course-details-table td:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);

@@ -69,7 +69,6 @@ async function openView(browser, group, view) {
 
 const scenarios = [
   { name: "费用汇总", group: "students", view: "summary", title: "学生费用汇总", row: ".student-summary-table tbody tr:not(.empty)", text: "首次加载学生" },
-  { name: "费用明细", group: "students", view: "feeDetails", title: "学生费用明细", row: ".fee-detail-table tbody tr:not(.empty)", text: "首次加载课程", direct: true },
   { name: "学生单价", group: "students", view: "studentPricing", title: "学生单价规则", row: ".student-pricing-rule-row", text: "首次加载学生", direct: true },
   { name: "教师薪资汇总", group: "teachers", view: "teacherSalary", title: "薪资汇总", row: ".teacher-salary-summary-row", text: "首次加载老师" },
   { name: "教师车费明细", group: "teachers", view: "teacherTravelFees", title: "车费明细", row: ".teacher-travel-fee-row", text: "首次加载老师" },
@@ -93,8 +92,8 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
   await browser.waitFor(`document.querySelector('#topbar')?.textContent.includes(${JSON.stringify(scenario.title)}) && document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0 && document.body.textContent.includes(${JSON.stringify(scenario.text)})`);
   assert.equal(await browser.evaluate("document.querySelector('.month-select')?.value || '2026-07-01'"), MONTH);
   if (!scenario.direct) assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
-  if (["studentPricing", "feeDetails"].includes(scenario.view)) {
-    assert.equal(browser.responses.some((response) => new RegExp(scenario.view === "feeDetails" ? "/api/fee-details-page\\?" : "/api/student-pricing-page\\?").test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
+  if (scenario.view === "studentPricing") {
+    assert.equal(browser.responses.some((response) => new RegExp("/api/student-pricing-page\\?").test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
     assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url)), false, JSON.stringify(browser.responses));
   }
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
@@ -109,21 +108,24 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
 }));
 
 test("month switching refreshes the full-bootstrap cache without stale fee details", async () => withBrowser(async (browser) => {
-  await browser.login("boss", "123456"); await openView(browser, "students", "feeDetails");
-  await browser.waitFor("document.body.textContent.includes('首次加载课程')");
+  await browser.login("boss", "123456"); await openView(browser, "students", "summary");
+  await browser.waitFor("state.derived.fee_details.some(row=>row.notes==='首次加载课程')");
   await browser.evaluate("(() => { const select=document.querySelector('.month-select'); select.value='2026-08-01'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
-  await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('8月') && document.body.textContent.includes('八月课程') && !document.body.textContent.includes('首次加载课程')");
+  await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('8月') && state.derived.fee_details.some(row=>row.notes==='八月课程') && !state.derived.fee_details.some(row=>row.notes==='首次加载课程')");
   await browser.evaluate("(() => { const select=document.querySelector('.month-select'); select.value='2026-07-01'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
-  await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('7月') && document.body.textContent.includes('首次加载课程') && !document.body.textContent.includes('八月课程')");
+  await browser.waitFor("document.querySelector('#topbar')?.textContent.includes('7月') && state.derived.fee_details.some(row=>row.notes==='首次加载课程') && !state.derived.fee_details.some(row=>row.notes==='八月课程')");
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
 }));
 
 test("fee and teacher detail headers and row cells share the approved column order", async () => withBrowser(async (browser) => {
-  await browser.login("boss", "123456"); await openView(browser, "students", "feeDetails");
-  await browser.waitFor("document.querySelectorAll('.fee-detail-table tbody tr:not(.empty)').length > 0");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"), ["序号", "学生姓名", "授课老师", "日期", "星期", "时间", "教室", "状态", "年级", "科目", "备注", "单人费用", "规则费用"]);
-  assert.equal(await browser.evaluate("document.querySelector('.fee-detail-table tbody tr')?.children.length"), 13);
-  assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fee-detail-scroll')).overflowX !== 'visible'"), true);
+  await browser.login("boss", "123456"); await openView(browser, "students", "studentPricing");
+  await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
+  await browser.evaluate("document.querySelector('.student-pricing-rule-row').click()");
+  await browser.waitFor("!!document.querySelector('.shared-course-dialog')");
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.course-details-table th')].map(cell=>cell.textContent.trim())"), ['序号','授课老师','日期','星期','时间','教室','类型','状态','年级','科目','学生','备注','实际费用','规则费用']);
+  assert.equal(await browser.evaluate("document.querySelector('.course-details-table tbody tr').children.length"),14);
+  assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.course-details-table').closest('.table-wrap')).overflowX"),'auto');
+  await browser.click('.shared-course-dialog .dialog-close');
   await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
   await browser.evaluate("(() => { const input=document.querySelector('input.teacher-detail-teacher-select'); input.value='首次加载老师'; input.dispatchEvent(new Event('change',{bubbles:true})); })()");
   await browser.waitFor("Boolean(document.querySelector('[data-salary-class]'))");
