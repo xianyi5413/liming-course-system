@@ -269,8 +269,8 @@ test("student profiles keep loading, empty and conflict states visible and refre
   await withBrowserScenario({}, async ({ browser, database }) => {
     await browser.login("boss", "123456");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('link[href*=\"styles.css\"],script[src*=\"app.js\"]')].map((item)=>item.getAttribute('href')||item.getAttribute('src'))"), [
-      "/styles.css?v=20261014-teaching-consistency",
-      "/app.js?v=20261014-teaching-consistency",
+      "/styles.css?v=20261015-singleline-lesson-performance",
+      "/app.js?v=20261015-singleline-lesson-performance",
     ]);
     if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))")) await browser.click('.nav-btn[data-nav-group="students"]');
     await browser.waitFor("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentProfiles\"]'))");
@@ -408,7 +408,7 @@ test("student conflict totals ignore filters and historical students are reveale
     })()`);
     assert.deepEqual(alignment, {
       nameHead: "center", nameCell: "center", wrapperDisplay: "flex", wrapperJustify: "center",
-      badgeWhiteSpace: "normal", badgeInside: true, grade: "center", status: "center",
+      badgeWhiteSpace: "nowrap", badgeInside: true, grade: "center", status: "center",
       joined: "center", left: "center", notes: "left", pageFits: true,
     });
 
