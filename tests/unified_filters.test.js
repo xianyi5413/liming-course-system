@@ -27,7 +27,7 @@ function seed(db) {
     INSERT INTO students(id,name,grade,status) VALUES (8201,'张三','初一','在读'),(8202,'李四','初一','在读'),(8203,'王五','初二','在读'),(8204,'赵六','初二','离校');
     INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes) VALUES
       (8301,'张三','初一','数学','张三；李四',188,'记录A'),
-      (8302,'李四','初二','英语','王五；赵六',199,'记录B');
+      (8302,'李四','初一','数学','张三；李四',199,'记录B');
     INSERT INTO class_groups(id,teacher,grade,subject,students_key,students_display,class_name) VALUES (8401,'统一筛选老师','初一','数学','张三|李四','张三；李四','统一筛选班级');
     INSERT INTO lessons(teacher_name,date,month_key,grade,subject,student_names,time_slot,status) VALUES ('统一筛选老师','2026-07-01','${MONTH}','初一','数学','张三、李四','09:00-11:00','待上');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES (8501,'统一筛选老师','初一','数学','张三；李四',220,2,1,'统一筛选规则');

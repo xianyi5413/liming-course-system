@@ -625,7 +625,7 @@ function cacheInvalidationPrefixes(path = "") {
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
-  if (base.startsWith("/api/lessons")) return ["/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/lessons")) return ["/api/class-groups", "/api/student-pricing", "/api/teacher-detail", "/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
   return [];
 }
@@ -684,12 +684,14 @@ async function request(path, options = {}) {
       if (String(path).startsWith("/api/student-pricing")
         || String(path).startsWith("/api/students")
         || String(path).startsWith("/api/lessons")
+        || String(path).startsWith("/api/class-groups/course-type")
         || String(path).startsWith("/api/pricing")
         || String(path).startsWith("/api/fee-overrides")
         || String(path).startsWith("/api/settings")
         || String(path).startsWith("/api/import")
         || String(path).startsWith("/api/data-center/import")
         || String(path).startsWith("/api/audit/apply")) {
+        cancelStudentPricingPageRequest();
         studentPricingPageCache.clear();
       }
     }
@@ -1741,6 +1743,7 @@ async function loadStudentPricingPage({ force = false } = {}) {
     cache: false,
     signal: controller.signal,
   }).then((data) => {
+    if (controller.signal.aborted) throw new DOMException("请求已过期", "AbortError");
     const prepared = prepareStudentPricingPage(data);
     studentPricingPageCache.set(key, {
       data: prepared,

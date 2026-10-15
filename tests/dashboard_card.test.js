@@ -32,6 +32,9 @@ function seedBase(dbPath) {
     INSERT INTO students(id,name,grade,status) VALUES (8201,'状态学生甲','初一','在读'),(8202,'状态学生乙','初一','在读');
     INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes)
       VALUES (8301,'状态学生甲','初一','数学','状态学生甲',188,'有效价格'),(8302,'状态学生乙','初一','英语','状态学生乙',0,'待设置价格');
+    INSERT INTO lessons(teacher_name,date,month_key,time_slot,classroom,grade,subject,student_names,status) VALUES
+      ('状态教师','2031-01-01','2031-01-01','09:00-11:00','合成A','初一','数学','状态学生甲','待上'),
+      ('状态教师','2031-01-02','2031-01-01','09:00-11:00','合成B','初一','英语','状态学生乙','待上');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes)
       VALUES (8401,'状态教师','初一','数学','状态学生甲',220,2,1,'有效薪资'),
              (8402,'状态教师','初一','英语','状态学生乙',0,2,1,'零金额'),

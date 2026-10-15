@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261015-fee-entry-interactions";
+const APP_VERSION = process.env.APP_VERSION || "20261015-course-backed-lists";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -2500,9 +2500,9 @@ function preserveLegacyStudentPricingFeeOverrides() {
   });
 }
 
-function syncStudentPricingCandidatesFromLessons() {
+function syncStudentPricingCandidatesFromLessons({ lessons = null, rules = null } = {}) {
   return withTransaction(() => {
-    const existingKeys = new Set(all("SELECT * FROM student_pricing").map((rule) => studentPricingRuleKey(rule)));
+    const existingKeys = new Set((rules || all("SELECT * FROM student_pricing")).map((rule) => studentPricingRuleKey(rule)));
     const seenLessonKeys = new Set();
     const skippedReasons = new Map();
     const insert = db.prepare(`
@@ -2514,7 +2514,7 @@ function syncStudentPricingCandidatesFromLessons() {
     let scannedLessonCount = 0;
     const createdRules = [];
 
-    for (const lesson of all(`
+    for (const lesson of lessons || all(`
       SELECT grade, subject, student_names
       FROM lessons
       ORDER BY grade, subject, student_names, id
@@ -2544,7 +2544,7 @@ function syncStudentPricingCandidatesFromLessons() {
           continue;
         }
         const result = insert.run(studentName, grade, subject, studentNames);
-        const created = get("SELECT * FROM student_pricing WHERE id = ?", [Number(result.lastInsertRowid)]);
+        const created = { id: Number(result.lastInsertRowid), ...candidate, custom_price: 0, notes: "" };
         createdRules.push(created);
         existingKeys.add(key);
         createdCount += 1;
@@ -6777,8 +6777,9 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
     return all(sql, params);
   };
   const lessons = studentPricingScopedLessons(readRows("SELECT id, date, time_slot, teacher_name, course_type, classroom, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, time_slot, id"), user);
-  const visibleRuleKeys = user && canonicalRole(user.role) === "teacher"
-    ? new Set(lessons.flatMap(lesson => splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name })))) : null;
+  const storedRules = readRows("SELECT * FROM student_pricing ORDER BY id");
+  const { createdRules } = syncStudentPricingCandidatesFromLessons({ lessons, rules: storedRules });
+  const visibleRuleKeys = new Set();
   const matchesByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
   const knownStatuses = new Set(courseStatusValues());
@@ -6793,7 +6794,6 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
   };
   for (const lesson of lessons) {
     const effectiveStatus = deriveStatus(lesson, knownStatuses);
-    if (effectiveStatus !== "已上") continue;
     const { students, normalized: normalizedStudentNames } = parseStudentSet(lesson.student_names);
     for (const studentName of students) {
       const key = studentPricingRuleKey({
@@ -6802,12 +6802,14 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
         subject: lesson.subject,
         student_names: normalizedStudentNames,
       });
+      visibleRuleKeys.add(key);
+      if (effectiveStatus !== "已上") continue;
       if (!matchesByRule.has(key)) matchesByRule.set(key, []);
       matchesByRule.get(key).push({ ...lesson, effective_status: effectiveStatus, normalized_student_names: normalizedStudentNames, student_count: students.length });
     }
   }
   const pricingLookups = feePricingLookups(readRows);
-  const rows = readRows("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).filter(row => !visibleRuleKeys || visibleRuleKeys.has(studentPricingRuleKey(row))).map((row) => {
+  const rows = [...storedRules, ...createdRules].filter(isCompleteStudentPricingRule).filter(row => visibleRuleKeys.has(studentPricingRuleKey(row))).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
@@ -14768,6 +14770,19 @@ async function handleApi(req, res, url) {
         failed: missing.map((id) => ({ id, student_name: "", grade: "", subject: "", code: "RULE_NOT_FOUND", message: "学生单价规则不存在" })),
         rows: [],
       }, 404);
+    }
+    // Recheck actual courses: selections can outlive a course deletion in another tab.
+    const scopedLessons = studentPricingScopedLessons(all(`
+      SELECT teacher_name, grade, subject, student_names, date, time_slot,
+             classroom, status, course_status, lesson_status FROM lessons
+    `), user);
+    const courseKeys = new Set(scopedLessons.flatMap(lesson =>
+      splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name }))));
+    if (before.some(row => !courseKeys.has(studentPricingRuleKey(row)))) {
+      return sendJson(res, {
+        ok: false, processed: ids.length, success: 0,
+        failed: [{ code: "RULE_NO_COURSES", message: "所选规则已无可见关联课程，请刷新列表" }], rows: [],
+      }, 409);
     }
     withTransaction(() => {
       const statement = db.prepare("UPDATE student_pricing SET custom_price=? WHERE id=?");

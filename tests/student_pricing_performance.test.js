@@ -9,7 +9,8 @@ const { freePort, launchChrome } = require("./helpers/chrome_cdp");
 
 const root = path.resolve(__dirname, "..");
 const MONTH = "2026-07-01";
-const RULE_COUNT = 1000;
+const RULE_COUNT = 400; // 400 multi-student lessons expand to 1000 pricing identities.
+const VISIBLE_RULE_COUNT = 1000; // Includes every student in each complete group.
 const STUDENT_COUNT = 500;
 const INITIAL_ROW_COUNT = 36;
 let tempRoot;
@@ -154,7 +155,7 @@ after(async () => {
 test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and isolated cache scopes", async () => {
   const cold = await api(`/api/student-pricing-page?month=${MONTH}`);
   assert.equal(cold.response.status, 200);
-  assert.equal(cold.payload.rules.length, RULE_COUNT);
+  assert.equal(cold.payload.rules.length, VISIBLE_RULE_COUNT);
   assert.ok(cold.elapsed < 1500, `cold endpoint ${cold.elapsed.toFixed(1)}ms`);
   assert.ok(cold.bytes < 500_000, `response ${cold.bytes} bytes`);
   assert.equal(cold.payload.cache_status, "miss");
@@ -184,7 +185,7 @@ test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and 
   });
   assert.equal(deniedWrite.response.status, 403);
   console.log("[student-pricing-server-performance]", JSON.stringify({
-    rows: RULE_COUNT,
+    rows: VISIBLE_RULE_COUNT,
     students: STUDENT_COUNT,
     cold_ms: Number(cold.elapsed.toFixed(1)),
     hot_ms: Number(hot.elapsed.toFixed(1)),
@@ -256,9 +257,9 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     assert.deepEqual(first.indexes, first.indexes.map((_, index) => index + 1));
     assert.equal(first.layoutReads, 0);
     assert.ok(operableMs < 2000, `operable ${operableMs.toFixed(1)}ms`);
-    await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true' && document.querySelectorAll('.student-pricing-rule-row').length===${RULE_COUNT}`, 10_000);
+    await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true' && document.querySelectorAll('.student-pricing-rule-row').length===${VISIBLE_RULE_COUNT}`, 10_000);
     const allDataMs = performance.now() - started;
-    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), Array.from({length:RULE_COUNT}, (_, index) => index + 1));
+    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), Array.from({length:VISIBLE_RULE_COUNT}, (_, index) => index + 1));
     assert.ok(allDataMs < 3500, `all rows ${allDataMs.toFixed(1)}ms`);
     const pageResponses = browser.responses.slice(responseStart);
     assert.equal(pageResponses.filter((item) => /\/api\/student-pricing-page\?/.test(item.url)).length, 1);
@@ -266,7 +267,7 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     assert.equal(pageResponses.some((item) => /\/api\/students(?:\?|$)/.test(item.url)), false);
 
     await browser.click(".student-pricing-select-all");
-    await browser.waitFor(`document.querySelector('.batch-selection-summary')?.textContent.includes('${RULE_COUNT}')`);
+    await browser.waitFor(`document.querySelector('.batch-selection-summary')?.textContent.includes('${VISIBLE_RULE_COUNT}')`);
     await browser.evaluate(`(() => {
       const wrap=document.querySelector('#student-pricing-table-wrap');
       wrap.scrollTop=wrap.scrollHeight;
@@ -277,7 +278,7 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     const filterStarted = performance.now();
     await browser.evaluate(`(() => {
       const input=document.querySelector('.student-pricing-filter-input.multi-select-value[data-filter-field="student"]');
-      input.value='性能学生001';
+      input.value='性能学生003';
       input.dispatchEvent(new Event('change',{bubbles:true}));
     })()`);
     await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===2 && document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
@@ -333,7 +334,7 @@ test("real Chromium keeps first paint, progressive rendering, filtering, selecti
     const secondMs = performance.now() - secondStarted;
     assert.ok(secondMs < 800, `second entry ${secondMs.toFixed(1)}ms`);
     assert.equal(browser.responses.slice(secondResponseStart).some((item) => /student-pricing-page/.test(item.url)), false);
-    await browser.evaluate(`studentPricingFilter={...studentPricingFilter,student:''};render();studentPricingFilter={...studentPricingFilter,student:'性能学生002'};render();`);
+    await browser.evaluate(`studentPricingFilter={...studentPricingFilter,student:''};render();studentPricingFilter={...studentPricingFilter,student:'性能学生008'};render();`);
     await browser.waitFor("document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), [1, 2]);
     assert.ok(await browser.evaluate("[...document.querySelectorAll('.student-pricing-select-row')].every(input=>Number(input.dataset.id)>2)"));

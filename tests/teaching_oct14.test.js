@@ -188,7 +188,7 @@ test('student pricing exact full-history completed matches, stored mixed types, 
     const rule=page.rules.find(row=>row.id===9101), empty=page.rules.find(row=>row.id===9102);
     assert.equal(rule.total_lessons,2);assert.equal(rule.current_month_lessons,0);
     assert.equal(rule.start_date,'2026-09-01');assert.equal(rule.end_date,'2026-09-02');
-    assert.deepEqual(rule.course_types,['1V2','小班课']);assert.equal(empty.total_lessons,0);assert.equal(empty.start_date,'');assert.deepEqual(empty.course_types,[]);
+    assert.deepEqual(rule.course_types,['1V2','小班课']);assert.equal(empty,undefined);assert.equal(db.prepare('SELECT custom_price FROM student_pricing WHERE id=9102').get().custom_price,150);
     const detail=await api('/api/student-pricing/9101/courses');assert.equal(detail.response.status,200);
     assert.deepEqual(detail.payload.lessons.map(row=>row.id),[9001,9002]);
     assert.deepEqual(detail.payload.lessons.map(row=>row.unit_price),[350,135]);
@@ -252,6 +252,7 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
       for(const page of ['recharges','studentPricing','studentProfiles','teacherProfiles','teacherDetail']) {
         await show(page);
         if(page==='teacherDetail') {await browser.evaluate("selectedTeacherDetail='合成教师';SalaryUI.applyRange('teacher-detail-salary','2026-09-01','2026-09-30')");await browser.waitFor("document.querySelectorAll('[data-salary-class]').length===1");}
+        await browser.waitFor("[...document.querySelectorAll('#content table[data-adaptive-table]')].every(table=>table.dataset.adaptiveWidths)");
         const layout=await browser.evaluate(`({page:document.documentElement.scrollWidth,width:innerWidth,tables:[...document.querySelectorAll('#content table[data-adaptive-table]')].map(table=>({natural:table.dataset.adaptiveNatural,cols:table.querySelectorAll('col').length,headers:table.querySelectorAll('thead tr:first-child th').length,widths:table.dataset.adaptiveWidths,scroll:table.closest('.table-wrap')?.scrollWidth}))})`);
         assert.ok(layout.page<=layout.width+1,`${page}/${width} page overflow: ${JSON.stringify(layout)}`);
         assert.ok(layout.tables.length);for(const table of layout.tables){assert.equal(table.natural,'true');assert.equal(table.cols,table.headers);assert.ok(table.widths);}

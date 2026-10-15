@@ -61,6 +61,9 @@ before(async () => {
     INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes) VALUES
       (721,'合成学生甲','初一','数学','合成学生甲',100,'学生备注甲'),
       (722,'合成学生乙','初二','英语','合成学生乙',120,'学生备注乙');
+    INSERT INTO lessons(teacher_name,date,month_key,time_slot,classroom,grade,subject,student_names,status) VALUES
+      ('批量甲','2031-01-01','2031-01-01','09:00-11:00','合成A','初一','数学','合成学生甲','待上'),
+      ('批量乙','2031-01-02','2031-01-01','09:00-11:00','合成B','初二','英语','合成学生乙','待上');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES
       (731,'批量甲','初一','数学','合成学生甲',200,2,1,'教师备注甲'),
       (732,'批量乙','初二','英语','合成学生乙',220,2,-1,'教师备注乙');
