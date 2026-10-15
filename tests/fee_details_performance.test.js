@@ -176,8 +176,7 @@ test("fee details synthetic performance and amount equivalence", async () => {
     console.log(feeServerMetrics.split("\n").filter(line=>line.includes("[fee-details-perf]")).join("\n"));
     console.log(JSON.stringify({label:process.env.FEE_BASELINE?'before':'after',count:expected.length,bootstrapMs:full.elapsed,bytes:full.bytes,operable,complete,initial,...metrics}));
     if(!process.env.FEE_BASELINE){assert.ok(initial.rows<=36);const lite=await api(`/api/fee-details-page?month=${MONTH}`);assert.equal((await api(`/api/fee-details-page?month=${MONTH}`,{cookie:academicCookie})).response.status,403);assert.equal(lite.response.status,200);assert.deepEqual(lite.payload.fee_details.map(r=>[r.id,r.unit_price,r.rule_price]),expected.map(r=>[r.id,r.unit_price,r.rule_price]));console.log(JSON.stringify({feeApiMs:lite.elapsed,feeBytes:lite.bytes}));}
-    await browser.evaluate("document.querySelector('.fee-detail-select-all').click()");
-    assert.equal(await browser.evaluate("selectedFeeDetailKeys.size"),await browser.evaluate("state.derived.fee_details.filter(canApplyStudentPricingRule).length"));
+    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-detail-select-all,.fee-detail-select-row,.fee-override,.apply-selected-student-pricing-rules').length"),0);
     const filtered=await browser.evaluate("(()=>{feeDetailsFilter.student=state.derived.fee_details[0].student_name;render();feeDetailsFilter.student=state.derived.fee_details.at(-1).student_name;render();return state.derived.fee_details.filter(r=>feeDetailMatchesFilter(r)).length;})()");
     await browser.waitFor(`document.querySelectorAll('.fee-detail-table td.row-index').length===${filtered}`);
     await browser.evaluate("new Promise(resolve=>setTimeout(resolve,150))");
@@ -185,8 +184,7 @@ test("fee details synthetic performance and amount equivalence", async () => {
     assert.ok(await browser.evaluate("[...document.querySelectorAll('.fee-detail-table td.row-index')].every((e,i)=>Number(e.textContent)===i+1)"));
     await browser.evaluate("resetFeeDetailsFilter();render()");
     await browser.waitFor(`document.querySelectorAll('.fee-detail-table td.row-index').length===${expected.length}`,30000);
-    const edited=await browser.evaluate("(()=>{const input=[...document.querySelectorAll('.fee-detail-table .fee-override')].at(-1);input.value='123.45';input.dispatchEvent(new Event('change',{bubbles:true}));return {lesson:Number(input.dataset.lessonId),student:input.dataset.studentName};})()");
-    await browser.waitFor(`state.derived.fee_details.some(r=>r.lesson_id===${edited.lesson}&&r.student_name===${JSON.stringify(edited.student)}&&r.unit_price===123.45)`);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-detail-table .price-amount').length"),expected.length);
     assert.deepEqual(await browser.evaluate("Promise.all([loadFeeDetailsPage(),loadFeeDetailsPage()])"),[false,true]);
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
   } finally {await browser.close();if(chrome.child.exitCode==null){const done=new Promise(r=>chrome.child.once('exit',r));chrome.child.kill();await done;}}

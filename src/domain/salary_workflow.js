@@ -120,6 +120,16 @@ function classKey(lesson) { return JSON.stringify([text(lesson.teacher_name), te
 function courseTypes(values) {
   return [...new Set(values.map(value => text(value && typeof value === 'object' ? value.course_type : value)).filter(Boolean))].sort((a, b) => (TYPES.includes(a) ? TYPES.indexOf(a) : TYPES.length) - (TYPES.includes(b) ? TYPES.indexOf(b) : TYPES.length) || a.localeCompare(b, 'zh-Hans-CN', { numeric: true }));
 }
+const classCollator = new Intl.Collator('zh-Hans-CN', { numeric: true });
+function compareClasses(a, b) {
+  const rank = grade => GRADES.includes(grade) ? GRADES.indexOf(grade) : GRADES.length;
+  const typeKeys = row => courseTypes(row.course_types || [row.course_type]).map(type => `${TYPES.includes(type) ? TYPES.indexOf(type) : TYPES.length}:${type}`).join('|');
+  return rank(a.grade) - rank(b.grade) || classCollator.compare(a.grade || '', b.grade || '')
+    || classCollator.compare(a.subject || '', b.subject || '') || classCollator.compare(typeKeys(a), typeKeys(b))
+    || classCollator.compare(a.teacher || a.teacher_name || '', b.teacher || b.teacher_name || '')
+    || classCollator.compare(normalizeStoredStudentSet(a.students_key || a.student_names), normalizeStoredStudentSet(b.students_key || b.student_names))
+    || classCollator.compare(String(a.id || ''), String(b.id || ''));
+}
 function addClassLesson(group, lesson) {
   group.lesson_ids.push(lesson.id);
   group.course_types = courseTypes([...(group.course_types || []), lesson.course_type]);
@@ -148,4 +158,4 @@ function resolveBase(lesson, newRule, legacyRule = null) {
   // Explicit restoration applies a legacy rule once in the storage layer.
   return { cents: lesson.teacher_salary == null ? null : Math.round(Number(lesson.teacher_salary) * 100), source: text(lesson.teacher_salary_source) || 'legacy' };
 }
-module.exports = { GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeRules, normalizeTemplate, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, courseTypes, addClassLesson, resolveBase, Formula };
+module.exports = { compareClasses, GRADES, TYPES, validDate, migrateSalaryWorkflow, normalizeRules, normalizeTemplate, normalizeTable, tableContext, matchTable, tableRule, studentCount, classKey, courseTypes, addClassLesson, resolveBase, Formula };
