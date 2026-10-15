@@ -126,7 +126,7 @@ test("target tables keep short fields complete, keep bounded notes single-line w
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
     const layout = await browser.evaluate(`(() => {
-      const cells=[...document.querySelectorAll('.fee-detail-table tbody tr td:nth-child(7)')];
+      const cells=[...document.querySelectorAll('.fee-detail-table tbody tr td:nth-child(6)')];
       const wrap=document.querySelector('.fee-detail-scroll');
       const table=document.querySelector('.fee-detail-table');
       return {

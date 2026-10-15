@@ -81,11 +81,11 @@ test('small class actual headcounts and normalized student sets preserve class i
   }
 });
 
-test('equal manual and historical amounts display automatic without read writes; saving equal clears overrides', t => {
+test('historical covers retain truthful special display without read writes; saving equal clears overrides', t => {
   const { db, store } = fixture(t), table = store.save(autumn('200+40K'));
   const lesson = () => db.prepare('SELECT * FROM lessons WHERE id=1').get();
   db.exec("UPDATE lessons SET teacher_base_salary_source='manual', teacher_base_salary_override=200 WHERE id=1");
-  assert.equal(store.resolve(lesson()).teacher_base_salary_display_source, 'auto');
+  assert.equal(store.resolve(lesson()).teacher_base_salary_display_source, 'manual');
   assert.equal(lesson().teacher_base_salary_source, 'manual');
   store.save(autumn('220+40K'), table.id);
   assert.equal(store.resolve(lesson()).teacher_base_salary_display_source, 'manual');
@@ -101,7 +101,7 @@ test('legacy comparison uses actual fallback and allocation retains monthly frac
   const { db, store } = fixture(t);
   const lesson = db.prepare('SELECT * FROM lessons WHERE id=1').get();
   const historic = {...lesson, teacher_salary:99, teacher_salary_source:'import'};
-  assert.equal(store.resolve(historic).teacher_base_salary_display_source,'auto');
+  assert.equal(store.resolve(historic).teacher_base_salary_display_source,'legacy');
   assert.equal(store.resolve({...historic,teacher_salary:100}).teacher_base_salary_display_source,'legacy');
   store.save(autumn('0+0.01K'));
   const rows = [1,2,3].map(id => ({...lesson,id}));

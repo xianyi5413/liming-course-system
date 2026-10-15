@@ -374,7 +374,6 @@ let openingBalanceFilter = { student: "", grade: "" };
 let openingBalanceModalOpen = false;
 let selectedOpeningBalanceIds = new Set();
 let feeDetailsFilter = { month_key: "", student: "", teacher: "", grade: "", status: "", source: "", start: "", end: "" };
-let selectedFeeDetailKeys = new Set();
 let summaryFilter = { student: "", grade: "", balance: "" };
 let studentPricingFilter = { student: "", grade: "", subject: "", student_names: "", price: "", usage: "" };
 let studentPricingModalOpen = false;
@@ -1158,6 +1157,7 @@ function scrollCustomSelectOptionIntoView(wrapper) {
 }
 
 function openCustomSelect(wrapper) {
+  closeOpenMultiSelectMenus();
   closeCustomSelects(wrapper);
   wrapper.classList.add("open");
   customSelectMenu(wrapper)?.classList.add("open");
@@ -1172,12 +1172,14 @@ function openCustomSelect(wrapper) {
 }
 
 function closeSearchablePicker() {
+  closeScheduleInlinePicker();
   closeCustomSelects();
   closeOpenMultiSelectMenus();
   closeCustomDatePicker();
 }
 
 function closeAllFloatingOverlays() {
+  closeScheduleInlinePicker();
   closeCustomSelects();
   closeOpenMultiSelectMenus();
   document.querySelectorAll(".floating-multi-select-menu").forEach((menu) => {
@@ -1347,6 +1349,12 @@ function enhanceCustomSelects() {
       const button = wrapper.querySelector(".custom-select-button");
       const menu = customSelectMenu(wrapper);
       const optionsList = customSelectVisibleOptions(menu);
+      if (event.key === "Escape" && activeScheduleInlinePicker?.wrapper === wrapper) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeScheduleInlinePicker({ restoreFocus: true });
+        return;
+      }
       if (event.target.matches?.(".custom-select-search-input")) {
         if (event.key === "Escape") {
           event.stopPropagation();
@@ -3648,7 +3656,7 @@ function adaptiveCellContentWidth(cell, definition, font) {
   const badges = cell.querySelector('.inline-badges');
   if (badges) return [...badges.children].reduce((width,badge) => width + measure(badge.textContent.trim()) + 22, 20);
   const currency = cell.querySelector(".currency-display");
-  if (currency) return measure(currency.textContent.trim()) + 56 + (cell.querySelector(".salary-auto-button") ? measure("恢复自动") + 52 : 0);
+  if (currency) return measure(currency.textContent.trim()) + 56 + [...cell.querySelectorAll("button")].reduce((width, button) => width + measure(button.textContent.trim()) + 52, 0);
   const input = cell.querySelector(":scope > .cell-input");
   if (input) return (definition.wrap ? wrapWidth(input.value || input.placeholder) : measure(input.value || input.placeholder || "")) + (input.type === "date" ? 52 : 36);
   const custom = cell.querySelector(".custom-select-value");
@@ -3690,7 +3698,7 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
     adaptiveTextWidthForData(fallback, font),
     ...unique(values).map((value) => adaptiveTextWidthForData(value, font)),
   );
-  const rawWidths = fee ? [44, 48, ...['student_name','teacher_name','date','weekday','time_slot','classroom','status','grade','subject','notes','unit_price','rule_price'].map((key, index) => measured(rows.map(row => row[key])) + (index >= 10 ? 64 : 36))] : [
+  const rawWidths = fee ? [48, ...['student_name','teacher_name','date','weekday','time_slot','classroom','status','grade','subject','notes','unit_price','rule_price'].map((key, index) => measured(rows.map(row => row[key])) + (index >= 10 ? 64 : 36))] : [
     44,
     adaptiveTextWidthForData(String(Math.max(1, rows.length)), font) + 20,
     measured(rows.map((row) => row.student_name)) + 36,
@@ -4566,6 +4574,8 @@ function closeOpenMultiSelectMenus() {
 }
 
 function closeOtherMultiSelectMenus(except) {
+  closeScheduleInlinePicker();
+  closeCustomSelects();
   document.querySelectorAll(".multi-select.open").forEach((select) => {
     if (select === except) return;
     if (select.classList.contains("schedule-student-popover") && typeof select._studentClose === "function") select._studentClose();
@@ -5196,35 +5206,47 @@ function priceSourceBadge(row) {
   return sourceStatusBadge(priceSourceLabel(row.price_source), priceSourceTitle(row));
 }
 
-function editablePriceCell(row) {
-  const title = escapeHtml(priceSourceTitle(row));
-  const locked = !isCompletedLesson(row);
-  const input = currencyInputMarkup(row.unit_price, {
-    className: `fee-override ${row.price_source === "manual" ? "manual-price" : ""}`,
-    attrs: `data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" min="0" title="${title}" ${locked ? "disabled" : ""}`,
+function showStudentPricingCourses(rule, result) {
+  const editable = result.can_edit_fee && canWriteData();
+  const feeCell = row => `<td class="right pricing-course-fee" data-lesson-id="${row.id}">${editable ? `<button class="btn pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : formatMoney(row.unit_price)}</td>`;
+  const dialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { feeCells: feeCell }));
+  let active = null;
+  const restore = () => {
+    if (!active || active.busy) return;
+    const { cell, row } = active;
+    cell.innerHTML = feeCell(row).replace(/^<td[^>]*>|<\/td>$/g, '');
+    applyAdaptiveTableColumns({table:cell.closest("table")});
+    active = null;
+  };
+  dialog.element.addEventListener('click', async event => {
+    if (event.target.closest('.pricing-course-fee-edit')) {
+      if (active?.busy) return;
+      restore();
+      const cell = event.target.closest('td');
+      const row = result.lessons.find(row => String(row.id) === cell.dataset.lessonId);
+      active = { cell, row, busy: false };
+      cell.innerHTML = `<span class="price-inline editable-price-inline">${currencyInputMarkup(row.unit_price, {className:'pricing-course-fee-input', attrs:'min="0" max="10000" step="0.01" required'})}<button class="btn pricing-course-fee-save">保存</button><button class="btn pricing-course-fee-cancel">取消</button><span role="alert"></span></span>`;
+      applyAdaptiveTableColumns({table:cell.closest("table")});
+      cell.querySelector('input').focus(); cell.querySelector('input').select();
+    } else if (event.target.closest('.pricing-course-fee-cancel')) restore();
+    else if (event.target.closest('.pricing-course-fee-save') && active && !active.busy) {
+      const editor = active, input = editor.cell.querySelector('input');
+      if (!input.reportValidity()) return;
+      editor.busy = true;
+      editor.cell.querySelectorAll('button,input').forEach(node => node.disabled = true);
+      try {
+        const saved = await request('/api/fee-overrides', {method:'POST', body:{lesson_id:editor.row.id, student_name:result.student_name, unit_price:input.value}});
+        editor.row.unit_price = saved.unit_price;
+        showToast('单节费用已保存');
+      } catch (error) { showToast(error.message, 'error'); }
+      finally { editor.busy = false; restore(); }
+    }
   });
-  return `
-    <td class="text-cell right price-cell-wrap" title="${title}">
-      <span class="price-inline editable-price-inline">
-        ${input}
-      ${priceSourceBadge(row)}
-      </span>
-    </td>
-  `;
-}
-
-function feeDetailKey(row) {
-  return `${row.lesson_id}\u0001${row.student_name}`;
-}
-
-function canApplyStudentPricingRule(row) {
-  return isCompletedLesson(row) && Boolean(row.can_apply_pricing_rule) && row.rule_price != null && row.price_source !== "pending";
-}
-
-function feeDetailSelectTitle(row) {
-  if (!isCompletedLesson(row)) return "非已上课程费用自动按 0 处理";
-  if (!canApplyStudentPricingRule(row)) return "尚未设置有效学生单价规则";
-  return "可按当前学生单价规则更新";
+  dialog.element.addEventListener('keydown', event => {
+    if (!active) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); restore(); }
+    if (event.key === 'Enter' && event.target.matches('input')) { event.preventDefault(); active.cell.querySelector('.pricing-course-fee-save').click(); }
+  }, true);
 }
 
 function readonlyPriceCell(row) {
@@ -6324,6 +6346,7 @@ function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
   if (trigger?.getAttribute("aria-busy") === "true") return;
   if (!trigger || isReadonlyUser()) return;
   closeScheduleInlinePicker();
+  closeOpenMultiSelectMenus();
   const select = document.createElement("select");
   select.className = `schedule-inline-picker-native ${field === "status" ? "status-select" : ""}`;
   select.dataset.id = String(id);
@@ -6479,7 +6502,7 @@ function lessonPageBounds(rows) {
 }
 function lessonPaginationHtml(rows) {
   const { start, end, pages } = lessonPageBounds(rows);
-  return `<div class="lesson-pagination" role="navigation" aria-label="课程分页"><span>共 ${rows.length} 节，显示 ${rows.length ? start + 1 : 0}–${end} 节；全选作用于全部筛选结果</span><button type="button" class="btn" data-lesson-page="1" ${lessonPage === 1 ? "disabled" : ""}>首页</button><button type="button" class="btn" data-lesson-page="${lessonPage - 1}" ${lessonPage === 1 ? "disabled" : ""}>上一页</button><span>${lessonPage} / ${pages}</span><button type="button" class="btn" data-lesson-page="${lessonPage + 1}" ${lessonPage === pages ? "disabled" : ""}>下一页</button><button type="button" class="btn" data-lesson-page="${pages}" ${lessonPage === pages ? "disabled" : ""}>末页</button></div>`;
+  return `<div class="lesson-pagination" role="navigation" aria-label="课程分页"><span>共${rows.length}节，${rows.length ? `显示${start + 1}–${end}节` : "暂无课程"}</span><button type="button" class="btn" data-lesson-page="1" ${lessonPage === 1 ? "disabled" : ""}>首页</button><button type="button" class="btn" data-lesson-page="${lessonPage - 1}" ${lessonPage === 1 ? "disabled" : ""}>上一页</button><span>${lessonPage} / ${pages}</span><button type="button" class="btn" data-lesson-page="${lessonPage + 1}" ${lessonPage === pages ? "disabled" : ""}>下一页</button><button type="button" class="btn" data-lesson-page="${pages}" ${lessonPage === pages ? "disabled" : ""}>末页</button></div>`;
 }
 function lessonRowsHtml(rows) {
   if (!rows.length) return `<tr><td colspan="14" class="empty">暂无课程记录</td></tr>`;
@@ -8589,11 +8612,9 @@ function appendProgressiveRows(table, rows, markup, offset, batchSize = 72, { is
 }
 
 function feeDetailRowMarkup(row, index) {
-              const canApply = canApplyStudentPricingRule(row);
-              const key = feeDetailKey(row);
               return `
               <tr class="${detailRowClass(row)}">
-                <td class="select-col"><input class="fee-detail-select-row" type="checkbox" data-lesson-id="${row.lesson_id}" data-student-name="${escapeHtml(row.student_name)}" ${selectedFeeDetailKeys.has(key) ? "checked" : ""} ${canApply ? "" : "disabled"} title="${escapeHtml(feeDetailSelectTitle(row))}"></td>${renderRowIndex(index)}
+                ${renderRowIndex(index)}
                 <td class="text-cell">${renderStudentBadge(row.student_name, { fallbackGrade: row.grade })}</td>
                 <td class="text-cell">${escapeHtml(row.teacher_name)}</td>
                 <td class="text-cell">${escapeHtml(row.date)}</td>
@@ -8604,7 +8625,7 @@ function feeDetailRowMarkup(row, index) {
                 <td class="text-cell">${renderEntityBadge("grade", row.grade)}</td>
                 <td class="text-cell">${renderEntityBadge("subject", row.subject)}</td>
                 <td class="text-cell single-line-note" title="${escapeHtml(row.notes || '')}">${escapeHtml(row.notes)}</td>
-                ${editablePriceCell(row)}
+                ${readonlyPriceCell(row)}
                 <td class="text-cell right">${row.rule_price == null ? "" : formatMoney(row.rule_price)}</td>
               </tr>
             `;
@@ -8616,49 +8637,31 @@ function renderFeeDetails() {
   const rows = state.derived.fee_details;
   const visibleRows = rows.filter((row) => feeDetailMatchesFilter(row));
   feeDetailsVisibleRows = visibleRows;
-  const selectableRows = visibleRows.filter(canApplyStudentPricingRule);
-  const selectableKeys = new Set(selectableRows.map(feeDetailKey));
-  selectedFeeDetailKeys = new Set([...selectedFeeDetailKeys].filter((key) => selectableKeys.has(key)));
-  const selectedCount = selectedFeeDetailKeys.size;
-  const allSelectableChecked = selectableRows.length > 0 && selectedCount === selectableRows.length;
   const total = visibleRows.filter((row) => row.effective).reduce((sum, row) => sum + numberValue(row.unit_price), 0);
   renderTopbar(`${monthLabel()} 学生费用明细`, `已筛选 ${visibleRows.length} / 共 ${rows.length} 条，有效费用合计 ${formatMoney(total)}`);
   contentEl.innerHTML = `
     <div class="band">
       ${renderFeeDetailsFilterBar(rows, visibleRows)}
-      <div class="bulk-action-row fee-detail-bulk-actions">
-        <button class="btn primary apply-selected-student-pricing-rules" type="button" ${bulkActionDisabledAttr(selectedCount)}>${bulkActionText("按规则更新所选费用", selectedCount)}</button>
-        <span class="muted-tip">仅更新已勾选且命中有效学生单价规则的费用明细。</span>
-      </div>
       <div class="table-wrap smooth-table-wrap compact-table-scroll fee-detail-scroll">
         <table class="fee-detail-table uniform-table nowrap-table compact-rows" data-adaptive-table="true" data-adaptive-source="fee-details">
           <colgroup>
-            <col class="fee-detail-col-select" data-column-type="select">${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
+            ${rowIndexColumn()}<col data-column-type="name"><col data-column-type="name"><col data-column-type="date" data-min-width="108" data-max-width="120"><col data-column-type="short" data-min-width="56" data-max-width="64"><col class="fee-detail-col-time" data-column-type="short" data-min-width="128" data-max-width="128">
             <col data-column-type="short"><col data-column-type="status"><col data-column-type="short" data-max-width="120"><col data-column-type="short" data-max-width="120"><col data-column-type="long"><col data-column-type="money"><col data-column-type="money">
           </colgroup>
           <thead>
             <tr>
-              <th class="select-col"><input class="fee-detail-select-all" type="checkbox" ${allSelectableChecked ? "checked" : ""} ${selectableRows.length ? "" : "disabled"} title="全选当前可按规则更新的费用明细"></th>${rowIndexHeader()}
+              ${rowIndexHeader()}
               <th>学生姓名</th><th>授课老师</th><th>日期</th><th>星期</th><th>时间</th><th>教室</th><th>状态</th><th>年级</th><th>科目</th><th class="wide note-head">备注</th><th>单人费用</th><th>规则费用</th>
             </tr>
           </thead>
           <tbody>
-            ${visibleRows.slice(0, 36).map(feeDetailRowMarkup).join("") || `<tr><td colspan="14" class="empty">暂无费用明细</td></tr>`}
+            ${visibleRows.slice(0, 36).map(feeDetailRowMarkup).join("") || `<tr><td colspan="13" class="empty">暂无费用明细</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>
   `;
   const table = contentEl.querySelector('.fee-detail-table');
-  table.addEventListener('change', event => {
-    const input = event.target;
-    if (input.matches('.fee-detail-select-row')) {
-      const key = `${input.dataset.lessonId}\u0001${input.dataset.studentName}`;
-      if (input.checked) selectedFeeDetailKeys.add(key); else selectedFeeDetailKeys.delete(key);
-      render();
-    }
-    if (input.matches('.fee-override')) refreshAfter(() => request('/api/fee-overrides', {method:'POST',body:{lesson_id:Number(input.dataset.lessonId),student_name:input.dataset.studentName,unit_price:input.value}}));
-  });
   appendProgressiveRows(table, visibleRows, feeDetailRowMarkup, 36);
 }
 
@@ -11670,7 +11673,6 @@ function renderStudentPricing() {
         <button class="btn clear-student-pricing-selection" type="button" ${selectedStudentPricingIds.size ? "" : "disabled"}>清空选择</button>
         <button class="btn primary open-student-pricing-batch-modal" type="button" ${selectedStudentPricingIds.size && canWriteData() ? "" : "disabled"}>批量设置单价</button>
       </div>
-      <p class="muted-tip">类型、起止日期、节数及行点击明细：全历史已上课程；精确匹配学生、年级、科目与学生集合。</p>
       <div id="student-pricing-table-wrap" class="table-wrap smooth-table-wrap">
         <table class="student-pricing-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-source="student-pricing" data-adaptive-natural="true" data-initial-row-count="${initialRows.length}" data-rendered-rows="${initialRows.length}" ${initialRows.length === visibleRows.length ? 'data-render-complete="true"' : ""}>
           <colgroup><col data-column-type="select">${rowIndexColumn()}<col data-column-type="name" data-min-width="0"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="short" data-min-width="0" data-max-width="120"><col data-column-type="full" data-min-width="0" data-alignment="center"><col data-column-type="students" data-min-width="0" data-max-width="360"><col data-column-type="date"><col data-column-type="date"><col data-column-type="short" data-min-width="0"><col data-column-type="money" data-min-width="0"><col data-column-type="status"><col data-column-type="note" data-max-width="480"></colgroup>
@@ -15277,7 +15279,7 @@ function ensureStudentPricingDelegatedEvents() {
       const rule = state.student_pricing.find(row => Number(row.id) === Number(ruleRow.dataset.ruleId));
       if (rule) request(`/api/student-pricing/${rule.id}/courses`, { cache: false }).then(result => {
         if (view !== 'studentPricing' || !auth.user) return;
-        CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, '<p class="muted-tip">全历史已上课程；单人费用包含特殊费用覆盖。</p>' + CourseDetails.table(result.lessons, { feeCells: row => `<td class="right">${formatMoney(row.unit_price)}</td>` }));
+        showStudentPricingCourses(rule, result);
       }).catch(error => showToast(error.message, 'error'));
       return;
     }
@@ -17841,45 +17843,6 @@ function wireEvents() {
     });
   });
 
-  document.querySelectorAll(".fee-detail-select-all").forEach((input) => {
-    input.addEventListener("change", () => {
-      const visibleRows = (state.derived.fee_details || [])
-        .filter((row) => feeDetailMatchesFilter(row))
-        .filter(canApplyStudentPricingRule);
-      for (const row of visibleRows) {
-        const key = feeDetailKey(row);
-        if (input.checked) selectedFeeDetailKeys.add(key);
-        else selectedFeeDetailKeys.delete(key);
-      }
-      render();
-    });
-  });
-
-  document.querySelectorAll(".apply-selected-student-pricing-rules").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (button.disabled) return;
-      const items = (state.derived.fee_details || [])
-        .filter((row) => selectedFeeDetailKeys.has(feeDetailKey(row)))
-        .filter(canApplyStudentPricingRule)
-        .map((row) => ({ lesson_id: row.lesson_id, student_name: row.student_name }));
-      if (!items.length) return;
-      if (!confirm(`将把所选 ${items.length} 条费用明细更新为当前学生单价规则费用。未勾选的数据不会修改。是否继续？`)) return;
-      button.disabled = true;
-      try {
-        const result = await request("/api/student-pricing/apply-selected", {
-          method: "POST",
-          body: { items },
-        });
-        selectedFeeDetailKeys = new Set();
-        await load();
-        alert(`已更新 ${result.updatedCount || 0} 条，跳过 ${result.skippedCount || 0} 条。`);
-      } catch (error) {
-        button.disabled = false;
-        alert(`按规则更新费用失败：${error.message}`);
-      }
-    });
-  });
-
   document.querySelectorAll("input.summary-filter-input").forEach((input) => {
     const applySummaryFilter = (value) => {
       const field = input.dataset.filterField;
@@ -18782,17 +18745,6 @@ function wireEvents() {
     button.addEventListener("click", () => {
       window.location.href = `/api/export/finance-summary.csv?${financeRangeQuery()}`;
     });
-  });
-
-  document.querySelectorAll(".fee-override:not(.fee-detail-table .fee-override)").forEach((input) => {
-    input.addEventListener("change", () => refreshAfter(() => request("/api/fee-overrides", {
-      method: "POST",
-      body: {
-        lesson_id: Number(input.dataset.lessonId),
-        student_name: input.dataset.studentName,
-        unit_price: input.value,
-      },
-    })));
   });
 
   document.querySelectorAll(".recharge-field").forEach((input) => {

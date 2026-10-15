@@ -349,3 +349,67 @@ test('scored months and legacy unscored months allocate independently with salar
   await post('2026-10-01',{coefficient:.73});
   const october=(await api('/api/bootstrap?month=2026-10-01')).payload.derived.teacher_summary.find(row=>row.teacher_name==='合成教师');assert.equal(october.performance_score,null);assert.equal(october.total_salary,229.2);
 });
+
+
+test('fee entry migration validates exact identities, cents, scopes and preserves rule/other-student amounts', async () => {
+  const details = (await api('/api/student-pricing/9101/courses')).payload;
+  assert.equal(details.student_name,'张三'); assert.equal(details.can_edit_fee,true);
+  const month=details.lessons[0].date.slice(0,7)+'-01';
+  const id=details.lessons[0].id, db=new DatabaseSync(databasePath);
+  const rule=db.prepare('SELECT * FROM student_pricing WHERE id=9101').get();
+  const otherBefore=db.prepare('SELECT * FROM fee_overrides WHERE lesson_id=? AND student_name=?').get(id,'李四');
+  const write=(value,student='张三',cookie=ownerCookie)=>api('/api/fee-overrides',{method:'POST',cookie,body:{lesson_id:id,student_name:student,unit_price:value}});
+  try {
+    for(const value of [0,220.25,10000]) { const saved=await write(value);assert.equal(saved.response.status,200,JSON.stringify(saved.payload));assert.equal(saved.payload.unit_price,value);assert.equal((await api('/api/student-pricing/9101/courses')).payload.lessons.find(row=>row.id===id).unit_price,value); }
+    for(const value of [-1,10000.01,'NaN','abc',0.001,true,' ']) assert.equal((await write(value)).response.status,400,String(value));
+    assert.equal((await write(220,'张')).response.status,404);
+    assert.equal((await write(220,'张三',teacherCookie)).response.status,403);
+    assert.deepEqual(db.prepare('SELECT * FROM student_pricing WHERE id=9101').get(),rule);
+    assert.deepEqual(db.prepare('SELECT * FROM fee_overrides WHERE lesson_id=? AND student_name=?').get(id,'李四'),otherBefore);
+    assert.equal((await api('/api/student-pricing/9101/courses',{cookie:teacherCookie})).payload.can_edit_fee,false);
+    const beforeSummary=(await api('/api/bootstrap?month='+month)).payload.derived.student_summary.find(row=>row.student_name==='张三');
+    await write(220);
+    const fee=(await api('/api/fee-details-page?month='+month)).payload.fee_details.find(row=>row.lesson_id===id&&row.student_name==='张三');
+    assert.equal(fee.unit_price,220);
+    const boot=(await api('/api/bootstrap?month='+month)).payload;
+    assert.equal(boot.derived.fee_details.find(row=>row.lesson_id===id&&row.student_name==='张三').unit_price,220);
+    const afterSummary=boot.derived.student_summary.find(row=>row.student_name==='张三');
+    assert.equal(beforeSummary.total_fee-afterSummary.total_fee,9780);
+    assert.equal(afterSummary.actual_balance+afterSummary.gift_balance-beforeSummary.actual_balance-beforeSummary.gift_balance,9780);
+    const {buildFullDataBuffer,restoreFullData}=require('../src/excel/full_backup');
+    const file=path.join(tempRoot,'fee-migration.xlsx'),target=path.join(tempRoot,'fee-migration-restore.sqlite');
+    fs.writeFileSync(file,buildFullDataBuffer(db).buffer);fs.copyFileSync(databasePath,target);restoreFullData({dbPath:target,inputPath:file});
+    const restored=new DatabaseSync(target);try {assert.deepEqual(restored.prepare('SELECT lesson_id,student_name,unit_price FROM fee_overrides ORDER BY lesson_id,student_name').all(),db.prepare('SELECT lesson_id,student_name,unit_price FROM fee_overrides ORDER BY lesson_id,student_name').all());}finally{restored.close();}
+  }finally {db.close();}
+});
+
+test('Chromium fee modal saves locally, cancels and rolls back errors at five widths; details stay readonly', async()=>{
+  const chrome=await launchChrome(path.join(tempRoot,'fee-migration-chrome')), browser=chrome.session;
+  try {
+    await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
+    await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");
+    await browser.waitFor("!!document.querySelector('.student-pricing-rule-row[data-rule-id=\"9101\"]')");
+    await browser.click('.student-pricing-rule-row[data-rule-id="9101"] td.row-index');
+    await browser.waitFor("!!document.querySelector('.pricing-course-fee-edit')");
+    for(const width of [1920,1440,1280,1024,390]) {
+      await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
+      assert.ok(await browser.evaluate("(()=>{const p=document.querySelector('.shared-course-dialog .modal-panel').getBoundingClientRect();return document.documentElement.scrollWidth<=innerWidth&&Math.abs((p.left+p.right)/2-innerWidth/2)<2;})()"));
+    }
+    await browser.click('.pricing-course-fee-edit');
+    assert.ok(await browser.evaluate("(()=>{const cell=document.querySelector('.pricing-course-fee-input').closest('td');return cell.scrollWidth<=cell.clientWidth+1;})()"),'fee editor must fit its cell');
+    await browser.evaluate("document.querySelector('.pricing-course-fee-input').value='0'");
+    await browser.click('.pricing-course-fee-save');
+    await browser.waitFor("!!document.querySelector('.pricing-course-fee-edit')&&!document.querySelector('.pricing-course-fee-input')");
+    assert.match(await browser.evaluate("document.querySelector('.pricing-course-fee-edit').textContent"),/0.00/);
+    await browser.click('.pricing-course-fee-edit');await browser.evaluate("document.querySelector('.pricing-course-fee-input').value='99'");await browser.click('.pricing-course-fee-cancel');
+    assert.match(await browser.evaluate("document.querySelector('.pricing-course-fee-edit').textContent"),/0.00/);
+    await browser.evaluate("window.realFeeRequest=request;request=(path,options)=>path==='/api/fee-overrides'?Promise.reject(new Error('合成保存失败')):realFeeRequest(path,options)");
+    await browser.click('.pricing-course-fee-edit');await browser.evaluate("document.querySelector('.pricing-course-fee-input').value='99'");await browser.click('.pricing-course-fee-save');
+    await browser.waitFor("!!document.querySelector('.pricing-course-fee-edit')&&!document.querySelector('.pricing-course-fee-input')");
+    assert.match(await browser.evaluate("document.querySelector('.pricing-course-fee-edit').textContent"),/0.00/);
+    await browser.evaluate("request=realFeeRequest");await browser.click('.shared-course-dialog .dialog-close');
+    await browser.evaluate("setActiveView('feeDetails');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.fee-detail-table')");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.fee-override,.fee-detail-select-row,.fee-detail-select-all,.apply-selected-student-pricing-rules').length"),0);
+    assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
+  } finally {await browser.close();if(chrome.child.exitCode==null)chrome.child.kill();}
+});

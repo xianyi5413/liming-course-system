@@ -64,7 +64,7 @@ async function show(browser, page) {
   if(page==='teacherSalaryRules') await browser.waitFor('teacherSalaryRuleCandidateSync.requested && !teacherSalaryRuleCandidateSync.busy');
 }
 const pages = [
-  ['summary','.student-summary-table',0], ['feeDetails','.fee-detail-table',1],
+  ['summary','.student-summary-table',0], ['feeDetails','.fee-detail-table',0],
   ['recharges','.recharge-table',1], ['openingBalances','.opening-balance-table',1],
   ['studentQuery','.student-query-detail-table',0], ['studentPricing','.student-pricing-table',1],
   ['classGroups','.class-group-table',0], ['studentProfiles','.student-profile-table',1],
@@ -105,7 +105,7 @@ test('thirteen pages use continuous display indexes and keep responsive sticky t
 test('filters, history, teacher changes and real recharge deletion regenerate display order',async()=>browserRun(async browser=>{
   const filters=[
     ['summary','.student-summary-table',0,"summaryFilter={...summaryFilter,grade:'高二'};"],
-    ['feeDetails','.fee-detail-table',1,"feeDetailsFilter={...feeDetailsFilter,grade:'高二'};"],
+    ['feeDetails','.fee-detail-table',0,"feeDetailsFilter={...feeDetailsFilter,grade:'高二'};"],
     ['recharges','.recharge-table',1,"rechargeStudentFilter='合成学生乙';"],
     ['openingBalances','.opening-balance-table',1,"openingBalanceFilter={...openingBalanceFilter,student:'合成学生乙'};"],
     ['studentPricing','.student-pricing-table',1,"studentPricingFilter={...studentPricingFilter,student:'合成学生乙'};"],

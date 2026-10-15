@@ -145,6 +145,8 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     for(const width of [1920,1440,1280,1024,390]){
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       const layout=await browser.evaluate("(()=>{const children=[...document.querySelector('.salary-editor-controls').children].map(x=>x.getBoundingClientRect().bottom);return {children,overflow:document.documentElement.scrollWidth>innerWidth}})()");
+      const columns=await browser.evaluate("(()=>{const table=document.querySelector('.salary-formula-table');applyAdaptiveTableColumns({table});return {widths:[...table.querySelectorAll('col')].map(c=>parseFloat(c.style.width)),fit:[...table.querySelectorAll('input')].every(i=>i.clientWidth>=30&&i.scrollWidth<=i.clientWidth+1)};})()");
+      assert.ok(columns.widths.slice(1,4).every(w=>w<=120),JSON.stringify(columns));assert.ok(columns.fit,JSON.stringify(columns));
       assert.equal(layout.overflow,false,JSON.stringify({width,layout}));if(width>=1280)assert.ok(Math.max(...layout.children)-Math.min(...layout.children)<3,JSON.stringify(layout));
     }
     await browser.send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});

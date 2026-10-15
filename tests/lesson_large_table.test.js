@@ -26,6 +26,32 @@ test('500/2000/6000 lessons retain full-result selection, pagination, editing an
       assert.equal(await browser.evaluate("document.querySelectorAll('.floating-multi-select-menu').length"),0);
 
     });
+    await t.test('inline editors are exclusive in both directions and paging information is right aligned', async () => {
+      await browser.evaluate('scheduleMode=false;lessonPage=1;reRenderLessonsTbody();');
+      assert.equal(await browser.evaluate("document.querySelectorAll('#lessons-tbody .schedule-student-popover,#lessons-tbody [data-lesson-edit-trigger]').length"),0);
+      await browser.evaluate('scheduleMode=true;reRenderLessonsTbody();');
+      for (const field of ['subject','grade','teacher_name','time_slot','classroom','status']) {
+        await browser.click('#lessons-tbody .schedule-student-popover .multi-select-toggle');
+        await browser.click(`#lessons-tbody [data-field="${field}"][data-lesson-edit-trigger]`);
+        assert.equal(await browser.evaluate("document.querySelectorAll('.floating-multi-select-menu').length"),0);
+        assert.equal(await browser.evaluate('Boolean(activeScheduleInlinePicker)'),true);
+        await browser.click('#lessons-tbody .schedule-student-popover .multi-select-toggle');
+        assert.equal(await browser.evaluate('Boolean(activeScheduleInlinePicker)'),false);
+        assert.equal(await browser.evaluate("document.querySelectorAll('.floating-multi-select-menu').length"),1);
+        await browser.evaluate('closeOpenMultiSelectMenus()');
+      }
+      await browser.click('#lessons-tbody [data-field="subject"][data-lesson-edit-trigger]');
+      await browser.evaluate("document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}))");
+      assert.equal(await browser.evaluate('Boolean(activeScheduleInlinePicker)'),false);
+      await browser.click('#lessons-tbody [data-field="subject"][data-lesson-edit-trigger]');
+      await browser.evaluate("document.body.click()");
+      assert.equal(await browser.evaluate('Boolean(activeScheduleInlinePicker)'),false);
+      await browser.click('#lessons-tbody [data-field="subject"][data-lesson-edit-trigger]');
+      await browser.evaluate("setActiveView('dashboard');render();setActiveView('lessons');render()");
+      assert.equal(await browser.evaluate('Boolean(activeScheduleInlinePicker)'),false);
+      const footer=await browser.evaluate("({text:document.querySelector('.lesson-pagination').textContent,align:getComputedStyle(document.querySelector('.lesson-pagination')).justifyContent})");
+      assert.match(footer.text,/共6000节，显示1–100节/);assert.doesNotMatch(footer.text,/全选作用/);assert.equal(footer.align,'flex-end');
+    });
     await t.test('both modes, long sets, bounded notes, sticky headers and outer scroll at five widths', async () => {
       for (const width of [1920,1440,1280,1024,390]) {
         await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
@@ -46,6 +72,7 @@ test('500/2000/6000 lessons retain full-result selection, pagination, editing an
       await browser.click('.lesson-filter-region .multi-select[data-field="student_names"] .multi-select-toggle');
       assert.ok(await browser.evaluate(`(()=>{const owner=document.querySelector('.lesson-filter-region .multi-select[data-field="student_names"]');const input=multiSelectMenuFor(owner).querySelector('.multi-select-search');input.value='测试学生19';input.dispatchEvent(new Event('input',{bubbles:true}));return owner.classList.contains('open')&&document.activeElement===input;})()`));
       await browser.waitFor(`(()=>{const menu=multiSelectMenuFor(document.querySelector('.lesson-filter-region .multi-select[data-field="student_names"]'));return menu.querySelectorAll('.multi-select-option').length===1&&menu.querySelector('.multi-select-option').dataset.value==='测试学生19';})()`);
+      await browser.send('Page.bringToFront');
       await browser.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
       await browser.evaluate(`(()=>{for(const grade of ['初一','高一']){const input=document.querySelector('.lesson-filter-region .multi-select[data-field="grade"] .multi-select-value');input.value=grade;input.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
       await browser.waitFor(`visibleLessonRows().length===3000&&[...document.querySelectorAll('#lessons-tbody tr[data-row-id]')].every(r=>r.querySelector('.col-grade').textContent==='高一')`);

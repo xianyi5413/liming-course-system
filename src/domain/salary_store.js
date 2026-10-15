@@ -100,7 +100,7 @@ function createSalaryStore(db, { minutes, legacyRule, eligible }) {
     return {
       teacher_base_salary: !eligible(lesson) ? 0 : base.cents == null ? null : base.cents / 100,
       teacher_base_salary_source: base.source,
-      teacher_base_salary_display_source: base.cents != null && (rule?.matched || legacy?.calculation) && base.cents === (rule?.matched ? rule.base_cents : W.Formula.cents(legacy.calculation.salary)) ? 'auto' : base.source,
+      teacher_base_salary_display_source: base.source,
       salary_table_id: table?.id ?? null,
       salary_rule_expression: rule ? (rule.matched ? rule.expression : '无规则') : (legacy?.calculation ? String(legacy.calculation.salary) : '无规则'),
       salary_rule_reason: rule?.reason || legacy?.reason || '',

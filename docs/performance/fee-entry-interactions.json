@@ -1,0 +1,69 @@
+﻿{
+    "version":  "20261015-fee-entry-interactions",
+    "source":  "Final serial regression; synthetic Chromium data",
+    "measurements":  [
+                         {
+                             "count":  500,
+                             "syncMs":  46.900000005960464,
+                             "initialRows":  100,
+                             "filterSyncMs":  107.7999999821186,
+                             "filterAndMenuMs":  150.19999998807907,
+                             "filteredRows":  333,
+                             "remainingRenderMs":  121.24860000000035,
+                             "menus":  {
+                                           "teacher_names":  24.5,
+                                           "student_names":  22.900000005960464
+                                       },
+                             "nodes":  5218,
+                             "longestTask":  72,
+                             "rows":  100,
+                             "LayoutCount":  7,
+                             "RecalcStyleCount":  13,
+                             "LayoutDuration":  0.054253,
+                             "RecalcStyleDuration":  0.044673,
+                             "TaskDuration":  0.235054
+                         },
+                         {
+                             "count":  2000,
+                             "syncMs":  109.40000000596046,
+                             "initialRows":  100,
+                             "filterSyncMs":  201.7000000178814,
+                             "filterAndMenuMs":  258.80000001192093,
+                             "filteredRows":  1332,
+                             "remainingRenderMs":  80.3744999999999,
+                             "menus":  {
+                                           "teacher_names":  12.299999982118607,
+                                           "student_names":  29.200000017881393
+                                       },
+                             "nodes":  5218,
+                             "longestTask":  78,
+                             "rows":  100,
+                             "LayoutCount":  7,
+                             "RecalcStyleCount":  13,
+                             "LayoutDuration":  0.031215999999999994,
+                             "RecalcStyleDuration":  0.033858,
+                             "TaskDuration":  0.22229899999999997
+                         },
+                         {
+                             "count":  6000,
+                             "syncMs":  345.59999999403954,
+                             "initialRows":  100,
+                             "filterSyncMs":  302.09999999403954,
+                             "filterAndMenuMs":  342.7000000178814,
+                             "filteredRows":  4000,
+                             "remainingRenderMs":  128.20379999999932,
+                             "menus":  {
+                                           "teacher_names":  26.299999982118607,
+                                           "student_names":  23.5
+                                       },
+                             "nodes":  5218,
+                             "longestTask":  127,
+                             "rows":  100,
+                             "LayoutCount":  7,
+                             "RecalcStyleCount":  13,
+                             "LayoutDuration":  0.043290999999999996,
+                             "RecalcStyleDuration":  0.05362,
+                             "TaskDuration":  0.536561
+                         }
+                     ]
+}

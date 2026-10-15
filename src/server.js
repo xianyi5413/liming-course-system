@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261015-singleline-lesson-performance";
+const APP_VERSION = process.env.APP_VERSION || "20261015-fee-entry-interactions";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -7237,7 +7237,7 @@ function classGroupRows(user = null) {
     SalaryWorkflow.addClassLesson(group, lesson);
   }
   // Name metadata stays persisted, but the management view contains actual course groups only.
-  return [...groups.values()];
+  return [...groups.values()].sort(SalaryWorkflow.compareClasses);
 }
 
 function classGroupLookupMap() {
@@ -12939,7 +12939,7 @@ async function handleApi(req, res, url) {
       student_names: row.student_names, notes: row.notes,
       unit_price: unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade, studentCount: splitStudents(row.student_names).length, lessonId: row.id, status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups).unit_price,
     }));
-    return sendJson(res, { rule_id: rule.id, scope: "全历史已上课程", lessons });
+    return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: "全历史已上课程", lessons });
   }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
     const monthKey = resolveMonthKey(url);
@@ -15005,9 +15005,14 @@ async function handleApi(req, res, url) {
     const lessonId = Number(body.lesson_id);
     const studentName = text(body.student_name);
     if (!lessonId || !studentName) return sendError(res, 400, "lesson_id and student_name are required");
-    const unitPrice = num(body.unit_price);
-    if (body.unit_price !== "" && body.unit_price != null && unitPrice < 0) return sendError(res, 400, "单价不能为负数");
-    if (body.unit_price !== "" && body.unit_price != null && unitPrice > 10000) return sendError(res, 400, "单价超出合理范围");
+    const lesson = get("SELECT * FROM lessons WHERE id=?", [lessonId]);
+    if (!lesson || !splitStudents(lesson.student_names).includes(studentName)) return sendError(res, 404, "课程或学生不存在");
+    if (!studentPricingScopedLessons([lesson], user).length || !filterLessonsByRolePrefilter([lesson], user, "feeDetails").length) return sendError(res, 403, "课程不在可修改范围内");
+    const empty = body.unit_price === "" || body.unit_price == null;
+    const unitPrice = empty ? null : Number(body.unit_price);
+    if (!empty && (!["number", "string"].includes(typeof body.unit_price) || String(body.unit_price).trim() === "" || !Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 10000 || Math.abs(unitPrice * 100 - Math.round(unitPrice * 100)) > 0.000001)) return sendError(res, 400, "单价须为0至10000元且最多两位小数");
+    const actualPrice = () => unitPriceFor({studentName, subject:lesson.subject, grade:lesson.grade, studentCount:splitStudents(lesson.student_names).length, lessonId, status:deriveStatus(lesson, new Set(courseStatusValues())), studentNames:normalizedStudents(lesson.student_names)});
+    const previousPrice = actualPrice().unit_price;
     const before = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     if (body.unit_price === "" || body.unit_price == null) {
       db.prepare("DELETE FROM fee_overrides WHERE lesson_id = ? AND student_name = ?").run(lessonId, studentName);
@@ -15022,8 +15027,8 @@ async function handleApi(req, res, url) {
     }
     const after = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
-    writeOperationLog(user, { operation_type: after ? "修改学生课次费用" : "删除学生课次费用", operation_content: `课程ID ${lessonId} ${studentName} ${after ? `¥${after.unit_price}` : ""}`, target_type: "fee_overrides", target_id: `${lessonId}|${studentName}` });
-    return sendJson(res, { ok: true });
+    writeOperationLog(user, { operation_type: after ? "修改学生课次费用" : "删除学生课次费用", operation_content: `课程ID ${lessonId} ${studentName}：${previousPrice} → ${actualPrice().unit_price}`, target_type: "fee_overrides", target_id: `${lessonId}|${studentName}` });
+    return sendJson(res, { ok: true, lesson_id: lessonId, student_name: studentName, ...actualPrice() });
   }
 
   if (req.method === "PATCH" && url.pathname === "/api/teacher-salary-notes") {
