@@ -1,0 +1,251 @@
+{
+  "before": {
+    "student-pricing-server-performance": [
+      {
+        "rows": 1000,
+        "students": 500,
+        "cold_ms": 61.8,
+        "hot_ms": 10.7,
+        "bytes": 360227,
+        "cold_queries": 6,
+        "hot_queries": 0
+      }
+    ],
+    "student-pricing-browser-performance": [
+      {
+        "operable_ms": 184.8,
+        "all_data_ms": 1717.5,
+        "second_entry_ms": 147.1,
+        "filter_ms": 121.8,
+        "clear_first_screen_ms": 149.1,
+        "initial_rows": 36,
+        "first_dom_nodes": 6957,
+        "adaptive_ms": 20.7,
+        "layout_reads": 0,
+        "max_long_task_ms": 134,
+        "viewports": [
+          {
+            "width": 1440,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 1280,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 1024,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 390,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          }
+        ]
+      }
+    ],
+    "lesson-benchmark": [
+      {
+        "count": 500,
+        "syncMs": 37.20000001788139,
+        "initialRows": 100,
+        "filterSyncMs": 83.10000002384186,
+        "filterAndMenuMs": 108.60000002384186,
+        "filteredRows": 333,
+        "remainingRenderMs": 77.18769999999995,
+        "menus": {
+          "teacher_names": 10,
+          "student_names": 23.5
+        },
+        "nodes": 5218,
+        "longestTask": 76,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.031192,
+        "RecalcStyleDuration": 0.033128,
+        "TaskDuration": 0.151141
+      },
+      {
+        "count": 2000,
+        "syncMs": 93.7000000178814,
+        "initialRows": 100,
+        "filterSyncMs": 128.40000000596046,
+        "filterAndMenuMs": 159.40000000596046,
+        "filteredRows": 1332,
+        "remainingRenderMs": 67.69160000000011,
+        "menus": {
+          "teacher_names": 14.699999988079071,
+          "student_names": 29.099999994039536
+        },
+        "nodes": 5218,
+        "longestTask": 67,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.026197999999999992,
+        "RecalcStyleDuration": 0.031953,
+        "TaskDuration": 0.191365
+      },
+      {
+        "count": 6000,
+        "syncMs": 213.40000000596046,
+        "initialRows": 100,
+        "filterSyncMs": 442.59999999403954,
+        "filterAndMenuMs": 490.2999999821186,
+        "filteredRows": 4000,
+        "remainingRenderMs": 83.03759999999966,
+        "menus": {
+          "teacher_names": 26,
+          "student_names": 27.599999994039536
+        },
+        "nodes": 5218,
+        "longestTask": 76,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.02686899999999999,
+        "RecalcStyleDuration": 0.02992700000000001,
+        "TaskDuration": 0.34212999999999993
+      }
+    ]
+  },
+  "after": {
+    "student-pricing-server-performance": [
+      {
+        "rows": 1000,
+        "students": 500,
+        "cold_ms": 62,
+        "hot_ms": 9.3,
+        "bytes": 360227,
+        "cold_queries": 6,
+        "hot_queries": 0
+      }
+    ],
+    "student-pricing-browser-performance": [
+      {
+        "operable_ms": 178.4,
+        "all_data_ms": 1422.7,
+        "second_entry_ms": 103.5,
+        "filter_ms": 82.7,
+        "clear_first_screen_ms": 81.2,
+        "initial_rows": 36,
+        "first_dom_nodes": 6738,
+        "adaptive_ms": 21,
+        "layout_reads": 0,
+        "max_long_task_ms": 109,
+        "viewports": [
+          {
+            "width": 1440,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 1280,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 1024,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          },
+          {
+            "width": 390,
+            "pageOverflow": false,
+            "outerOverflow": "auto",
+            "layoutReads": 0
+          }
+        ]
+      }
+    ],
+    "lesson-benchmark": [
+      {
+        "count": 500,
+        "syncMs": 67.69999998807907,
+        "initialRows": 100,
+        "filterSyncMs": 107.20000004768372,
+        "filterAndMenuMs": 155,
+        "filteredRows": 333,
+        "remainingRenderMs": 98.25540000000001,
+        "menus": {
+          "teacher_names": 18.899999976158142,
+          "student_names": 28.200000047683716
+        },
+        "nodes": 5218,
+        "longestTask": 96,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.037415,
+        "RecalcStyleDuration": 0.045235,
+        "TaskDuration": 0.20831
+      },
+      {
+        "count": 2000,
+        "syncMs": 115.80000001192093,
+        "initialRows": 100,
+        "filterSyncMs": 172.5,
+        "filterAndMenuMs": 226.89999997615814,
+        "filteredRows": 1332,
+        "remainingRenderMs": 74.47890000000007,
+        "menus": {
+          "teacher_names": 11.699999988079071,
+          "student_names": 26.5
+        },
+        "nodes": 5218,
+        "longestTask": 73,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.029896000000000006,
+        "RecalcStyleDuration": 0.03304699999999999,
+        "TaskDuration": 0.22287999999999997
+      },
+      {
+        "count": 6000,
+        "syncMs": 250.10000002384186,
+        "initialRows": 100,
+        "filterSyncMs": 269.80000001192093,
+        "filterAndMenuMs": 309.5999999642372,
+        "filteredRows": 4000,
+        "remainingRenderMs": 103.82750000000033,
+        "menus": {
+          "teacher_names": 27.400000035762787,
+          "student_names": 29.100000023841858
+        },
+        "nodes": 5218,
+        "longestTask": 103,
+        "rows": 100,
+        "LayoutCount": 7,
+        "RecalcStyleCount": 13,
+        "LayoutDuration": 0.026860999999999996,
+        "RecalcStyleDuration": 0.044515,
+        "TaskDuration": 0.4048059999999999
+      }
+    ]
+  },
+  "notes": [
+    "相同1000条单价规则合成夹具；真实Chromium、临时SQLite；单次本机测量，不代表稳定性能保证。",
+    "规则费用复用每次明细请求的批量收费映射，不逐行查询。读取次数不包含候选规则在事务内的INSERT。",
+    "大课程量基线来自上一轮已提交的course-backed-lists.json，不是本轮同时段重复采样。"
+  ],
+  "validation": {
+    "completed_at": "2026-10-16 02:44:41 +08:00",
+    "timezone": "Asia/Shanghai",
+    "passed": 505,
+    "failed": 0,
+    "skipped": 0,
+    "duration_ms": 650013.157
+  }
+}

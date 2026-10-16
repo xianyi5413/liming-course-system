@@ -188,7 +188,7 @@ test('student pricing exact full-history completed matches, stored mixed types, 
     const rule=page.rules.find(row=>row.id===9101), empty=page.rules.find(row=>row.id===9102);
     assert.equal(rule.total_lessons,2);assert.equal(rule.current_month_lessons,0);
     assert.equal(rule.start_date,'2026-09-01');assert.equal(rule.end_date,'2026-09-02');
-    assert.deepEqual(rule.course_types,['1V2','小班课']);assert.equal(empty.total_lessons,0);assert.equal(empty.start_date,'');assert.deepEqual(empty.course_types,[]);
+    assert.deepEqual(rule.course_types,['1V2','小班课']);assert.equal(empty,undefined);assert.equal(db.prepare('SELECT custom_price FROM student_pricing WHERE id=9102').get().custom_price,150);
     const detail=await api('/api/student-pricing/9101/courses');assert.equal(detail.response.status,200);
     assert.deepEqual(detail.payload.lessons.map(row=>row.id),[9001,9002]);
     assert.deepEqual(detail.payload.lessons.map(row=>row.unit_price),[350,135]);
@@ -252,6 +252,7 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
       for(const page of ['recharges','studentPricing','studentProfiles','teacherProfiles','teacherDetail']) {
         await show(page);
         if(page==='teacherDetail') {await browser.evaluate("selectedTeacherDetail='合成教师';SalaryUI.applyRange('teacher-detail-salary','2026-09-01','2026-09-30')");await browser.waitFor("document.querySelectorAll('[data-salary-class]').length===1");}
+        await browser.waitFor("[...document.querySelectorAll('#content table[data-adaptive-table]')].every(table=>table.dataset.adaptiveWidths)");
         const layout=await browser.evaluate(`({page:document.documentElement.scrollWidth,width:innerWidth,tables:[...document.querySelectorAll('#content table[data-adaptive-table]')].map(table=>({natural:table.dataset.adaptiveNatural,cols:table.querySelectorAll('col').length,headers:table.querySelectorAll('thead tr:first-child th').length,widths:table.dataset.adaptiveWidths,scroll:table.closest('.table-wrap')?.scrollWidth}))})`);
         assert.ok(layout.page<=layout.width+1,`${page}/${width} page overflow: ${JSON.stringify(layout)}`);
         assert.ok(layout.tables.length);for(const table of layout.tables){assert.equal(table.natural,'true');assert.equal(table.cols,table.headers);assert.ok(table.widths);}
@@ -266,10 +267,10 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
     }
     await browser.send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await show('studentPricing');
-    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers.slice(1),['序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','节数','单价','价格状态','备注']);
+    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers.slice(1),['序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','节数','规则费用','备注']);
     await browser.click('.student-pricing-rule-row[data-rule-id="9101"] .student-pricing-select-row');assert.equal(await browser.evaluate("document.querySelectorAll('.shared-course-dialog').length"),0);
     await browser.click('.student-pricing-rule-row[data-rule-id="9101"] td:nth-child(3)');await browser.waitFor("document.querySelectorAll('.course-details-table tbody tr').length===2");
-    assert.match(await browser.evaluate("document.querySelector('.shared-course-dialog').textContent"),/单人费用/);await browser.click('.dialog-close');
+    assert.match(await browser.evaluate("document.querySelector('.shared-course-dialog').textContent"),/实际费用.*规则费用/);await browser.click('.dialog-close');
     await show('studentProfiles');
     assert.equal(await browser.evaluate("[...document.querySelectorAll('[data-field=guardian]')].every(e=>e.value===''&&e.placeholder==='-')"),true);
     await browser.evaluate("(()=>{const e=document.querySelector('.student-profile-main-row [data-field=guardian]');e.value='合成家长';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
@@ -369,7 +370,7 @@ test('fee entry migration validates exact identities, cents, scopes and preserve
     assert.equal((await api('/api/student-pricing/9101/courses',{cookie:teacherCookie})).payload.can_edit_fee,false);
     const beforeSummary=(await api('/api/bootstrap?month='+month)).payload.derived.student_summary.find(row=>row.student_name==='张三');
     await write(220);
-    const fee=(await api('/api/fee-details-page?month='+month)).payload.fee_details.find(row=>row.lesson_id===id&&row.student_name==='张三');
+    const fee=(await api('/api/bootstrap?month='+month)).payload.derived.fee_details.find(row=>row.lesson_id===id&&row.student_name==='张三');
     assert.equal(fee.unit_price,220);
     const boot=(await api('/api/bootstrap?month='+month)).payload;
     assert.equal(boot.derived.fee_details.find(row=>row.lesson_id===id&&row.student_name==='张三').unit_price,220);
@@ -408,7 +409,7 @@ test('Chromium fee modal saves locally, cancels and rolls back errors at five wi
     await browser.waitFor("!!document.querySelector('.pricing-course-fee-edit')&&!document.querySelector('.pricing-course-fee-input')");
     assert.match(await browser.evaluate("document.querySelector('.pricing-course-fee-edit').textContent"),/0.00/);
     await browser.evaluate("request=realFeeRequest");await browser.click('.shared-course-dialog .dialog-close');
-    await browser.evaluate("setActiveView('feeDetails');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.fee-detail-table')");
+    await browser.evaluate("setActiveView('feeDetails');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-summary-table')");
     assert.equal(await browser.evaluate("document.querySelectorAll('.fee-override,.fee-detail-select-row,.fee-detail-select-all,.apply-selected-student-pricing-rules').length"),0);
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
   } finally {await browser.close();if(chrome.child.exitCode==null)chrome.child.kill();}

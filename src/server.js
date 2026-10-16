@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261015-fee-entry-interactions";
+const APP_VERSION = process.env.APP_VERSION || "20261016-student-query-pricing";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -148,7 +148,6 @@ const PERMISSION_TREE = [
     label: "学生",
     children: [
       { key: "summary", label: "费用汇总" },
-      { key: "feeDetails", label: "费用明细" },
       { key: "recharges", label: "充值记录" },
       { key: "openingBalances", label: "期初余额" },
       { key: "studentQuery", label: "学生查询" },
@@ -206,7 +205,6 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "weekMatrix",
   "courseNotice",
   "teacherCourseNotice",
-  "feeDetails",
   "summary",
   "recharges",
   "openingBalances",
@@ -1552,7 +1550,7 @@ function isSuperRole(role) {
 }
 
 function permissionKeySet() {
-  return new Set(PAGE_PERMISSION_KEYS);
+  return new Set([...PAGE_PERMISSION_KEYS, "feeDetails"]); // Legacy persisted financial permission; no page entry.
 }
 
 function normalizePermissionKeys(keys) {
@@ -2397,11 +2395,12 @@ function activeStudentPricingRuleForLesson({ studentName, grade, subject, studen
   `, [name, gradeValue, subjectValue]).find((rule) => normalizedStudents(rule.student_names) === studentNamesValue) || null;
 }
 
-function feePricingLookups(readRows = all) {
-  const feeOverrides = new Map(readRows("SELECT lesson_id, student_name, unit_price FROM fee_overrides")
+function feePricingLookups(readRows = all, studentName = "") {
+  const params = studentName ? [studentName] : [];
+  const feeOverrides = new Map(readRows("SELECT lesson_id, student_name, unit_price FROM fee_overrides" + (studentName ? " WHERE student_name=?" : ""), params)
     .map((row) => [`${Number(row.lesson_id)}\u0001${text(row.student_name)}`, row]));
   const studentPricingRules = new Map();
-  for (const row of readRows("SELECT * FROM student_pricing WHERE custom_price > 0 ORDER BY id DESC")) {
+  for (const row of readRows("SELECT * FROM student_pricing WHERE custom_price > 0" + (studentName ? " AND student_name=?" : "") + " ORDER BY id DESC", params)) {
     const key = studentPricingRuleKey(row);
     if (!studentPricingRules.has(key)) studentPricingRules.set(key, row);
   }
@@ -2440,6 +2439,8 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
     unit_price: currentPrice,
     source,
     rule_price: rule ? rulePrice : null,
+    // Comparison target only: changing a custom rule must not reprice settled lessons.
+    baseline_price: rule ? moneyRound(rulePrice) : standard ? moneyRound(standard.unit_price) : null,
     pricing_rule_id: rule ? Number(rule.id) : null,
   };
 }
@@ -2500,9 +2501,9 @@ function preserveLegacyStudentPricingFeeOverrides() {
   });
 }
 
-function syncStudentPricingCandidatesFromLessons() {
+function syncStudentPricingCandidatesFromLessons({ lessons = null, rules = null } = {}) {
   return withTransaction(() => {
-    const existingKeys = new Set(all("SELECT * FROM student_pricing").map((rule) => studentPricingRuleKey(rule)));
+    const existingKeys = new Set((rules || all("SELECT * FROM student_pricing")).map((rule) => studentPricingRuleKey(rule)));
     const seenLessonKeys = new Set();
     const skippedReasons = new Map();
     const insert = db.prepare(`
@@ -2514,7 +2515,7 @@ function syncStudentPricingCandidatesFromLessons() {
     let scannedLessonCount = 0;
     const createdRules = [];
 
-    for (const lesson of all(`
+    for (const lesson of lessons || all(`
       SELECT grade, subject, student_names
       FROM lessons
       ORDER BY grade, subject, student_names, id
@@ -2544,7 +2545,7 @@ function syncStudentPricingCandidatesFromLessons() {
           continue;
         }
         const result = insert.run(studentName, grade, subject, studentNames);
-        const created = get("SELECT * FROM student_pricing WHERE id = ?", [Number(result.lastInsertRowid)]);
+        const created = { id: Number(result.lastInsertRowid), ...candidate, custom_price: 0, notes: "" };
         createdRules.push(created);
         existingKeys.add(key);
         createdCount += 1;
@@ -5676,7 +5677,7 @@ function dashboardTodos(monthKey, user, monthData = dashboardMonthData(monthKey,
     const missingPriceStudents = new Set(details.filter((row) => row.price_source === "pending").map((row) => row.student_name)).size;
     todos.push(
       { key: "debt_students", label: "欠费学生数", count: debtStudents, view: "summary", filter: { balance: "actual" } },
-      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "feeDetails", filter: { source: "pending" } },
+      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "studentPricing", filter: { price: "unset" } },
     );
   }
   if (role !== "teacher") {
@@ -6771,14 +6772,15 @@ function studentPricingLessonMatches(rule, lesson, knownStatuses = new Set(cours
     && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...lesson, student_name: rule.student_name });
 }
 
-function studentPricingRows(monthKey, metrics = null, user = null) {
+function studentPricingRows(monthKey, metrics = null, user = null, scope = null) {
   const readRows = (sql, params = []) => {
     if (metrics) metrics.sql_queries += 1;
     return all(sql, params);
   };
-  const lessons = studentPricingScopedLessons(readRows("SELECT id, date, time_slot, teacher_name, course_type, classroom, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY date, time_slot, id"), user);
-  const visibleRuleKeys = user && canonicalRole(user.role) === "teacher"
-    ? new Set(lessons.flatMap(lesson => splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name })))) : null;
+  const lessons = studentPricingScopedLessons(readRows("SELECT id, date, time_slot, teacher_name, course_type, classroom, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons" + (scope ? " WHERE date>=? AND date<=?" : "") + " ORDER BY date, time_slot, id", scope ? [scope.start, scope.end] : []), user).filter(row => !scope || splitStudents(row.student_names).includes(scope.student));
+  const names = scope ? [...new Set(lessons.flatMap(row => splitStudents(row.student_names)))] : [];
+  const storedRules = readRows("SELECT * FROM student_pricing" + (scope ? ` WHERE student_name IN (${names.map(() => "?").join(",") || "NULL"})` : "") + " ORDER BY id", names);
+  const { createdRules } = syncStudentPricingCandidatesFromLessons({ lessons, rules: storedRules });
   const matchesByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
   const knownStatuses = new Set(courseStatusValues());
@@ -6793,7 +6795,6 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
   };
   for (const lesson of lessons) {
     const effectiveStatus = deriveStatus(lesson, knownStatuses);
-    if (effectiveStatus !== "已上") continue;
     const { students, normalized: normalizedStudentNames } = parseStudentSet(lesson.student_names);
     for (const studentName of students) {
       const key = studentPricingRuleKey({
@@ -6802,12 +6803,13 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
         subject: lesson.subject,
         student_names: normalizedStudentNames,
       });
+      if (effectiveStatus !== "已上") continue;
       if (!matchesByRule.has(key)) matchesByRule.set(key, []);
       matchesByRule.get(key).push({ ...lesson, effective_status: effectiveStatus, normalized_student_names: normalizedStudentNames, student_count: students.length });
     }
   }
-  const pricingLookups = feePricingLookups(readRows);
-  const rows = readRows("SELECT * FROM student_pricing ORDER BY id").filter(isCompleteStudentPricingRule).filter(row => !visibleRuleKeys || visibleRuleKeys.has(studentPricingRuleKey(row))).map((row) => {
+  const pricingLookups = feePricingLookups(readRows, scope?.student);
+  const rows = [...storedRules, ...createdRules].filter(isCompleteStudentPricingRule).filter(row => !scope || row.student_name === scope.student).filter(row => matchesByRule.has(studentPricingRuleKey(row))).map((row) => {
     const studentName = text(row.student_name);
     const grade = text(row.grade);
     const subject = text(row.subject);
@@ -6830,6 +6832,7 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
       : 0;
     return {
       ...row,
+      rule_fee: unitPriceFor({ studentName, subject, grade, studentCount: splitStudents(studentNames).length, lessonId: matches[0]?.id, status: "已上", studentNames }, pricingLookups).baseline_price,
       grade,
       student_names: studentNames,
       lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"),
@@ -6852,6 +6855,14 @@ function studentPricingRows(monthKey, metrics = null, user = null) {
   ));
 }
 
+function studentPricingWriteScopeAllowed(url, ids, user) {
+  if (!url.searchParams.has('student')) return true;
+  const range = studentStatementRangeFromUrl(url), student = text(url.searchParams.get('student'));
+  if (!range || !student) return false;
+  const allowed = new Set(studentPricingRows(resolveMonthKey(url), null, user, {student,...range}).map(row => Number(row.id)));
+  return ids.every(id => allowed.has(Number(id)));
+}
+
 function studentPricingPagePayload(monthKey, user) {
   const key = `${monthKey}|${studentPricingScopeKey(user)}`;
   const cached = studentPricingPageCache.get(key);
@@ -6869,6 +6880,7 @@ function studentPricingPagePayload(monthKey, user) {
     subject: text(row.subject),
     student_names: text(row.student_names),
     custom_price: moneyRound(row.custom_price),
+    rule_fee: row.rule_fee,
     price_status: row.price_status === "已设置" ? "已设置" : "未设置",
     notes: text(row.notes),
     current_month_lessons: Number(row.current_month_lessons || 0),
@@ -6907,8 +6919,9 @@ function studentPricingRow(monthKey, id) {
   const subject = text(row.subject);
   const studentNames = normalizedStudents(row.student_names);
   const key = studentPricingRuleKey(row);
-  const matches = all("SELECT id, month_key, grade, subject, student_names FROM lessons ORDER BY id")
-    .filter(isCompletedLesson)
+  const statuses = new Set(courseStatusValues());
+  const matches = all("SELECT id, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY id")
+    .filter(lesson => deriveStatus(lesson, statuses) === "已上")
     .map((lesson) => {
       const students = splitStudents(lesson.student_names);
       return { ...lesson, normalized_student_names: normalizedStudents(lesson.student_names), student_count: students.length, students };
@@ -6917,11 +6930,11 @@ function studentPricingRow(monthKey, id) {
   const rulePrice = num(row.custom_price);
   const pricingLookups = feePricingLookups();
   const mismatchCount = rulePrice > 0 ? matches.filter((lesson) => {
-    const price = unitPriceFor({ studentName, subject: lesson.subject, grade: lesson.grade, studentCount: lesson.student_count, lessonId: lesson.id, status: deriveStatus(lesson), studentNames: lesson.normalized_student_names }, pricingLookups);
+    const price = unitPriceFor({ studentName, subject: lesson.subject, grade: lesson.grade, studentCount: lesson.student_count, lessonId: lesson.id, status: deriveStatus(lesson, statuses), studentNames: lesson.normalized_student_names }, pricingLookups);
     return Math.abs(num(price.unit_price) - rulePrice) >= 0.0001;
   }).length : 0;
   const source = rulePrice <= 0 ? "pending" : (mismatchCount > 0 ? "manual" : "auto");
-  return { ...row, grade, student_names: studentNames, lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"), current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length, total_lessons: matches.length, rule_source: source, price_status: studentPriceStatus(source), mismatch_lessons: mismatchCount };
+  return { ...row, rule_fee: unitPriceFor({studentName,subject,grade,studentNames,studentCount:splitStudents(studentNames).length,lessonId:matches[0]?.id,status:"已上"},pricingLookups).baseline_price, grade, student_names: studentNames, lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"), current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length, total_lessons: matches.length, rule_source: source, price_status: studentPriceStatus(source), mismatch_lessons: mismatchCount };
 }
 
 function recomputePricing(body) {
@@ -10029,7 +10042,6 @@ function apiPagePermissionKeys(req, url) {
   const p = url.pathname;
   if ((p.startsWith("/api/salary-tables") || p.startsWith("/api/salary-templates"))) return ["teacherDetail"];
   if (p === "/api/teacher-monthly-performance") return ["teacherSalary"];
-  if (p === "/api/fee-details-page") return ["feeDetails"];
   if (p.startsWith("/api/teacher-detail")) return ["teacherDetail"];
   if (p === "/api/teacher-salary-rules/apply-selected") return ["teacherDetail"];
   if (p.startsWith("/api/data-center")) return ["audit"];
@@ -10037,6 +10049,7 @@ function apiPagePermissionKeys(req, url) {
   if (p.startsWith("/api/users") || p.startsWith("/api/roles")) return ["userAdmin"];
   if (p.startsWith("/api/class-groups")) return ["classGroups"];
   if (p.startsWith("/api/student-grade-stages")) return ["studentProfiles"];
+  if (req.method === "GET" && (p === "/api/student-pricing-query" || /^\/api\/student-pricing\/\d+\/courses$/.test(p))) return ["studentPricing", "studentQuery"];
   if (p.startsWith("/api/student-pricing")) return ["studentPricing"];
   if (p === "/api/students/batch-delete") return ["studentProfiles"];
   if (p.startsWith("/api/course-notice")) return ["courseNotice"];
@@ -12920,10 +12933,11 @@ async function handleApi(req, res, url) {
       : bootstrap(monthKey, includeInactiveRows);
     return sendJson(res, sanitizeBootstrap(payload, user));
   }
-  if (req.method === "GET" && url.pathname === "/api/fee-details-page") {
-    const monthKey = resolveMonthKey(url);
-    const sanitized = sanitizeBootstrap({ lessons: [], derived: { fee_details: feeDetails(monthKey) } }, user);
-    return sendJson(res, { month_key: monthKey, fee_details: sanitized.derived.fee_details.map(({ teacher_salary, ...row }) => row) });
+  if (req.method === "GET" && url.pathname === "/api/student-pricing-query") {
+    const student = text(url.searchParams.get("student"));
+    const range = studentStatementRangeFromUrl(url);
+    if (!student || !range) return sendError(res, 400, "学生和有效日期范围不能为空");
+    return sendJson(res, { student_name: student, range, rules: studentPricingRows(resolveMonthKey(url), null, user, { student, ...range }), can_edit_rule: userHasAnyPermission(user, ["studentPricing"]) && !userReadonly(user) && roleCan(user, "students", "write") });
   }
   const studentPricingCoursesMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)\/courses$/);
   if (req.method === "GET" && studentPricingCoursesMatch) {
@@ -12933,12 +12947,19 @@ async function handleApi(req, res, url) {
     const candidates = all("SELECT * FROM lessons WHERE grade=? AND subject=? ORDER BY date,time_slot,id", [rule.grade, rule.subject]);
     const scoped = studentPricingScopedLessons(candidates, user);
     if (canonicalRole(user.role) === "teacher" && !scoped.some(row => splitStudents(row.student_names).includes(rule.student_name) && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...row, student_name: rule.student_name }))) return sendError(res, 404, "规则不在可见课程范围内");
-    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses)).map(row => ({
-      id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
-      status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
-      student_names: row.student_names, notes: row.notes,
-      unit_price: unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade, studentCount: splitStudents(row.student_names).length, lessonId: row.id, status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups).unit_price,
-    }));
+    const range = studentStatementRangeFromUrl(url);
+    if (!range) return sendError(res, 400, "无效日期范围");
+    if (url.searchParams.has("student") && text(url.searchParams.get("student")) !== rule.student_name) return sendError(res, 400, "学生与规则不匹配");
+    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses) && (!(url.searchParams.has("start") || url.searchParams.has("end")) || (row.date >= range.start && row.date <= range.end))).map(row => {
+      const price = unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade,
+        studentCount: splitStudents(row.student_names).length, lessonId: row.id,
+        status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups);
+      return {
+        id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
+        status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
+        student_names: row.student_names, notes: row.notes, unit_price: price.unit_price, rule_fee: price.baseline_price,
+      };
+    });
     return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: "全历史已上课程", lessons });
   }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
@@ -14756,6 +14777,7 @@ async function handleApi(req, res, url) {
         rows: [],
       }, 400);
     }
+    if (!studentPricingWriteScopeAllowed(url, ids, user)) return sendError(res, 403, "规则不在当前学生及日期范围内");
     const placeholders = ids.map(() => "?").join(",");
     const before = all(`SELECT * FROM student_pricing WHERE id IN (${placeholders}) ORDER BY id`, ids);
     const foundIds = new Set(before.map((row) => Number(row.id)));
@@ -14768,6 +14790,20 @@ async function handleApi(req, res, url) {
         failed: missing.map((id) => ({ id, student_name: "", grade: "", subject: "", code: "RULE_NOT_FOUND", message: "学生单价规则不存在" })),
         rows: [],
       }, 404);
+    }
+    // Recheck actual courses: selections can outlive a course deletion in another tab.
+    const scopedLessons = studentPricingScopedLessons(all(`
+      SELECT teacher_name, grade, subject, student_names, date, time_slot,
+             classroom, status, course_status, lesson_status FROM lessons
+    `), user);
+    const completedStatuses = new Set(courseStatusValues());
+    const courseKeys = new Set(scopedLessons.filter(lesson => deriveStatus(lesson, completedStatuses) === "已上").flatMap(lesson =>
+      splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name }))));
+    if (before.some(row => !courseKeys.has(studentPricingRuleKey(row)))) {
+      return sendJson(res, {
+        ok: false, processed: ids.length, success: 0,
+        failed: [{ code: "RULE_NO_COURSES", message: "所选规则已无可见已上课程，请刷新列表" }], rows: [],
+      }, 409);
     }
     withTransaction(() => {
       const statement = db.prepare("UPDATE student_pricing SET custom_price=? WHERE id=?");
@@ -14789,9 +14825,10 @@ async function handleApi(req, res, url) {
   }
   const studentPricingMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)$/);
   if (studentPricingMatch && req.method === "PATCH") {
+    if (!studentPricingWriteScopeAllowed(url, [Number(studentPricingMatch[1])], user)) return sendError(res, 403, "规则不在当前学生及日期范围内");
     const body = await readBody(req);
     if (Object.prototype.hasOwnProperty.call(body, "custom_price")
-      && (!Number.isFinite(Number(body.custom_price)) || num(body.custom_price) < 0 || num(body.custom_price) > 100000)) {
+      && (!Number.isFinite(Number(body.custom_price)) || num(body.custom_price) < 0 || num(body.custom_price) > 100000 || Math.abs(Number(body.custom_price) * 100 - Math.round(Number(body.custom_price) * 100)) >= 1e-8)) {
       return sendError(res, 400, "学生单价必须是 0 到 100000 之间的有效金额；0 元规则仅作为未设置候选");
     }
     const payload = { ...body };

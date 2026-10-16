@@ -67,7 +67,7 @@ async function show(browser, page) {
 test('shared filters, matrix container and settings fit four viewport widths',async()=>browserRun(async browser=>{
  for(const width of [1440,1280,1024,390]){
   await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
-  for(const page of ['lessons','weekMatrix','feeDetails','recharges','studentQuery','studentPricing','classGroups','studentProfiles','teacherDetail','teacherSalaryRules','teacherProfiles','audit','userAdmin','baseData']){
+  for(const page of ['lessons','weekMatrix','recharges','studentQuery','studentPricing','classGroups','studentProfiles','teacherDetail','teacherSalaryRules','teacherProfiles','audit','userAdmin','baseData']){
    await show(browser,page);await browser.evaluate('new Promise(requestAnimationFrame)');
    const result=await browser.evaluate(`({overflow:document.documentElement.scrollWidth>innerWidth,controls:[...document.querySelectorAll('.filter-bar .filter-field')].map(e=>e.getBoundingClientRect().width)})`);
    assert.equal(result.overflow,false,JSON.stringify({width,page,result}));
@@ -88,7 +88,7 @@ test('empty values, single-line lesson rows, wrapping tasks and screenshot-only 
  assert.ok(await browser.evaluate("[...document.querySelectorAll('.teacher-detail-table tbody td')].every(e=>getComputedStyle(e).whiteSpace==='nowrap')"));
  const teacherLabels=await browser.evaluate(`(()=>{const texts=[],original=CanvasRenderingContext2D.prototype.fillText;CanvasRenderingContext2D.prototype.fillText=function(text,...args){texts.push(text);return original.call(this,text,...args);};try{teacherDetailCanvas('合成老师');}finally{CanvasRenderingContext2D.prototype.fillText=original;}return texts;})()`);assert.ok(teacherLabels.includes('备注'));
  await show(browser,'studentQuery');
- assert.ok(await browser.evaluate("document.querySelector('.student-query-detail-slot').textContent.includes('明细课时表')&&document.querySelector('.student-query-detail-table thead').textContent.includes('备注')"));
+ assert.ok(await browser.evaluate("document.querySelector('.student-query-detail-slot').textContent.includes('已上课程规则')&&document.querySelector('.student-query-detail-slot .student-pricing-table thead').textContent.includes('备注')"));
  const labels=await browser.evaluate(`(()=>{const texts=[],original=CanvasRenderingContext2D.prototype.fillText;CanvasRenderingContext2D.prototype.fillText=function(text,...args){texts.push(text);return original.call(this,text,...args);};try{studentStatementCanvas(studentStatementReport());}finally{CanvasRenderingContext2D.prototype.fillText=original;}return texts;})()`);assert.ok(!labels.includes('备注'));assert.ok(labels.includes('明细课时表'));
  await show(browser,'teacherProfiles');assert.equal(await browser.evaluate("document.querySelector('.teacher-profile-table [data-field=phone]').placeholder"),'-');
  await show(browser,'pricing');assert.ok(await browser.evaluate("[...document.querySelectorAll('.pricing-table td.row-index')].every((cell,index)=>Number(cell.textContent)===index+1)"));

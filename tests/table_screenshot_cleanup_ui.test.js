@@ -85,7 +85,7 @@ test('grade changes preserve manually managed valid types', async () => {
 });
 
 test('all business headers stick in their own scroll containers and stay aligned at four viewports', async () => browserRun(async browser => {
-  const pages=[['lessons','.lesson-table'],['feeDetails','.fee-detail-table'],['recharges','.recharge-table'],['openingBalances','.opening-balance-table'],['studentQuery','.student-history-table,.student-query-detail-table'],['studentPricing','.student-pricing-table'],['classGroups','.class-group-table'],['studentProfiles','.student-profile-table'],['teacherSalary','.teacher-salary-table'],['teacherTravelFees','.teacher-travel-table'],['teacherDetail','.teacher-detail-table'],['teacherSalaryRules','.teacher-salary-rule-table'],['teacherProfiles','.teacher-profile-table']];
+  const pages=[['lessons','.lesson-table'],['recharges','.recharge-table'],['openingBalances','.opening-balance-table'],['studentQuery','.student-history-table,.student-query-detail-slot .student-pricing-table'],['studentPricing','.student-pricing-table'],['classGroups','.class-group-table'],['studentProfiles','.student-profile-table'],['teacherSalary','.teacher-salary-table'],['teacherTravelFees','.teacher-travel-table'],['teacherDetail','.teacher-detail-table'],['teacherSalaryRules','.teacher-salary-rule-table'],['teacherProfiles','.teacher-profile-table']];
   for(const width of [1440,1280,1024,390]) {
     await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
     for(const [page,selector] of pages){

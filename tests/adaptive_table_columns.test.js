@@ -43,8 +43,8 @@ function seed(db) {
       (9752,'名字较长的自适应老师','高三','物理','长集合','${LONG_STUDENT}，学生乙；学生丙
 学生丁','高三物理自适应测试班');
     INSERT INTO lessons(teacher_name,date,month_key,grade,subject,student_names,time_slot,status) VALUES
-      ('自适应老师','2026-07-01','${MONTH}','初一','数学','短名','09:00-11:00','待上'),
-      ('名字较长的自适应老师','2026-07-02','${MONTH}','高三','物理','${LONG_STUDENT}、学生乙、学生丙、学生丁','09:00-11:00','待上');
+      ('自适应老师','2026-07-01','${MONTH}','初一','数学','短名','09:00-11:00','已上'),
+      ('名字较长的自适应老师','2026-07-02','${MONTH}','高三','物理','${LONG_STUDENT}、学生乙、学生丙、学生丁','09:00-11:00','已上');
     INSERT INTO teacher_salary_rules(id,teacher_name,grade,subject,student_names,salary_per_unit,unit_hours,is_active,notes) VALUES
       (9761,'自适应老师','初一','数学','短名',0,2,1,'短'),
       (9762,'名字较长的自适应老师','高三','物理','${LONG_STUDENT}、学生乙，学生丙；学生丁',23456.78,2,1,'较长的薪资规则备注');
@@ -185,7 +185,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   const pages = [
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "center", "right", "right", "center", "center", "left"]],
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "center", "right", "right", "left"]],
-    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "center", "left"]],
+    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],

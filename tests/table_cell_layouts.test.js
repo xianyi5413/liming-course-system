@@ -33,6 +33,9 @@ function seed(db) {
       (9202,'布局老师','2026-07-02','上课','10:10-12:10','A1','初一','数学','陈曦','短备注','已上','已上','${MONTH}',2),
       (9203,'布局老师','2026-07-03','上课','21:00-23:00','A1','初一','数学','陈曦','短备注','已上','已上','${MONTH}',3),
       (9204,'布局老师','2026-07-04','上课','23:30-00:30','A1','初一','数学','陈曦','短备注','已上','已上','${MONTH}',4);
+    INSERT INTO lessons(teacher_name,date,month_key,time_slot,grade,subject,student_names,status) VALUES
+      ('布局老师','2031-01-01','2031-01-01','09:00-11:00','初一','数学','${STUDENTS.join("、")}','已上'),
+      ('布局老师','2031-01-02','2031-01-01','09:00-11:00','初一','数学','强皓然','已上');
     INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price,notes) VALUES
       (9301,'陈曦','初一','数学','["陈曦","强皓然","陈曦","陶雨馨","许诺扬","于辰皓","周以文"]',188,'多人规则'),
       (9302,'强皓然','初一','数学','强皓然',199,'单人规则'),
@@ -122,13 +125,15 @@ async function viewport(browser, width) {
 test("target tables keep short fields complete, keep bounded notes single-line with complete hover text and delegate narrow overflow to the outer wrapper", async () => withBrowser(async (browser) => {
   await browser.login("boss", "123456");
 
-  await openView(browser, "students", "feeDetails", ".fee-detail-table tbody tr");
+  await openView(browser, "students", "studentPricing", ".student-pricing-rule-row");
+  await browser.evaluate("(async()=>{const rule=state.student_pricing.find(row=>row.student_names==='陈曦');showStudentPricingCourses(rule,await request('/api/student-pricing/'+rule.id+'/courses'));})()");
+  await browser.waitFor("!!document.querySelector('.shared-course-dialog .course-details-table')");
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
     const layout = await browser.evaluate(`(() => {
-      const cells=[...document.querySelectorAll('.fee-detail-table tbody tr td:nth-child(6)')];
-      const wrap=document.querySelector('.fee-detail-scroll');
-      const table=document.querySelector('.fee-detail-table');
+      const cells=[...document.querySelectorAll('.course-details-table tbody tr td:nth-child(5)')];
+      const wrap=document.querySelector('.shared-course-dialog .table-wrap');
+      const table=document.querySelector('.shared-course-dialog .course-details-table');
       return {
         values:cells.map((cell)=>cell.textContent.trim()),
         widths:cells.map((cell)=>cell.getBoundingClientRect().width),
@@ -151,6 +156,7 @@ test("target tables keep short fields complete, keep bounded notes single-line w
     assert.equal(layout.pageOverflow, false);
   }
 
+  await browser.click(".shared-course-dialog .dialog-close");
   await openView(browser, "students", "recharges", ".recharge-row");
   assert.deepEqual(
     await browser.evaluate("[...document.querySelectorAll('.recharge-table thead th')].map((cell)=>cell.textContent.trim()||'选择')"),
