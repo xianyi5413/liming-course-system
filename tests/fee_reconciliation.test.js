@@ -7,6 +7,44 @@ const { DatabaseSync } = require("node:sqlite");
 const { after, before, test } = require("node:test");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
 const root = path.resolve(__dirname, "..");
+
+test('immediate fee editor deduplicates Enter/blur, cancels closing drafts and isolates delayed row responses',async()=>{
+  const chrome=await launchChrome(path.join(tempRoot,'immediate-fee-chrome')),b=chrome.session;
+  try {
+    await b.send('Emulation.setFocusEmulationEnabled',{enabled:true});
+    await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+    await b.evaluate(`window.originalRequest=request;window.feeCalls=[];window.feePending=[];
+      request=(path,options)=>path==='/api/fee-overrides'?new Promise((resolve,reject)=>{feeCalls.push(options.body);feePending.push({resolve,reject})}):originalRequest(path,options);
+      window.openSyntheticFees=()=>showStudentPricingCourses({student_name:'合成学生',grade:'高一',subject:'数学'},{student_name:'合成学生',can_edit_fee:true,lessons:[{id:1,unit_price:100,rule_fee:100},{id:2,unit_price:200,rule_fee:200}]});openSyntheticFees();`);
+    const open=id=>b.click(`.pricing-course-fee[data-lesson-id="${id}"] .pricing-course-fee-edit`);
+    const key=key=>b.evaluate(`document.querySelector('.pricing-course-fee-input').dispatchEvent(new KeyboardEvent('keydown',{key:'${key}',bubbles:true}))`);
+    await open(1);assert.equal(await b.evaluate("document.querySelectorAll('.pricing-course-fee-save,.pricing-course-fee-cancel').length"),0);
+    await key('Enter');assert.equal(await b.evaluate('feeCalls.length'),0);
+    await open(1);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='99'");await key('Escape');assert.equal(await b.evaluate('feeCalls.length'),0);
+    await open(1);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='10000.01';document.querySelector('.pricing-course-fee-input').blur()");
+    await b.waitFor("!document.querySelector('.pricing-course-fee-input')");assert.equal(await b.evaluate('feeCalls.length'),0);
+    await open(1);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='0';const input=document.querySelector('.pricing-course-fee-input');input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));input.blur()");
+    assert.equal(await b.evaluate('feeCalls.length'),1);
+    await open(2);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='180';document.querySelector('.pricing-course-fee-input').blur()");
+    await b.waitFor('feeCalls.length===2');assert.deepEqual(await b.evaluate('feeCalls.map(x=>[x.lesson_id,x.student_name,x.unit_price])'),[[1,'合成学生','0'],[2,'合成学生','180']]);
+    await b.evaluate('feePending[1].resolve({unit_price:180})');await b.waitFor("document.querySelector('[data-lesson-id=\"2\"] button')?.disabled===false");
+    await b.evaluate('feePending[0].reject(new Error("合成网络失败"))');await b.waitFor("document.querySelector('[data-lesson-id=\"1\"] button')?.disabled===false");
+    assert.equal(await b.evaluate("document.querySelector('[data-lesson-id=\"1\"]').textContent"),'¥100.00');
+    assert.equal(await b.evaluate("document.querySelector('[data-lesson-id=\"2\"]').textContent"),'¥180.00');
+    await open(2);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='199'");
+    // Native pointer sequence verifies cancellation happens before the close button steals focus.
+    const point=await b.evaluate("(()=>{const r=document.querySelector('.shared-course-dialog .dialog-close').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()");
+    await b.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
+    await b.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+    await b.waitFor("!document.querySelector('.shared-course-dialog')");assert.equal(await b.evaluate('feeCalls.length'),2);
+    await b.evaluate('openSyntheticFees()');await open(1);await b.evaluate("document.querySelector('.pricing-course-fee-input').value='50'");await key('Enter');
+    await b.click('.dialog-close');await b.evaluate('openSyntheticFees();feePending[2].resolve({unit_price:50})');
+    await b.waitFor("document.querySelector('[data-lesson-id=\"1\"] button')?.disabled===false");
+    assert.equal(await b.evaluate("document.querySelector('[data-lesson-id=\"1\"]').textContent"),'¥100.00');
+    await b.evaluate('request=originalRequest;closeStudentPricingCourses()');
+    assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+  }finally{await b.close();chrome.child.kill();}
+});
 let tempRoot;
 let databasePath;
 let port;
@@ -206,8 +244,8 @@ test('Chromium five widths compares amounts, saves locally, rolls back and redir
       for(const amount of [150,180,0,240,160.01]) {
         await browser.click(cell+' .pricing-course-fee-edit');
         await browser.evaluate(`document.querySelector('.pricing-course-fee-input').value='${amount}'`);
-        await browser.click('.pricing-course-fee-save');
-        await browser.waitFor(`document.querySelector('${cell} .pricing-course-fee-edit')?.textContent.includes('${amount.toFixed(2)}')`);
+        await browser.evaluate("document.querySelector('.pricing-course-fee-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
+        await browser.waitFor(`document.querySelector('${cell} .pricing-course-fee-edit')?.disabled===false&&document.querySelector('${cell} .pricing-course-fee-edit')?.textContent.includes('${amount.toFixed(2)}')`);
         assert.equal(await browser.evaluate(`document.querySelector('${cell}').classList.contains('negative')`),amount!==240);
         assert.equal(await browser.evaluate(`document.querySelector('${cell}').nextElementSibling.textContent`),'¥240.00');
       }
@@ -224,7 +262,7 @@ test('Chromium five widths compares amounts, saves locally, rolls back and redir
     assert.notEqual(themeColors[0].actual,themeColors[1].actual);
     await browser.evaluate("document.documentElement.dataset.theme='light'");
     await browser.evaluate("window.realRequest=request;request=(path,options)=>path==='/api/fee-overrides'?Promise.reject(new Error('合成保存失败')):realRequest(path,options)");
-    await browser.click(cell+' .pricing-course-fee-edit');await browser.evaluate("document.querySelector('.pricing-course-fee-input').value='160'");await browser.click('.pricing-course-fee-save');
+    await browser.click(cell+' .pricing-course-fee-edit');await browser.evaluate("document.querySelector('.pricing-course-fee-input').value='160'");await browser.evaluate("document.querySelector('.pricing-course-fee-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
     await browser.waitFor(`!!document.querySelector('${cell} .pricing-course-fee-edit')`);
     assert.equal(await browser.evaluate(`document.querySelector('${cell}').classList.contains('negative')&&document.querySelector('${cell}').textContent.includes('160.01')`),true);
     await browser.evaluate('request=realRequest');await browser.click('.shared-course-dialog .dialog-close');

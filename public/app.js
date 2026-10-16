@@ -5144,49 +5144,71 @@ function showStudentPricingCourses(rule, result) {
   const feeDiffers = row => row.rule_fee != null && row.unit_price != null && Math.round(Number(row.rule_fee) * 100) !== Math.round(Number(row.unit_price) * 100);
   const feeCell = row => `<td class="right pricing-course-fee ${feeDiffers(row) ? 'negative' : ''}" data-lesson-id="${row.id}">${editable ? `<button class="pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : formatMoney(row.unit_price)}</td>`;
   closeStudentPricingCourses();
-  const dialog = studentPricingCourseDialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { feeCells: row => feeCell(row) + `<td class="right pricing-course-rule-fee">${row.rule_fee == null ? "—" : formatMoney(row.rule_fee)}</td>` }));
-  let active = null;
-  const restore = () => {
-    if (!active || active.busy) return;
-    const { cell, row } = active;
-    cell.classList.toggle('negative', feeDiffers(row));
-    cell.innerHTML = feeCell(row).replace(/^<td[^>]*>|<\/td>$/g, '');
-    applyAdaptiveTableColumns({table:cell.closest("table")});
-    active = null;
+  let active = null, closed = false, refreshSequence = 0;
+  const pending = new Set();
+  const paint = editor => {
+    if (closed || !editor.cell.isConnected) return;
+    editor.cell.classList.toggle('negative', feeDiffers(editor.row));
+    editor.cell.innerHTML = feeCell(editor.row).replace(/^<td[^>]*>|<\/td>$/g, '');
+    editor.cell.querySelector('button').disabled = pending.has(editor.row.id);
   };
-  dialog.element.addEventListener('click', async event => {
-    if (event.target.closest('.pricing-course-fee-edit')) {
-      if (active?.busy) return;
-      restore();
-      const cell = event.target.closest('td');
-      const row = result.lessons.find(row => String(row.id) === cell.dataset.lessonId);
-      active = { cell, row, busy: false };
-      cell.innerHTML = `<span class="price-inline editable-price-inline">${currencyInputMarkup(row.unit_price, {className:'pricing-course-fee-input', attrs:'min="0" max="10000" step="0.01" required'})}<button class="btn pricing-course-fee-save">保存</button><button class="btn pricing-course-fee-cancel">取消</button><span role="alert"></span></span>`;
-      applyAdaptiveTableColumns({table:cell.closest("table")});
-      cell.querySelector('input').focus(); cell.querySelector('input').select();
-    } else if (event.target.closest('.pricing-course-fee-cancel')) restore();
-    else if (event.target.closest('.pricing-course-fee-save') && active && !active.busy) {
-      const editor = active, input = editor.cell.querySelector('input');
-      if (!input.reportValidity()) return;
-      editor.busy = true;
-      editor.cell.querySelectorAll('button,input').forEach(node => node.disabled = true);
-      try {
-        const saved = await request('/api/fee-overrides', {method:'POST', body:{lesson_id:editor.row.id, student_name:result.student_name, unit_price:input.value}});
-        editor.row.unit_price = saved.unit_price;
-        showToast('单节费用已保存');
-        if (view === 'studentQuery') {
-          const key = studentStatementCacheKey();
-          const report = await fetchStudentStatement(selectedStudent, true);
-          if (view === 'studentQuery' && key === studentStatementCacheKey()) {state.student_statement = report; updateStudentQueryResultsOnly();}
-        }
-      } catch (error) { showToast(error.message, 'error'); }
-      finally { editor.busy = false; restore(); }
-    } else if (!event.target.closest('.pricing-course-fee')) restore();
+  const cancel = () => {
+    if (!active) return;
+    const editor = active; active = null; editor.finished = true; paint(editor);
+  };
+  const dialog = studentPricingCourseDialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { feeCells: row => feeCell(row) + `<td class="right pricing-course-rule-fee">${row.rule_fee == null ? "—" : formatMoney(row.rule_fee)}</td>` }), {
+    beforeClose: () => { cancel(); closed = true; document.removeEventListener('pointerdown', outside, true); },
+  });
+  // Pointerdown runs before focus moves: closing/navigation cancels an unsubmitted draft.
+  const outside = event => {
+    if (!dialog.element.contains(event.target) || event.target.closest('.dialog-close')) cancel();
+  };
+  document.addEventListener('pointerdown', outside, true);
+  const submit = async editor => {
+    if (!editor || editor.finished || closed) return;
+    editor.finished = true;
+    if (active === editor) active = null;
+    const input = editor.input, value = input.value;
+    if (!input.checkValidity()) { paint(editor); showToast('请输入0至10000之间、最多两位小数的金额', 'error'); return; }
+    if (Number(value) === Number(editor.row.unit_price)) { paint(editor); return; }
+    pending.add(editor.row.id); paint(editor);
+    const account = auth.user?.id;
+    try {
+      const saved = await request('/api/fee-overrides', {method:'POST', body:{lesson_id:editor.row.id, student_name:result.student_name, unit_price:value}});
+      if (auth.user?.id !== account) return;
+      editor.row.unit_price = saved.unit_price;
+      showToast('单节费用已保存');
+      if (view === 'studentQuery') {
+        const sequence = ++refreshSequence, key = studentStatementCacheKey();
+        const report = await fetchStudentStatement(selectedStudent, true);
+        if (sequence === refreshSequence && view === 'studentQuery' && key === studentStatementCacheKey()) { state.student_statement = report; updateStudentQueryResultsOnly(); }
+      }
+    } catch (error) { if (auth.user?.id === account) showToast(error.message, 'error'); }
+    finally { pending.delete(editor.row.id); paint(editor); }
+  };
+  dialog.element.addEventListener('click', event => {
+    const button = event.target.closest('.pricing-course-fee-edit');
+    if (!button && active && !event.target.closest('.pricing-course-fee')) { void submit(active); return; }
+    if (!button || button.disabled || closed) return;
+    if (active) void submit(active);
+    closeScheduleInlinePicker(); closeOpenMultiSelectMenus();
+    const cell = button.closest('td'), row = result.lessons.find(row => String(row.id) === cell.dataset.lessonId);
+    if (pending.has(row.id)) return;
+    const editor = active = {cell, row, finished:false};
+    cell.innerHTML = `<span class="price-inline editable-price-inline">${currencyInputMarkup(row.unit_price, {className:'pricing-course-fee-input', attrs:'min="0" max="10000" step="0.01" required'})}</span>`;
+    const input = editor.input = cell.querySelector('input');
+    input.addEventListener('blur', event => {
+      if (event.relatedTarget?.closest('.dialog-close') || (event.relatedTarget && !dialog.element.contains(event.relatedTarget))) { if (active === editor) cancel(); return; }
+      // A close/page change in the same event finishes cancellation before this runs.
+      setTimeout(() => { if (!closed && cell.isConnected) void submit(editor); }, 0);
+    });
+    applyAdaptiveTableColumns({table:cell.closest('table')});
+    input.focus(); input.select();
   });
   dialog.element.addEventListener('keydown', event => {
     if (!active) return;
-    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); restore(); }
-    if (event.key === 'Enter' && event.target.matches('input')) { event.preventDefault(); active.cell.querySelector('.pricing-course-fee-save').click(); }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancel(); }
+    else if (event.key === 'Enter' && event.target === active.input) { event.preventDefault(); void submit(active); }
   }, true);
 }
 
@@ -6242,7 +6264,7 @@ function lessonInlinePickerCell(row, field, tdClass = "") {
 function scheduleInlinePickerOptions(row = {}, field = "") {
   const current = row[field] || "";
   const manualLabel = lessonManualLabel(field);
-  if (field === "course_type") return courseTypeSelectOptions(row.grade, current);
+  if (field === "course_type") return courseTypeSelectOptions(row.grade, current, false);
   if (field === "time_slot" || field === "classroom") {
     return lessonCandidateSelectOptions({
       field,
@@ -6280,7 +6302,24 @@ function openScheduleInlinePicker(trigger) {
   const row = (state.lessons || []).find((item) => String(item.id) === String(trigger.dataset.lessonId));
   const field = trigger.dataset.field || "";
   if (!row || !field) return;
-  openInlineCustomPicker(trigger, { id: row.id, field, choices: scheduleInlinePickerOptions(row, field), onChange: handleLessonFieldChange });
+  if (field === 'course_type' && (!scheduleMode || !ClassCourseUI.editable())) return;
+  openInlineCustomPicker(trigger, { id: row.id, field, choices: scheduleInlinePickerOptions(row, field), onChange: field === 'course_type' ? saveScheduleCourseType : handleLessonFieldChange });
+}
+
+async function saveScheduleCourseType(input) {
+  if (!scheduleMode || !ClassCourseUI.editable()) return;
+  const row = state.lessons.find(row => String(row.id) === input.dataset.id);
+  if (!row || input.value === row.course_type) return;
+  const account = auth.user.id, type = input.value;
+  const key = JSON.stringify([row.teacher_name.trim(), row.grade.trim(), row.subject.trim(), normalizedTeacherSalaryStudentNames(row.student_names)]);
+  const result = await ClassCourseUI.saveType(key, [row.id], type, 'lesson');
+  if (auth.user?.id !== account) return;
+  state.class_groups = result.class_groups;
+  patchLessonInState({id:row.id, course_type:type, course_type_source:'manual'});
+  state.week_lessons = (state.week_lessons || []).map(item => item.id === row.id ? {...item, course_type:type, course_type_source:'manual'} : item);
+  markLessonDerivedDataDirty();
+  const display = input.closest('td')?.querySelector('.lesson-inline-picker');
+  if (display?.isConnected) display.innerHTML = lessonInlinePickerDisplay({...row, course_type:type}, 'course_type');
 }
 
 function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
@@ -6392,7 +6431,7 @@ function lessonEditCells(row, visibleIndex, cumulative) {
       <td class="readonly col-weekday">${escapeHtml(weekdayCn(row.date))}</td>
       ${lessonInlinePickerCell(row, "time_slot", "col-time")}
       ${lessonInlinePickerCell(row, "classroom", "col-room")}
-      ${lessonTextCell("col-type", row.course_type || "")}
+      ${ClassCourseUI.editable() ? lessonInlinePickerCell(row, "course_type", "col-type") : lessonTextCell("col-type", row.course_type || "")}
       ${lessonInlinePickerCell(row, "status", "col-status")}
       ${lessonInlinePickerCell(row, "grade", "col-grade")}
       ${lessonInlinePickerCell(row, "subject", "col-subject")}

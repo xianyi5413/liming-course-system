@@ -236,6 +236,12 @@ test('Chromium in Tokyo verifies teacher switching, copy text, previews, compact
     assert.deepEqual(await browser.evaluate('immediateProgress'), { visible: true, disabled: true });
     await browser.waitFor('!!window.downloadedJob'); assert.ok((await browser.evaluate('downloadedJob')).bytes > 1000);
     assert.equal(await browser.evaluate("document.querySelector('.task-progress progress').value"), 100);
+    for (const width of [1920,1440,1280,1024,390]) {
+      await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
+      assert.ok(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),`data center at ${width}px`);
+      assert.equal(await browser.evaluate("document.querySelector('.task-progress progress').value"),100);
+      assert.equal(await browser.evaluate("document.querySelector('.data-full-export').disabled"),false);
+    }
     await browser.evaluate("backupState.importFile=new File(['invalid'],'invalid.xlsx');document.querySelector('.data-import-preview-button').click()");
     await browser.waitFor("backupState.task?.status==='failed' && !backupState.busy");
     assert.ok(await browser.evaluate("backupState.task.message.length>0 && !document.querySelector('.data-import-preview-button').disabled"));

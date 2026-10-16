@@ -81,6 +81,7 @@ function xmlEscape(value) {
 }
 
 function xmlDecode(value) {
+  if (!String(value || '').includes('&')) return String(value || '');
   return String(value || "").replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
     .replace(/&#(\d+);/g, (_, decimal) => String.fromCodePoint(Number(decimal)))
     .replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
@@ -170,7 +171,11 @@ function readZip(buffer) {
   return entries;
 }
 
-function attr(tag, name) { return xmlDecode(String(tag).match(new RegExp(`${name}="([^"]*)"`, "i"))?.[1] || ""); }
+const attributePatterns = new Map();
+function attr(tag, name) {
+  if (!attributePatterns.has(name)) attributePatterns.set(name, new RegExp(`${name}="([^"]*)"`, 'i'));
+  return xmlDecode(String(tag).match(attributePatterns.get(name))?.[1] || '');
+}
 function columnIndex(ref) { let n = 0; for (const char of String(ref).match(/[A-Z]+/i)?.[0]?.toUpperCase() || "") n = n * 26 + char.charCodeAt(0) - 64; return n - 1; }
 function relationshipTarget(target) { const value = String(target || "").replaceAll("\\", "/"); return value.startsWith("/") ? value.slice(1) : `xl/${value.replace(/^\.\//, "")}`; }
 
@@ -197,9 +202,12 @@ function parseWorkbook(buffer) {
       for (const [, cellTag, cellXml] of rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
         const index = columnIndex(attr(cellTag, "r")); const type = attr(cellTag, "t");
         if (/<f\b/i.test(cellXml)) { const error = new Error(`XLSX_FORMULA_FORBIDDEN:${name}:${attr(cellTag, "r")}`); error.code = "XLSX_FORMULA_FORBIDDEN"; throw error; }
-        const inline = [...cellXml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((match) => xmlDecode(match[1])).join("");
         const raw = xmlDecode(cellXml.match(/<v>([\s\S]*?)<\/v>/)?.[1] || "");
-        if (type === "inlineStr" || type === "str") values[index] = inline || raw;
+        if (type === "inlineStr" || type === "str") {
+          let inline = '';
+          for (const match of cellXml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)) inline += xmlDecode(match[1]);
+          values[index] = inline || raw;
+        }
         else if (type === "s") {
           const sharedIndex = Number(raw);
           if (!Number.isInteger(sharedIndex) || sharedIndex < 0 || sharedIndex >= strings.length) { const error = new Error("XLSX_SHARED_STRING_INDEX_INVALID"); error.code = "XLSX_SHARED_STRING_INDEX_INVALID"; throw error; }

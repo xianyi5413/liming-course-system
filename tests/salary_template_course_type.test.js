@@ -208,8 +208,8 @@ test('Chromium template draft, readonly types, adaptive detail and coefficient i
     await browser.click('[data-salary-class]');await browser.waitFor("!!document.querySelector('.teacher-class-lessons')");
     const salaries=await browser.evaluate("(()=>{const t=document.querySelector('.teacher-class-lessons');applyAdaptiveTableColumns({table:t});return [...t.querySelector('tbody tr').cells].map(x=>getComputedStyle(x).textAlign)})()");
     assert.deepEqual(salaries,Array(11).fill('center').concat('left','right','right','center'));await browser.click('[data-salary-action=close]');
-    await browser.evaluate("setActiveView('lessons');scheduleMode=true;load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.lesson-table')");
-    assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
+    await browser.evaluate("setActiveView('lessons');lessonFilter={...defaultLessonFilter(),start_date:'2026-09-01',end_date:'2026-09-30',date_preset_initialized:true};scheduleMode=true;load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.lesson-table')");
+    assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),true);
     await browser.evaluate('scheduleMode=false;render()');assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
     const classRequests=browser.responses.length;
     await browser.evaluate("setActiveView('classGroups');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.class-group-row')");

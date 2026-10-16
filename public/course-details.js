@@ -21,11 +21,11 @@ const CourseDetails = (() => {
   function shell(title, body, extra = '', closeClass = 'dialog-close', closeAttributes = '') {
     return `<div class="modal-panel salary-workflow-panel responsive-content-panel ${extra}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="modal-head"><div class="modal-title">${escapeHtml(title)}</div><button class="btn ${closeClass}" ${closeAttributes}>关闭</button></div>${body}</div>`;
   }
-  function dialog(title, body, { onClose = () => {} } = {}) {
+  function dialog(title, body, { onClose = () => {}, beforeClose = () => {} } = {}) {
     const focus = document.activeElement, element = document.createElement('div');
     element.className = 'modal-backdrop shared-course-dialog';
     element.innerHTML = shell(title, body);
-    const close = () => { element.remove(); focus?.focus({ preventScroll: true }); onClose(); };
+    const close = () => { beforeClose(); element.remove(); focus?.focus({ preventScroll: true }); onClose(); };
     element.querySelector('.dialog-close').onclick = close;
     element.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.stopPropagation(); close(); }
@@ -43,7 +43,8 @@ const CourseDetails = (() => {
 
 const ClassCourseUI = (() => {
   let active = null, generation = 0;
-  const editable = () => canWriteData() && ['owner', 'boss', 'admin', 'academic', 'jiaowu'].includes(auth.user?.role);
+  const editable = () => canWriteData() && canView('classGroups') && ['owner', 'boss', 'admin', 'academic', 'jiaowu'].includes(auth.user?.role);
+  const saveType = (groupKey, ids, type, mode) => request('/api/class-groups/course-type', { method: 'PATCH', body: { group_key: groupKey, lesson_ids: ids, course_type: type, mode } });
   function close() { generation++; active?.close(); active = null; }
   async function details(group) {
     close();
@@ -61,7 +62,7 @@ const ClassCourseUI = (() => {
   }
   async function change(group, ids, type, mode) {
     const account = auth.user?.id;
-    const result = await request('/api/class-groups/course-type', { method: 'PATCH', body: { group_key: group.group_key, lesson_ids: ids, course_type: type, mode } });
+    const result = await saveType(group.group_key, ids, type, mode);
     if (!auth.user || auth.user.id !== account || view !== 'classGroups') return;
     state.class_groups = result.class_groups;
     state.lesson_loaded_range = null;
@@ -87,5 +88,5 @@ const ClassCourseUI = (() => {
       cell.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); event.stopPropagation(); open(); } };
     });
   }
-  return { bind, close, editable };
+  return { bind, close, editable, saveType };
 })();

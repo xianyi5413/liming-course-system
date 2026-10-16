@@ -30,7 +30,7 @@ test('500/2000/6000 lessons retain full-result selection, pagination, editing an
       await browser.evaluate('scheduleMode=false;lessonPage=1;reRenderLessonsTbody();');
       assert.equal(await browser.evaluate("document.querySelectorAll('#lessons-tbody .schedule-student-popover,#lessons-tbody [data-lesson-edit-trigger]').length"),0);
       await browser.evaluate('scheduleMode=true;reRenderLessonsTbody();');
-      for (const field of ['subject','grade','teacher_name','time_slot','classroom','status']) {
+      for (const field of ['subject','grade','teacher_name','time_slot','classroom','status','course_type']) {
         await browser.click('#lessons-tbody .schedule-student-popover .multi-select-toggle');
         await browser.click(`#lessons-tbody [data-field="${field}"][data-lesson-edit-trigger]`);
         assert.equal(await browser.evaluate("document.querySelectorAll('.floating-multi-select-menu').length"),0);
