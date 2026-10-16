@@ -125,7 +125,7 @@ let ruleId, standardId;
 const detail = async () => (await api(`/api/student-pricing/${ruleId}/courses`)).payload;
 const save = (amount, cookie = ownerCookie) => api('/api/fee-overrides', {method:'POST',cookie,body:{lesson_id:9001,student_name:'张三',unit_price:amount}});
 
-test('reconciliation reuses override-free settlement, preserves unapplied prices, zero and unmatched standards', async () => {
+test('reconciliation uses custom comparison targets without applying them to actual fees, zero and unmatched standards', async () => {
   const db=new DatabaseSync(databasePath);
   try {
     standardId=db.prepare("SELECT id FROM pricing_standards WHERE grade='高一' AND student_count=2").get().id;
@@ -138,11 +138,12 @@ test('reconciliation reuses override-free settlement, preserves unapplied prices
   for(const amount of [160,150,180,0,160.01]) {
     assert.equal((await save(amount)).response.status,200);
     const row=(await detail()).lessons.find(row=>row.id===9001);
-    assert.equal(row.unit_price,amount);assert.equal(row.rule_fee,160);
+    assert.equal(row.unit_price,amount);assert.equal(row.rule_fee,240);
   }
   assert.equal((await save(20,teacherCookie)).response.status,403);
   assert.equal((await api('/api/student-pricing/'+ruleId+'/courses',{cookie:teacherCookie})).payload.can_edit_fee,false);
   assert.equal((await save(20,academicCookie)).response.status,403);
+  await api('/api/student-pricing/'+ruleId,{method:'PATCH',body:{custom_price:0}});
   await api('/api/pricing-standards/'+standardId,{method:'PATCH',body:{unit_price:0}});await save(0);
   assert.equal((await detail()).lessons[0].rule_fee,0);
   const editing=new DatabaseSync(databasePath);
@@ -153,6 +154,7 @@ test('reconciliation reuses override-free settlement, preserves unapplied prices
   }finally{
     editing.prepare('INSERT INTO pricing_standards(id,grade,student_count,unit_price,description) VALUES(?,?,?,?,?)').run(standard.id,standard.grade,standard.student_count,160,standard.description);editing.close();
   }
+  await api('/api/student-pricing/'+ruleId,{method:'PATCH',body:{custom_price:240}});
   const boot=(await api('/api/bootstrap?month=2026-09-01')).payload;
   assert.equal(boot.derived.fee_details.find(row=>row.lesson_id===9001&&row.student_name==='李四').unit_price,beforeOther);
   assert.equal((await api('/api/student-pricing-page?month=2026-10-01')).payload.rules.find(row=>row.id===ruleId).custom_price,240);
@@ -201,13 +203,13 @@ test('Chromium five widths compares amounts, saves locally, rolls back and redir
     for(const width of [1920,1440,1280,1024,390]) {
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
       await browser.evaluate('scheduleAdaptiveTableColumns()');
-      for(const amount of [150,180,0,160,160.01]) {
+      for(const amount of [150,180,0,240,160.01]) {
         await browser.click(cell+' .pricing-course-fee-edit');
         await browser.evaluate(`document.querySelector('.pricing-course-fee-input').value='${amount}'`);
         await browser.click('.pricing-course-fee-save');
         await browser.waitFor(`document.querySelector('${cell} .pricing-course-fee-edit')?.textContent.includes('${amount.toFixed(2)}')`);
-        assert.equal(await browser.evaluate(`document.querySelector('${cell}').classList.contains('negative')`),amount!==160);
-        assert.equal(await browser.evaluate(`document.querySelector('${cell}').nextElementSibling.textContent`),'¥160.00');
+        assert.equal(await browser.evaluate(`document.querySelector('${cell}').classList.contains('negative')`),amount!==240);
+        assert.equal(await browser.evaluate(`document.querySelector('${cell}').nextElementSibling.textContent`),'¥240.00');
       }
       assert.ok(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth&&[...document.querySelectorAll('.course-details-table .student-set-badges')].every(node=>getComputedStyle(node).flexWrap==='nowrap')"));
       assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.course-details-table').closest('.table-wrap')).overflowX"),'auto');

@@ -161,7 +161,7 @@ test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and 
   assert.equal(cold.payload.cache_status, "miss");
   assert.equal(cold.payload.diagnostics.sql_query_count, 6);
   const allowedFields = new Set([
-    "id", "student_name", "grade", "subject", "student_names", "custom_price",
+    "id", "student_name", "grade", "subject", "student_names", "custom_price", "rule_fee",
     "price_status", "notes", "current_month_lessons", "total_lessons", "course_types", "start_date", "end_date",
   ]);
   assert.deepEqual(Object.keys(cold.payload.rules[0]).filter((field) => !allowedFields.has(field)), []);
@@ -184,6 +184,12 @@ test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and 
     body: { custom_price: 1 },
   });
   assert.equal(deniedWrite.response.status, 403);
+  const scoped = await api('/api/student-pricing-query?' + new URLSearchParams({student:'性能学生001',start:'2026-07-01',end:'2026-07-31'}));
+  assert.equal(scoped.response.status,200);
+  assert.equal(scoped.payload.rules.length,1);
+  assert.ok(scoped.payload.rules.every(row=>row.student_name==='性能学生001'));
+  assert.ok(scoped.bytes < cold.bytes / 20);
+  console.log('[student-query-scoped-performance]',JSON.stringify({rules:scoped.payload.rules.length,bytes:scoped.bytes,elapsed_ms:Number(scoped.elapsed.toFixed(1))}));
   console.log("[student-pricing-server-performance]", JSON.stringify({
     rows: VISIBLE_RULE_COUNT,
     students: STUDENT_COUNT,

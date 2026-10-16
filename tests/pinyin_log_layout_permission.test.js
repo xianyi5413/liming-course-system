@@ -88,7 +88,7 @@ test('long business values, compact regions and shared notice toolbars fit four 
    if(page==='recharges')assert.ok(await browser.evaluate("(()=>{const e=[...document.querySelectorAll('.recharge-analysis-split')].map(e=>e.getBoundingClientRect());return e.length===2&&e[1].top>=e[0].bottom;})()"));
    if(page==='studentQuery') {
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-query-detail-slot .section-head').length"),1);
-    const note=await browser.evaluate("(()=>{const e=document.querySelector('.student-query-detail-table tbody tr td:nth-child(11)');return {white:getComputedStyle(e).whiteSpace,overflow:getComputedStyle(e).textOverflow};})()");assert.equal(note.white,'nowrap');
+    const note=await browser.evaluate("(()=>{const e=document.querySelector('.student-query-detail-slot .student-pricing-table tbody tr td:nth-child(12)');return {white:getComputedStyle(e).whiteSpace,overflow:getComputedStyle(e).textOverflow};})()");assert.equal(note.white,'nowrap');
     if(width===1440)assert.equal(await browser.evaluate("new Set([...document.querySelectorAll('.student-statement-metrics .metric')].map(e=>Math.round(e.getBoundingClientRect().top))).size"),1);
    }
    if(page==='studentPricing') {assert.equal(await browser.evaluate("document.querySelectorAll('.finance-notice-list').length"),0);assert.ok(await browser.evaluate("!!document.querySelector('.pricing-batch-actions .pricing-unset-summary')"));}

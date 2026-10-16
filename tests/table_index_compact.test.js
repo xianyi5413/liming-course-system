@@ -66,7 +66,7 @@ async function show(browser, page) {
 const pages = [
   ['summary','.student-summary-table',0],
   ['recharges','.recharge-table',1], ['openingBalances','.opening-balance-table',1],
-  ['studentQuery','.student-query-detail-table',0], ['studentPricing','.student-pricing-table',1],
+  ['studentQuery','.student-query-detail-slot .student-pricing-table',1], ['studentPricing','.student-pricing-table',1],
   ['classGroups','.class-group-table',0], ['studentProfiles','.student-profile-table',1],
   ['teacherSalary','.teacher-salary-table',0], ['teacherTravelFees','.teacher-travel-table',0],
   ['teacherDetail','.teacher-detail-table',0], ['teacherSalaryRules','.teacher-salary-rule-table',1],
@@ -166,7 +166,7 @@ test('account insertion, reordered data and query ranges retain display-only num
   assert.equal(await browser.evaluate('studentStatementCanvas(studentStatementReport()).toDataURL()'),before);
   for(const mode of ['all','range']) {
     await browser.evaluate(`(async()=>{studentQueryRange={mode:${JSON.stringify(mode)},start:'2026-07-03',end:'2026-07-09'};await load({refreshGlobal:false});})()`);
-    await assertIndexes(browser,'.student-query-detail-table',0);
+    await assertIndexes(browser,'.student-query-detail-slot .student-pricing-table',1);
     assert.equal(await browser.evaluate("!!document.querySelector('.student-history-table .row-index')"),false);
   }
   assert.deepEqual(await browser.evaluate('[rowIndexValue(0,40),rowIndexValue(1,40)]'),[41,42]);

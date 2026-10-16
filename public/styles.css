@@ -14415,3 +14415,8 @@ table.adaptive-table td.single-line-note,
 .course-details-table .pricing-course-rule-fee { color: var(--text); text-align: right; padding-right: 14px; }
 .course-details-table .pricing-course-fee.negative { color: var(--danger); }
 .pricing-course-fee .pricing-course-fee-edit { color: inherit; }
+
+/* Read mode uses the same typography as the adjacent rule amount. */
+.pricing-course-fee-edit { appearance: none; border: 0; background: transparent; padding: 0; margin: 0; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+.pricing-course-fee-edit:hover { text-decoration: underline; }
+.pricing-course-fee-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
