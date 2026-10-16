@@ -60,7 +60,7 @@ test('inline picker immediately paints grade/subject independently, types share 
       return {empty,shown,subject:subjectTrigger.textContent.trim(),students:state.lessons.find(item=>item.id===row.id).student_names};
     })()`);
     assert.deepEqual(immediate.empty,{grade:'-',badge:false,subject:'-'});assert.equal(immediate.shown,'初一');assert.equal(immediate.subject,'数学');assert.equal(immediate.students,'');
-    assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),false);
+    assert.equal(await browser.evaluate("!!document.querySelector('[data-field=course_type][data-lesson-edit-trigger]')"),true);
     assert.equal(await browser.evaluate(`(()=>{lessonFilter.time_slot='15:40-17:40';return visibleLessonRows().length;})()`),1);
     const filters=await browser.evaluate(`(async()=>{lessonFilter.time_slot='15:40-17:40';lessonFilter.teacher_names=['合成老师'];lessonFilter.student_names=['合成学生'];lessonFilter.grade='高一';await refreshLessonsView({reloadRange:false});const count=visibleLessonRows().length;return {count,time:visibleLessonRows()[0]?.time_slot};})()`);
     assert.deepEqual(filters,{count:1,time:'15:40-17:40'});

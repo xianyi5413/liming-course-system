@@ -30,6 +30,52 @@ test('canonical class identity excludes type but retains teacher, grade, subject
   assert.deepEqual(W.courseTypes(['小班课','1V3','1V1','1V2','小班课','自定义']),['1V1','1V2','1V3','小班课','自定义']);
 });
 
+test('scheduling type entry shares class permissions, single-course persistence and floating picker at five widths',async()=>{
+  const chrome=await launchChrome(path.join(tempRoot,'schedule-type-chrome')),b=chrome.session;
+  try {
+    await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+    await b.evaluate("setActiveView('lessons');lessonFilter={...defaultLessonFilter(),start_date:'2026-09-01',end_date:'2026-09-30',date_preset_initialized:true};load({refreshGlobal:false})");await b.waitFor("!!document.querySelector('.lesson-table tbody tr')");
+    assert.equal(await b.evaluate("document.querySelectorAll('.col-type[data-lesson-edit-trigger]').length"),0);
+    await b.evaluate('scheduleMode=true;reRenderLessonsTbody()');
+    const id=await b.evaluate("Number(document.querySelector('.col-type[data-lesson-edit-trigger]').dataset.lessonId)");
+    const db=new DatabaseSync(databasePath),before=db.prepare('SELECT * FROM lessons ORDER BY id').all();db.close();
+    for(const width of [1920,1440,1280,1024,390]) {
+      await b.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+      await b.click('.col-type[data-lesson-edit-trigger]');
+      assert.equal(await b.evaluate("document.querySelectorAll('.schedule-inline-picker-native').length"),1);
+      assert.ok(await b.evaluate("document.documentElement.scrollWidth<=innerWidth"));
+      await b.click('.col-subject[data-lesson-edit-trigger]');
+      assert.equal(await b.evaluate("document.querySelectorAll('.schedule-inline-picker-native').length"),1);
+      await b.evaluate('closeScheduleInlinePicker()');
+    }
+    await b.click('.col-type[data-lesson-edit-trigger]');
+    await b.evaluate("(()=>{const input=document.querySelector('.schedule-inline-picker-native');input.value='1V3';input.dispatchEvent(new Event('change',{bubbles:true}));})()");
+    await b.waitFor(`state.lessons.find(row=>row.id===${id}).course_type==='1V3'`);
+    const check=new DatabaseSync(databasePath),after=check.prepare('SELECT * FROM lessons ORDER BY id').all();check.close();
+    for(let i=0;i<before.length;i++) if(before[i].id!==id)assert.deepEqual(after[i],before[i]);
+    assert.equal(after.find(row=>row.id===id).course_type_source,'manual');
+    assert.equal((await api('/api/class-groups')).payload.class_groups.filter(row=>row.teacher==='合成教师').length,1);
+    await b.evaluate("window.typeRequest=request;request=(path,options)=>path==='/api/class-groups/course-type'?Promise.reject(new Error('合成类型保存失败')):typeRequest(path,options)");
+    await b.click('.col-type[data-lesson-edit-trigger]');
+    await b.evaluate("(()=>{const input=document.querySelector('.schedule-inline-picker-native');input.value='1V1';input.dispatchEvent(new Event('change'));})()");
+    await b.waitFor('!activeScheduleInlinePicker');
+    assert.equal(await b.evaluate(`state.lessons.find(row=>row.id===${id}).course_type`),'1V3');
+    assert.equal(await b.evaluate("document.querySelector('.col-type .lesson-inline-picker').textContent"),'1V3');
+    await b.evaluate('request=typeRequest');
+    await b.evaluate("window.savedUser=auth.user;auth.user={...auth.user,permissions:['lessons']};reRenderLessonsTbody()");
+    assert.equal(await b.evaluate("document.querySelectorAll('.col-type[data-lesson-edit-trigger]').length"),0);
+    await b.evaluate("auth.user={...savedUser,role:'teacher'};reRenderLessonsTbody()");
+    assert.equal(await b.evaluate("document.querySelectorAll('.col-type[data-lesson-edit-trigger]').length"),0);
+    await b.evaluate('auth.user=savedUser;scheduleMode=false;reRenderLessonsTbody()');
+    assert.equal(await b.evaluate("document.querySelectorAll('.col-type[data-lesson-edit-trigger]').length"),0);
+    const group=(await api('/api/class-groups')).payload.class_groups.find(row=>row.teacher==='合成教师');
+    assert.equal((await api('/api/class-groups/course-type',{cookie:teacherCookie,method:'PATCH',body:{group_key:group.group_key,lesson_ids:[id],course_type:'1V1',mode:'lesson'}})).response.status,403);
+    // Restore via the authoritative API so later fixtures retain their starting type.
+    await api('/api/class-groups/course-type',{method:'PATCH',body:{group_key:group.group_key,lesson_ids:[id],course_type:before.find(row=>row.id===id).course_type,mode:'lesson'}});
+    assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+  }finally{await b.close();chrome.child.kill();}
+});
+
 test('both APIs keep mixed types in one class; single and whole-class edits preserve exact IDs and salaries', async () => {
   let group=(await api('/api/class-groups')).payload.class_groups.find(row=>row.teacher==='合成教师');
   assert.equal(group.course_count,10); assert.deepEqual(group.course_types,['小班课']);

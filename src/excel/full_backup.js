@@ -82,7 +82,8 @@ function safeTimestamp(date = new Date()) {
 function fullDataFilename(date = new Date()) { return `黎明教育_全量数据_${safeTimestamp(date)}.xlsx`; }
 function tableExists(db, table) { return !!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(table); }
 function tableColumns(db, table) { return db.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all().map((row) => row.name); }
-function compareRows(fields) { return (left, right) => { for (const field of fields) { const a = left[field]; const b = right[field]; const result = typeof a === "number" && typeof b === "number" ? a - b : String(a ?? "").localeCompare(String(b ?? ""), "zh-Hans-CN", { numeric: true }); if (result) return result; } return 0; }; }
+const exportCollator = new Intl.Collator('zh-Hans-CN', { numeric: true });
+function compareRows(fields) { return (left, right) => { for (const field of fields) { const a = left[field]; const b = right[field]; const result = typeof a === "number" && typeof b === "number" ? a - b : exportCollator.compare(String(a ?? ""), String(b ?? "")); if (result) return result; } return 0; }; }
 function sourceDefinition(table) { return SOURCE_TABLE_DEFINITIONS.find((item) => item.source_table === table); }
 function recordKey(table, row) { const fields = sourceDefinition(table)?.key_fields || ["id"]; return canonical(fields.map((field) => row[field])); }
 function safeSettingRows(rows) { return rows.filter((row) => SETTING_LABELS[row.key] && !SECRET_SETTING_PATTERN.test(row.key)); }
@@ -119,7 +120,7 @@ function teacherRuleKey(row) { return [text(row.teacher_name), text(row.grade), 
 function moneyRound(value) { return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100; }
 function studentRuleSource(rule, lessons, context) {
   const price = Number(rule.custom_price || 0); if (price <= 0) return "pending";
-  const matches = lessons.filter((lesson) => splitList(lesson.student_names).includes(text(rule.student_name)) && priceKey({ ...lesson, student_name: rule.student_name }) === priceKey(rule) && deriveStatus(lesson, context.allowedStatuses) === "已上");
+  const matches = context.completedPriceLessons.get(priceKey(rule)) || [];
   const mismatch = matches.some((lesson) => {
     const override = context.feeOverrides.get(`${lesson.id}\u0001${text(rule.student_name)}`);
     const standard = context.priceStandards.get(`${text(lesson.grade)}\u0001${priceBucket(lesson.grade, splitList(lesson.student_names).length)}`);
@@ -285,6 +286,7 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
   const createdAt = options.createdAt || new Date(); const allowedStatuses = new Set([...DEFAULT_COURSE_STATUSES, ...customStatuses(sourceData)]);
   const context = {
     lessons: sourceData.lessons,
+    completedPriceLessons: new Map(),
     salaryContext: SalaryWorkflow.tableContext(sourceData.salary_tables, sourceData.salary_table_rules, sourceData.teachers),
     allowedStatuses,
     staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])),
@@ -292,6 +294,15 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
     priceStandards: new Map(sourceData.pricing_standards.map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, Number(row.unit_price)])),
     studentRules: new Map(sourceData.student_pricing.map((row) => [priceKey(row), row])),
   };
+  // Export-local index of the same exact identity/status predicate. Never cache across snapshots.
+  for (const lesson of context.lessons) {
+    if (deriveStatus(lesson, allowedStatuses) !== '已上') continue;
+    for (const student_name of new Set(splitList(lesson.student_names))) {
+      const key = priceKey({...lesson, student_name});
+      if (!context.completedPriceLessons.has(key)) context.completedPriceLessons.set(key, []);
+      context.completedPriceLessons.get(key).push(lesson);
+    }
+  }
   const mapping = []; const chunks = []; const mappedRows = new Set(); const visibleCounts = {}; const visibleSheets = [];
   for (const definition of VISIBLE_SHEET_DEFINITIONS) {
     const records = visibleRecords(definition, sourceData, context); visibleCounts[definition.sheet_name] = records.length;

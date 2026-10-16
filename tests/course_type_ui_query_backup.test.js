@@ -177,6 +177,8 @@ test('Chromium: logo, sidebar, teacher serials, query model, refresh and sticky 
     assert.deepEqual(filteredSerials, ['1']);
     await browser.evaluate("(async () => { activeMonth='2026-07-01'; scheduleMode=true; setActiveView('lessons'); lessonFilter.start_date='2026-07-01'; lessonFilter.end_date='2026-07-31'; await load({refreshGlobal:false}); })()");
     await browser.waitFor("Boolean(document.querySelector('.lesson-table'))");
+    assert.equal(await browser.evaluate("!!document.querySelector('[data-lesson-edit-trigger][data-field=course_type]')"),true);
+    await browser.evaluate('scheduleMode=false;reRenderLessonsTbody()');
     assert.equal(await browser.evaluate("!!document.querySelector('[data-lesson-edit-trigger][data-field=course_type]')"),false);
     await browser.evaluate("(async () => { setActiveView('classGroups'); await load({refreshGlobal:false}); })()");
     assert.equal(await browser.evaluate("Boolean(document.querySelector('.new-class-group'))"), false);
