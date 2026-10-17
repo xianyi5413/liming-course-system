@@ -267,7 +267,7 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
     }
     await browser.send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await show('studentPricing');
-    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers,['序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','节数','规则费用','备注']);
+    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers,['','序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','有效节数','总节数','规则费用','备注']);
     assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-select-row').length"),0);assert.equal(await browser.evaluate("document.querySelectorAll('.shared-course-dialog').length"),0);
     await browser.click('.student-pricing-rule-row[data-rule-id="9101"] td:nth-child(3)');await browser.waitFor("document.querySelectorAll('.course-details-table tbody tr').length===2");
     assert.match(await browser.evaluate("document.querySelector('.shared-course-dialog').textContent"),/实际费用.*规则费用/);await browser.click('.dialog-close');

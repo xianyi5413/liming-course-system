@@ -1,0 +1,322 @@
+{
+  "baseline_commit": "e181c84",
+  "method": "Baseline three runs on e181c84; final three runs include per-course fee-mode implementation. Fresh synthetic databases with identical fixture; first candidate creation included. 1000 means distinct rules, others one rule. Concurrent regression load; not a production SLA. Initial alternating measurements also retained. Final collapsed samples include outer-scroll gutter fix; expansion-only batching does not execute on collapsed path.",
+  "before": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 45.1000000089407,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 47.400000005960464,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 266.20000000298023,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2373.5,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 40.5,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 43.900000005960464,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 196.40000000596046,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2151,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 53.79999999701977,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 47.5,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 201.70000000298023,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 1363.2999999970198,
+        "expanded_ms": null
+      }
+    ]
+  ],
+  "after": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 44.099999994039536,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 41.599999994039536,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 192.8999999910593,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2262,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 45.30000001192093,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 52,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 194.20000000298023,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2261.7999999970198,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 52.400000005960464,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 51.5,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 296.09999999403954,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2457.7999999970198,
+        "expanded_ms": null
+      }
+    ]
+  ],
+  "medians": [
+    {
+      "count": 10,
+      "before_ms": 45.1,
+      "after_ms": 45.3
+    },
+    {
+      "count": 100,
+      "before_ms": 47.4,
+      "after_ms": 51.5
+    },
+    {
+      "count": 500,
+      "before_ms": 201.7,
+      "after_ms": 194.2
+    },
+    {
+      "count": 1000,
+      "before_ms": 2151,
+      "after_ms": 2262
+    }
+  ],
+  "initial_after": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 44.6000000089407,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 42.70000000298023,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 240.20000000298023,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2225.2999999970198,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 46.8999999910593,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 43.900000005960464,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 199.29999999701977,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 1243.7000000029802,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 43.3999999910593,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 41.29999999701977,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 191.90000000596046,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 1545.5999999940395,
+        "expanded_ms": null
+      }
+    ]
+  ],
+  "pre_scroll_fix_after": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 41.8999999910593,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 39.29999999701977,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 178.5,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 1760.4000000059605,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 47.29999999701977,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 43,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 188.40000000596046,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 1879.2000000029802,
+        "expanded_ms": null
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 40.1000000089407,
+        "expanded_ms": null
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 42,
+        "expanded_ms": null
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 184.09999999403954,
+        "expanded_ms": null
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2103,
+        "expanded_ms": null
+      }
+    ]
+  ],
+  "release_expansion": [
+    {
+      "count": 10,
+      "collapsed_ms": 20.69999998807907,
+      "expanded_ms": 60.89999997615814
+    },
+    {
+      "count": 100,
+      "collapsed_ms": 19.5,
+      "expanded_ms": 172.19999998807907
+    },
+    {
+      "count": 500,
+      "collapsed_ms": 21.700000017881393,
+      "expanded_ms": 776.9000000059605
+    },
+    {
+      "count": 1000,
+      "collapsed_ms": 118.59999999403954,
+      "expanded_ms": 13617.40000000596,
+      "measure_ms": 139.40000000596046
+    }
+  ],
+  "release_expansion_note": "Warmed regression fixture, not comparable to fresh-database collapsed medians. Final full-suite measurement; 1000 represents 1000 distinct groups, others one group."
+}

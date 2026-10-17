@@ -14275,3 +14275,16 @@ table.adaptive-table td.single-line-note,
 
 /* Student query uses semantic alignment, independent of historical column positions. */
 .student-pricing-table .student-set-cell .student-set-badges { justify-content: flex-start; }
+
+.query-rule-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
+.query-rule-expand { display:inline-flex; align-items:center; gap:4px; }
+.query-rule-expand svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.8; }
+.student-pricing-table > tbody > .query-rule-details > td { padding:8px 12px; background:var(--panel); overflow:visible; }
+.query-rule-details .table-wrap { overflow:visible; max-width:none; }
+
+.query-course-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+
+.query-rule-heading { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+
+/* Expanded child tables own no scrollbars; avoid gutter clipping at the outer scroll limit. */
+#student-pricing-table-wrap { scrollbar-gutter: auto; }

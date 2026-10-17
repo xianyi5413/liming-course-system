@@ -1,3 +1,4 @@
+const { migrateStudentFeeMode, automaticStudentFee } = require('../domain/fee_restore');
 const StudentDisplay = require('../../public/student-display');
 const { parseTimeRange } = require("../domain/lesson_time");
 const SalaryWorkflow = require("../domain/salary_workflow");
@@ -133,7 +134,8 @@ function studentFeeValues(lesson, studentName, context) {
   if (deriveStatus(lesson, context.allowedStatuses) !== "已上") return { unit_price: 0 };
   const override = context.feeOverrides.get(`${lesson.id}\u0001${studentName}`);
   const standard = context.priceStandards.get(`${text(lesson.grade)}\u0001${priceBucket(lesson.grade, splitList(lesson.student_names).length)}`);
-  return { unit_price: moneyRound(override == null ? Number(standard || 0) : Number(override)) };
+  const rule = context.studentRules.get(priceKey({...lesson, student_name:studentName}));
+  return { unit_price: moneyRound(override == null ? (automaticStudentFee(lesson.student_fee_mode, rule?.custom_price, standard) ?? 0) : Number(override)) };
 }
 function gradeStageFields(sourceData, studentName) {
   const stages = new Map((sourceData.student_grade_stages || []).filter((row) => text(row.student_name) === text(studentName)).map((row) => [text(row.stage), row]));
@@ -292,7 +294,7 @@ function buildFullDataBufferFromSourceData(sourceData, options = {}) {
     staffNames: new Map(sourceData.staff.map((row) => [Number(row.id), row.name])),
     feeOverrides: new Map(sourceData.fee_overrides.map((row) => [`${row.lesson_id}\u0001${text(row.student_name)}`, Number(row.unit_price)])),
     priceStandards: new Map(sourceData.pricing_standards.map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, Number(row.unit_price)])),
-    studentRules: new Map(sourceData.student_pricing.map((row) => [priceKey(row), row])),
+    studentRules: new Map([...sourceData.student_pricing].filter(row => Number(row.custom_price) > 0).sort((a,b) => Number(a.id)-Number(b.id)).map((row) => [priceKey(row), row])),
   };
   // Export-local index of the same exact identity/status predicate. Never cache across snapshots.
   for (const lesson of context.lessons) {
@@ -494,6 +496,7 @@ function validateData(data, parsedVisible) {
       coefficients.add(key);
     }
     for (const row of data.lessons) {
+      if (![undefined, null, "", "standard", "rule"].includes(row.student_fee_mode)) throw new Error("学生费用来源无效");
       if (![undefined, null, "", "manual", "auto", "legacy"].includes(row.course_type_source)) throw new Error("课程类型来源无效");
       if (![undefined, null, "", "manual", "auto"].includes(row.teacher_base_salary_source)) throw new Error("基础课薪来源无效");
       if (row.teacher_base_salary_override != null && SalaryWorkflow.Formula.cents(row.teacher_base_salary_override) > 10000000) throw new Error("特殊基础课薪超出范围");
@@ -534,6 +537,7 @@ function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
     try {
       SalaryWorkflow.migrateSalaryWorkflow(db);
       ensureSchemaCompatible(db);
+      migrateStudentFeeMode(db);
       migrateCourseTypes(db, { backfill: false });
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => b.restore_order - a.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
@@ -545,7 +549,7 @@ function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
       for (const definition of [...SOURCE_TABLE_DEFINITIONS].sort((a, b) => a.restore_order - b.restore_order)) {
         if (definition.source_table === "operation_logs" && !verified.operation_logs_included) continue;
         const available = new Set(tableColumns(db, definition.source_table));
-        for (const row of verified.data[definition.source_table]) { if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); if (definition.source_table === "lessons" && !Object.hasOwn(row, "course_type_source")) row.course_type_source = row.course_type ? "legacy" : "auto"; const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
+        for (const row of verified.data[definition.source_table]) { if (definition.source_table === "lessons" && !row.student_fee_mode) row.student_fee_mode = "standard"; if (["lessons", "class_groups"].includes(definition.source_table) && !Object.hasOwn(row, "course_type")) row.course_type = defaultCourseType(row.grade, row.student_names || row.students_key); if (definition.source_table === "lessons" && !Object.hasOwn(row, "course_type_source")) row.course_type_source = row.course_type ? "legacy" : "auto"; const fields = Object.keys(row).filter((field) => available.has(field)); if (!fields.length) continue; db.prepare(`INSERT INTO ${definition.source_table}(${fields.join(",")}) VALUES (${fields.map(() => "?").join(",")})`).run(...fields.map((field) => row[field])); }
         written += verified.data[definition.source_table].length;
         onProgress('write', 75 + Math.round(written / Math.max(1, total) * 15), '正在写入数据');
       }

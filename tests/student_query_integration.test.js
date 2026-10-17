@@ -236,7 +236,7 @@ test('query-only page permission does not grant rule writes; batch scope and sta
 });
 
 
-test('retired pricing entry redirects without granting query access; query rules have no bulk controls', async()=>{
+test('retired pricing entry redirects without granting query access; query rules keep retired controls absent and expose scoped selection', async()=>{
  assert.equal((await api('/api/student-pricing-page')).response.status,410);
  const cookie=await login('salary-readonly');
  assert.equal((await api('/api/student-statement?student='+encodeURIComponent('张三'),{cookie})).response.status,403);
@@ -248,7 +248,7 @@ test('retired pricing entry redirects without granting query access; query rules
   assert.equal(await b.evaluate("document.querySelectorAll('[data-view=studentPricing],.student-query-price-filter,.student-pricing-select-row,.student-pricing-select-all,.open-student-pricing-batch-modal').length"),0);
   assert.equal(await b.evaluate("typeof renderStudentPricing"),'undefined');
   const layout=await b.evaluate("(()=>{const td=document.querySelector('.student-set-cell'),t=td.closest('table');return {align:getComputedStyle(td).textAlign,head:getComputedStyle(t.tHead.rows[0].cells[td.cellIndex]).textAlign,wrap:getComputedStyle(td.firstElementChild).flexWrap,justify:getComputedStyle(td.firstElementChild).justifyContent,cols:t.tHead.rows[0].cells.length}})()");
-  assert.deepEqual(layout,{align:'left',head:'center',wrap:'nowrap',justify:'flex-start',cols:11});
+  assert.deepEqual(layout,{align:'left',head:'center',wrap:'nowrap',justify:'flex-start',cols:13});
   assert.equal(b.responses.some(r=>r.url.includes('/api/student-pricing-page')),false);
   const legacy=(await api('/api/auth/me',{cookie})).payload;
   assert.notEqual(legacy.user?.first_accessible_view,'studentPricing');

@@ -1,3 +1,4 @@
+const { planFeeRestore, migrateStudentFeeMode, automaticStudentFee } = require('./domain/fee_restore');
 const StudentDisplay = require('../public/student-display');
 const { WorkerJobs } = require('./backup/worker_jobs');
 const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
@@ -51,7 +52,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261017-query-monochrome";
+const APP_VERSION = process.env.APP_VERSION || "20261018-query-expansion";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -842,6 +843,7 @@ function initDb() {
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_opening_balances_student ON student_opening_balances(student_name)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_student_grade_stages_student ON student_grade_stages(student_name)").run();
 
+  migrateStudentFeeMode(db);
   const studentPricingSql = text(get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'student_pricing'")?.sql);
   if (!studentPricingSql.includes("grade TEXT") || !studentPricingSql.includes("student_names TEXT") || !studentPricingSql.includes("UNIQUE (student_name, grade, subject, student_names)")) {
     withTransaction(() => {
@@ -2371,7 +2373,8 @@ function feePricingLookups(readRows = all, studentName = "") {
   }
   const pricingStandards = new Map(readRows("SELECT grade, student_count, unit_price FROM pricing_standards")
     .map((row) => [`${text(row.grade)}\u0001${Number(row.student_count)}`, row]));
-  return { feeOverrides, studentPricingRules, pricingStandards };
+  const lessonFeeModes = new Map(readRows("SELECT id, student_fee_mode FROM lessons").map(row => [Number(row.id), row.student_fee_mode]));
+  return { feeOverrides, studentPricingRules, pricingStandards, lessonFeeModes };
 }
 
 function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, status, studentNames }, lookups = null) {
@@ -2394,9 +2397,10 @@ function unitPriceFor({ studentName, subject, grade, studentCount, lessonId, sta
       "SELECT unit_price FROM pricing_standards WHERE grade = ? AND student_count = ?",
       [grade, bucket],
     );
+  const mode = lookups?.lessonFeeModes ? lookups.lessonFeeModes.get(Number(lessonId)) : get("SELECT student_fee_mode FROM lessons WHERE id=?", [lessonId])?.student_fee_mode;
   const currentPrice = override
     ? num(override.unit_price)
-    : (standard ? num(standard.unit_price) : 0);
+    : (automaticStudentFee(mode, rule?.custom_price, standard?.unit_price) ?? 0);
   const source = rule
     ? (Math.abs(currentPrice - rulePrice) < 0.0001 ? "auto" : "manual")
     : "pending";
@@ -6746,7 +6750,7 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
   const names = scope ? [...new Set(lessons.flatMap(row => splitStudents(row.student_names)))] : [];
   const storedRules = readRows("SELECT * FROM student_pricing" + (scope ? ` WHERE student_name IN (${names.map(() => "?").join(",") || "NULL"})` : "") + " ORDER BY id", names);
   const { createdRules } = syncStudentPricingCandidatesFromLessons({ lessons, rules: storedRules });
-  const matchesByRule = new Map();
+  const matchesByRule = new Map(), totalsByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
   const knownStatuses = new Set(courseStatusValues());
   const parsedStudentSets = new Map();
@@ -6768,6 +6772,7 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
         subject: lesson.subject,
         student_names: normalizedStudentNames,
       });
+      totalsByRule.set(key, (totalsByRule.get(key) || 0) + 1);
       if (effectiveStatus !== "已上") continue;
       if (!matchesByRule.has(key)) matchesByRule.set(key, []);
       matchesByRule.get(key).push({ ...lesson, effective_status: effectiveStatus, normalized_student_names: normalizedStudentNames, student_count: students.length });
@@ -6803,6 +6808,8 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
       lookup_key: [studentName, grade, subject, studentNames].filter(Boolean).join("-"),
       current_month_lessons: matches.filter((lesson) => lesson.month_key === monthKey).length,
       total_lessons: matches.length,
+      effective_lessons: matches.length,
+      all_lessons: totalsByRule.get(studentPricingRuleKey(row)) || 0,
       start_date: matches[0]?.date || "",
       end_date: matches.at(-1)?.date || "",
       course_types: SalaryWorkflow.courseTypes(matches),
@@ -6818,6 +6825,51 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
     || text(a.student_names).localeCompare(text(b.student_names), "zh-Hans-CN")
     || Number(a.id || 0) - Number(b.id || 0)
   ));
+}
+
+// One scoped read and one pricing snapshot serve every expanded group.
+function studentRuleCourseDetails(rules, user, range = null, includeAll = false) {
+  const groups = new Map(rules.map(rule => [Number(rule.id), []]));
+  if (!rules.length) return groups;
+  const byKey = new Map(rules.map(rule => [studentPricingRuleKey(rule), rule]));
+  const students = [...new Set(rules.map(rule => rule.student_name))];
+  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all, students.length === 1 ? students[0] : "");
+  const lessons = studentPricingScopedLessons(all("SELECT * FROM lessons" + (range ? " WHERE date>=? AND date<=?" : "") + " ORDER BY date,time_slot,id", range ? [range.start, range.end] : []), user);
+  for (const row of lessons) {
+    const status = deriveStatus(row, statuses), names = splitStudents(row.student_names);
+    if (!includeAll && status !== "已上") continue;
+    for (const student of names) {
+      const rule = byKey.get(studentPricingRuleKey({...row, student_name:student}));
+      if (!rule) continue;
+      const price = unitPriceFor({studentName:student, subject:row.subject, grade:row.grade, studentCount:names.length, lessonId:row.id, status, studentNames:row.student_names}, lookups);
+      groups.get(Number(rule.id)).push({id:row.id, teacher_name:row.teacher_name, date:row.date, time_slot:row.time_slot, classroom:row.classroom,
+        status, grade:row.grade, subject:row.subject, course_type:row.course_type, student_names:row.student_names, notes:row.notes,
+        unit_price:status === "已上" ? price.unit_price : null, rule_fee:status === "已上" ? price.baseline_price : null,
+        can_edit_fee:status === "已上" && !userReadonly(user) && roleCan(user,"students","write") && filterLessonsByRolePrefilter([row],user,"feeDetails").length > 0});
+    }
+  }
+  return groups;
+}
+
+const feeRestorePreviews = new Map();
+function feeRestorePlan(ids, student, user, range) {
+  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all, student);
+  const lessons = all(`SELECT * FROM lessons WHERE id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`, ids);
+  if (lessons.length !== ids.length) throw Object.assign(new Error('课程已删除，请刷新'), {status:409});
+  const items = lessons.map(lesson => {
+    if (!splitStudents(lesson.student_names).includes(student) || lesson.date < range.start || lesson.date > range.end || !studentPricingScopedLessons([lesson],user).length || !filterLessonsByRolePrefilter([lesson],user,'feeDetails').length)
+      throw Object.assign(new Error('课程或学生不在可修改范围内'), {status:403});
+    const status = deriveStatus(lesson,statuses), count=splitStudents(lesson.student_names).length;
+    const price = unitPriceFor({studentName:student, subject:lesson.subject, grade:lesson.grade, studentCount:count, lessonId:lesson.id, status, studentNames:lesson.student_names},lookups);
+    const override=lookups.feeOverrides.get(`${lesson.id}\u0001${student}`);
+    const standard=lookups.pricingStandards.get(`${lesson.grade}\u0001${priceBucket(lesson.grade,count)}`);
+    const target=price.baseline_price ?? null;
+    return {lesson_id:lesson.id, student_name:student, date:lesson.date, actual:price.unit_price, target,
+      difference:target == null ? null : moneyRound(target-price.unit_price),
+      ...planFeeRestore({status,actual:price.unit_price,target,fallback:automaticStudentFee(lesson.student_fee_mode,price.rule_price,standard?.unit_price),hasOverride:Boolean(override)}),
+      fingerprint:{lesson,override:override || null,standard:standard || null,rule:activeStudentPricingRuleForLesson({studentName:student,grade:lesson.grade,subject:lesson.subject,studentNames:lesson.student_names},lookups)}};
+  });
+  return {items, signature:crypto.createHash('sha256').update(JSON.stringify(items)).digest('hex')};
 }
 
 function studentPricingWriteScopeAllowed(url, ids, user) {
@@ -9948,7 +10000,7 @@ function apiArea(req, url) {
   if (p.startsWith("/api/opening-balances")) return "students";
   if (p.includes("/statement") || p.includes("student-statement")) return "studentBilling";
   if (p.includes("pricing")) return "pricing";
-  if (p.includes("student") || p === "/api/fee-overrides") return "students";
+  if (p.includes("student") || p.startsWith("/api/fee-overrides")) return "students";
   if (p.startsWith("/api/course-notice") || p.startsWith("/api/teacher-course-notice")) return "schedule";
   if (p.includes("lessons") || p.includes("months") || p.includes("schedule-conflicts") || p === "/api/settings") return "schedule";
   if (p.startsWith("/api/teachers")) return "profiles";
@@ -12001,9 +12053,9 @@ function insertLesson(data, options = {}) {
     INSERT INTO lessons(
       teacher_name, date, lesson_status, time_slot, classroom, grade, subject,
       student_names, notes, course_status, status, teacher_salary, teacher_salary_source,
-      teacher_salary_rule_id, month_key, sort_order, course_type, course_type_source
+      teacher_salary_rule_id, month_key, sort_order, course_type, course_type_source, student_fee_mode
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     text(data.teacher_name),
     text(data.date || monthKey),
@@ -12023,6 +12075,7 @@ function insertLesson(data, options = {}) {
     num(data.sort_order),
     courseType,
     options.preserveCourseType ? (data.course_type_source || "legacy") : (text(data.course_type) ? "legacy" : "auto"),
+    options.explicitSource === "import" ? "standard" : "rule",
   );
   const lesson = get("SELECT * FROM lessons WHERE id = ?", [Number(result.lastInsertRowid)]);
   return salary.warning ? { ...lesson, teacher_salary_warning: salary.warning } : lesson;
@@ -12849,30 +12902,21 @@ async function handleApi(req, res, url) {
     const student = text(url.searchParams.get("student"));
     const range = studentStatementRangeFromUrl(url);
     if (!student || !range) return sendError(res, 400, "学生和有效日期范围不能为空");
-    return sendJson(res, { student_name: student, range, rules: studentPricingRows(resolveMonthKey(url), null, user, { student, ...range }), can_edit_rule: userHasAnyPermission(user, ["studentPricing"]) && !userReadonly(user) && roleCan(user, "students", "write") });
+    const rules = studentPricingRows(resolveMonthKey(url), null, user, { student, ...range });
+    const courses = url.searchParams.get("include_courses") === "1" ? Object.fromEntries(studentRuleCourseDetails(rules, user, range, true)) : undefined;
+    return sendJson(res, { student_name: student, range, rules, courses, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), can_edit_rule: userHasAnyPermission(user, ["studentPricing"]) && !userReadonly(user) && roleCan(user, "students", "write") });
   }
   const studentPricingCoursesMatch = url.pathname.match(/^\/api\/student-pricing\/(\d+)\/courses$/);
   if (req.method === "GET" && studentPricingCoursesMatch) {
     const rule = get("SELECT * FROM student_pricing WHERE id=?", [Number(studentPricingCoursesMatch[1])]);
     if (!rule || !isCompleteStudentPricingRule(rule)) return sendError(res, 404, "学生单价规则不存在");
-    const statuses = new Set(courseStatusValues()), lookups = feePricingLookups();
-    const candidates = all("SELECT * FROM lessons WHERE grade=? AND subject=? ORDER BY date,time_slot,id", [rule.grade, rule.subject]);
-    const scoped = studentPricingScopedLessons(candidates, user);
-    if (canonicalRole(user.role) === "teacher" && !scoped.some(row => splitStudents(row.student_names).includes(rule.student_name) && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...row, student_name: rule.student_name }))) return sendError(res, 404, "规则不在可见课程范围内");
     const range = studentStatementRangeFromUrl(url);
     if (!range) return sendError(res, 400, "无效日期范围");
     if (url.searchParams.has("student") && text(url.searchParams.get("student")) !== rule.student_name) return sendError(res, 400, "学生与规则不匹配");
-    const lessons = scoped.filter(row => studentPricingLessonMatches(rule, row, statuses) && (!(url.searchParams.has("start") || url.searchParams.has("end")) || (row.date >= range.start && row.date <= range.end))).map(row => {
-      const price = unitPriceFor({ studentName: rule.student_name, subject: row.subject, grade: row.grade,
-        studentCount: splitStudents(row.student_names).length, lessonId: row.id,
-        status: deriveStatus(row, statuses), studentNames: normalizedStudents(row.student_names) }, lookups);
-      return {
-        id: row.id, teacher_name: row.teacher_name, date: row.date, time_slot: row.time_slot, classroom: row.classroom,
-        status: deriveStatus(row, statuses), grade: row.grade, subject: row.subject, course_type: row.course_type,
-        student_names: row.student_names, notes: row.notes, unit_price: price.unit_price, rule_fee: price.baseline_price,
-      };
-    });
-    return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: "全历史已上课程", lessons });
+    const scopedRange = url.searchParams.has("start") || url.searchParams.has("end");
+    const lessons = studentRuleCourseDetails([rule], user, scopedRange ? range : null, scopedRange).get(Number(rule.id)) || [];
+    if (canonicalRole(user.role) === "teacher" && !lessons.length) return sendError(res, 404, "规则不在可见课程范围内");
+    return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: scopedRange ? "当前范围全部课程" : "全历史已上课程", lessons });
   }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
     return sendError(res, 410, "独立学生单价页面已下线，请通过学生查询管理规则费用");
@@ -14677,7 +14721,7 @@ async function handleApi(req, res, url) {
     const rawIds = Array.isArray(body.ids) ? body.ids : [];
     const ids = [...new Set(rawIds.map(Number))];
     const price = Number(body.price);
-    const validMoney = Number.isFinite(price) && price >= 0 && price <= 100000
+    const validMoney = ["string", "number"].includes(typeof body.price) && String(body.price).trim() !== "" && Number.isFinite(price) && price >= 0 && price <= 100000
       && Math.abs(price * 100 - Math.round(price * 100)) < 1e-8;
     if (!rawIds.length || ids.length > 500 || ids.some((id) => !Number.isInteger(id) || id <= 0) || !validMoney) {
       return sendJson(res, {
@@ -14946,6 +14990,40 @@ async function handleApi(req, res, url) {
     recordAuditEvent(req, user, { action: "delete", entity_type: "recharge_records", entity_id: String(id), before, after: { row: null, carry_over: result } });
     writeOperationLog(user, { operation_type: "删除充值记录", operation_content: `${before.student_name} ${before.month_key}`, target_type: "recharge_records", target_id: String(id) });
     return sendJson(res, { ok: true, deleted: true, carry_over: result });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fee-overrides/restore-rule") {
+    if (userReadonly(user) || !roleCan(user,'students','write')) return sendError(res,403,'无实际费用修改权限');
+    const body=await readBody(req);
+    try {
+      if (body.action === 'preview') {
+        const ids=[...new Set((Array.isArray(body.lesson_ids) ? body.lesson_ids : []).map(Number))].sort((a,b)=>a-b);
+        const student=text(body.student_name), range=studentStatementRangeFromUrl(url);
+        if (!ids.length || ids.length>1000 || ids.some(id=>!Number.isSafeInteger(id)||id<=0) || !student || !range) return sendError(res,400,'学生、课程ID和日期范围必须有效，单次最多1000节');
+        const plan=feeRestorePlan(ids,student,user,range), token=crypto.randomUUID();
+        for (const [key,value] of feeRestorePreviews) if(value.expires<Date.now()) feeRestorePreviews.delete(key);
+        if (feeRestorePreviews.size>=100) feeRestorePreviews.delete(feeRestorePreviews.keys().next().value);
+        feeRestorePreviews.set(token,{owner:user.id,ids,student,range,signature:plan.signature,expires:Date.now()+300000});
+        return sendJson(res,{token,items:plan.items.map(({fingerprint,...item})=>item),warning:'历史已上课程恢复可能改变历史消费和余额；当前系统不能还原未保存的历史费率版本。仅处理已明确列出的可恢复项目。'});
+      }
+      if (body.action !== 'apply') return sendError(res,400,'无效操作');
+      const preview=feeRestorePreviews.get(body.token);
+      if (!preview || preview.owner!==user.id || preview.expires<Date.now()) return sendError(res,409,'预览已过期，请重新预览并确认');
+      const result=withTransaction(()=>{
+        const plan=feeRestorePlan(preview.ids,preview.student,user,preview.range);
+        if(plan.signature!==preview.signature) throw Object.assign(new Error('课程、费用或规则已变化，请重新预览并确认'),{status:409});
+        const changed=plan.items.filter(item=>item.action==='restore');
+        for(const item of changed) {
+          const before=get('SELECT * FROM fee_overrides WHERE lesson_id=? AND student_name=?',[item.lesson_id,item.student_name]);
+          db.prepare('DELETE FROM fee_overrides WHERE lesson_id=? AND student_name=?').run(item.lesson_id,item.student_name);
+          recordAuditEvent(req,user,{action:'restore_rule',entity_type:'fee_overrides',entity_id:`${item.lesson_id}|${item.student_name}`,before,after:null});
+          writeOperationLog(user,{operation_type:'批量恢复学生规则收费',operation_content:`课程ID ${item.lesson_id} ${item.student_name}：${item.actual} → ${item.target}；清除单节覆盖`,target_type:'fee_overrides',target_id:`${item.lesson_id}|${item.student_name}`});
+        }
+        return {updated:changed.length,unchanged:plan.items.filter(item=>item.action==='unchanged').length,skipped:plan.items.filter(item=>item.action==='skip').length};
+      });
+      feeRestorePreviews.delete(body.token);
+      return sendJson(res,{ok:true,...result});
+    } catch(error) { return sendError(res,error.status || 500,error.status ? error.message : '批量恢复失败，整批已回滚'); }
   }
 
   if (req.method === "POST" && url.pathname === "/api/fee-overrides") {
