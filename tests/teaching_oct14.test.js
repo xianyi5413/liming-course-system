@@ -184,8 +184,8 @@ test('student pricing exact full-history completed matches, stored mixed types, 
     db.exec("INSERT INTO student_pricing(id,student_name,grade,subject,student_names,custom_price) VALUES(9101,'张三','高一','数学','李四、张三',120),(9102,'张三','高二','数学','张三',150); UPDATE lessons SET course_type='小班课',course_type_source='manual' WHERE id=9002; INSERT INTO fee_overrides(lesson_id,student_name,unit_price) VALUES(9002,'张三',135);");
     // Invalidate caches using a normal authorized write.
     await api('/api/student-pricing/9101',{method:'PATCH',body:{notes:''}});
-    const page=(await api('/api/student-pricing-page?month=2026-10-01')).payload;
-    const rule=page.rules.find(row=>row.id===9101), empty=page.rules.find(row=>row.id===9102);
+    const page=(await api('/api/bootstrap?month=2026-10-01')).payload;
+    const rule=page.student_pricing.find(row=>row.id===9101), empty=page.student_pricing.find(row=>row.id===9102);
     assert.equal(rule.total_lessons,2);assert.equal(rule.current_month_lessons,0);
     assert.equal(rule.start_date,'2026-09-01');assert.equal(rule.end_date,'2026-09-02');
     assert.deepEqual(rule.course_types,['1V2','小班课']);assert.equal(empty,undefined);assert.equal(db.prepare('SELECT custom_price FROM student_pricing WHERE id=9102').get().custom_price,150);
@@ -246,7 +246,7 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
   const chrome=await launchChrome(path.join(tempRoot,'oct14-ui')),browser=chrome.session;
   try {
     await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
-    const show=async page=>{await browser.evaluate(`(async()=>{setActiveView('${page}');activeMonth='2026-09-01';await load({refreshGlobal:true});})()`);await browser.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');};
+    const show=async page=>{await browser.evaluate(`(async()=>{setActiveView('${page}');activeMonth='2026-09-01';if(view==='studentQuery'){selectedStudent='张三';studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};}await load({refreshGlobal:true});})()`);await browser.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');};
     for(const width of [1920,1440,1280,1024,390]) {
       await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
       for(const page of ['recharges','studentPricing','studentProfiles','teacherProfiles','teacherDetail']) {
@@ -267,8 +267,8 @@ test('Chromium five-width natural tables, empty editable fields, pricing details
     }
     await browser.send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await show('studentPricing');
-    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers.slice(1),['序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','节数','规则费用','备注']);
-    await browser.click('.student-pricing-rule-row[data-rule-id="9101"] .student-pricing-select-row');assert.equal(await browser.evaluate("document.querySelectorAll('.shared-course-dialog').length"),0);
+    const headers=await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].map(e=>e.textContent.trim())");assert.deepEqual(headers,['序号','学生','年级','科目','类型','学生集合','起始日期','结束日期','节数','规则费用','备注']);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-select-row').length"),0);assert.equal(await browser.evaluate("document.querySelectorAll('.shared-course-dialog').length"),0);
     await browser.click('.student-pricing-rule-row[data-rule-id="9101"] td:nth-child(3)');await browser.waitFor("document.querySelectorAll('.course-details-table tbody tr').length===2");
     assert.match(await browser.evaluate("document.querySelector('.shared-course-dialog').textContent"),/实际费用.*规则费用/);await browser.click('.dialog-close');
     await show('studentProfiles');
@@ -318,11 +318,11 @@ test('pricing scope and exact boundaries reject unrelated grade, subject, studen
       INSERT INTO user_page_permissions(user_id,permission_key,enabled) SELECT id,'studentPricing',1 FROM users WHERE username='salary-readonly';`);
     await api('/api/student-pricing/9101',{method:'PATCH',body:{notes:''}});
     const scopedCookie=await login('salary-readonly');
-    const ownerPage=(await api('/api/student-pricing-page?month=2025-08-01')).payload;
-    const rule=ownerPage.rules.find(row=>row.id===9101);assert.equal(rule.total_lessons,4);assert.equal(rule.current_month_lessons,2);assert.equal(rule.start_date,'2025-08-15');assert.deepEqual(rule.course_types,['1V1','1V2','1V3','小班课']);
+    const ownerPage=(await api('/api/bootstrap?month=2025-08-01')).payload;
+    const rule=ownerPage.student_pricing.find(row=>row.id===9101);assert.equal(rule.total_lessons,4);assert.equal(rule.current_month_lessons,2);assert.equal(rule.start_date,'2025-08-15');assert.deepEqual(rule.course_types,['1V1','1V2','1V3','小班课']);
     const ownerDetails=(await api('/api/student-pricing/9101/courses')).payload.lessons;assert.equal(ownerDetails.length,rule.total_lessons);
-    const scopedPage=await api('/api/student-pricing-page?month=2025-08-01',{cookie:scopedCookie});assert.equal(scopedPage.response.status,200);
-    const scopedRule=scopedPage.payload.rules.find(row=>row.id===9101);assert.equal(scopedRule.total_lessons,3);
+    const scopedPage=await api('/api/bootstrap?month=2025-08-01',{cookie:scopedCookie});assert.equal(scopedPage.response.status,200);
+    const scopedRule=scopedPage.payload.student_pricing.find(row=>row.id===9101);assert.equal(scopedRule.total_lessons,3);
     const scopedDetail=await api('/api/student-pricing/9101/courses',{cookie:scopedCookie});assert.equal(scopedDetail.response.status,200);assert.equal(scopedDetail.payload.lessons.length,scopedRule.total_lessons);assert.ok(scopedDetail.payload.lessons.every(row=>row.teacher_name==='合成教师'));
     assert.equal((await api('/api/student-pricing/9102/courses',{cookie:scopedCookie})).response.status,404);
     const denied=await api('/api/teacher-monthly-performance',{cookie:scopedCookie,method:'PUT',body:{teacher_name:'合成教师',month_key:'2026-09-01',performance_score:0}});assert.equal(denied.response.status,403);
@@ -388,7 +388,7 @@ test('Chromium fee modal saves locally, cancels and rolls back errors at five wi
   const chrome=await launchChrome(path.join(tempRoot,'fee-migration-chrome')), browser=chrome.session;
   try {
     await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
-    await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");
+    await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};selectedStudent='张三';load({refreshGlobal:false})");
     await browser.waitFor("!!document.querySelector('.student-pricing-rule-row[data-rule-id=\"9101\"]')");
     await browser.click('.student-pricing-rule-row[data-rule-id="9101"] td.row-index');
     await browser.waitFor("!!document.querySelector('.pricing-course-fee-edit')");

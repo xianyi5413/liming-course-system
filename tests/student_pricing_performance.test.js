@@ -152,217 +152,41 @@ after(async () => {
   }
 });
 
-test("1000-rule lightweight endpoint uses fixed batch queries, minimal DTOs and isolated cache scopes", async () => {
-  const cold = await api(`/api/student-pricing-page?month=${MONTH}`);
-  assert.equal(cold.response.status, 200);
-  assert.equal(cold.payload.rules.length, VISIBLE_RULE_COUNT);
-  assert.ok(cold.elapsed < 1500, `cold endpoint ${cold.elapsed.toFixed(1)}ms`);
-  assert.ok(cold.bytes < 500_000, `response ${cold.bytes} bytes`);
-  assert.equal(cold.payload.cache_status, "miss");
-  assert.equal(cold.payload.diagnostics.sql_query_count, 6);
-  const allowedFields = new Set([
-    "id", "student_name", "grade", "subject", "student_names", "custom_price", "rule_fee",
-    "price_status", "notes", "current_month_lessons", "total_lessons", "course_types", "start_date", "end_date",
-  ]);
-  assert.deepEqual(Object.keys(cold.payload.rules[0]).filter((field) => !allowedFields.has(field)), []);
-  assert.doesNotMatch(JSON.stringify(cold.payload), /guardian|phone|balance|recharge|teacher_salary|password|token|secret/i);
 
-  const hot = await api(`/api/student-pricing-page?month=${MONTH}`);
-  assert.equal(hot.payload.cache_status, "hit");
-  assert.equal(hot.payload.diagnostics.sql_query_count, 0);
-  assert.ok(hot.elapsed < 600, `hot endpoint ${hot.elapsed.toFixed(1)}ms`);
-
-  const academic = await api(`/api/student-pricing-page?month=${MONTH}`, { cookie: academicCookie });
-  assert.equal(academic.response.status, 200);
-  assert.equal(academic.payload.cache_status, "miss");
-  assert.notEqual(academic.payload.diagnostics.cache_scope_hash, cold.payload.diagnostics.cache_scope_hash);
-  const readonly = await api(`/api/student-pricing-page?month=${MONTH}`, { cookie: readonlyCookie });
-  assert.equal(readonly.response.status, 200);
-  const deniedWrite = await api(`/api/student-pricing/30001?month=${MONTH}`, {
-    cookie: readonlyCookie,
-    method: "PATCH",
-    body: { custom_price: 1 },
-  });
-  assert.equal(deniedWrite.response.status, 403);
-  const scoped = await api('/api/student-pricing-query?' + new URLSearchParams({student:'性能学生001',start:'2026-07-01',end:'2026-07-31'}));
-  assert.equal(scoped.response.status,200);
-  assert.equal(scoped.payload.rules.length,1);
-  assert.ok(scoped.payload.rules.every(row=>row.student_name==='性能学生001'));
-  assert.ok(scoped.bytes < cold.bytes / 20);
-  console.log('[student-query-scoped-performance]',JSON.stringify({rules:scoped.payload.rules.length,bytes:scoped.bytes,elapsed_ms:Number(scoped.elapsed.toFixed(1))}));
-  console.log("[student-pricing-server-performance]", JSON.stringify({
-    rows: VISIBLE_RULE_COUNT,
-    students: STUDENT_COUNT,
-    cold_ms: Number(cold.elapsed.toFixed(1)),
-    hot_ms: Number(hot.elapsed.toFixed(1)),
-    bytes: cold.bytes,
-    cold_queries: cold.payload.diagnostics.sql_query_count,
-    hot_queries: hot.payload.diagnostics.sql_query_count,
-  }));
+const queryPath = student => '/api/student-pricing-query?' + new URLSearchParams({student,start:'2026-07-01',end:'2026-07-31'});
+test('400-course fixture retains 1000 possible pricing identities while scoped query avoids the retired global endpoint', async()=>{
+ assert.equal((await api('/api/student-pricing-page')).response.status,410);
+ const db=new DatabaseSync(databasePath);const count=db.prepare('SELECT count(*) AS n FROM student_pricing').get().n;const identities=db.prepare('SELECT student_names FROM lessons').all().reduce((n,row)=>n+row.student_names.split('、').length,0);db.close();assert.equal(count,RULE_COUNT);assert.equal(identities,VISIBLE_RULE_COUNT);
+ const cold=await api(queryPath('性能学生001'));assert.equal(cold.response.status,200);assert.equal(cold.payload.rules.length,1);assert.ok(cold.elapsed<1500);assert.ok(cold.bytes<25000);
+ assert.ok(cold.payload.rules.every(row=>row.student_name==='性能学生001'));
+ const hot=await api(queryPath('性能学生001'));assert.ok(hot.elapsed<600);assert.deepEqual(hot.payload.rules,cold.payload.rules);
+ assert.equal((await api(queryPath('性能学生001'),{cookie:academicCookie})).response.status,200,'legacy scoped pricing read remains compatible');
+ assert.equal((await api('/api/student-statement?student='+encodeURIComponent('性能学生001'),{cookie:academicCookie})).response.status,403,'pricing-only does not grant the full statement');
+ assert.equal((await api('/api/student-pricing/30001',{cookie:readonlyCookie,method:'PATCH',body:{custom_price:1}})).response.status,403);
+ console.log('[student-query-scoped-performance]',JSON.stringify({stored_rules:count,candidate_identities:identities,rows:cold.payload.rules.length,cold_ms:cold.elapsed,hot_ms:hot.elapsed,bytes:cold.bytes}));
 });
-
-test("single and batch writes invalidate the page cache and return only affected rows", async () => {
-  await api(`/api/student-pricing-page?month=${MONTH}`);
-  const single = await api(`/api/student-pricing/30001?month=${MONTH}`, {
-    method: "PATCH",
-    body: { custom_price: 188.25 },
-  });
-  assert.equal(single.response.status, 200);
-  assert.equal(single.payload.id, 30001);
-  assert.equal(single.payload.custom_price, 188.25);
-  const afterSingle = await api(`/api/student-pricing-page?month=${MONTH}`);
-  assert.equal(afterSingle.payload.cache_status, "miss");
-  assert.equal(afterSingle.payload.rules.find((row) => row.id === 30001).custom_price, 188.25);
-
-  const batch = await api(`/api/student-pricing/batch?month=${MONTH}`, {
-    method: "PATCH",
-    body: { ids: [30002, 30002, 30003], price: 199.5 },
-  });
-  assert.equal(batch.response.status, 200);
-  assert.deepEqual({ processed: batch.payload.processed, success: batch.payload.success }, { processed: 2, success: 2 });
-  assert.deepEqual(batch.payload.rows.map((row) => row.id).sort((a, b) => a - b), [30002, 30003]);
-  const afterBatch = await api(`/api/student-pricing-page?month=${MONTH}`);
-  assert.equal(afterBatch.payload.cache_status, "miss");
-  assert.deepEqual(
-    afterBatch.payload.rules.filter((row) => [30002, 30003].includes(row.id)).map((row) => row.custom_price),
-    [199.5, 199.5],
-  );
+test('single writes and retained legacy batch service preserve precise identities and refresh scoped reads',async()=>{
+ const single=await api('/api/student-pricing/30001',{method:'PATCH',body:{custom_price:188.25}});assert.equal(single.response.status,200);assert.equal(single.payload.custom_price,188.25);
+ const fresh=await api(queryPath(single.payload.student_name));assert.equal(fresh.payload.rules.find(r=>r.id===30001).custom_price,188.25);
+ const batch=await api('/api/student-pricing/batch',{method:'PATCH',body:{ids:[30002,30002,30003],price:199.5}});assert.equal(batch.response.status,200);assert.deepEqual({processed:batch.payload.processed,success:batch.payload.success},{processed:2,success:2});
+ for(const row of batch.payload.rows){const read=await api(queryPath(row.student_name));assert.equal(read.payload.rules.find(r=>r.id===row.id).custom_price,199.5);}
 });
-
-test("real Chromium keeps first paint, progressive rendering, filtering, selection and local saves responsive", async () => {
-  const chrome = await launchChrome(path.join(tempRoot, "pricing-performance-chrome"));
-  const browser = chrome.session;
-  try {
-    await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}` });
-    await browser.login("boss", "123456");
-    await browser.evaluate(`(() => {
-      window.__pricingLongTasks=[];
-      new PerformanceObserver((list)=>window.__pricingLongTasks.push(...list.getEntries().map((entry)=>entry.duration))).observe({type:'longtask'});
-      return true;
-    })()`);
-    const responseStart = browser.responses.length;
-    const started = performance.now();
-    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentPricing\"]'))")) {
-      await browser.click('.nav-btn[data-nav-group="students"]');
-    }
-    await browser.click('.nav-sub-btn[data-view="studentPricing"]');
-    await browser.waitFor("Boolean(document.querySelector('.student-pricing-table[data-adaptive-widths]'))", 10_000);
-    const operableMs = performance.now() - started;
-    const first = await browser.evaluate(`(() => {
-      const table=document.querySelector('.student-pricing-table');
-      return {
-        indexes:[...table.querySelectorAll("td.row-index")].map(cell=>Number(cell.textContent)),
-        initial:Number(table.dataset.initialRowCount),
-        rendered:Number(table.dataset.renderedRows),
-        layoutReads:Number(table.dataset.adaptiveLayoutReads),
-        measurement:Number(table.dataset.adaptiveMeasurementMs),
-        nodes:document.getElementsByTagName('*').length
-      };
-    })()`);
-    assert.equal(first.initial, INITIAL_ROW_COUNT);
-    assert.deepEqual(first.indexes, first.indexes.map((_, index) => index + 1));
-    assert.equal(first.layoutReads, 0);
-    assert.ok(operableMs < 2000, `operable ${operableMs.toFixed(1)}ms`);
-    await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true' && document.querySelectorAll('.student-pricing-rule-row').length===${VISIBLE_RULE_COUNT}`, 10_000);
-    const allDataMs = performance.now() - started;
-    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), Array.from({length:VISIBLE_RULE_COUNT}, (_, index) => index + 1));
-    assert.ok(allDataMs < 3500, `all rows ${allDataMs.toFixed(1)}ms`);
-    const pageResponses = browser.responses.slice(responseStart);
-    assert.equal(pageResponses.filter((item) => /\/api\/student-pricing-page\?/.test(item.url)).length, 1);
-    assert.equal(pageResponses.some((item) => /\/api\/bootstrap\?.*month=/.test(item.url)), false);
-    assert.equal(pageResponses.some((item) => /\/api\/students(?:\?|$)/.test(item.url)), false);
-
-    await browser.click(".student-pricing-select-all");
-    await browser.waitFor(`document.querySelector('.batch-selection-summary')?.textContent.includes('${VISIBLE_RULE_COUNT}')`);
-    await browser.evaluate(`(() => {
-      const wrap=document.querySelector('#student-pricing-table-wrap');
-      wrap.scrollTop=wrap.scrollHeight;
-      return true;
-    })()`);
-    assert.equal(await browser.evaluate("document.querySelector('.student-pricing-rule-row:last-child .student-pricing-select-row').checked"), true);
-
-    const filterStarted = performance.now();
-    await browser.evaluate(`(() => {
-      const input=document.querySelector('.student-pricing-filter-input.multi-select-value[data-filter-field="student"]');
-      input.value='性能学生003';
-      input.dispatchEvent(new Event('change',{bubbles:true}));
-    })()`);
-    await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===2 && document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
-    const filterMs = performance.now() - filterStarted;
-    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), [1, 2]);
-    assert.ok(filterMs < 500, `filter ${filterMs.toFixed(1)}ms`);
-    assert.match(await browser.evaluate("document.querySelector('.batch-selection-summary').textContent"), /2/);
-
-    const saveResponseStart = browser.responses.length;
-    await browser.evaluate(`(() => {
-      const input=document.querySelector('.student-pricing-field[data-field="custom_price"]');
-      input.value='211.25';
-      input.dispatchEvent(new Event('change',{bubbles:true}));
-    })()`);
-    await browser.waitFor("document.querySelector('.toast-success')?.textContent.includes('学生单价已保存')");
-    const saveResponses = browser.responses.slice(saveResponseStart);
-    assert.equal(saveResponses.filter((item) => /\/api\/student-pricing\/\d+/.test(item.url) && item.status === 200).length, 1);
-    assert.equal(saveResponses.some((item) => /student-pricing-page|\/api\/bootstrap/.test(item.url)), false);
-
-    const viewportResults = [];
-    for (const width of [1440, 1280, 1024, 390]) {
-      await browser.send("Emulation.setDeviceMetricsOverride", { width, height: width === 390 ? 844 : 900, deviceScaleFactor: 1, mobile: width === 390 });
-      await browser.evaluate("window.dispatchEvent(new Event('resize'))");
-      await new Promise((resolve) => setTimeout(resolve, 180));
-      viewportResults.push(await browser.evaluate(`({
-        width:${width},
-        pageOverflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,
-        outerOverflow:getComputedStyle(document.querySelector('#student-pricing-table-wrap')).overflowX,
-        layoutReads:Number(document.querySelector('.student-pricing-table').dataset.adaptiveLayoutReads)
-      })`));
-    }
-    assert.ok(viewportResults.every((item) => !item.pageOverflow && item.outerOverflow === "auto" && item.layoutReads === 0), JSON.stringify(viewportResults));
-
-    const clearStarted = performance.now();
-    await browser.click(".reset-student-pricing-filter");
-    await browser.waitFor("Number(document.querySelector('.student-pricing-table')?.dataset.renderedRows)>=36");
-    const clearFirstScreenMs = performance.now() - clearStarted;
-    assert.ok(clearFirstScreenMs < 500, `clear filter first screen ${clearFirstScreenMs.toFixed(1)}ms`);
-    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"dashboard\"]'))")) {
-      await browser.click('.nav-btn[data-nav-group="home"]');
-    }
-    await browser.click('.nav-sub-btn[data-view="dashboard"]');
-    await browser.waitFor("!document.querySelector('.student-pricing-table')");
-    assert.equal(await browser.evaluate("Boolean(document.querySelector('.student-pricing-render-progress'))"), false);
-
-    const secondResponseStart = browser.responses.length;
-    const secondStarted = performance.now();
-    if (!await browser.evaluate("Boolean(document.querySelector('.nav-sub-btn[data-view=\"studentPricing\"]'))")) {
-      await browser.click('.nav-btn[data-nav-group="students"]');
-    }
-    await browser.click('.nav-sub-btn[data-view="studentPricing"]');
-    await browser.waitFor("Boolean(document.querySelector('.student-pricing-table[data-adaptive-widths]'))");
-    const secondMs = performance.now() - secondStarted;
-    assert.ok(secondMs < 800, `second entry ${secondMs.toFixed(1)}ms`);
-    assert.equal(browser.responses.slice(secondResponseStart).some((item) => /student-pricing-page/.test(item.url)), false);
-    await browser.evaluate(`studentPricingFilter={...studentPricingFilter,student:''};render();studentPricingFilter={...studentPricingFilter,student:'性能学生008'};render();`);
-    await browser.waitFor("document.querySelector('.student-pricing-table')?.dataset.renderComplete==='true'");
-    assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table td.row-index')].map(cell=>Number(cell.textContent))"), [1, 2]);
-    assert.ok(await browser.evaluate("[...document.querySelectorAll('.student-pricing-select-row')].every(input=>Number(input.dataset.id)>2)"));
-    const longTasks = await browser.evaluate("window.__pricingLongTasks");
-    assert.ok(Math.max(0, ...longTasks) < 500, JSON.stringify(longTasks));
-    assert.deepEqual(browser.exceptions, []);
-    assert.deepEqual(browser.consoleErrors, []);
-    console.log("[student-pricing-browser-performance]", JSON.stringify({
-      operable_ms: Number(operableMs.toFixed(1)),
-      all_data_ms: Number(allDataMs.toFixed(1)),
-      second_entry_ms: Number(secondMs.toFixed(1)),
-      filter_ms: Number(filterMs.toFixed(1)),
-      clear_first_screen_ms: Number(clearFirstScreenMs.toFixed(1)),
-      initial_rows: first.initial,
-      first_dom_nodes: first.nodes,
-      adaptive_ms: first.measurement,
-      layout_reads: first.layoutReads,
-      max_long_task_ms: Number(Math.max(0, ...longTasks).toFixed(1)),
-      viewports: viewportResults,
-    }));
-  } finally {
-    await browser.close();
-    if (chrome.child.exitCode == null) chrome.child.kill("SIGTERM");
+test('Chromium scoped selection, local saves and repeated entry stay responsive without retired requests',async()=>{
+ const chrome=await launchChrome(path.join(tempRoot,'query-performance-chrome')),b=chrome.session;
+ try {
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+  const elapsed=await b.evaluate("(async()=>{const start=performance.now();setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-31'};selectedStudent='性能学生001';await load({refreshGlobal:false});return performance.now()-start})()");assert.ok(elapsed<2500);
+  for(const width of [1920,1440,1280,1024,390]){
+   await b.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
+   await b.evaluate("applyStudentQuerySelection('性能学生008')");assert.ok(await b.evaluate("studentQueryRules.every(r=>r.student_name==='性能学生008')"));
+   assert.equal(await b.evaluate("document.documentElement.scrollWidth>innerWidth"),false);
+   await b.waitFor("document.querySelector('.student-pricing-table')?.dataset.adaptiveLayoutReads==='0'");
+   assert.equal(await b.evaluate("Number(document.querySelector('.student-pricing-table').dataset.adaptiveLayoutReads)"),0);
   }
+  await b.evaluate("window.confirm=()=>true;const input=document.querySelector('.student-pricing-field[data-field=custom_price]');input.value='221.25';saveStudentPricingField(input)");assert.equal(await b.evaluate('studentQueryRules[0].custom_price'),221.25);
+  assert.equal(await b.evaluate("document.querySelectorAll('.student-pricing-select-row,.open-student-pricing-batch-modal').length"),0);
+  assert.equal(b.responses.some(r=>r.url.includes('/api/student-pricing-page')),false);
+  assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+  console.log('[student-query-browser-performance]',JSON.stringify({first_ms:elapsed}));
+ }finally{await b.close();chrome.child.kill();}
 });

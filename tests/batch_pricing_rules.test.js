@@ -199,29 +199,10 @@ test("real Chromium batch selection, indeterminate state, modal update and 390px
     await browser.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
     await browser.send("Page.navigate", { url: `http://127.0.0.1:${port}` });
     await browser.login("boss", "123456");
-    await openView("students", "studentPricing", ".student-pricing-rule-row");
-    await browser.click(".student-pricing-select-all");
-    await browser.waitFor("document.querySelector('.batch-selection-summary')?.textContent.includes('2')");
-    await browser.evaluate(`(() => {
-      const input=document.querySelector('.student-pricing-filter-input.multi-select-value[data-filter-field="student"]');
-      input.value='合成学生甲';
-      input.dispatchEvent(new Event('change',{bubbles:true}));
-    })()`);
-    await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length === 1 && document.querySelector('.batch-selection-summary')?.textContent.includes('1')");
-    await browser.click(".open-student-pricing-batch-modal");
-    await browser.waitFor("Boolean(document.querySelector('.student-pricing-batch-modal'))");
-    const studentModalText = await browser.evaluate("document.querySelector('.student-pricing-batch-modal').textContent");
-    assert.match(studentModalText, /已选择 1 条规则/);
-    assert.match(studentModalText, /当前筛选：学生：合成学生甲/);
-    await browser.evaluate("document.querySelector('.student-pricing-batch-value').value='188.50'");
-    const studentResponseStart = browser.responses.length;
-    await browser.click(".confirm-student-pricing-batch");
-    await browser.waitFor("!document.querySelector('.student-pricing-batch-modal') && document.querySelector('.batch-selection-summary')?.textContent.includes('0')");
-    assert.equal(await browser.evaluate("Number(document.querySelector('.student-pricing-field[data-field=\"custom_price\"]').value)"), 188.5);
-    assert.equal(await browser.evaluate("document.querySelector('.student-pricing-filter-input.multi-select-value[data-filter-field=\"student\"]').value"), "合成学生甲");
-    const studentMutationResponses = browser.responses.slice(studentResponseStart);
-    assert.equal(studentMutationResponses.filter((item) => /\/api\/student-pricing\/batch/.test(item.url) && item.status === 200).length, 1);
-    assert.equal(studentMutationResponses.some((item) => /\/api\/bootstrap/.test(item.url)), false);
+    await browser.evaluate("setActiveView('studentQuery');selectedStudent='合成学生甲';studentQueryRange={mode:'range',start:'2031-01-01',end:'2031-01-31'};load({refreshGlobal:false})");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-select-all,.open-student-pricing-batch-modal').length"),0);
+    await browser.evaluate("window.confirm=()=>true;const input=document.querySelector('.student-pricing-field[data-field=custom_price]');input.value='188.50';saveStudentPricingField(input)");
+    assert.equal(await browser.evaluate('studentQueryRules[0].custom_price'),188.5);
 
     await openView("teachers", "teacherSalaryRules", ".teacher-salary-rule-row");
     await browser.click(".teacher-salary-rule-select-all");

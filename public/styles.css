@@ -160,7 +160,7 @@
   --panel-raised: #ffffff;
   --surface: #ffffff;
   --section-head: #ffffff;
-  --topbar-bg: rgba(255, 255, 255, 0.96);
+  --topbar-bg: #ffffff;
   --input-bg: #ffffff;
   --btn-bg: #ffffff;
   --btn-hover: #f5f5f5;
@@ -168,8 +168,8 @@
   --text: #0a0a0a;
   --ink-strong: #000000;
   --muted: #666666;
-  --line: #e8e8e8;
-  --line-soft: #f1f1f1;
+  --line: #e5e5e5;
+  --line-soft: #ededed;
   --hover-border: #c6c6c6;
   --brand: #0a0a0a;
   --brand-dark: #000000;
@@ -177,21 +177,10 @@
   --brand-border: #dddddd;
   --brand-pale: #f7f7f7;
   --accent: #0a0a0a;
-  --success: #3f3f3f;
-  --success-bg: #f6f6f6;
-  --info: #3f3f3f;
-  --info-bg: #f6f6f6;
-  --warning: #525252;
-  --warning-bg: #f6f6f6;
   --danger: #b42318;
   --danger-bg: #fff1f3;
-  --warn-bg: #f6f6f6;
-  --warn-fg: #3f3f3f;
-  --manual-bg: #f1f1f1;
-  --manual-fg: #1a1a1a;
-  --group: #f1f1f1;
-  --sidebar-bg: #ffffff;
-  --sidebar: #ffffff;
+  --sidebar-bg: #f8f8f8;
+  --sidebar: var(--sidebar-bg);
   --sidebar-hover: #f5f5f5;
   --sidebar-active: #f1f1f1;
   --sidebar-ink: #0a0a0a;
@@ -203,10 +192,8 @@
   --sidebar-active-ink: #000000;
   --table-head: #fafafa;
   --table-head-ink: #0a0a0a;
-  --abnormal-hover: #f5f5f5;
   --receivable-hover: #fff1f3;
   --risk-unpaid-bg: #fff1f3;
-  --risk-low-bg: #f5f5f5;
   --neutral-chip-bg: #f5f5f5;
   --neutral-chip-fg: #454545;
   --neutral-chip-border: #dedede;
@@ -218,11 +205,6 @@
   --selection-border: #c6c6c6;
   --selection-ink: #0a0a0a;
   --brand-hover-bg: rgba(17, 17, 17, 0.08);
-  --group-fg: #1a1a1a;
-  --group-hover: #ededed;
-  --exam-hover: #f2f2f2;
-  --warn-pill-bg: #f2f2f2;
-  --warn-pill-fg: #3f3f3f;
   --shot-bg: #ffffff;
   --shot-panel: #ffffff;
   --shot-card: #ffffff;
@@ -237,6 +219,8 @@
   --shot-tag-text: #0a0a0a;
   --shot-time-bg: #f1f1f1;
   --shot-footer-bg: #f5f5f5;
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.03);
+  --shadow-sticky: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 :root[data-palette="jade-original"] {
@@ -826,19 +810,8 @@
   --brand-border: #404040;
   --brand-pale: #1d1d1d;
   --accent: #ffffff;
-  --success: #e5e5e5;
-  --success-bg: #151515;
-  --info: #d4d4d4;
-  --info-bg: #151515;
-  --warning: #d4d4d4;
-  --warning-bg: #151515;
   --danger: #f97066;
   --danger-bg: #2a1012;
-  --warn-bg: #151515;
-  --warn-fg: #d4d4d4;
-  --manual-bg: #242424;
-  --manual-fg: #ffffff;
-  --group: #151515;
   --sidebar-bg: #000000;
   --sidebar: #000000;
   --sidebar-hover: #121212;
@@ -853,10 +826,8 @@
   --table-head: #0a0a0a;
   --table-head-ink: #f0f0f0;
   --table-row-hover: #141414;
-  --abnormal-hover: #1d1d1d;
   --receivable-hover: #2a1012;
   --risk-unpaid-bg: #2a1012;
-  --risk-low-bg: #1d1d1d;
   --neutral-chip-bg: #151515;
   --neutral-chip-fg: #d4d4d4;
   --neutral-chip-border: #404040;
@@ -868,11 +839,6 @@
   --selection-border: #555555;
   --selection-ink: #ffffff;
   --brand-hover-bg: rgba(255, 255, 255, 0.08);
-  --group-fg: #f0f0f0;
-  --group-hover: #242424;
-  --exam-hover: #1d1d1d;
-  --warn-pill-bg: #1d1d1d;
-  --warn-pill-fg: #d4d4d4;
   --shot-bg: #000000;
   --shot-panel: #050505;
   --shot-card: #0a0a0a;
@@ -1081,22 +1047,8 @@
     --brand-border: #3f3f46;
     --brand-pale: #27272a;
     --accent: #ffffff;
-    --success: #e5e7eb;
-    --success-bg: #18181b;
-    --info: #d4d4d8;
-    --info-bg: #18181b;
-    --warning: #d4d4d8;
-    --warning-bg: #18181b;
     --danger: #ffffff;
     --danger-bg: #18181b;
-    --warn-bg: #18181b;
-    --warn-fg: #d4d4d8;
-    --manual-bg: #27272a;
-    --manual-fg: #ffffff;
-    --group: #18181b;
-    --group-fg: #e5e7eb;
-    --group-hover: #27272a;
-    --exam-hover: #27272a;
     --sidebar-bg: #050505;
     --sidebar: #050505;
     --sidebar-hover: #111111;
@@ -1110,10 +1062,8 @@
     --table-head: #111111;
     --table-head-ink: #e5e7eb;
     --table-row-hover: #18181b;
-    --abnormal-hover: #27272a;
     --receivable-hover: #27272a;
     --risk-unpaid-bg: #27272a;
-    --risk-low-bg: #202020;
     --neutral-chip-bg: #18181b;
     --neutral-chip-fg: #d4d4d8;
     --neutral-chip-border: #3f3f46;
@@ -1126,8 +1076,6 @@
     --selection-bg: #27272a;
     --selection-border: #52525b;
     --selection-ink: #ffffff;
-    --warn-pill-bg: #27272a;
-    --warn-pill-fg: #d4d4d8;
     --shot-bg: #050505;
     --shot-panel: #0a0a0a;
     --shot-card: #111111;
@@ -1325,22 +1273,8 @@
     --brand-border: #404040;
     --brand-pale: #1d1d1d;
     --accent: #ffffff;
-    --success: #e5e5e5;
-    --success-bg: #151515;
-    --info: #d4d4d4;
-    --info-bg: #151515;
-    --warning: #d4d4d4;
-    --warning-bg: #151515;
     --danger: #f97066;
     --danger-bg: #2a1012;
-    --warn-bg: #151515;
-    --warn-fg: #d4d4d4;
-    --manual-bg: #242424;
-    --manual-fg: #ffffff;
-    --group: #151515;
-    --group-fg: #f0f0f0;
-    --group-hover: #242424;
-    --exam-hover: #1d1d1d;
     --sidebar-bg: #000000;
     --sidebar: #000000;
     --sidebar-hover: #121212;
@@ -1356,10 +1290,8 @@
     --table-head: #0a0a0a;
     --table-head-ink: #f0f0f0;
     --table-row-hover: #141414;
-    --abnormal-hover: #1d1d1d;
     --receivable-hover: #2a1012;
     --risk-unpaid-bg: #2a1012;
-    --risk-low-bg: #1d1d1d;
     --neutral-chip-bg: #151515;
     --neutral-chip-fg: #d4d4d4;
     --neutral-chip-border: #404040;
@@ -1370,8 +1302,6 @@
     --selection-bg: #242424;
     --selection-border: #555555;
     --selection-ink: #ffffff;
-    --warn-pill-bg: #1d1d1d;
-    --warn-pill-fg: #d4d4d4;
     --shot-bg: #000000;
     --shot-panel: #050505;
     --shot-card: #0a0a0a;
@@ -3736,25 +3666,21 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.teacher-salary-rule-modal .lesson-create-form,
-.student-pricing-modal .lesson-create-form {
+.teacher-salary-rule-modal .lesson-create-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-4);
 }
 
-.teacher-salary-rule-modal .lesson-create-form .wide,
-.student-pricing-modal .lesson-create-form .wide {
+.teacher-salary-rule-modal .lesson-create-form .wide {
   grid-column: 1 / -1;
 }
 
-.teacher-salary-rule-modal .filter-combo,
-.student-pricing-modal .filter-combo {
+.teacher-salary-rule-modal .filter-combo {
   width: 100%;
 }
 
-.teacher-salary-rule-modal .filter-combo-menu,
-.student-pricing-modal .filter-combo-menu {
+.teacher-salary-rule-modal .filter-combo-menu {
   z-index: 90;
   background: var(--panel-raised);
   color: var(--text);
@@ -3762,20 +3688,17 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   box-shadow: var(--shadow-sticky);
 }
 
-.teacher-salary-rule-modal :is(input, select, option),
-.student-pricing-modal :is(input, select, option) {
+.teacher-salary-rule-modal :is(input, select, option) {
   color-scheme: light;
 }
 
-.teacher-salary-rule-modal :is(.control, select.control),
-.student-pricing-modal :is(.control, select.control) {
+.teacher-salary-rule-modal :is(.control, select.control) {
   background: var(--input-bg);
   color: var(--ink);
   border-color: var(--line);
 }
 
-.teacher-salary-rule-modal select.control option,
-.student-pricing-modal select.control option {
+.teacher-salary-rule-modal select.control option {
   background: var(--panel);
   color: var(--ink);
 }
@@ -4018,7 +3941,6 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 @media (max-width: 720px) {
   .lesson-create-modal .lesson-create-form,
   .teacher-salary-rule-modal .lesson-create-form,
-  .student-pricing-modal .lesson-create-form,
   .recharge-form-grid {
     grid-template-columns: 1fr;
   }
@@ -7537,8 +7459,6 @@ tr.risk-debt:hover td {
 .recharge-table :is(th, td):nth-child(5),
 .recharge-table :is(th, td):nth-child(6),
 .pricing-table :is(th, td):nth-child(3),
-.student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(6),
 .teacher-salary-table :is(th, td):nth-child(n + 4):nth-child(-n + 8),
 .finance-table :is(th, td):nth-child(n + 2),
 .risk-table :is(th, td):nth-child(3) {
@@ -7570,11 +7490,6 @@ tr.risk-debt:hover td {
 .recharge-table :is(th, td):nth-child(7),
 .pricing-table :is(th, td):nth-child(1),
 .pricing-table :is(th, td):nth-child(2),
-.student-pricing-create-table :is(th, td):nth-child(2),
-.student-pricing-create-table :is(th, td):nth-child(5),
-.student-pricing-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(4),
-.student-pricing-table :is(th, td):nth-child(7),
 .teacher-salary-table :is(th, td):nth-child(3),
 .top-students-table :is(th, td):nth-child(2),
 .risk-table :is(th, td):nth-child(1) {
@@ -7590,8 +7505,6 @@ tr.risk-debt:hover td {
 .recharge-table :is(th, td):nth-child(5),
 .recharge-table :is(th, td):nth-child(6),
 .pricing-table :is(th, td):nth-child(3),
-.student-pricing-create-table :is(th, td):nth-child(3),
-.student-pricing-table :is(th, td):nth-child(6),
 .teacher-salary-table :is(th, td):nth-child(n + 4):nth-child(-n + 8),
 .profit-table :is(th, td):nth-child(n + 2),
 .balance-table :is(th, td):nth-child(2),
@@ -7612,12 +7525,6 @@ tr.risk-debt:hover td {
 .recharge-table :is(th, td):nth-child(8),
 .pricing-table :is(th, td):nth-child(4),
 .pricing-table :is(th, td):nth-child(5),
-.student-pricing-create-table :is(th, td):nth-child(1),
-.student-pricing-create-table :is(th, td):nth-child(4),
-.student-pricing-table :is(th, td):nth-child(2),
-.student-pricing-table :is(th, td):nth-child(5),
-.student-pricing-table :is(th, td):nth-child(8),
-.student-pricing-table :is(th, td):nth-child(9),
 .teacher-salary-table :is(th, td):nth-child(2),
 .teacher-salary-table :is(th, td):nth-child(10),
 .finance-table :is(th, td):nth-child(1),
@@ -7649,8 +7556,6 @@ td.empty {
 .recharge-table td:nth-child(5) .cell-input,
 .recharge-table td:nth-child(6) .cell-input,
 .pricing-table td:nth-child(3) .cell-input,
-.student-pricing-create-table td:nth-child(3) .cell-input,
-.student-pricing-table td:nth-child(6) .cell-input,
 .teacher-salary-table td:nth-child(n + 4):nth-child(-n + 7) .cell-input {
   text-align: inherit;
 }
@@ -7727,8 +7632,6 @@ td.empty {
 .student-query-detail-table :is(td, th):nth-child(11),
 .recharge-table:not(.opening-balance-table) :is(td, th):nth-child(8),
 .opening-balance-table :is(td, th):nth-child(8),
-.student-pricing-table :is(td, th):nth-child(5),
-.student-pricing-table :is(td, th):nth-child(8),
 .teacher-salary-rule-table :is(td, th):nth-child(5),
 .teacher-salary-rule-table :is(td, th):nth-child(8),
 .profile-table :is(td, th).profile-notes-col,
@@ -7756,7 +7659,6 @@ td.empty {
 .student-query-detail-table.uniform-table :is(td, th):not(:nth-child(11)),
 .recharge-table.uniform-table:not(.opening-balance-table) :is(td, th):not(:nth-child(8)),
 .opening-balance-table.uniform-table :is(td, th):not(:nth-child(8)),
-.student-pricing-table.uniform-table :is(td, th):not(:nth-child(5)):not(:nth-child(8)),
 .pricing-table.uniform-table :is(td, th):not(:nth-child(5)),
 .teacher-salary-table.uniform-table :is(td, th):nth-child(2),
 .profile-table.uniform-table :is(td, th):not(.profile-notes-col),
@@ -7796,8 +7698,6 @@ table th,
 .student-query-detail-table td:nth-child(11),
 .recharge-table:not(.opening-balance-table) td:nth-child(8),
 .opening-balance-table td:nth-child(8),
-.student-pricing-table td:nth-child(5),
-.student-pricing-table td:nth-child(8),
 .teacher-salary-rule-table td:nth-child(5),
 .teacher-salary-rule-table td:nth-child(8),
 .teacher-detail-table td.teacher-detail-students,
@@ -7831,7 +7731,6 @@ table th,
 .recharge-table:not(.opening-balance-table) td:nth-child(6),
 .opening-balance-table td:nth-child(6),
 .opening-balance-table td:nth-child(7),
-.student-pricing-table td:nth-child(6),
 .teacher-salary-rule-table td:nth-child(6),
 .teacher-detail-table td:nth-child(13),
 .teacher-detail-table td:nth-child(14),
@@ -7862,7 +7761,6 @@ table th,
 }
 
 .course-table.week-detail-table :is(th, td):nth-child(9),
-.student-pricing-table :is(th, td):nth-child(5),
 .teacher-salary-rule-table :is(th, td):nth-child(5) {
   min-width: 240px;
   max-width: 460px;
@@ -7873,7 +7771,6 @@ table th,
 .student-query-detail-table :is(th, td):nth-child(11),
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(8),
 .opening-balance-table :is(th, td):nth-child(8),
-.student-pricing-table :is(th, td):nth-child(8),
 .teacher-salary-rule-table :is(th, td):nth-child(8),
 .teacher-profile-table :is(th, td).profile-notes-col,
 .student-profile-table :is(th, td).profile-notes-col {
@@ -7906,7 +7803,6 @@ table th,
 .recharge-table:not(.opening-balance-table) :is(th, td):nth-child(6),
 .opening-balance-table :is(th, td):nth-child(6),
 .opening-balance-table :is(th, td):nth-child(7),
-.student-pricing-table :is(th, td):nth-child(6),
 .teacher-salary-rule-table :is(th, td):nth-child(6),
 .student-query-detail-table :is(th, td):nth-child(12) {
   min-width: 112px;
@@ -7946,7 +7842,6 @@ table th,
 .recharge-table.uniform-table:not(.opening-balance-table) td:nth-child(6),
 .opening-balance-table.uniform-table td:nth-child(6),
 .opening-balance-table.uniform-table td:nth-child(7),
-.student-pricing-table.uniform-table td:nth-child(6),
 .teacher-salary-rule-table.uniform-table td:nth-child(6),
 .teacher-detail-table.uniform-table td:nth-child(13),
 .teacher-detail-table.uniform-table td:nth-child(14),
@@ -8117,7 +8012,6 @@ table th,
 .teacher-profile-table td.profile-notes-col .cell-input,
 .recharge-table:not(.opening-balance-table) td:nth-child(8) .cell-input,
 .opening-balance-table td:nth-child(8) .cell-input,
-.student-pricing-table td:nth-child(8) .cell-input,
 .teacher-salary-rule-table td:nth-child(8) .cell-input {
   text-align: left;
 }
@@ -11975,9 +11869,6 @@ table th,
     flex: 1 1 0;
   }
 
-  .pricing-batch-actions .batch-selection-summary {
-    flex-basis: 100%;
-  }
 }
 
 .recharge-page .recharge-table :is(th, td) {
@@ -12095,7 +11986,6 @@ table th,
   white-space: nowrap;
 }
 
-.student-pricing-page .table-wrap,
 .recharge-page .table-wrap,
 .opening-balance-page .table-wrap{
   max-width: 100%;
@@ -12290,13 +12180,6 @@ table th,
   --sidebar-muted: #525252;
   --table-head-ink: #000000;
   --neutral-chip-fg: #0d0d0d;
-  --manual-fg: #0d0d0d;
-  --group-fg: #0d0d0d;
-  --warn-fg: #0d0d0d;
-  --warn-pill-fg: #0d0d0d;
-  --success: #0d0d0d;
-  --info: #0d0d0d;
-  --warning: #0d0d0d;
   --shot-title: #000000;
   --shot-muted: #525252;
   --shot-tag-text: #000000;
@@ -12317,13 +12200,6 @@ table th,
   --sidebar-muted: #b4b4b4;
   --table-head-ink: #ffffff;
   --neutral-chip-fg: #ffffff;
-  --manual-fg: #ffffff;
-  --group-fg: #ffffff;
-  --warn-fg: #ffffff;
-  --warn-pill-fg: #ffffff;
-  --success: #ffffff;
-  --info: #ffffff;
-  --warning: #ffffff;
   --shot-title: #ffffff;
   --shot-muted: #b4b4b4;
   --shot-tag-text: #ffffff;
@@ -12340,13 +12216,6 @@ table th,
     --sidebar-muted: #b4b4b4;
     --table-head-ink: #ffffff;
     --neutral-chip-fg: #ffffff;
-    --manual-fg: #ffffff;
-    --group-fg: #ffffff;
-    --warn-fg: #ffffff;
-    --warn-pill-fg: #ffffff;
-    --success: #ffffff;
-    --info: #ffffff;
-    --warning: #ffffff;
     --shot-title: #ffffff;
     --shot-muted: #b4b4b4;
     --shot-tag-text: #ffffff;
@@ -13770,7 +13639,6 @@ body {
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page,
   .profile-panel,
@@ -13832,14 +13700,12 @@ table.adaptive-table td[data-adaptive-alignment="center"] > :is(input, select, t
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page
 ) table.uniform-table.adaptive-table.nowrap-table thead tr > th,
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page
 ) table.uniform-table.adaptive-table.nowrap-table thead tr > th.wide {
@@ -13853,7 +13719,6 @@ table.adaptive-table td[data-adaptive-alignment="center"] > :is(input, select, t
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page
 ) table.uniform-table.adaptive-table td.adaptive-center {
@@ -13863,7 +13728,6 @@ table.adaptive-table td[data-adaptive-alignment="center"] > :is(input, select, t
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page
 ) table.uniform-table.adaptive-table td.adaptive-right {
@@ -13875,7 +13739,6 @@ table.adaptive-table td[data-adaptive-alignment="center"] > :is(input, select, t
 :is(
   .recharge-page,
   .opening-balance-page,
-  .student-pricing-page,
   .class-group-page,
   .teacher-salary-rule-page
 ) table.uniform-table.adaptive-table td.adaptive-left {
@@ -13997,18 +13860,7 @@ table.adaptive-table .adaptive-textarea {
   word-break: break-all !important;
 }
 
-.student-pricing-page table.adaptive-table .adaptive-textarea {
-  field-sizing: content;
-  min-height: 38px;
-  max-height: 9rem;
-  overflow-y: auto;
-}
 
-.student-pricing-render-progress {
-  min-height: 24px;
-  padding: 8px 4px 0;
-  text-align: center;
-}
 
 table.adaptive-table :is(.entity-badge, .student-badge, .status-badge) {
   display: inline-flex;
@@ -14213,9 +14065,9 @@ table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { 
 .recharge-analysis-chip { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; width: 164px; min-height: 96px; gap: 5px; box-sizing: border-box; }
 .recharge-analysis-chip > span { font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
 .recharge-analysis-chip em { color: var(--muted); font-size: var(--text-caption); font-style: normal; }
-:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value) { appearance: textfield; -moz-appearance: textfield; }
-:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value)::-webkit-inner-spin-button,
-:is(input.currency-input,input.money-input,input.student-pricing-batch-value,input.teacher-salary-rule-batch-value)::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+:is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value) { appearance: textfield; -moz-appearance: textfield; }
+:is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value)::-webkit-inner-spin-button,
+:is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value)::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .teacher-detail-table.compact-rows tbody td, .teacher-detail-table.compact-rows .teacher-detail-notes { white-space: nowrap !important; }
 .teacher-detail-table.compact-rows .student-set-badges { flex-wrap: nowrap; width: max-content; }
 
@@ -14420,3 +14272,6 @@ table.adaptive-table td.single-line-note,
 .pricing-course-fee-edit { appearance: none; border: 0; background: transparent; padding: 0; margin: 0; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
 .pricing-course-fee-edit:hover { text-decoration: underline; }
 .pricing-course-fee-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* Student query uses semantic alignment, independent of historical column positions. */
+.student-pricing-table .student-set-cell .student-set-badges { justify-content: flex-start; }

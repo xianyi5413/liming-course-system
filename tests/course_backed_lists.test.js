@@ -120,9 +120,9 @@ after(async () => {
 
 let retainedRule, retainedGroup;
 const people='存在性甲、存在性乙';
-const page=()=>api('/api/student-pricing-page?month=2026-09-01');
+const page=()=>api('/api/bootstrap?month=2026-09-01');
 const groups=()=>api('/api/class-groups');
-const ownRules=payload=>payload.rules.filter(row=>row.student_names.includes('存在性'));
+const ownRules=payload=>payload.student_pricing.filter(row=>row.student_names.includes('存在性'));
 async function create(day,fields={}) {
  const result=await api('/api/lessons',{method:'POST',body:{teacher_name:'合成教师',date:`2031-01-${day}`,time_slot:'15:00-17:00',classroom:'存在性教室',grade:'高一',subject:'数学',student_names:people,status:'待上',...fields}});
  assert.equal(result.response.status,201,JSON.stringify(result.payload));return result.payload.id;
@@ -158,7 +158,7 @@ test('class existence keeps all statuses while pricing requires completed course
  const moved=await api(`/api/lessons/${id}`,{method:'PATCH',body:{teacher_name:'其他教师',grade:'高二',subject:'英语',student_names:'存在性甲'}});assert.equal(moved.response.status,200,JSON.stringify(moved.payload));
  assert.equal((await groups()).payload.class_groups.some(row=>row.id===group.id),false);
  assert.equal(ownRules((await page()).payload).some(row=>row.id===retainedRule.id),false);
- assert.equal((await page()).payload.rules.find(row=>row.student_name==='存在性甲').grade,'高二');
+ assert.equal((await page()).payload.student_pricing.find(row=>row.student_name==='存在性甲').grade,'高二');
 });
 
 test('Chromium five widths keeps only real-course groups, completed rules, exact details and refreshed cache',async()=>{
@@ -168,28 +168,18 @@ test('Chromium five widths keeps only real-course groups, completed rules, exact
   await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
   for(const width of [1920,1440,1280,1024,390]) {
    await browser.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
-   await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
-   assert.ok(await browser.evaluate("state.student_pricing.some(row=>row.student_name==='存在性乙'&&row.total_lessons===1)"));
+   await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2031-01-01',end:'2031-01-31'};selectedStudent='存在性乙';load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-pricing-table')");
+   assert.ok(await browser.evaluate("studentQueryRules.some(row=>row.student_name==='存在性乙'&&row.total_lessons===1)"));
    assert.ok(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth&&[...document.querySelectorAll('.student-set-badges')].every(node=>getComputedStyle(node).flexWrap==='nowrap')"));
    await browser.evaluate("setActiveView('classGroups');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.class-group-table')");
    assert.ok(await browser.evaluate('state.class_groups.every(row=>row.course_count>0)'));
   }
-  await browser.evaluate("selectedStudentPricingIds=new Set(state.student_pricing.filter(row=>row.student_name==='存在性乙').map(row=>row.id))");
+
   const outcome=await browser.evaluate(`(async()=>{const before=await request('/api/class-groups');const group=before.class_groups.find(row=>row.students_key==='存在性乙、存在性甲'||row.students_key==='存在性甲、存在性乙');await request('/api/lessons/batch-delete',{method:'POST',body:{ids:group.lesson_ids}});const after=await request('/api/class-groups');return after.class_groups.some(row=>row.id===group.id);})()`);
   assert.equal(outcome,false);
-  await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
-  assert.equal(await browser.evaluate("state.student_pricing.some(row=>row.student_name==='存在性乙')"),false);
-  assert.equal(await browser.evaluate('selectedStudentPricingIds.size'),0);
-  const stale=await browser.evaluate(`(async()=>{
-   const realRequest=request;let resolveOld;
-   request=()=>new Promise(resolve=>resolveOld=resolve);
-   try {
-    const pending=loadStudentPricingPage({force:true}).then(()=>false,error=>error.name==='AbortError');
-    cancelStudentPricingPageRequest();resolveOld({rules:[],filters:{}});
-    return {aborted:await pending,cached:studentPricingPageCache.has(studentPricingPageCacheKey())};
-   }finally{request=realRequest;}
-  })()`);
-  assert.deepEqual(stale,{aborted:true,cached:false});
+  await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2031-01-01',end:'2031-01-31'};selectedStudent='存在性乙';load({refreshGlobal:false})");await browser.waitFor("!!document.querySelector('.student-pricing-table')");
+  assert.equal(await browser.evaluate("studentQueryRules.some(row=>row.student_name==='存在性乙')"),false);
+  assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-select-row').length"),0);
   assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
  }finally{await browser.close();if(chrome.child.exitCode==null)chrome.child.kill();}
 });

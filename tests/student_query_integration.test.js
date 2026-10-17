@@ -234,3 +234,81 @@ test('query-only page permission does not grant rule writes; batch scope and sta
   assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
  }finally{await b.close();chrome.child.kill();}
 });
+
+
+test('retired pricing entry redirects without granting query access; query rules have no bulk controls', async()=>{
+ assert.equal((await api('/api/student-pricing-page')).response.status,410);
+ const cookie=await login('salary-readonly');
+ assert.equal((await api('/api/student-statement?student='+encodeURIComponent('张三'),{cookie})).response.status,403);
+ const chrome=await launchChrome(path.join(tempRoot,'retired-pricing-chrome')),b=chrome.session;
+ try {
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+  await b.evaluate("setActiveView('studentPricing');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};selectedStudent='张三';load({refreshGlobal:false})");
+  assert.equal(await b.evaluate('view'),'studentQuery');
+  assert.equal(await b.evaluate("document.querySelectorAll('[data-view=studentPricing],.student-query-price-filter,.student-pricing-select-row,.student-pricing-select-all,.open-student-pricing-batch-modal').length"),0);
+  assert.equal(await b.evaluate("typeof renderStudentPricing"),'undefined');
+  const layout=await b.evaluate("(()=>{const td=document.querySelector('.student-set-cell'),t=td.closest('table');return {align:getComputedStyle(td).textAlign,head:getComputedStyle(t.tHead.rows[0].cells[td.cellIndex]).textAlign,wrap:getComputedStyle(td.firstElementChild).flexWrap,justify:getComputedStyle(td.firstElementChild).justifyContent,cols:t.tHead.rows[0].cells.length}})()");
+  assert.deepEqual(layout,{align:'left',head:'center',wrap:'nowrap',justify:'flex-start',cols:11});
+  assert.equal(b.responses.some(r=>r.url.includes('/api/student-pricing-page')),false);
+  const legacy=(await api('/api/auth/me',{cookie})).payload;
+  assert.notEqual(legacy.user?.first_accessible_view,'studentPricing');
+  assert.deepEqual(b.exceptions,[]);
+ }finally{await b.close();chrome.child.kill();}
+});
+
+test('monochrome palette preserves semantic colors and screenshot preference across five viewports',async()=>{
+ const chrome=await launchChrome(path.join(tempRoot,'monochrome-chrome')),b=chrome.session;
+ try {
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+  await b.evaluate("themeMode='light';paletteMode='black-white';applyTheme();applyPalette();shotFollowPalette=false;applyShotPalettePreference()");
+  const fixed=await b.evaluate('courseNoticeShotPalette()');
+  if(process.env.QUERY_THEME_SCREENSHOTS) {
+   const output=path.resolve(process.env.QUERY_THEME_SCREENSHOTS);fs.mkdirSync(output,{recursive:true});
+   await b.send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+   await b.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};selectedStudent='张三';load({refreshGlobal:false})");
+   await b.evaluate('new Promise(requestAnimationFrame)');
+   fs.writeFileSync(path.join(output,'query-theme-after.png'),Buffer.from((await b.send('Page.captureScreenshot',{format:'png'})).data,'base64'));
+   const baseline=spawnSync('git',['show','b3fb535:public/styles.css'],{cwd:root,encoding:'utf8',maxBuffer:2e6});assert.equal(baseline.status,0);
+   await b.evaluate(`(()=>{window.originalStyle=document.querySelector('link[rel=stylesheet]');originalStyle.disabled=true;window.baselineStyle=document.createElement('style');baselineStyle.textContent=${JSON.stringify(baseline.stdout)};document.head.append(baselineStyle)})()`);
+   await b.evaluate('new Promise(requestAnimationFrame)');
+   fs.writeFileSync(path.join(output,'query-theme-before.png'),Buffer.from((await b.send('Page.captureScreenshot',{format:'png'})).data,'base64'));
+   await b.evaluate('baselineStyle.remove();originalStyle.disabled=false');
+  }
+
+  for(const width of [1920,1440,1280,1024,390]) {
+   await b.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
+   for(const page of ['dashboard','lessons','studentQuery','summary','recharges','teacherSalary','teacherDetail','audit','appearance']) {
+    await b.evaluate(`setActiveView('${page}');load({refreshGlobal:false})`);
+    const colors=await b.evaluate("(()=>{const s=getComputedStyle(document.documentElement);return {bg:s.getPropertyValue('--bg').trim(),ink:s.getPropertyValue('--ink').trim(),success:s.getPropertyValue('--success').trim(),warning:s.getPropertyValue('--warning').trim(),danger:s.getPropertyValue('--danger').trim(),overflow:document.documentElement.scrollWidth>innerWidth}})()");
+    assert.equal(colors.bg,'#ffffff');assert.equal(colors.ink,'#000000');assert.notEqual(colors.success,colors.warning);assert.notEqual(colors.warning,colors.danger);assert.equal(colors.overflow,false,`${page} ${width}`);
+   }
+  }
+  const themePerformance=await b.evaluate("(async()=>{const node=contentEl.firstElementChild,start=performance.now();paletteMode='liming-blue';applyPalette();paletteMode='black-white';applyPalette();await new Promise(requestAnimationFrame);return {switch_ms:performance.now()-start,sameContent:node===contentEl.firstElementChild}})()");
+  assert.equal(themePerformance.sameContent,true);assert.ok(themePerformance.switch_ms<500);
+  const contrast=await b.evaluate("(()=>{const rgb=hex=>hex.replace('#','').match(/../g).map(c=>parseInt(c,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);const l=hex=>rgb(hex).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);const s=getComputedStyle(document.documentElement),ratio=(a,b)=>(Math.max(l(a),l(b))+.05)/(Math.min(l(a),l(b))+.05);return {body:ratio(s.getPropertyValue('--ink').trim(),s.getPropertyValue('--bg').trim()),secondary:ratio(s.getPropertyValue('--muted').trim(),s.getPropertyValue('--panel').trim()),button:ratio(s.getPropertyValue('--brand').trim(),s.getPropertyValue('--primary-ink').trim())}})()");
+  assert.ok(Object.values(contrast).every(value=>value>=4.5),JSON.stringify(contrast));
+  console.log('[query-monochrome-browser]',JSON.stringify({themePerformance,contrast,viewports:[1920,1440,1280,1024,390]}));
+  await b.send('Page.reload');await b.waitFor("!!document.querySelector('.nav-btn')");
+  assert.equal(await b.evaluate('paletteMode'),'black-white');assert.equal(await b.evaluate('themeMode'),'light');
+  await b.evaluate("paletteMode='liming-blue';applyPalette()");assert.deepEqual(await b.evaluate('courseNoticeShotPalette()'),fixed);
+  await b.evaluate("paletteMode='black-white';applyPalette();shotFollowPalette=true;applyShotPalettePreference()");assert.notDeepEqual(await b.evaluate('courseNoticeShotPalette()'),fixed);
+  await b.evaluate("themeMode='dark';applyTheme()");assert.equal(await b.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()"),'#000000');
+  assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+ }finally{await b.close();chrome.child.kill();}
+});
+
+
+test('pricing-only historical login gets a safe no-access page and keeps original write restrictions',async()=>{
+ const chrome=await launchChrome(path.join(tempRoot,'legacy-entry-chrome')),b=chrome.session;
+ try {
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});
+  await b.waitFor("!!document.querySelector('.login-panel')");
+  await b.evaluate("localStorage.setItem('liming:view','studentPricing');document.querySelector('.login-username').value='salary-readonly';document.querySelector('.login-password').value='123456';document.querySelector('.login-submit').click()");
+  await b.waitFor("document.body.textContent.includes('暂无可访问页面')");
+  assert.equal(await b.evaluate("canView('studentQuery')"),false);
+  assert.equal(await b.evaluate("document.querySelectorAll('.student-pricing-table,[data-view=studentPricing]').length"),0);
+  await b.evaluate("setActiveView('studentPricing');render()");
+  assert.equal(await b.evaluate("document.body.textContent.includes('暂无可访问页面')"),true);
+  assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+ }finally{await b.close();chrome.child.kill();}
+});

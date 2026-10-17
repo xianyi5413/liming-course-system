@@ -169,7 +169,7 @@ test('reconciliation uses custom comparison targets without applying them to act
     standardId=db.prepare("SELECT id FROM pricing_standards WHERE grade='高一' AND student_count=2").get().id;
   }finally{db.close();}
   assert.equal((await api('/api/pricing-standards/'+standardId,{method:'PATCH',body:{unit_price:160}})).response.status,200);
-  const rules=(await api('/api/student-pricing-page?month=2026-10-01')).payload.rules;
+  const rules=(await api('/api/bootstrap?month=2026-10-01')).payload.student_pricing;
   ruleId=rules.find(row=>row.student_name==='张三').id;
   assert.equal((await api('/api/student-pricing/'+ruleId,{method:'PATCH',body:{custom_price:240}})).payload.total_lessons,2);
   const beforeOther=(await api('/api/bootstrap?month=2026-09-01')).payload.derived.fee_details.find(row=>row.lesson_id===9001&&row.student_name==='李四').unit_price;
@@ -195,18 +195,18 @@ test('reconciliation uses custom comparison targets without applying them to act
   await api('/api/student-pricing/'+ruleId,{method:'PATCH',body:{custom_price:240}});
   const boot=(await api('/api/bootstrap?month=2026-09-01')).payload;
   assert.equal(boot.derived.fee_details.find(row=>row.lesson_id===9001&&row.student_name==='李四').unit_price,beforeOther);
-  assert.equal((await api('/api/student-pricing-page?month=2026-10-01')).payload.rules.find(row=>row.id===ruleId).custom_price,240);
+  assert.equal((await api('/api/bootstrap?month=2026-10-01')).payload.student_pricing.find(row=>row.id===ruleId).custom_price,240);
 });
 
 test('zero completed courses never enter selectors or batch writes, while old rules reactivate unchanged', async()=>{
-  const page=async()=> (await api('/api/student-pricing-page?month=2026-10-01')).payload;
+  const page=async()=> (await api('/api/bootstrap?month=2026-10-01')).payload;
   for(const id of [9001,9002]) await api('/api/lessons/'+id,{method:'PATCH',body:{status:id===9001?'待上':'请假'}});
-  assert.equal((await page()).rules.length,0);
-  assert.deepEqual((await page()).filters.students,[]);
+  assert.equal((await page()).student_pricing.length,0);
+  assert.deepEqual((await page()).student_pricing,[]);
   const rejected=await api('/api/student-pricing/batch',{method:'PATCH',body:{ids:[ruleId],price:999}});
   assert.equal(rejected.response.status,409);assert.equal(rejected.payload.success,0);
   await api('/api/lessons/9001',{method:'PATCH',body:{status:'已上'}});
-  const restored=(await page()).rules.find(row=>row.id===ruleId);
+  const restored=(await page()).student_pricing.find(row=>row.id===ruleId);
   assert.equal(restored.total_lessons,1);assert.equal(restored.current_month_lessons,0);assert.equal(restored.custom_price,240);
   await api('/api/lessons/9002',{method:'PATCH',body:{status:'已上'}});
 });
@@ -231,7 +231,7 @@ test('Chromium five widths compares amounts, saves locally, rolls back and redir
   const chrome=await launchChrome(path.join(tempRoot,'reconciliation-chrome')),browser=chrome.session;
   try {
     await browser.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await browser.login('boss','123456');
-    await browser.evaluate("setActiveView('studentPricing');load({refreshGlobal:false})");
+    await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};selectedStudent='张三';load({refreshGlobal:false})");
     await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
     assert.equal(await browser.evaluate("[...document.querySelectorAll('.student-pricing-table th')].some(node=>node.textContent==='价格状态')"),false);
     assert.equal(await browser.evaluate("document.querySelectorAll('[data-view=feeDetails]').length"),0);
@@ -277,8 +277,8 @@ test('Chromium five widths compares amounts, saves locally, rolls back and redir
     await browser.evaluate("localStorage.setItem('liming:view','feeDetails')");
     await browser.send('Page.reload');await browser.waitFor("!!document.querySelector('.student-summary-table')");
     await browser.evaluate("dashboardGoTo('studentPricing',{price:'unset'})");
-    await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===1");
-    assert.equal(await browser.evaluate("studentPricingFilter.price==='unset'&&studentPricingVisibleRows.every(row=>row.custom_price===0&&row.total_lessons>0)"),true);
+    await browser.waitFor("view==='studentQuery'&&!!document.querySelector('.student-pricing-table')");
+    assert.equal(await browser.evaluate("!document.querySelector('.student-query-price-filter')&&studentPricingVisibleRows.every(row=>row.total_lessons>0)"),true);
     await browser.evaluate("dashboardGoTo('feeDetails',{source:'pending'})");await browser.waitFor("!!document.querySelector('.student-summary-table')");
     assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
   }finally{await browser.close();if(chrome.child.exitCode==null)chrome.child.kill();}
