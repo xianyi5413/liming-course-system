@@ -51,7 +51,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261016-inline-excel-performance";
+const APP_VERSION = process.env.APP_VERSION || "20261017-query-monochrome";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -151,7 +151,7 @@ const PERMISSION_TREE = [
       { key: "recharges", label: "充值记录" },
       { key: "openingBalances", label: "期初余额" },
       { key: "studentQuery", label: "学生查询" },
-      { key: "studentPricing", label: "学生单价" },
+      { key: "studentPricing", label: "规则费用编辑（需学生查询权限）" },
       { key: "classGroups", label: "班级管理" },
       { key: "studentProfiles", label: "学生档案" },
     ],
@@ -209,7 +209,6 @@ const FIRST_ACCESSIBLE_VIEW_ORDER = [
   "recharges",
   "openingBalances",
   "studentQuery",
-  "studentPricing",
   "classGroups",
   "studentProfiles",
   "teacherSalary",
@@ -1186,40 +1185,6 @@ const derivedCaches = {
   studentBalanceThroughDate: new Map(),
   financeBase: new Map(),
 };
-const studentPricingPageCache = new Map();
-const STUDENT_PRICING_PAGE_CACHE_TTL_MS = 60_000;
-
-function studentPricingScopeKey(user) {
-  return [
-    Number(user?.id || 0),
-    canonicalRole(user?.role),
-    [...new Set(userPermissionKeys(user))].sort().join(","),
-    uniqueNames([...(user?.bound_teacher_names || []), user?.teacher_name]).join(","),
-  ].join("|");
-}
-
-function clearStudentPricingPageCache(reason = "") {
-  const count = studentPricingPageCache.size;
-  studentPricingPageCache.clear();
-  if (count && DERIVED_CACHE_DEBUG) {
-    console.info(`[perf] student pricing page cache cleared entries=${count}${reason ? ` reason=${reason}` : ""}`);
-  }
-}
-
-function studentPricingMutationInvalidatesCache(method, pathname) {
-  if (String(method).toUpperCase() === "GET") return false;
-  return pathname.startsWith("/api/student-pricing")
-    || pathname.startsWith("/api/students")
-    || pathname.startsWith("/api/student-grade-stages")
-    || pathname.startsWith("/api/lessons")
-    || pathname.startsWith("/api/pricing")
-    || pathname.startsWith("/api/fee-overrides")
-    || pathname.startsWith("/api/settings")
-    || pathname.startsWith("/api/import")
-    || pathname.startsWith("/api/data-center/import")
-    || pathname.startsWith("/api/audit/apply");
-}
-
 function cacheKey(...parts) {
   return parts.map((part) => text(part)).join("|");
 }
@@ -5677,7 +5642,7 @@ function dashboardTodos(monthKey, user, monthData = dashboardMonthData(monthKey,
     const missingPriceStudents = new Set(details.filter((row) => row.price_source === "pending").map((row) => row.student_name)).size;
     todos.push(
       { key: "debt_students", label: "欠费学生数", count: debtStudents, view: "summary", filter: { balance: "actual" } },
-      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "studentPricing", filter: { price: "unset" } },
+      { key: "missing_price_students", label: "未设置单价学生数", count: missingPriceStudents, view: "studentQuery", filter: {} },
     );
   }
   if (role !== "teacher") {
@@ -6861,54 +6826,6 @@ function studentPricingWriteScopeAllowed(url, ids, user) {
   if (!range || !student) return false;
   const allowed = new Set(studentPricingRows(resolveMonthKey(url), null, user, {student,...range}).map(row => Number(row.id)));
   return ids.every(id => allowed.has(Number(id)));
-}
-
-function studentPricingPagePayload(monthKey, user) {
-  const key = `${monthKey}|${studentPricingScopeKey(user)}`;
-  const cached = studentPricingPageCache.get(key);
-  if (cached && cached.expires_at > Date.now()) {
-    const payload = structuredClone(cached.payload);
-    if (payload.diagnostics) payload.diagnostics.sql_query_count = 0;
-    return { ...payload, cache_status: "hit" };
-  }
-  const started = performance.now();
-  const metrics = { sql_queries: 0 };
-  const rules = studentPricingRows(monthKey, metrics, user).map((row) => ({
-    id: Number(row.id),
-    student_name: text(row.student_name),
-    grade: text(row.grade),
-    subject: text(row.subject),
-    student_names: text(row.student_names),
-    custom_price: moneyRound(row.custom_price),
-    rule_fee: row.rule_fee,
-    price_status: row.price_status === "已设置" ? "已设置" : "未设置",
-    notes: text(row.notes),
-    current_month_lessons: Number(row.current_month_lessons || 0),
-    total_lessons: Number(row.total_lessons || 0),
-    start_date: row.start_date, end_date: row.end_date, course_types: row.course_types,
-  }));
-  const payload = {
-    month_key: monthKey,
-    rules,
-    filters: {
-      students: uniqueNames(rules.map((row) => row.student_name)).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
-      grades: [...new Set(rules.map((row) => row.grade).filter(Boolean))].sort(compareGradeName),
-      subjects: [...new Set(rules.map((row) => row.subject).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
-      student_groups: [...new Set(rules.map((row) => row.student_names).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
-    },
-    generated_ms: Math.round((performance.now() - started) * 10) / 10,
-    ...(process.env.STUDENT_PRICING_PERF_DIAGNOSTICS === "1" ? {
-      diagnostics: {
-        sql_query_count: metrics.sql_queries,
-        cache_scope_hash: crypto.createHash("sha256").update(studentPricingScopeKey(user)).digest("hex").slice(0, 12),
-      },
-    } : {}),
-  };
-  studentPricingPageCache.set(key, {
-    expires_at: Date.now() + STUDENT_PRICING_PAGE_CACHE_TTL_MS,
-    payload: structuredClone(payload),
-  });
-  return { ...payload, cache_status: "miss" };
 }
 
 function studentPricingRow(monthKey, id) {
@@ -12432,12 +12349,7 @@ async function handleApi(req, res, url) {
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
   if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
-  if (studentPricingMutationInvalidatesCache(req.method, url.pathname)) {
-    clearStudentPricingPageCache(`${req.method} ${url.pathname}`);
-    res.once("finish", () => {
-      if (res.statusCode < 400) clearStudentPricingPageCache(`${req.method} ${url.pathname} completed`);
-    });
-  }
+
 
   if (req.method === "GET" && url.pathname === "/api/roles") {
     return sendJson(res, {
@@ -12963,8 +12875,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, { rule_id: rule.id, student_name: rule.student_name, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), scope: "全历史已上课程", lessons });
   }
   if (req.method === "GET" && url.pathname === "/api/student-pricing-page") {
-    const monthKey = resolveMonthKey(url);
-    return sendJson(res, studentPricingPagePayload(monthKey, user));
+    return sendError(res, 410, "独立学生单价页面已下线，请通过学生查询管理规则费用");
   }
   if (req.method === "GET" && url.pathname === "/api/lessons-range") {
     const viewKey = prefilterViewFromUrl(url, "lessons");
@@ -13595,7 +13506,7 @@ async function handleApi(req, res, url) {
       const job = manager.start(user.id, key || action + ':' + (body.include_operation_logs !== false), { kind: action, owner: user.id, dbPath, dataDir, appVersion: APP_VERSION, inputPath, uploadId, mode: body.mode, includeOperationLogs: body.include_operation_logs !== false }, {
         success: (job) => {
           if (action === 'preview') pendingDataImports.get(uploadId).preview = job.result;
-          if (action === 'restore') { sessions.clear(); pendingSalaryImports.clear(); clearDerivedCache('data job restore'); clearStudentPricingPageCache('data job restore'); }
+          if (action === 'restore') { sessions.clear(); pendingSalaryImports.clear(); clearDerivedCache('data job restore'); }
           if (action === 'export' || action === 'restore') writeOperationLog(user, { operation_type: action === 'export' ? '导出全量数据Excel' : '导入全量数据', operation_content: action === 'export' ? '后台导出完整 Excel 成功' : '后台导入成功，已清除登录会话', target_type: 'data_center', target_id: job.id });
         },
         finish: job => {

@@ -126,10 +126,9 @@ async function dashboardMetrics(browser) {
 
 test("student price status stays binary and teacher status distinguishes disabled rules", async () => withBrowser(async ({ browser }) => {
   await browser.login("boss", "123456");
-  await openView(browser, "students", "studentPricing");
-  await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length === 2");
-  assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-table .visible-price-status').length"),0);
-  assert.deepEqual(await browser.evaluate("[...document.querySelector('.student-pricing-filter-input[data-filter-field=price]').closest('.multi-select').querySelectorAll('.multi-select-option')].map(node=>node.dataset.value)"), ['已设置','未设置']);
+  await browser.evaluate("setActiveView('studentQuery');load({refreshGlobal:false})");
+  assert.equal(await browser.evaluate("document.querySelectorAll('.student-query-price-filter,.student-pricing-filter-input').length"),0);
+  assert.deepEqual(await browser.evaluate("[visiblePriceStatus(0),visiblePriceStatus(120)]"),['未设置','已设置']);
 
   await openView(browser, "teachers", "teacherSalaryRules");
   await browser.waitFor("document.querySelectorAll('.teacher-salary-rule-row').length === 3");

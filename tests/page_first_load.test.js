@@ -58,7 +58,9 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view) {
-  if (view === "teacherSalaryRules") {
+  if (view === "studentQuery" || view === "studentPricing") {
+    await browser.evaluate("setActiveView('studentQuery');selectedStudent='首次加载学生';studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-31'};load({refreshGlobal:false})");
+  } else if (view === "teacherSalaryRules") {
     await browser.evaluate("setActiveView('teacherSalaryRules');load({refreshGlobal:false})");
   } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) await browser.click(`.nav-btn[data-nav-group="${group}"]`);
@@ -69,7 +71,7 @@ async function openView(browser, group, view) {
 
 const scenarios = [
   { name: "费用汇总", group: "students", view: "summary", title: "学生费用汇总", row: ".student-summary-table tbody tr:not(.empty)", text: "首次加载学生" },
-  { name: "学生单价", group: "students", view: "studentPricing", title: "学生单价规则", row: ".student-pricing-rule-row", text: "首次加载学生", direct: true },
+  { name: "学生查询规则", group: "students", view: "studentQuery", title: "学生查询", row: ".student-pricing-rule-row", text: "首次加载学生", direct: true },
   { name: "教师薪资汇总", group: "teachers", view: "teacherSalary", title: "薪资汇总", row: ".teacher-salary-summary-row", text: "首次加载老师" },
   { name: "教师车费明细", group: "teachers", view: "teacherTravelFees", title: "车费明细", row: ".teacher-travel-fee-row", text: "首次加载老师" },
   { name: "充值记录", group: "students", view: "recharges", title: "充值记录", row: ".recharge-row", text: "首次加载学生", direct: true },
@@ -92,8 +94,8 @@ for (const scenario of scenarios) test(`${scenario.name} from a fresh home sessi
   await browser.waitFor(`document.querySelector('#topbar')?.textContent.includes(${JSON.stringify(scenario.title)}) && document.querySelectorAll(${JSON.stringify(scenario.row)}).length > 0 && document.body.textContent.includes(${JSON.stringify(scenario.text)})`);
   assert.equal(await browser.evaluate("document.querySelector('.month-select')?.value || '2026-07-01'"), MONTH);
   if (!scenario.direct) assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
-  if (scenario.view === "studentPricing") {
-    assert.equal(browser.responses.some((response) => new RegExp("/api/student-pricing-page\\?").test(response.url) && /month=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
+  if (scenario.view === "studentQuery") {
+    assert.equal(browser.responses.some((response) => new RegExp("/api/student-pricing-query\\?").test(response.url) && /start=2026-07-01/.test(response.url) && response.status === 200), true, JSON.stringify(browser.responses));
     assert.equal(browser.responses.some((response) => /\/api\/bootstrap\?/.test(response.url) && /month=2026-07-01/.test(response.url)), false, JSON.stringify(browser.responses));
   }
   assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);

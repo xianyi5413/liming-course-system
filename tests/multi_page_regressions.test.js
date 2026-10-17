@@ -54,7 +54,7 @@ test("page-scoped visual regressions and overlay cleanup stay explicit", () => {
   assert.match(app, /function scheduleAdaptiveTableColumns\(/);
   assert.match(app, /function renderStudentSetBadges\(value, options = \{\}\)/);
   assert.match(app, /function studentSetInlineText\(value\)/);
-  assert.match(app.slice(app.indexOf("function studentPricingRowMarkup"), app.indexOf("function cancelStudentPricingProgressiveRender")), /renderStudentSetBadges\(row.student_names/);
+  assert.match(app.slice(app.indexOf("function studentPricingRowMarkup"), app.indexOf("function renderClassGroups")), /renderStudentSetBadges\(row.student_names/);
   assert.match(app, /class-group-row[\s\S]{0,900}renderStudentSetBadges/);
   assert.match(app, /teacher-salary-rule-row[\s\S]{0,900}renderStudentSetBadges/);
   assert.doesNotMatch(css, /516px/);
@@ -65,8 +65,8 @@ test("summary teacher and pricing scopes are based on raw data and selected mont
   for (const field of ["total_fee", "prev_actual", "prev_gift", "cur_recharge", "cur_gift", "actual_consumption", "gift_consumption", "actual_balance", "gift_balance"]) assert.match(app, new RegExp(`"${field}"`));
   assert.match(server, /SELECT DISTINCT teacher_name FROM lessons WHERE month_key = \?/);
   assert.match(server, /function studentPricingRows[\s\S]*matchesByRule/);
-  assert.match(app, /function saveStudentPricingField[\s\S]*\/api\/student-pricing\/\$\{id\}[\s\S]*mergeStudentPricingResponseRow/);
-  assert.match(app, /\/api\/student-pricing-page\?month=/);
+  assert.match(app, /function saveStudentPricingField[\s\S]*\/api\/student-pricing\/\$\{id\}[\s\S]*refreshStudentQueryOnly/);
+  assert.doesNotMatch(app, /\/api\/student-pricing-page\?month=/);
   assert.match(server, /GET" && url\.pathname === "\/api\/student-pricing-page"/);
   assert.match(server, /PATCH" && url\.pathname === "\/api\/student-pricing\/batch"/);
 });

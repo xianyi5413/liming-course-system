@@ -1,0 +1,90 @@
+{
+  "recordedAt": "2026-10-17T03:34:39.248Z",
+  "api": {
+    "ms": 91.7005999999999,
+    "bytes": 4555103,
+    "rows": 6000,
+    "queryPlan": [
+      {
+        "id": 3,
+        "parent": 0,
+        "notused": 216,
+        "detail": "SCAN lessons"
+      },
+      {
+        "id": 38,
+        "parent": 0,
+        "notused": 0,
+        "detail": "USE TEMP B-TREE FOR ORDER BY"
+      }
+    ]
+  },
+  "firstOpenMs": 731.6967000000004,
+  "results": [
+    {
+      "count": 500,
+      "syncMs": 39,
+      "initialRows": 100,
+      "filterSyncMs": 120.80000001192093,
+      "filterAndMenuMs": 168.80000001192093,
+      "filteredRows": 333,
+      "remainingRenderMs": 88.81759999999986,
+      "menus": {
+        "teacher_names": 17.700000002980232,
+        "student_names": 25.899999991059303
+      },
+      "nodes": 5218,
+      "longestTask": 56,
+      "rows": 100,
+      "LayoutCount": 7,
+      "RecalcStyleCount": 13,
+      "LayoutDuration": 0.040682,
+      "RecalcStyleDuration": 0.036282,
+      "TaskDuration": 0.179289
+    },
+    {
+      "count": 2000,
+      "syncMs": 120.70000000298023,
+      "initialRows": 100,
+      "filterSyncMs": 151.20000000298023,
+      "filterAndMenuMs": 192.8999999910593,
+      "filteredRows": 1332,
+      "remainingRenderMs": 98.32020000000011,
+      "menus": {
+        "teacher_names": 17.299999997019768,
+        "student_names": 27.5
+      },
+      "nodes": 5218,
+      "longestTask": 94,
+      "rows": 100,
+      "LayoutCount": 7,
+      "RecalcStyleCount": 13,
+      "LayoutDuration": 0.036319000000000004,
+      "RecalcStyleDuration": 0.03868100000000001,
+      "TaskDuration": 0.254407
+    },
+    {
+      "count": 6000,
+      "syncMs": 238.09999999403954,
+      "initialRows": 100,
+      "filterSyncMs": 277.09999999403954,
+      "filterAndMenuMs": 311.3999999910593,
+      "filteredRows": 4000,
+      "remainingRenderMs": 95.44790000000012,
+      "menus": {
+        "teacher_names": 16.599999994039536,
+        "student_names": 27.100000008940697
+      },
+      "nodes": 5218,
+      "longestTask": 94,
+      "rows": 100,
+      "LayoutCount": 7,
+      "RecalcStyleCount": 13,
+      "LayoutDuration": 0.03707300000000002,
+      "RecalcStyleDuration": 0.03540500000000002,
+      "TaskDuration": 0.37833300000000003
+    }
+  ],
+  "exceptions": [],
+  "consoleErrors": []
+}

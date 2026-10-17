@@ -99,7 +99,9 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view, tableSelector) {
-  if (view === "teacherSalaryRules") {
+  if (view === "studentPricing") {
+    await browser.evaluate(`setActiveView('studentQuery');selectedStudent=${JSON.stringify(LONG_STUDENT)};studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-31'};load({refreshGlobal:false})`);
+  } else if (view === "teacherSalaryRules") {
     await browser.evaluate("setActiveView('teacherSalaryRules');load({refreshGlobal:false})");
   } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) {
@@ -108,7 +110,7 @@ async function openView(browser, group, view, tableSelector) {
   await browser.waitFor(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`);
   await browser.click(`.nav-sub-btn[data-view="${view}"]`);
   }
-  await browser.waitFor(`Boolean(document.querySelector(${JSON.stringify(`${tableSelector}[data-adaptive-widths]`)}))`);
+  try { await browser.waitFor(`Boolean(document.querySelector(${JSON.stringify(`${tableSelector}[data-adaptive-widths]`)}))`); } catch(error) { throw new Error(error.message+JSON.stringify({exceptions:browser.exceptions,errors:browser.consoleErrors,state:await browser.evaluate("({view,html:contentEl.textContent.slice(0,1000),tables:[...document.querySelectorAll('table')].map(t=>({class:t.className,cols:t.querySelectorAll('col').length,heads:t.querySelectorAll('th').length}))})")})); }
 }
 
 async function viewport(browser, width) {
@@ -185,7 +187,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   const pages = [
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "center", "right", "right", "center", "center", "left"]],
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "center", "right", "right", "left"]],
-    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "left"]],
+    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],
@@ -218,7 +220,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
 
   assert.ok(results.recharges[1440][7] > results.recharges[1440][3], "long custom channel must drive its column");
   assert.ok(results.openingBalances[1440][6] > results.openingBalances[1440][3], "long opening note must drive its column");
-  assert.ok(results.studentPricing[1440][6] > results.studentPricing[1440][3], "student badges must drive the set column");
+  assert.ok(results.studentPricing[1440][5] > results.studentPricing[1440][3], "student badges must drive the set column");
   assert.ok(results.classGroups[1440][5] > results.classGroups[1440][3], "class badges must drive the set column");
   assert.ok(results.teacherSalaryRules[1440][5] > results.teacherSalaryRules[1440][3], "salary badges must drive the set column");
   assert.equal(results.teacherProfiles[1440][7], 76, "empty teacher notes retain compact content width");
@@ -259,7 +261,7 @@ test("semantic caps remain stable across filtering and 1100-row measurement stay
   assert.equal(pricingMeasurement.source, "student-pricing");
   assert.equal(pricingMeasurement.layoutReads, 0);
   assert.ok(pricingMeasurement.elapsed < 200, JSON.stringify(pricingMeasurement));
-  await browser.evaluate(`(() => { studentPricingFilter={ student:'短名', grade:'', subject:'', student_names:'', price:'', usage:'' }; render(); })()`);
+  await browser.evaluate(`applyStudentQuerySelection('短名')`);
   await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===1 && Boolean(document.querySelector('.student-pricing-table[data-adaptive-widths]'))");
   const filteredWidths = await browser.evaluate("document.querySelector('.student-pricing-table').dataset.adaptiveWidths");
   const full = fullWidths.split(",").map(Number);
@@ -268,7 +270,7 @@ test("semantic caps remain stable across filtering and 1100-row measurement stay
   assert.equal(filtered[2] >= config[2].minWidth && filtered[2] <= config[2].maxWidth, true);
   assert.equal(filtered[5] >= config[5].minWidth && filtered[5] <= config[5].maxWidth, true);
   assert.equal(full[5] <= config[5].maxWidth, true, "student set column is capped instead of following the longest row");
-  await browser.evaluate("(() => { studentPricingFilter={ student:'', grade:'', subject:'', student_names:'', price:'', usage:'' }; render(); })()");
+  await browser.evaluate(`applyStudentQuerySelection(${JSON.stringify(LONG_STUDENT)})`);
   await browser.waitFor(`document.querySelector('.student-pricing-table')?.dataset.adaptiveWidths===${JSON.stringify(fullWidths)}`);
 
   const performanceResult = await browser.evaluate(`(() => {

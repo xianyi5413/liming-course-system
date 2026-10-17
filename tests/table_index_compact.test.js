@@ -66,7 +66,7 @@ async function show(browser, page) {
 const pages = [
   ['summary','.student-summary-table',0],
   ['recharges','.recharge-table',1], ['openingBalances','.opening-balance-table',1],
-  ['studentQuery','.student-query-detail-slot .student-pricing-table',1], ['studentPricing','.student-pricing-table',1],
+  ['studentQuery','.student-query-detail-slot .student-pricing-table',0], ['studentPricing','.student-pricing-table',0],
   ['classGroups','.class-group-table',0], ['studentProfiles','.student-profile-table',1],
   ['teacherSalary','.teacher-salary-table',0], ['teacherTravelFees','.teacher-travel-table',0],
   ['teacherDetail','.teacher-detail-table',0], ['teacherSalaryRules','.teacher-salary-rule-table',1],
@@ -107,17 +107,18 @@ test('filters, history, teacher changes and real recharge deletion regenerate di
     ['summary','.student-summary-table',0,"summaryFilter={...summaryFilter,grade:'高二'};"],
     ['recharges','.recharge-table',1,"rechargeStudentFilter='合成学生乙';"],
     ['openingBalances','.opening-balance-table',1,"openingBalanceFilter={...openingBalanceFilter,student:'合成学生乙'};"],
-    ['studentPricing','.student-pricing-table',1,"studentPricingFilter={...studentPricingFilter,student:'合成学生乙'};"],
+    ['studentPricing','.student-pricing-table',0,"studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-12'};await refreshStudentQueryOnly({force:true});"],
     ['classGroups','.class-group-table',0,"classGroupFilter={...classGroupFilter,teacher:'合成老师乙'};"],
     ['studentProfiles','.student-profile-table',1,"profileGradeFilter.students='高二';"],
     ['teacherSalaryRules','.teacher-salary-rule-table',1,"teacherSalaryRuleFilter={...teacherSalaryRuleFilter,teacher:'合成老师乙'};"],
   ];
   for(const [page,selector,position,filter] of filters) {
+    if(page==='studentPricing') { const created=await api('/api/lessons','POST',{teacher_name:'合成老师',date:'2026-07-25',time_slot:'15:00-17:00',classroom:'B1',grade:'高一',subject:'英语',student_names:'合成学生',status:'已上'});assert.equal(created.status,201); }
     await show(browser,page);
-    const before=await browser.evaluate(`document.querySelectorAll(${JSON.stringify(selector+' tbody tr')}).length`);
-    await browser.evaluate(filter+'render();');await browser.evaluate('new Promise(requestAnimationFrame)');
+    const before=await browser.evaluate(`document.querySelectorAll(${JSON.stringify(selector+' tbody tr:not(:has(.empty))')}).length`);
+    await browser.evaluate('(async()=>{'+filter+'render();})()');await browser.evaluate('new Promise(requestAnimationFrame)');
     await assertIndexes(browser,selector,position);
-    assert.ok(await browser.evaluate(`document.querySelectorAll(${JSON.stringify(selector+' tbody tr')}).length`)<before,page);
+    assert.ok(await browser.evaluate(`document.querySelectorAll(${JSON.stringify(selector+' tbody tr:not(:has(.empty))')}).length`)<before,page);
   }
   for(const teacher of ['合成老师','合成老师乙']) {
     await show(browser,'teacherDetail');await browser.evaluate(`(async()=>{selectedTeacherDetail=${JSON.stringify(teacher)};await load({refreshGlobal:false});})()`);await assertIndexes(browser,'.teacher-detail-table',0);
@@ -138,7 +139,7 @@ test('compact rows retain their height with notes, salary state stays one line a
   for(const [page,selector] of [['teacherDetail','.teacher-class-lessons'],['teacherSalaryRules','.teacher-salary-rule-table']]) {
     await show(browser,page);if(page==='teacherDetail'){await browser.click('[data-salary-class]');await browser.waitFor("Boolean(document.querySelector('.teacher-class-lessons'))");}
     await browser.evaluate('new Promise(requestAnimationFrame)');
-    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.single-line-note,.teacher-detail-notes,.course-details-table td:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
+    const heights=await browser.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(selector+' tbody tr:not(:has(.empty))')})];return rows.map(row=>({height:row.getBoundingClientRect().height,note:(row.querySelector('[data-field="notes"]')?.value||row.querySelector('.content-wrap,.single-line-note,.teacher-detail-notes,.course-details-table td:nth-child(12)')?.textContent||''),scroll:[...row.cells].some(cell=>['auto','scroll'].includes(getComputedStyle(cell).overflowY))}));})()`);
     const short=heights.find(row=>!row.note),long=heights.find(row=>row.note);
     assert.ok(short&&long,JSON.stringify({page,heights}));assert.ok(short.height<=55,JSON.stringify({page,short}));assert.ok(Math.abs(long.height-short.height)<=1,JSON.stringify({page,heights}));assert.ok(heights.every(row=>!row.scroll));if(page==='teacherDetail')await browser.click('[data-salary-action=close]');
   }
@@ -166,7 +167,7 @@ test('account insertion, reordered data and query ranges retain display-only num
   assert.equal(await browser.evaluate('studentStatementCanvas(studentStatementReport()).toDataURL()'),before);
   for(const mode of ['all','range']) {
     await browser.evaluate(`(async()=>{studentQueryRange={mode:${JSON.stringify(mode)},start:'2026-07-03',end:'2026-07-09'};await load({refreshGlobal:false});})()`);
-    await assertIndexes(browser,'.student-query-detail-slot .student-pricing-table',1);
+    await assertIndexes(browser,'.student-query-detail-slot .student-pricing-table',0);
     assert.equal(await browser.evaluate("!!document.querySelector('.student-history-table .row-index')"),false);
   }
   assert.deepEqual(await browser.evaluate('[rowIndexValue(0,40),rowIndexValue(1,40)]'),[41,42]);

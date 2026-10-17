@@ -99,7 +99,9 @@ async function withBrowser(action) {
 }
 
 async function openView(browser, group, view, rowSelector) {
-  if (view === "teacherSalaryRules") {
+  if (view === "studentPricing") {
+    await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-01-01',end:'2031-12-31'};selectedStudent='陈曦';load({refreshGlobal:false})");
+  } else if (view === "teacherSalaryRules") {
     await browser.evaluate("setActiveView('teacherSalaryRules');load({refreshGlobal:false})");
   } else {
   if (!await browser.evaluate(`Boolean(document.querySelector('.nav-sub-btn[data-view="${view}"]'))`)) {
@@ -126,7 +128,7 @@ test("target tables keep short fields complete, keep bounded notes single-line w
   await browser.login("boss", "123456");
 
   await openView(browser, "students", "studentPricing", ".student-pricing-rule-row");
-  await browser.evaluate("(async()=>{const rule=state.student_pricing.find(row=>row.student_names==='陈曦');showStudentPricingCourses(rule,await request('/api/student-pricing/'+rule.id+'/courses'));})()");
+  await browser.evaluate("(async()=>{const rule=studentQueryRules.find(row=>row.student_names==='陈曦');showStudentPricingCourses(rule,await request('/api/student-pricing/'+rule.id+'/courses'));})()");
   await browser.waitFor("!!document.querySelector('.shared-course-dialog .course-details-table')");
   for (const width of [1440, 1280, 1024, 390]) {
     await viewport(browser, width);
@@ -215,7 +217,7 @@ test("target tables keep short fields complete, keep bounded notes single-line w
     const rows=[...document.querySelectorAll('.student-pricing-rule-row')];
     const byNote=(value)=>rows.find((row)=>row.querySelector('[data-field="notes"]')?.value===value);
     const multi=byNote('多人规则');
-    const single=byNote('单人规则');
+    const single=rows.find(row=>row!==multi);
     if (!multi||!single) return { missing:rows.map((row)=>({id:row.dataset.ruleId,note:row.querySelector('[data-field="notes"]')?.value||'',text:row.textContent})) };
     const cell=multi.querySelector('.student-set-cell');
     const value=cell.querySelector('.student-set-badges');
@@ -244,8 +246,7 @@ test("target tables keep short fields complete, keep bounded notes single-line w
   assert.deepEqual({ badges: pricing.badges, whiteSpace: pricing.whiteSpace, flexWrap: pricing.flexWrap, overflowX: pricing.overflowX, complete: pricing.complete }, { badges: STUDENTS.length, whiteSpace: "nowrap", flexWrap: "nowrap", overflowX: "visible", complete: true });
   assert.notEqual(pricing.textOverflow, "ellipsis");
   assert.ok(pricing.heightDelta <= 1);
-  await browser.click(".student-pricing-select-row");
-  assert.equal(await browser.evaluate("document.querySelector('.open-student-pricing-batch-modal').disabled"), false);
+  assert.equal(await browser.evaluate("document.querySelectorAll('.student-pricing-select-row,.open-student-pricing-batch-modal').length"),0);
   await viewport(browser, 390);
   assert.deepEqual(await browser.evaluate(`(() => { const table=document.querySelector('.student-pricing-table'); const wrap=table.closest('.table-wrap'); return { outer:table.scrollWidth>wrap.clientWidth, overflow:getComputedStyle(wrap).overflowX, page:document.documentElement.scrollWidth>document.documentElement.clientWidth }; })()`), { outer: true, overflow: "auto", page: false });
 

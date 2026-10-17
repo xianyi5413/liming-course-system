@@ -77,7 +77,7 @@ async function openView(browser, group, view) {
 const filterViews = [
   ["students", "recharges", "充值记录"], ["students", "summary", "费用汇总"],
   ["students", "openingBalances", "期初余额"],
-  ["students", "studentPricing", "学生单价"], ["students", "classGroups", "班级管理"],
+  ["students", "classGroups", "班级管理"],
   ["students", "studentProfiles", "学生档案"], ["teachers", "teacherDetail", "教师课时明细"],
   ["teachers", "teacherSalaryRules", "教师薪资规则"], ["teachers", "teacherProfiles", "教师档案"],
 ];
@@ -107,28 +107,17 @@ test("all ten pages reuse the course-list searchable filter control without over
   assert.deepEqual(browser.consoleErrors, []);
 }));
 
-test("student-pricing student filter matches only student_name and supports search keyboard selection and clear", async () => withBrowser(async (browser) => {
-  await browser.login("boss", "123456"); await openView(browser, "students", "studentPricing");
-  await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length === 2");
-  const choose = async (name) => {
-    await browser.evaluate("document.querySelector('.student-pricing-filter-input.multi-select-toggle')?.scrollIntoView({block:'center'})");
-    await browser.click('.student-pricing-filter-input.multi-select-toggle .multi-select-label');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(await browser.evaluate("Boolean(document.querySelector('.student-pricing-filter-bar .multi-select.open'))"), true);
-    await browser.evaluate(`(() => { const input=document.querySelector('.floating-multi-select-menu .multi-select-search'); input.value=${JSON.stringify(name)}; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true})); document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})); })()`);
-    await browser.waitFor(`document.querySelector('.student-pricing-filter-input.multi-select-value[data-filter-field="student"]')?.value === ${JSON.stringify(name)}`);
-  };
-  const visible = () => browser.evaluate("[...document.querySelectorAll('.student-pricing-rule-row')].filter((row)=>getComputedStyle(row).display!=='none').map((row)=>({text:row.textContent,notes:row.querySelector('[data-field=\"notes\"]')?.value||''}))");
-  await choose("张三"); assert.equal((await visible()).length, 1); assert.equal((await visible())[0].notes, "记录A");
-  await browser.click('.student-pricing-filter-input.multi-select-toggle .multi-select-clear-icon');
-  await browser.waitFor("document.querySelectorAll('.student-pricing-rule-row').length === 2");
-  await choose("李四"); assert.equal((await visible()).length, 1); assert.equal((await visible())[0].notes, "记录B");
-  await browser.click('.student-pricing-filter-input.multi-select-toggle .multi-select-clear-icon');
-  await browser.click('.student-pricing-filter-input.multi-select-toggle .multi-select-label');
-  await browser.evaluate("(() => { const input=document.querySelector('.floating-multi-select-menu .multi-select-search'); input.value='王五'; input.dispatchEvent(new Event('input',{bubbles:true})); })()");
-  assert.equal(await browser.evaluate("[...document.querySelectorAll('.floating-multi-select-menu .multi-select-option')].some((item)=>!item.hidden && item.dataset.value==='王五')"), false);
-  await browser.evaluate("document.querySelector('.floating-multi-select-menu .multi-select-search').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
-  assert.deepEqual(browser.exceptions, []); assert.deepEqual(browser.consoleErrors, []);
+test("student query selects exact student identity while retired price filters stay absent", async()=>withBrowser(async browser=>{
+ await browser.login('boss','123456');
+ await browser.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-07-31'};load({refreshGlobal:false})");
+ for(const [name,note] of [['张三','记录A'],['李四','记录B']]) {
+  await browser.evaluate(`applyStudentQuerySelection(${JSON.stringify(name)})`);
+  assert.equal(await browser.evaluate('studentQueryRules.length'),1);
+  assert.equal(await browser.evaluate('studentQueryRules[0].notes'),note);
+  assert.equal(await browser.evaluate("document.querySelectorAll('.student-query-price-filter,.student-pricing-filter-input').length"),0);
+ }
+ await browser.evaluate("applyStudentQuerySelection('')");assert.equal(await browser.evaluate('studentQueryRules.length'),0);
+ assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
 }));
 
 test("opening balances have no month UI and remain unchanged when the top month changes", async () => withBrowser(async (browser) => {
