@@ -14275,3 +14275,13 @@ table.adaptive-table td.single-line-note,
 
 /* Student query uses semantic alignment, independent of historical column positions. */
 .student-pricing-table .student-set-cell .student-set-badges { justify-content: flex-start; }
+
+.query-rule-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
+.query-rule-expand { display:inline-flex; align-items:center; gap:4px; }
+.query-rule-expand svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.8; }
+
+.query-course-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+
+.query-rule-heading { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+
+.query-course-view > .table-wrap { scrollbar-gutter: auto; }

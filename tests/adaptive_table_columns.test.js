@@ -187,7 +187,7 @@ test("semantic columns cover data-entry, teacher-profile and account tables at e
   const pages = [
     ["students", "recharges", ".recharge-table:not(.opening-balance-table)", ["center", "center", "center", "center", "right", "right", "center", "center", "left"]],
     ["students", "openingBalances", ".opening-balance-table", ["center", "center", "center", "center", "right", "right", "left"]],
-    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "left", "center", "center", "center", "right", "left"]],
+    ["students", "studentPricing", ".student-pricing-table", ["center", "center", "center", "center", "center", "center", "left", "center", "center", "center", "center", "right", "left"]],
     ["students", "classGroups", ".class-group-table", ["center", "center", "center", "center", "center", "left", "left"]],
     ["teachers", "teacherSalaryRules", ".teacher-salary-rule-table", ["center", "center", "center", "center", "center", "left", "right", "center", "left"]],
     ["teachers", "teacherProfiles", ".teacher-profile-table", ["center", "center", "center", "center", "center", "center", "center", "left"]],

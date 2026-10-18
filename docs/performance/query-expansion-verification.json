@@ -1,0 +1,30 @@
+{
+  "completed_at": "2026-10-18 00:34:28 +08:00",
+  "timezone": "Asia/Shanghai",
+  "version": "20261018-query-expansion",
+  "new_specialized_tests": 7,
+  "full_suite": {
+    "tests": 523,
+    "pass": 523,
+    "fail": 0,
+    "skipped": 0
+  },
+  "duration_ms": 663435.5156,
+  "javascript_syntax_files": 15,
+  "diff_check": "passed",
+  "chromium_widths": [
+    1920,
+    1440,
+    1280,
+    1024,
+    390
+  ],
+  "production_database_accessed": false,
+  "production_deployed": false,
+  "limitations": [
+    "1000 expanded rule groups remain slow (13.6174 seconds)",
+    "Real mobile hardware and manual Excel opening not tested",
+    "Real Windows symlink branch unavailable (EPERM)",
+    "New fee-source backups require this version or newer for faithful restoration"
+  ]
+}

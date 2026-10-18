@@ -124,8 +124,8 @@ test("fee and teacher detail headers and row cells share the approved column ord
   await browser.waitFor("!!document.querySelector('.student-pricing-rule-row')");
   await browser.evaluate("document.querySelector('.student-pricing-rule-row').click()");
   await browser.waitFor("!!document.querySelector('.shared-course-dialog')");
-  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.course-details-table th')].map(cell=>cell.textContent.trim())"), ['序号','授课老师','日期','星期','时间','教室','类型','状态','年级','科目','学生','备注','实际费用','规则费用']);
-  assert.equal(await browser.evaluate("document.querySelector('.course-details-table tbody tr').children.length"),14);
+  assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.course-details-table th')].map(cell=>cell.textContent.trim())"), ['','序号','授课老师','日期','星期','时间','教室','类型','状态','年级','科目','学生','备注','实际费用','规则费用']);
+  assert.equal(await browser.evaluate("document.querySelector('.course-details-table tbody tr').children.length"),15);
   assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.course-details-table').closest('.table-wrap')).overflowX"),'auto');
   await browser.click('.shared-course-dialog .dialog-close');
   await openView(browser, "teachers", "teacherDetail"); await browser.waitFor("document.querySelector('.teacher-detail-table .empty')?.textContent.includes('请先选择教师')");
