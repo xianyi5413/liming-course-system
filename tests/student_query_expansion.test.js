@@ -40,6 +40,7 @@ async function api(pathname, { cookie = ownerCookie, method = "GET", body } = {}
     method,
     headers: {
       cookie,
+      connection: "close",
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -191,15 +192,15 @@ test('Chromium five widths: scoped selections, expand/collapse, both fee batches
    await b.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width===390});
    assert.equal(await b.evaluate("document.querySelector('.query-rule-batch').disabled"),true);
    await b.click('.query-rule-select');assert.equal(await b.evaluate("document.querySelector('.query-rule-select-all').checked"),true);assert.equal(await b.evaluate("document.querySelectorAll('.shared-course-dialog').length"),0);
-   await b.click('.query-rule-expand');await b.waitFor("document.querySelectorAll('.query-rule-details [data-course-detail-id]').length===4&&!document.querySelector('.query-rule-detail-progress')");
-   assert.equal(await b.evaluate("document.querySelectorAll('.query-rule-details .query-course-select:disabled').length"),2);
+   await b.click('.query-rule-expand');await b.waitFor("document.querySelectorAll('.query-course-view [data-course-detail-id]').length===5&&!document.querySelector('.query-course-progress')");
+   assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view .query-course-select:disabled').length"),3);
    assert.equal(await b.evaluate("document.documentElement.scrollWidth>innerWidth"),false);
-   assert.equal(await b.evaluate("getComputedStyle(document.querySelector('.query-rule-details > td')).overflowX"),'visible');
-   // Stable both-edge scrollbar gutters contribute to clientLeft, not scrollWidth.
-   const extent=await b.evaluate("(()=>{const outer=document.querySelector('#student-pricing-table-wrap'),last=document.querySelector('.query-rule-details tbody tr').lastElementChild;outer.scrollLeft=outer.scrollWidth;return {scroll:outer.scrollWidth,needed:last.getBoundingClientRect().right-outer.getBoundingClientRect().left-outer.clientLeft+outer.scrollLeft,right:last.getBoundingClientRect().right,visibleRight:outer.getBoundingClientRect().left+outer.clientLeft+outer.clientWidth}})()");
-   assert.ok(extent.scroll+2>=extent.needed,JSON.stringify(extent));
+   assert.equal(await b.evaluate("document.querySelectorAll('.student-pricing-table,.query-rule-details,.query-course-view table table').length"),0);
+   assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view table thead tr').length"),1);
+   assert.equal(await b.evaluate("document.querySelectorAll('.query-course-batch').length"),1);
+   const extent=await b.evaluate("(()=>{const outer=document.querySelector('.query-course-view .table-wrap'),last=document.querySelector('.query-course-view tbody tr').lastElementChild;outer.scrollLeft=outer.scrollWidth;return {right:last.getBoundingClientRect().right,visibleRight:outer.getBoundingClientRect().left+outer.clientLeft+outer.clientWidth}})()");
    assert.ok(extent.right<=extent.visibleRight+2,JSON.stringify(extent));
-   await b.evaluate("document.querySelector('#student-pricing-table-wrap').scrollLeft=0");
+   await b.evaluate("document.querySelector('.query-course-view .table-wrap').scrollLeft=0");
    if(process.env.QUERY_EXPANSION_SCREENSHOTS && [1440,390].includes(width)){
     fs.mkdirSync(process.env.QUERY_EXPANSION_SCREENSHOTS,{recursive:true});
     await b.evaluate("document.querySelector('.query-rule-heading').scrollIntoView({block:'start'})");
@@ -257,7 +258,6 @@ test('10/100/500 scoped courses render completely in batches; 1000 rule identiti
  try{
   await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
   await b.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};render()");
-  await b.evaluate("window.expansionMetrics={};const originalMeasure=applyAdaptiveTableColumns;applyAdaptiveTableColumns=function(options){const start=performance.now();const result=originalMeasure(options);if(options.peerTables?.length)window.expansionMetrics.measure_ms=performance.now()-start;return result}");
   for(const count of [10,100,500,1000]){
    const ms=await b.evaluate(`(async()=>{const start=performance.now();await applyStudentQuerySelection('规模${count}');return performance.now()-start})()`);
    assert.equal(await b.evaluate("document.querySelectorAll('.query-rule-details').length"),0);
@@ -266,17 +266,15 @@ test('10/100/500 scoped courses render completely in batches; 1000 rule identiti
    let expansion=null;
    {
     await b.evaluate("window.expansionStart=performance.now();document.querySelector('.query-rule-expand').click()");
-    await b.waitFor(`document.querySelectorAll('.query-rule-details [data-course-detail-id]').length===${count}&&!document.querySelector('.query-rule-detail-progress')`,count===1000?30000:15000);
+    await b.waitFor(`document.querySelectorAll('.query-course-view [data-course-detail-id]').length===${count}&&!document.querySelector('.query-course-progress')`,count===1000?30000:15000);
     expansion=await b.evaluate("performance.now()-expansionStart");assert.ok(expansion<(count===1000?30000:10000));
-    assert.equal(await b.evaluate("new Set([...document.querySelectorAll('.query-rule-details [data-course-detail-id]')].map(row=>row.dataset.courseDetailId)).size"),count);
-    if(count===1000){
-     assert.equal(await b.evaluate("new Set([...document.querySelectorAll('.query-rule-details table')].map(table=>table.dataset.adaptiveWidths)).size"),1);
-     await b.evaluate("scheduleAdaptiveTableColumns()");
-     await b.waitFor("document.querySelector('.query-rule-details table').dataset.adaptiveWidths");
-    }
+    assert.equal(await b.evaluate("new Set([...document.querySelectorAll('.query-course-view [data-course-detail-id]')].map(row=>row.dataset.courseDetailId)).size"),count);
+    const nodes=await b.evaluate("document.querySelectorAll('.student-query-detail-slot *').length");
+    assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view table').length"),1);
+    assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view thead tr').length"),1);
+    measurements.push({count,collapsed_ms:ms,expanded_ms:expansion,dom_nodes:nodes});
     await b.click('.query-rule-expand');
    }
-   measurements.push({count,collapsed_ms:ms,expanded_ms:expansion,...await b.evaluate("window.expansionMetrics")});
   }
   console.log('[query-expansion-performance]',JSON.stringify(measurements));
   if(process.env.QUERY_EXPANSION_PERFORMANCE_OUTPUT)fs.writeFileSync(process.env.QUERY_EXPANSION_PERFORMANCE_OUTPUT,JSON.stringify(measurements,null,2)+'\n');
@@ -337,4 +335,70 @@ test('new courses follow current rules when completed, old courses stay standard
  const restored=new DatabaseSync(target);assert.equal(restored.prepare('SELECT student_fee_mode FROM lessons WHERE id=?').get(id).student_fee_mode,'rule');assert.equal(restored.prepare('SELECT COUNT(*) n FROM fee_overrides WHERE lesson_id=?').get(id).n,0);restored.close();
  const {migrateStudentFeeMode}=require('../src/domain/fee_restore');
  const legacy=new DatabaseSync(':memory:');legacy.exec('CREATE TABLE lessons(id INTEGER, notes TEXT);INSERT INTO lessons VALUES(1,\'untouched\')');migrateStudentFeeMode(legacy);migrateStudentFeeMode(legacy);assert.deepEqual({...legacy.prepare('SELECT * FROM lessons').get()},{id:1,notes:'untouched',student_fee_mode:'standard'});legacy.close();db.close();
+});
+
+
+test('flat view includes pending-only rules, exact identities and scopes; single and bulk fees preserve the table',async()=>{
+ const db=new DatabaseSync(databasePath);
+ db.exec("UPDATE pricing_standards SET unit_price=160 WHERE grade='高一' AND student_count=2");
+ db.exec(`INSERT INTO students(name,grade,status) VALUES('统一明细','高一','在读'),('仅待上','高一','在读');
+ INSERT INTO lessons(id,teacher_name,date,month_key,time_slot,grade,subject,student_names,status) VALUES
+ (9500001,'合成教师','2026-09-03','2026-09-01','09:00-11:00','高一','数学','统一明细、李四','已上'),
+ (9500002,'合成教师','2026-09-01','2026-09-01','13:00-15:00','高一','英语','李四、统一明细','已上'),
+ (9500003,'合成教师','2026-09-01','2026-09-01','09:00-11:00','高一','化学','统一明细','待上'),
+ (9500004,'合成教师','2026-09-04','2026-09-01','09:00-11:00','高一','物理','统一明细','请假'),
+ (9500005,'其他教师','2026-10-01','2026-10-01','09:00-11:00','高一','数学','统一明细','待上'),
+ (9500006,'合成教师','2026-09-01','2026-09-01','09:00-11:00','高一','数学','仅待上','待上');
+ INSERT INTO fee_overrides(lesson_id,student_name,unit_price) VALUES(9500001,'统一明细',135),(9500001,'李四',77);`);
+ const params=new URLSearchParams({student:'统一明细',start:'2026-09-01',end:'2026-09-30'});
+ const flat=(await api('/api/student-pricing-query?'+params+'&include_courses=flat')).payload;
+ assert.deepEqual(flat.lessons.map(row=>row.id),[9500003,9500002,9500001,9500004]);
+ assert.equal(new Set(flat.lessons.map(row=>row.id)).size,4);
+ assert.equal(flat.lessons[0].unit_price,null);assert.equal(flat.lessons[0].can_edit_fee,false);
+ assert.equal(flat.lessons[2].unit_price,135);assert.equal(flat.lessons[2].rule_fee,160);
+ const original=(await api('/api/student/'+encodeURIComponent('统一明细')+'/statement?'+params)).payload;
+ assert.deepEqual(new Set(original.details.map(row=>row.lesson_id)),new Set(flat.lessons.map(row=>row.id)));
+ assert.equal((await api('/api/student-pricing-query?'+params+'&include_courses=flat',{cookie:teacherCookie})).payload.lessons.every(row=>row.teacher_name==='合成教师'&&!row.can_edit_fee),true);
+ params.set('end','2026-10-31');assert.equal((await api('/api/student-pricing-query?'+params+'&include_courses=flat')).payload.lessons.length,5);
+ params.set('student','统一');assert.equal((await api('/api/student-pricing-query?'+params+'&include_courses=flat')).payload.lessons.length,0);
+ const chrome=await launchChrome(path.join(tempRoot,'flat-view-chrome')),b=chrome.session;
+ try{
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');
+  await b.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};applyStudentQuerySelection('统一明细')");
+  await b.waitFor("document.querySelectorAll('.student-pricing-rule-row').length===2");
+  await b.click('.query-rule-select');await b.click('.query-rule-expand');await b.waitFor("document.querySelector('.query-course-view[data-render-complete=true]')");
+  assert.equal(await b.evaluate("document.querySelectorAll('.student-pricing-table,.query-rule-details,.query-rule-batch').length"),0);
+  assert.equal(await b.evaluate("document.querySelectorAll('.query-course-batch').length"),1);
+  await b.evaluate("window.originalFlatTable=document.querySelector('.query-course-view table')");
+  await b.click('.pricing-course-fee[data-lesson-id="9500001"] button');
+  await b.evaluate("const input=document.querySelector('.pricing-course-fee-input');input.value='140';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");
+  await b.waitFor("document.querySelector('.pricing-course-fee[data-lesson-id=\"9500001\"] button')?.textContent.includes('140.00')");
+  assert.equal(await b.evaluate("originalFlatTable===document.querySelector('.query-course-view table')"),true);
+  assert.equal(await b.evaluate("document.querySelector('.pricing-course-fee[data-lesson-id=\"9500001\"]').classList.contains('negative')"),true);
+  await b.click('.query-course-select-all');await b.click('.query-course-batch');await b.waitFor("document.querySelector('.query-fee-confirm:not(:disabled)')");await b.click('.query-fee-confirm');
+  await b.waitFor("document.querySelector('.pricing-course-fee[data-lesson-id=\"9500001\"] button')?.textContent.includes('160.00')");
+  assert.equal(await b.evaluate("originalFlatTable===document.querySelector('.query-course-view table')"),true);
+  assert.equal(db.prepare("SELECT unit_price FROM fee_overrides WHERE lesson_id=9500001 AND student_name='李四'").get().unit_price,77);
+  await b.click('.query-rule-expand');assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view').length"),0);assert.equal(await b.evaluate("document.querySelectorAll('.query-rule-select:checked').length"),1);
+  await b.click('.query-rule-expand');await b.evaluate("applyStudentQuerySelection('仅待上')");await b.waitFor("document.querySelector('.query-course-view[data-render-complete=true]')&&document.querySelectorAll('.query-course-view [data-course-detail-id]').length===1");
+  assert.equal(await b.evaluate('queryRulesExpanded'),true);assert.equal(await b.evaluate('studentQueryRules.length'),0);
+  await b.click('.query-rule-expand');assert.equal(await b.evaluate("document.querySelector('.query-rule-expand').disabled"),false);
+  await b.evaluate("setActiveView('home');setActiveView('studentQuery')");assert.equal(await b.evaluate('queryRulesExpanded'),false);
+  assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+ }finally{await b.close();chrome.child.kill();db.close();}
+});
+
+test('1000 courses in one rule use one complete ordered table and one batch control',async()=>{
+ const db=new DatabaseSync(databasePath);db.prepare("INSERT INTO students(name,grade,status) VALUES('千节同组','高一','在读')").run();
+ const insert=db.prepare("INSERT INTO lessons(teacher_name,date,month_key,time_slot,grade,subject,student_names,status) VALUES('合成教师','2026-09-10','2026-09-01','09:00-11:00','高一','数学','千节同组','已上')");db.exec('BEGIN');for(let i=0;i<1000;i++)insert.run();db.exec('COMMIT');db.close();
+ const chrome=await launchChrome(path.join(tempRoot,'flat-thousand-chrome')),b=chrome.session;
+ try{
+  await b.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await b.login('boss','123456');await b.evaluate("setActiveView('studentQuery');studentQueryRange={mode:'range',start:'2026-09-01',end:'2026-09-30'};applyStudentQuerySelection('千节同组')");
+  await b.waitFor("studentQueryRules.length===1&&selectedStudent==='千节同组'");
+  await b.evaluate("window.flatStart=performance.now();document.querySelector('.query-rule-expand').click()");await b.waitFor("document.querySelector('.query-course-view[data-render-complete=true]')",10000);
+  const measurement=await b.evaluate("({elapsed_ms:performance.now()-flatStart,dom_nodes:document.querySelectorAll('.student-query-detail-slot *').length})");console.log('[flat-thousand-single-rule]',JSON.stringify(measurement));assert.ok(measurement.elapsed_ms<10000);
+  assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view tbody tr').length"),1000);assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view thead,.query-course-batch').length"),2);
+  const ids=await b.evaluate("[...document.querySelectorAll('.query-course-view [data-course-detail-id]')].map(row=>Number(row.dataset.courseDetailId))");assert.deepEqual(ids,[...ids].sort((a,b)=>a-b));assert.equal(new Set(ids).size,1000);
+  assert.deepEqual(b.exceptions,[]);assert.deepEqual(b.consoleErrors,[]);
+ }finally{await b.close();chrome.child.kill();}
 });

@@ -317,8 +317,8 @@ let studentQueryRules = [], studentQueryCanEditRules = false;
 const queryFeeConfirmDialogs = new Set();
 let queryRuleBatchDialog = null;
 let queryRuleSelection = new Set(), queryRulesExpanded = false, queryExpansionGeneration = 0, querySelectionStudent = "";
-let studentPricingCourseDialog = null, studentPricingCourseGeneration = 0;
-function closeStudentPricingCourses() { for (const dialog of queryFeeConfirmDialogs) dialog.close(); queryFeeConfirmDialogs.clear(); queryRuleBatchDialog?.close(); queryRuleBatchDialog=null; studentPricingCourseGeneration++; studentPricingCourseDialog?.close(); studentPricingCourseDialog = null; }
+let studentPricingCourseDialog = null, studentPricingCourseGeneration = 0, queryCourseEditorCleanup = null;
+function closeStudentPricingCourses() { queryCourseEditorCleanup?.(); queryCourseEditorCleanup=null; for (const dialog of queryFeeConfirmDialogs) dialog.close(); queryFeeConfirmDialogs.clear(); queryRuleBatchDialog?.close(); queryRuleBatchDialog=null; studentPricingCourseGeneration++; studentPricingCourseDialog?.close(); studentPricingCourseDialog = null; }
 function studentPricingScopeParams() { return view === 'studentQuery' ? '&' + new URLSearchParams({student:selectedStudent,...currentStudentQueryRange()}) : ''; }
 function canEditStudentPricing() { return canWriteData() && canView('studentPricing') && (view !== 'studentQuery' || studentQueryCanEditRules); }
 
@@ -3172,7 +3172,7 @@ async function loadStudentStatement() {
 
 async function refreshStudentQueryOnly({ force = false } = {}) {
   queryExpansionGeneration++;
-  if (querySelectionStudent !== selectedStudent) { queryRuleSelection.clear(); queryRulesExpanded = false; querySelectionStudent = selectedStudent; }
+  if (querySelectionStudent !== selectedStudent) { queryRuleSelection.clear(); querySelectionStudent = selectedStudent; }
   closeStudentPricingCourses();
   studentQueryRules = [];
   const requestGeneration = ++studentQueryRequestGeneration;
@@ -3658,7 +3658,7 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
   return widths;
 }
 
-function applyAdaptiveTableColumns({ table, flexibleColumn = null, peerTables = [] } = {}) {
+function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   if (!table?.isConnected) return [];
   const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
   const columns = [...table.querySelectorAll(":scope > colgroup > col")];
@@ -3675,9 +3675,7 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null, peerTables = 
     return applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions);
   }
   const started = performance.now();
-  const peers = peerTables.filter(peer => peer.isConnected && peer.querySelectorAll(":scope > colgroup > col").length === columns.length);
-  const tables = [table, ...peers];
-  const bodyRows = tables.flatMap(item => [...item.querySelectorAll(":scope > tbody > tr")]);
+  const bodyRows = [...table.querySelectorAll(":scope > tbody > tr")];
   const tableStyle = getComputedStyle(table);
   const measureFont = tableStyle.font || `${tableStyle.fontWeight} ${tableStyle.fontSize} ${tableStyle.fontFamily}`;
   const widths = headerCells.map((header, index) => {
@@ -3705,22 +3703,14 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null, peerTables = 
     });
   });
   const tableWidth = widths.reduce((sum, width) => sum + width, 0);
-  for (const item of tables) {
-    item.classList.add("adaptive-table");
-    item.querySelectorAll(":scope > colgroup > col").forEach((column, index) => { column.style.width = `${widths[index]}px`; });
-    item.querySelectorAll(":scope > thead > tr:first-child > th").forEach((header, index) => {
-      header.classList.toggle("adaptive-wrap", definitions[index].wrap);
-      header.classList.toggle("adaptive-full", definitions[index].type === "full");
-    });
-    item.style.tableLayout = "fixed";
-    item.style.width = `${Math.ceil(tableWidth)}px`;
-    item.style.minWidth = "0";
-    item.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
-    item.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
-    item.dataset.adaptiveLayoutReads = "0";
-    item.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
-    item.querySelectorAll("textarea.adaptive-textarea").forEach(resizeAdaptiveTextarea);
-  }
+  table.style.tableLayout = "fixed";
+  table.style.width = `${Math.ceil(tableWidth)}px`;
+  table.style.minWidth = "0";
+  table.dataset.adaptiveWidths = widths.map((width) => Math.ceil(width)).join(",");
+  table.dataset.adaptiveColumnConfig = JSON.stringify(definitions.map(({ header, ...definition }) => definition));
+  table.dataset.adaptiveLayoutReads = "0";
+  table.dataset.adaptiveMeasurementMs = (performance.now() - started).toFixed(2);
+  table.querySelectorAll("textarea.adaptive-textarea").forEach(resizeAdaptiveTextarea);
   return widths;
 }
 
@@ -3728,13 +3718,9 @@ function scheduleAdaptiveTableColumns() {
   const token = ++adaptiveTableMeasureToken;
   requestAnimationFrame(() => {
     if (token !== adaptiveTableMeasureToken) return;
-    const groups = new Map();
     document.querySelectorAll('table[data-adaptive-table="true"]').forEach((table) => {
-      const key = table.dataset.adaptiveGroup || table;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(table);
+      applyAdaptiveTableColumns({ table });
     });
-    for (const tables of groups.values()) applyAdaptiveTableColumns({table:tables[0],peerTables:tables.slice(1)});
   });
 }
 
@@ -5070,11 +5056,15 @@ function priceSourceBadge(row) {
   return sourceStatusBadge(priceSourceLabel(row.price_source), priceSourceTitle(row));
 }
 
-function showStudentPricingCourses(rule, result) {
+function studentCourseFeeCell(row, result) {
   const editable = result.can_edit_fee && canWriteData();
-  const feeDiffers = row => row.rule_fee != null && row.unit_price != null && Math.round(Number(row.rule_fee) * 100) !== Math.round(Number(row.unit_price) * 100);
-  const feeCell = row => `<td class="right pricing-course-fee ${feeDiffers(row) ? 'negative' : ''}" data-lesson-id="${row.id}">${editable && row.can_edit_fee !== false ? `<button class="pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : row.unit_price == null ? '—（不计费）' : formatMoney(row.unit_price)}</td>`;
-  closeStudentPricingCourses();
+  const differs = row.rule_fee != null && row.unit_price != null && Math.round(row.rule_fee*100)!==Math.round(row.unit_price*100);
+  return `<td class="right pricing-course-fee ${differs ? 'negative' : ''}" data-lesson-id="${row.id}">${editable && row.can_edit_fee !== false ? `<button class="pricing-course-fee-edit" aria-label="修改${escapeHtml(result.student_name)}本节费用">${formatMoney(row.unit_price)}</button>` : row.unit_price == null ? '—（不计费）' : formatMoney(row.unit_price)}</td>`;
+}
+function bindStudentCourseFeeEditor(root, result) {
+  const editable = result.can_edit_fee && canWriteData();
+  const feeDiffers = row => row.rule_fee != null && row.unit_price != null && Math.round(row.rule_fee*100)!==Math.round(row.unit_price*100);
+  const feeCell = row => studentCourseFeeCell(row,result);
   let active = null, closed = false, refreshSequence = 0;
   const pending = new Set();
   const paint = editor => {
@@ -5087,16 +5077,13 @@ function showStudentPricingCourses(rule, result) {
     if (!active) return;
     const editor = active; active = null; editor.finished = true; paint(editor);
   };
-  const dialog = studentPricingCourseDialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, { selection:editable, feeCells: row => feeCell(row) + `<td class="right pricing-course-rule-fee">${row.rule_fee == null ? "—" : formatMoney(row.rule_fee)}</td>` }), {
-    beforeClose: () => { cancel(); closed = true; document.removeEventListener('pointerdown', outside, true); },
-  });
-  if (editable) bindCourseFeeSelection(dialog.element.querySelector('.modal-panel'), result, async () => {
+  if (editable) bindCourseFeeSelection(root, result, async () => {
     for (const row of result.lessons) {
-      const cell = dialog.element.querySelector(`.pricing-course-fee[data-lesson-id="${row.id}"]`);
+      const cell = root.querySelector(`.pricing-course-fee[data-lesson-id="${row.id}"]`);
       if(cell) paint({cell,row});
     }
     const key=studentStatementCacheKey(), report=await fetchStudentStatement(selectedStudent,true);
-    if(!closed && key===studentStatementCacheKey()) { state.student_statement=report; updateStudentQueryResultsOnly(); }
+    if(!closed && root.isConnected && key===studentStatementCacheKey()) { state.student_statement=report; updateStudentQueryResultsOnly(report,{preserveDetails:true}); }
   }, {beforePreview:()=>{
     cancel();
     if (pending.size) { showToast('单节费用正在保存，请完成后再批量设置'); return false; }
@@ -5104,11 +5091,11 @@ function showStudentPricingCourses(rule, result) {
   }});
   // Pointerdown runs before focus moves: closing/navigation cancels an unsubmitted draft.
   const outside = event => {
-    if (!dialog.element.contains(event.target) || event.target.closest('.dialog-close')) cancel();
+    if (!root.contains(event.target) || event.target.closest('.dialog-close')) cancel();
   };
   document.addEventListener('pointerdown', outside, true);
   const submit = async editor => {
-    if (!editor || editor.finished || closed) return;
+    if (!editor || editor.finished || closed || !root.isConnected) return;
     editor.finished = true;
     if (active === editor) active = null;
     const input = editor.input, value = input.value;
@@ -5124,15 +5111,15 @@ function showStudentPricingCourses(rule, result) {
       if (view === 'studentQuery') {
         const sequence = ++refreshSequence, key = studentStatementCacheKey();
         const report = await fetchStudentStatement(selectedStudent, true);
-        if (sequence === refreshSequence && view === 'studentQuery' && key === studentStatementCacheKey()) { state.student_statement = report; updateStudentQueryResultsOnly(); }
+        if (sequence === refreshSequence && !closed && root.isConnected && view === 'studentQuery' && key === studentStatementCacheKey()) { state.student_statement = report; updateStudentQueryResultsOnly(report,{preserveDetails:true}); }
       }
     } catch (error) { if (auth.user?.id === account) showToast(error.message, 'error'); }
     finally { pending.delete(editor.row.id); paint(editor); }
   };
-  dialog.element.addEventListener('click', event => {
+  root.addEventListener('click', event => {
     const button = event.target.closest('.pricing-course-fee-edit');
     if (!button && active && !event.target.closest('.pricing-course-fee')) { void submit(active); return; }
-    if (!button || button.disabled || closed || dialog.element.querySelector('.modal-panel')?.dataset.feeBatchBusy === 'true') return;
+    if (!button || button.disabled || closed || root?.dataset.feeBatchBusy === 'true') return;
     if (active) void submit(active);
     closeScheduleInlinePicker(); closeOpenMultiSelectMenus();
     const cell = button.closest('td'), row = result.lessons.find(row => String(row.id) === cell.dataset.lessonId);
@@ -5141,18 +5128,26 @@ function showStudentPricingCourses(rule, result) {
     cell.innerHTML = `<span class="price-inline editable-price-inline">${currencyInputMarkup(row.unit_price, {className:'pricing-course-fee-input', attrs:'min="0" max="10000" step="0.01" required'})}</span>`;
     const input = editor.input = cell.querySelector('input');
     input.addEventListener('blur', event => {
-      if (event.relatedTarget?.closest('.dialog-close') || (event.relatedTarget && !dialog.element.contains(event.relatedTarget))) { if (active === editor) cancel(); return; }
+      if (event.relatedTarget?.closest('.dialog-close') || (event.relatedTarget && !root.contains(event.relatedTarget))) { if (active === editor) cancel(); return; }
       // A close/page change in the same event finishes cancellation before this runs.
       setTimeout(() => { if (!closed && cell.isConnected) void submit(editor); }, 0);
     });
     applyAdaptiveTableColumns({table:cell.closest('table')});
     input.focus(); input.select();
   });
-  dialog.element.addEventListener('keydown', event => {
+  root.addEventListener('keydown', event => {
     if (!active) return;
     if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancel(); }
     else if (event.key === 'Enter' && event.target === active.input) { event.preventDefault(); void submit(active); }
   }, true);
+  return () => { cancel(); closed=true; document.removeEventListener('pointerdown',outside,true); };
+}
+
+function showStudentPricingCourses(rule, result) {
+  closeStudentPricingCourses();
+  let dispose = () => {};
+  const dialog = studentPricingCourseDialog = CourseDetails.dialog(`${rule.student_name} · ${rule.grade} · ${rule.subject} · 共${result.lessons.length}节课`, `<p class="muted-tip">费用学生：${escapeHtml(result.student_name)}；仅修改该学生的单节实际费用。</p>` + CourseDetails.table(result.lessons, {selection:result.can_edit_fee && canWriteData(),feeCells:row=>studentCourseFeeCell(row,result)+`<td class="right pricing-course-rule-fee">${row.rule_fee==null?'—':formatMoney(row.rule_fee)}</td>`}), {beforeClose:()=>dispose()});
+  dispose = bindStudentCourseFeeEditor(dialog.element.querySelector('.modal-panel'),result);
 }
 
 function readonlyPriceCell(row) {
@@ -9922,7 +9917,7 @@ function updateStudentQueryToolbarOnly() {
   });
 }
 
-function updateStudentQueryResultsOnly(report = studentStatementReport()) {
+function updateStudentQueryResultsOnly(report = studentStatementReport(), {preserveDetails = false} = {}) {
   const resultRegion = document.querySelector(".student-query-results");
   if (!resultRegion) return false;
   const cards = studentStatementMetricCards(selectedStudent ? (report.summary || {}) : {});
@@ -9947,7 +9942,7 @@ function updateStudentQueryResultsOnly(report = studentStatementReport()) {
     if (monthBody) monthBody.innerHTML = studentQueryMonthRowsMarkup(report);
   }
   const detailSlot = resultRegion.querySelector(".student-query-detail-slot");
-  if (detailSlot) detailSlot.innerHTML = studentQueryRuleTableMarkup();
+  if (detailSlot && !preserveDetails) { queryCourseEditorCleanup?.(); queryCourseEditorCleanup=null; detailSlot.innerHTML = studentQueryRuleTableMarkup(); }
   enhanceCustomSelects();
   scheduleAdaptiveTableColumns();
   return true;
@@ -11428,11 +11423,11 @@ function studentPricingTableMarkup(initialRows, visibleRows = initialRows) {
 function studentQueryRuleTableMarkup() {
   const rows = selectedStudent ? studentQueryRules : [];
   studentPricingVisibleRows = rows;
-  queueMicrotask(() => { syncQueryRuleSelection(); if (queryRulesExpanded) void expandQueryRuleCourses(); });
-  return `<div class="band"><div class="query-rule-heading">${studentQuerySectionHeader('已上课程规则', studentStatementReport())}
-    <div class="query-rule-toolbar"><button class="btn query-rule-expand" aria-expanded="${queryRulesExpanded}" ${rows.length ? '' : 'disabled'}>${navExpandToggleIcon(queryRulesExpanded)}${queryRulesExpanded ? '折叠' : '展开'}</button>
-    ${canEditStudentPricing() ? '<button class="btn query-rule-batch" disabled>批量设置规则费用</button>' : ''}<span class="query-rule-selection-count"></span></div></div>
-    <div class="table-wrap smooth-table-wrap" id="student-pricing-table-wrap">${studentPricingTableMarkup(rows)}</div></div>`;
+  queueMicrotask(() => { if (queryRulesExpanded) void expandQueryRuleCourses(); else syncQueryRuleSelection(); });
+  return `<div class="band"><div class="query-rule-heading">${studentQuerySectionHeader(queryRulesExpanded ? '课程明细' : '已上课程规则', studentStatementReport())}
+    <div class="query-rule-toolbar"><button class="btn query-rule-expand" aria-expanded="${queryRulesExpanded}" ${selectedStudent ? '' : 'disabled'}>${navExpandToggleIcon(queryRulesExpanded)}${queryRulesExpanded ? '折叠' : '展开'}</button>
+    ${!queryRulesExpanded && canEditStudentPricing() ? '<button class="btn query-rule-batch" disabled>批量设置规则费用</button><span class="query-rule-selection-count"></span>' : ''}</div></div>
+    ${queryRulesExpanded ? '<div class="query-course-view"><div class="query-course-progress">正在加载课程…</div></div>' : `<div class="table-wrap smooth-table-wrap" id="student-pricing-table-wrap">${studentPricingTableMarkup(rows)}</div>`}</div>`;
 }
 
 function studentPricingRowMarkup(row, index = 0) {
@@ -14902,7 +14897,7 @@ function ensureStudentPricingDelegatedEvents() {
     }
   });
   contentEl.addEventListener("click", (event) => {
-    if (event.target.closest('.query-rule-expand')) { queryRulesExpanded = !queryRulesExpanded; queryExpansionGeneration++; updateStudentQueryResultsOnly(); return; }
+    if (event.target.closest('.query-rule-expand')) { closeStudentPricingCourses(); queryRulesExpanded = !queryRulesExpanded; queryExpansionGeneration++; updateStudentQueryResultsOnly(); return; }
     if (event.target.closest('.query-rule-batch')) { openQueryRuleBatch(); return; }
     const ruleRow = event.target.closest?.(".student-pricing-rule-row");
     if (ruleRow && !event.target.closest('button,input,textarea,select,a,[role="button"],.custom-select,.currency-input-wrap')) {

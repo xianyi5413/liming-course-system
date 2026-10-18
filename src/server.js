@@ -52,7 +52,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261018-query-expansion";
+const APP_VERSION = process.env.APP_VERSION || "20261018-query-flat-view";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -6827,6 +6827,22 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
   ));
 }
 
+function studentCourseDetailRow(row, student, statuses, lookups, user) {
+  const status = deriveStatus(row, statuses);
+  const price = unitPriceFor({studentName:student, subject:row.subject, grade:row.grade, studentCount:splitStudents(row.student_names).length, lessonId:row.id, status, studentNames:row.student_names}, lookups);
+  return {id:row.id, teacher_name:row.teacher_name, date:row.date, time_slot:row.time_slot, classroom:row.classroom,
+    status, grade:row.grade, subject:row.subject, course_type:row.course_type, student_names:row.student_names, notes:row.notes,
+    unit_price:status === "已上" ? price.unit_price : null, rule_fee:status === "已上" ? price.baseline_price : null,
+    can_edit_fee:status === "已上" && !userReadonly(user) && roleCan(user,"students","write") && filterLessonsByRolePrefilter([row],user,"feeDetails").length > 0};
+}
+
+function studentQueryCourseDetails(student, user, range) {
+  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all,student);
+  return studentPricingScopedLessons(all("SELECT * FROM lessons WHERE date>=? AND date<=? ORDER BY date,time_slot,id",[range.start,range.end]),user)
+    .filter(row=>splitStudents(row.student_names).includes(student))
+    .map(row=>studentCourseDetailRow(row,student,statuses,lookups,user));
+}
+
 // One scoped read and one pricing snapshot serve every expanded group.
 function studentRuleCourseDetails(rules, user, range = null, includeAll = false) {
   const groups = new Map(rules.map(rule => [Number(rule.id), []]));
@@ -6841,11 +6857,7 @@ function studentRuleCourseDetails(rules, user, range = null, includeAll = false)
     for (const student of names) {
       const rule = byKey.get(studentPricingRuleKey({...row, student_name:student}));
       if (!rule) continue;
-      const price = unitPriceFor({studentName:student, subject:row.subject, grade:row.grade, studentCount:names.length, lessonId:row.id, status, studentNames:row.student_names}, lookups);
-      groups.get(Number(rule.id)).push({id:row.id, teacher_name:row.teacher_name, date:row.date, time_slot:row.time_slot, classroom:row.classroom,
-        status, grade:row.grade, subject:row.subject, course_type:row.course_type, student_names:row.student_names, notes:row.notes,
-        unit_price:status === "已上" ? price.unit_price : null, rule_fee:status === "已上" ? price.baseline_price : null,
-        can_edit_fee:status === "已上" && !userReadonly(user) && roleCan(user,"students","write") && filterLessonsByRolePrefilter([row],user,"feeDetails").length > 0});
+      groups.get(Number(rule.id)).push(studentCourseDetailRow(row,student,statuses,lookups,user));
     }
   }
   return groups;
@@ -12902,6 +12914,7 @@ async function handleApi(req, res, url) {
     const student = text(url.searchParams.get("student"));
     const range = studentStatementRangeFromUrl(url);
     if (!student || !range) return sendError(res, 400, "学生和有效日期范围不能为空");
+    if (url.searchParams.get("include_courses") === "flat") return sendJson(res, {student_name:student,range,lessons:studentQueryCourseDetails(student,user,range),can_edit_fee:!userReadonly(user)&&roleCan(user,"students","write")});
     const rules = studentPricingRows(resolveMonthKey(url), null, user, { student, ...range });
     const courses = url.searchParams.get("include_courses") === "1" ? Object.fromEntries(studentRuleCourseDetails(rules, user, range, true)) : undefined;
     return sendJson(res, { student_name: student, range, rules, courses, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), can_edit_rule: userHasAnyPermission(user, ["studentPricing"]) && !userReadonly(user) && roleCan(user, "students", "write") });

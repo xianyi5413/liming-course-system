@@ -42,54 +42,32 @@ function openQueryRuleBatch() {
 
 async function expandQueryRuleCourses() {
   const token = ++queryExpansionGeneration, key = studentStatementCacheKey();
-  const parent = document.querySelector('.student-pricing-table > tbody');
-  if (!parent || !queryRulesExpanded || !studentQueryRules.length) return;
-  const current = () => token === queryExpansionGeneration && queryRulesExpanded && view === 'studentQuery' && key === studentStatementCacheKey() && parent.isConnected;
-  parent.querySelectorAll('.query-rule-details').forEach(row => row.remove());
+  const root = document.querySelector('.query-course-view');
+  if (!root || !queryRulesExpanded || !selectedStudent) return;
+  const current = () => token === queryExpansionGeneration && queryRulesExpanded && view === 'studentQuery' && key === studentStatementCacheKey() && root.isConnected;
   try {
-    const result = await request('/api/student-pricing-query?' + new URLSearchParams({student:selectedStudent,...currentStudentQueryRange(),include_courses:'1'}), {cache:false});
+    const result = await request('/api/student-pricing-query?' + new URLSearchParams({student:selectedStudent,...currentStudentQueryRange(),include_courses:'flat'}), {cache:false});
     if (!current()) return;
-    const ruleRows = new Map([...parent.children].filter(row => row.classList.contains('student-pricing-rule-row')).map(row => [Number(row.dataset.ruleId), row]));
-    const tables = [], pendingGroups = [];
-    const flushGroups = () => { for (const [row, child] of pendingGroups) row.after(child); pendingGroups.length=0; };
-    let rowsSinceYield = 0, lastYield = performance.now();
-    for (const rule of studentQueryRules) {
-      if (!current()) return;
-      const row = ruleRows.get(Number(rule.id));
-      if (!row) continue;
-      const lessons = result.courses?.[rule.id] || [];
-      const child = document.createElement('tr'); child.className='query-rule-details';
-      const cell = document.createElement('td'); cell.colSpan=13; child.append(cell);
-      if (lessons.length > 48) row.after(child); else pendingGroups.push([row, child]);
-      const fees = item => `<td class="right ${item.rule_fee != null && Math.round(item.unit_price*100)!==Math.round(item.rule_fee*100) ? 'negative' : ''}">${item.unit_price == null ? '—（不计费）' : formatMoney(item.unit_price)}</td><td class="right">${item.rule_fee == null ? '—' : formatMoney(item.rule_fee)}</td>`;
-      cell.innerHTML = '<div class="query-rule-detail-progress">正在加载课程…</div>' + CourseDetails.table([], {feeCells:fees, selection:result.can_edit_fee});
-      const body = cell.querySelector('tbody');
-      for (let start=0; start<lessons.length; start+=48) {
-        if (!current()) return;
-        const holder=document.createElement('div');
-        holder.innerHTML=CourseDetails.table(lessons.slice(start,start+48),{feeCells:fees,selection:result.can_edit_fee});
-        [...holder.querySelector('tbody').children].forEach((item,index)=>{ item.children[result.can_edit_fee ? 1 : 0].innerHTML=String(start+index+1); body.append(item); });
-        rowsSinceYield += Math.min(48, lessons.length-start);
-        if (rowsSinceYield >= 48 || performance.now()-lastYield >= 8) {
-          await new Promise(resolve=>setTimeout(resolve,0)); rowsSinceYield=0; lastYield=performance.now();
-        }
-      }
-      if (!current()) return;
-      cell.querySelector('.query-rule-detail-progress').remove();
-      if(result.can_edit_fee) bindCourseFeeSelection(cell,{student_name:result.student_name,lessons},()=>refreshStudentQueryOnly({force:true}));
-      if (pendingGroups.length >= 24) flushGroups();
-      const table = cell.querySelector('table'); table.dataset.adaptiveGroup='student-query-courses'; tables.push(table);
-      if (performance.now()-lastYield >= 8) {
-        await new Promise(resolve=>setTimeout(resolve,0)); rowsSinceYield=0; lastYield=performance.now();
-      }
+    const fees = row => studentCourseFeeCell(row,result)+`<td class="right pricing-course-rule-fee">${row.rule_fee==null?'—':formatMoney(row.rule_fee)}</td>`;
+    root.innerHTML = '<div class="query-course-progress">正在加载课程…</div>'+CourseDetails.table([], {feeCells:fees,selection:result.can_edit_fee && canWriteData()});
+    const body=root.querySelector('tbody');
+    for(let start=0;start<result.lessons.length;start+=48){
+      if(!current())return;
+      const holder=document.createElement('div');
+      holder.innerHTML=CourseDetails.table(result.lessons.slice(start,start+48),{feeCells:fees,selection:result.can_edit_fee && canWriteData(),indexOffset:start});
+      body.append(...holder.querySelector('tbody').children);
+      await new Promise(resolve=>setTimeout(resolve,0));
     }
-    if (!current()) return;
-    flushGroups();
-    if (tables.length) applyAdaptiveTableColumns({table:tables[0],peerTables:tables.slice(1)});
-  } catch(error) { if (current()) showToast(error.message || '课程展开失败，请重试','error'); }
+    if(!current())return;
+    if(!result.lessons.length)body.innerHTML=`<tr><td colspan="${result.can_edit_fee && canWriteData()?15:14}" class="empty">当前范围暂无课程</td></tr>`;
+    root.querySelector('.query-course-progress').remove();
+    queryCourseEditorCleanup=bindStudentCourseFeeEditor(root,result);
+    applyAdaptiveTableColumns({table:root.querySelector('table')});
+    root.dataset.renderComplete='true';
+  } catch(error) { if(current()){root.querySelector('.query-course-progress').textContent='课程加载失败，请折叠后重试';showToast(error.message,'error');} }
 }
 
-// Both inline groups and dialogs use this selection, preview and transaction UI.
+// The flat view and dialogs use this selection, preview and transaction UI.
 function bindCourseFeeSelection(root, result, onSaved, {beforePreview = () => true} = {}) {
   const selected=new Set(), account=auth.user?.id, key=studentStatementCacheKey();
   const toolbar=document.createElement('div'); toolbar.className='query-course-toolbar';

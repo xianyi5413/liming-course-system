@@ -1,0 +1,209 @@
+{
+  "baseline_commit": "6fd1cc4af18381ede3782043ec1d1cc977731880",
+  "method": "Three interleaved runs; local synthetic SQLite; CDP end-to-end expand until all rows rendered; DOM measured before collapse",
+  "before": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 40.900000005960464,
+        "expanded_ms": 75.5,
+        "dom_nodes": 344
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 44.70000001788139,
+        "expanded_ms": 154.5,
+        "dom_nodes": 2414
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 187.59999999403954,
+        "expanded_ms": 694.7000000178814,
+        "dom_nodes": 11614
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2365.9000000059605,
+        "expanded_ms": 24961.09999999404,
+        "dom_nodes": 91046,
+        "measure_ms": 186.5
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 43.5,
+        "expanded_ms": 61,
+        "dom_nodes": 344
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 47.30000001192093,
+        "expanded_ms": 132.59999999403954,
+        "dom_nodes": 2414
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 185.09999999403954,
+        "expanded_ms": 717.5,
+        "dom_nodes": 11614
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2224.800000011921,
+        "expanded_ms": 27325.80000001192,
+        "dom_nodes": 91046,
+        "measure_ms": 240.90000000596046
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 44.20000001788139,
+        "expanded_ms": 63.5,
+        "dom_nodes": 344
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 40.20000001788139,
+        "expanded_ms": 126,
+        "dom_nodes": 2414
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 187.5,
+        "expanded_ms": 766.3000000119209,
+        "dom_nodes": 11614
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2142.4000000059605,
+        "expanded_ms": 26883.69999998808,
+        "dom_nodes": 91046,
+        "measure_ms": 214.09999999403954
+      }
+    ]
+  ],
+  "after": [
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 44.5,
+        "expanded_ms": 58.599999994039536,
+        "dom_nodes": 292
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 40.80000001192093,
+        "expanded_ms": 85,
+        "dom_nodes": 2452
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 194.7000000178814,
+        "expanded_ms": 641,
+        "dom_nodes": 12052
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2303.2000000178814,
+        "expanded_ms": 2184.5,
+        "dom_nodes": 24052
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 46.69999998807907,
+        "expanded_ms": 78.60000002384186,
+        "dom_nodes": 292
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 44.89999997615814,
+        "expanded_ms": 82.40000000596046,
+        "dom_nodes": 2452
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 198.30000001192093,
+        "expanded_ms": 525,
+        "dom_nodes": 12052
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2548.7000000178814,
+        "expanded_ms": 2794.9000000059605,
+        "dom_nodes": 24052
+      }
+    ],
+    [
+      {
+        "count": 10,
+        "collapsed_ms": 42.80000001192093,
+        "expanded_ms": 79.30000001192093,
+        "dom_nodes": 292
+      },
+      {
+        "count": 100,
+        "collapsed_ms": 41.60000002384186,
+        "expanded_ms": 83.60000002384186,
+        "dom_nodes": 2452
+      },
+      {
+        "count": 500,
+        "collapsed_ms": 186.80000001192093,
+        "expanded_ms": 533.3000000119209,
+        "dom_nodes": 12052
+      },
+      {
+        "count": 1000,
+        "collapsed_ms": 2299.7000000178814,
+        "expanded_ms": 2346.199999988079,
+        "dom_nodes": 24052
+      }
+    ]
+  ],
+  "median": [
+    {
+      "courses": 10,
+      "rules": 1,
+      "before_ms": 63.5,
+      "after_ms": 78.6,
+      "time_reduction_pct": -23.78,
+      "before_dom": 344,
+      "after_dom": 292
+    },
+    {
+      "courses": 100,
+      "rules": 1,
+      "before_ms": 132.6,
+      "after_ms": 83.6,
+      "time_reduction_pct": 36.95,
+      "before_dom": 2414,
+      "after_dom": 2452
+    },
+    {
+      "courses": 500,
+      "rules": 1,
+      "before_ms": 717.5,
+      "after_ms": 533.3,
+      "time_reduction_pct": 25.67,
+      "before_dom": 11614,
+      "after_dom": 12052
+    },
+    {
+      "courses": 1000,
+      "rules": 1000,
+      "before_ms": 26883.7,
+      "after_ms": 2346.2,
+      "time_reduction_pct": 91.27,
+      "before_dom": 91046,
+      "after_dom": 24052
+    }
+  ],
+  "final_regression_single_rule_1000": {
+    "elapsed_ms": 1389.5,
+    "dom_nodes": 24052
+  }
+}
