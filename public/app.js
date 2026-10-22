@@ -621,7 +621,7 @@ function cacheInvalidationPrefixes(path = "") {
   if (/^\/api\/(salary-tables|salary-templates|class-groups\/course-type|teacher-monthly-performance|teacher-detail\/salary)/.test(base)) return ["/api/salary-tables", "/api/salary-templates", "/api/class-groups", "/api/teacher-detail", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-grade-stages")) return ["/api/student-grade-stages/conflicts", "/api/students", "/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
-  if (base.startsWith("/api/student-pricing")) return ["/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/student-pricing")) return ["/api/student/", "/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/lessons")) return ["/api/class-groups", "/api/student-pricing", "/api/teacher-detail", "/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
@@ -3171,6 +3171,7 @@ async function loadStudentStatement() {
 }
 
 async function refreshStudentQueryOnly({ force = false } = {}) {
+  queryMoneyViewGeneration++;
   queryExpansionGeneration++;
   if (querySelectionStudent !== selectedStudent) { queryRuleSelection.clear(); querySelectionStudent = selectedStudent; }
   closeStudentPricingCourses();
@@ -5065,7 +5066,7 @@ function bindStudentCourseFeeEditor(root, result) {
   const editable = result.can_edit_fee && canWriteData();
   const feeDiffers = row => row.rule_fee != null && row.unit_price != null && Math.round(row.rule_fee*100)!==Math.round(row.unit_price*100);
   const feeCell = row => studentCourseFeeCell(row,result);
-  let active = null, closed = false, refreshSequence = 0;
+  let active = null, closed = false;
   const pending = new Set();
   const paint = editor => {
     if (closed || !editor.cell.isConnected) return;
@@ -5077,13 +5078,35 @@ function bindStudentCourseFeeEditor(root, result) {
     if (!active) return;
     const editor = active; active = null; editor.finished = true; paint(editor);
   };
-  if (editable) bindCourseFeeSelection(root, result, async () => {
-    for (const row of result.lessons) {
-      const cell = root.querySelector(`.pricing-course-fee[data-lesson-id="${row.id}"]`);
-      if(cell) paint({cell,row});
+  const context=queryMoneyContext();
+  root.classList.add('student-fee-editor');
+  const rowsById=new Map(result.lessons.map(row=>[Number(row.id),row]));
+  const cells=new Map([...root.querySelectorAll('.pricing-course-fee')].map(cell=>[Number(cell.dataset.lessonId),cell]));
+  const syncRows = byId => {
+    if(closed || !queryMoneyContextCurrent(context))return;
+    for(const row of result.lessons) {
+      const latest=byId.get(Number(row.id)); if(!latest || pending.has(row.id) || active?.row===row)continue;
+      const cell=cells.get(Number(row.id)); if(!cell?.isConnected)continue;
+      if(row.unit_price!==latest.unit_price) {
+        row.unit_price=latest.unit_price;
+        const button=cell.querySelector('.pricing-course-fee-edit');
+        if(button)button.textContent=formatMoney(row.unit_price);
+        else cell.textContent=row.unit_price==null?'—（不计费）':formatMoney(row.unit_price);
+      }
+      if(row.rule_fee!==latest.rule_fee) {
+        row.rule_fee=latest.rule_fee;
+        cell.parentElement.querySelector('.pricing-course-rule-fee').textContent=row.rule_fee==null?'—':formatMoney(row.rule_fee);
+      }
+      cell.classList.toggle('negative',feeDiffers(row));
     }
-    const key=studentStatementCacheKey(), report=await fetchStudentStatement(selectedStudent,true);
-    if(!closed && root.isConnected && key===studentStatementCacheKey()) { state.student_statement=report; updateStudentQueryResultsOnly(report,{preserveDetails:true}); }
+  };
+  const controller={root,student:result.student_name,sync:syncRows}; queryFeeEditors.add(controller);
+  if (editable) bindCourseFeeSelection(root, result, async rows => {
+    for(const item of rows) {
+      const row=rowsById.get(Number(item.lesson_id)),cell=cells.get(Number(item.lesson_id));
+      if(row && cell)paint({cell,row});
+    }
+    await refreshStudentQueryMoney(context);
   }, {beforePreview:()=>{
     cancel();
     if (pending.size) { showToast('单节费用正在保存，请完成后再批量设置'); return false; }
@@ -5106,12 +5129,11 @@ function bindStudentCourseFeeEditor(root, result) {
     try {
       const saved = await request('/api/fee-overrides', {method:'POST', body:{lesson_id:editor.row.id, student_name:result.student_name, unit_price:value}});
       if (auth.user?.id !== account) return;
+      for (const page of ['studentSummary','summary','finance']) markDirty(page);
       editor.row.unit_price = saved.unit_price;
       showToast('单节费用已保存');
-      if (view === 'studentQuery') {
-        const sequence = ++refreshSequence, key = studentStatementCacheKey();
-        const report = await fetchStudentStatement(selectedStudent, true);
-        if (sequence === refreshSequence && !closed && root.isConnected && view === 'studentQuery' && key === studentStatementCacheKey()) { state.student_statement = report; updateStudentQueryResultsOnly(report,{preserveDetails:true}); }
+      if (queryMoneyContextCurrent(context)) {
+        try { await refreshStudentQueryMoney(context); } catch(error) { showToast('费用已保存，统计同步失败：'+error.message,'error'); }
       }
     } catch (error) { if (auth.user?.id === account) showToast(error.message, 'error'); }
     finally { pending.delete(editor.row.id); paint(editor); }
@@ -5140,7 +5162,7 @@ function bindStudentCourseFeeEditor(root, result) {
     if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancel(); }
     else if (event.key === 'Enter' && event.target === active.input) { event.preventDefault(); void submit(active); }
   }, true);
-  return () => { cancel(); closed=true; document.removeEventListener('pointerdown',outside,true); };
+  return () => { cancel(); closed=true; queryFeeEditors.delete(controller); document.removeEventListener('pointerdown',outside,true); };
 }
 
 function showStudentPricingCourses(rule, result) {
@@ -9937,14 +9959,21 @@ function updateStudentQueryResultsOnly(report = studentStatementReport(), {prese
     comparison.hidden = !hasReport;
     const rangeLabel = comparison.querySelector("[data-student-query-range-label]");
     if (rangeLabel) rangeLabel.textContent = studentStatementRangeLabel(report);
-    comparison.querySelector("thead tr").innerHTML = studentQueryMonthColumns(report).map(column => `<th>${escapeHtml(column.label)}</th>`).join("");
-    const monthBody = comparison.querySelector("[data-student-query-month-body]");
-    if (monthBody) monthBody.innerHTML = studentQueryMonthRowsMarkup(report);
+    const columns=studentQueryMonthColumns(report), monthBody=comparison.querySelector('[data-student-query-month-body]');
+    const rows=report?.month_rows || [], currentRows=[...(monthBody?.rows || [])];
+    if(preserveDetails && currentRows.length===rows.length && currentRows.every(row=>row.cells.length===columns.length)) {
+      rows.forEach((row,index)=>columns.forEach((column,col)=>{
+        const cell=currentRows[index].cells[col], value=String(column.value(row));
+        if(cell.textContent!==value)cell.textContent=value;
+      }));
+    } else {
+      comparison.querySelector('thead tr').innerHTML=columns.map(column=>`<th>${escapeHtml(column.label)}</th>`).join('');
+      if(monthBody)monthBody.innerHTML=studentQueryMonthRowsMarkup(report);
+    }
   }
   const detailSlot = resultRegion.querySelector(".student-query-detail-slot");
   if (detailSlot && !preserveDetails) { queryCourseEditorCleanup?.(); queryCourseEditorCleanup=null; detailSlot.innerHTML = studentQueryRuleTableMarkup(); }
-  enhanceCustomSelects();
-  scheduleAdaptiveTableColumns();
+  if (!preserveDetails) { enhanceCustomSelects(); scheduleAdaptiveTableColumns(); }
   return true;
 }
 
@@ -11440,7 +11469,7 @@ function studentPricingRowMarkup(row, index = 0) {
       <td class="adaptive-center">${row.course_types?.length ? CourseDetails.types(row) : "-"}</td>
       <td class="text-cell wide student-set-cell adaptive-left" data-adaptive-alignment="left">${renderStudentSetBadges(row.student_names, { fallbackGrade: row.grade })}</td>
       <td class="adaptive-center">${escapeHtml(row.start_date || "-")}</td><td class="adaptive-center">${escapeHtml(row.end_date || "-")}</td><td class="adaptive-center">${row.effective_lessons ?? row.total_lessons ?? 0}</td><td class="adaptive-center">${row.all_lessons ?? row.total_lessons ?? 0}</td>
-      <td class="currency-input-cell student-pricing-value-cell adaptive-right" data-adaptive-alignment="right">${currencyInputMarkup(row.rule_fee ?? row.custom_price, { displayValue: row.rule_fee === null ? "—" : null, className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" min="0" step="0.01" aria-invalid="false"${readonly}` })}</td>
+      <td class="currency-input-cell student-pricing-value-cell adaptive-right" data-adaptive-alignment="right">${currencyInputMarkup(row.rule_fee ?? row.custom_price, { displayValue: row.rule_fee === null ? "—" : null, className: "student-pricing-field", attrs: `data-id="${row.id}" data-field="custom_price" data-expected-price="${row.custom_price}" min="0" max="100000" step="0.01" aria-invalid="false"${readonly}` })}</td>
       <td class="adaptive-left single-line-note" data-adaptive-alignment="left" title="${escapeHtml(row.notes || '')}"><textarea class="cell-input adaptive-textarea wide student-pricing-field" data-id="${row.id}" data-field="notes" rows="1" wrap="soft" placeholder="-"${readonly}>${escapeHtml(row.notes)}</textarea></td>
     </tr>
   `;
@@ -14840,36 +14869,49 @@ function bindDateRangePickerControls(root = document) {
 
 
 async function saveStudentPricingField(input) {
-  if (!input || input.dataset.saving === "1") return;
+  if (!input || input.dataset.saving === "1" || queryRuleSavingIds.has(Number(input.dataset.id))) return;
   const value = input.type === "number" ? numberValue(input.value) : input.value;
   if (input.dataset.field === "custom_price" && numberValue(value) < 0) {
     showToast("学生单价必须大于或等于 0；0 元规则仅作为未设置候选。", "error");
     return;
   }
+  const context=queryMoneyContext();
   const id = Number(input.dataset.id);
   const before = studentQueryRules.find((row) => Number(row.id) === id);
   if (view === "studentQuery" && input.dataset.field === "custom_price" && !confirm("规则跨月份共用：修改会改变全部课程的对账值；新建且跟随规则的课程会同步计算实际费用和余额。旧课程收费方式及手动覆盖不变。确认设置？")) {input.value = moneyInput(before?.rule_fee ?? before?.custom_price); return;}
+  if (input.dataset.field === 'custom_price' && (!input.checkValidity() || !input.value.trim() || Number(value)>100000 || Math.abs(Number(value)*100-Math.round(Number(value)*100))>0.000001)) { showToast('请输入0至100000元且最多两位小数的金额','error'); input.value=moneyInput(before?.rule_fee ?? before?.custom_price); return; }
+  if (String(value)===String(before?.[input.dataset.field]))return;
   input.dataset.saving = "1";
+  queryRuleSavingIds.add(id); syncQueryRuleSelection();
   input.disabled = true;
   try {
     const result = await request(`/api/student-pricing/${id}?month=${encodeURIComponent(activeMonth)}${studentPricingScopeParams()}`, {
       method: "PATCH",
-      body: { [input.dataset.field]: value },
+      body: { [input.dataset.field]: value, expected_price:input.dataset.expectedPrice ?? before?.custom_price },
     });
     const row = result;
-    if (view === "studentQuery") await refreshStudentQueryOnly({force:true});
+    if(queryMoneyContextCurrent(context)) {
+      if(input.dataset.field==='custom_price')input.dataset.expectedPrice=String(result.custom_price);
+      syncQueryRuleAmounts([result]);
+      try { await refreshStudentQueryMoney(context); } catch(error) { showToast('规则已保存，统计同步失败：'+error.message,'error'); }
+    }
     for (const key of ["studentSummary", "summary", "finance"]) markDirty(key);
-    if (input.dataset.field === "notes") scheduleAdaptiveTableColumns();
+    if (input.dataset.field === "notes" && input.isConnected) applyAdaptiveTableColumns({table:input.closest("table")});
     if (result?.warnings?.length) alert(result.warnings.map((warning) => warning.message || warning.type).join("\n"));
     showToast("学生单价已保存");
     return row;
   } catch (error) {
-    if (before && input.isConnected) input.value = String(input.dataset.field === "custom_price" ? before.rule_fee ?? before.custom_price : before[input.dataset.field] ?? "");
+    if (before && input.isConnected) {
+      input.value = String(input.dataset.field === "custom_price" ? before.rule_fee ?? before.custom_price : before[input.dataset.field] ?? "");
+      const display=input.closest('.currency-input-wrap')?.querySelector('.currency-display');
+      if(display)display.textContent=before.rule_fee === null ? '—' : formatMoney(before.rule_fee ?? before.custom_price);
+    }
     showToast(error.message || "学生单价保存失败", "error");
   } finally {
+    queryRuleSavingIds.delete(id); syncQueryRuleSelection();
     if (input.isConnected) {
       input.dataset.saving = "0";
-      input.disabled = !canWriteData();
+      input.disabled = !canEditStudentPricing();
     }
   }
 }
