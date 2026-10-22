@@ -1,4 +1,4 @@
-const { planFeeRestore, migrateStudentFeeMode, automaticStudentFee } = require('./domain/fee_restore');
+const { planFeeRestore, planFeeSet, migrateStudentFeeMode, automaticStudentFee } = require('./domain/fee_restore');
 const StudentDisplay = require('../public/student-display');
 const { WorkerJobs } = require('./backup/worker_jobs');
 const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
@@ -52,7 +52,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261018-query-flat-view";
+const APP_VERSION = process.env.APP_VERSION || "20261022-student-fee-local-updates";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -6863,8 +6863,14 @@ function studentRuleCourseDetails(rules, user, range = null, includeAll = false)
   return groups;
 }
 
+function saveStudentFeeOverride(lessonId, studentName, unitPrice) {
+  if (unitPrice == null) db.prepare('DELETE FROM fee_overrides WHERE lesson_id=? AND student_name=?').run(lessonId,studentName);
+  else db.prepare(`INSERT INTO fee_overrides(lesson_id,student_name,unit_price,updated_at)
+    VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(lesson_id,student_name) DO UPDATE SET unit_price=excluded.unit_price,updated_at=CURRENT_TIMESTAMP`).run(lessonId,studentName,unitPrice);
+}
+
 const feeRestorePreviews = new Map();
-function feeRestorePlan(ids, student, user, range) {
+function feeRestorePlan(ids, student, user, range, mode = "restore") {
   const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all, student);
   const lessons = all(`SELECT * FROM lessons WHERE id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`, ids);
   if (lessons.length !== ids.length) throw Object.assign(new Error('课程已删除，请刷新'), {status:409});
@@ -6878,7 +6884,7 @@ function feeRestorePlan(ids, student, user, range) {
     const target=price.baseline_price ?? null;
     return {lesson_id:lesson.id, student_name:student, date:lesson.date, actual:price.unit_price, target,
       difference:target == null ? null : moneyRound(target-price.unit_price),
-      ...planFeeRestore({status,actual:price.unit_price,target,fallback:automaticStudentFee(lesson.student_fee_mode,price.rule_price,standard?.unit_price),hasOverride:Boolean(override)}),
+      ...(mode === "set_actual" ? planFeeSet : planFeeRestore)({status,actual:price.unit_price,target,fallback:automaticStudentFee(lesson.student_fee_mode,price.rule_price,standard?.unit_price),hasOverride:Boolean(override)}),
       fingerprint:{lesson,override:override || null,standard:standard || null,rule:activeStudentPricingRuleForLesson({studentName:student,grade:lesson.grade,subject:lesson.subject,studentNames:lesson.student_names},lookups)}};
   });
   return {items, signature:crypto.createHash('sha256').update(JSON.stringify(items)).digest('hex')};
@@ -12916,6 +12922,7 @@ async function handleApi(req, res, url) {
     if (!student || !range) return sendError(res, 400, "学生和有效日期范围不能为空");
     if (url.searchParams.get("include_courses") === "flat") return sendJson(res, {student_name:student,range,lessons:studentQueryCourseDetails(student,user,range),can_edit_fee:!userReadonly(user)&&roleCan(user,"students","write")});
     const rules = studentPricingRows(resolveMonthKey(url), null, user, { student, ...range });
+    if (url.searchParams.get('include_courses') === 'money') return sendJson(res,{student_name:student,range,rules,lessons:studentQueryCourseDetails(student,user,range)});
     const courses = url.searchParams.get("include_courses") === "1" ? Object.fromEntries(studentRuleCourseDetails(rules, user, range, true)) : undefined;
     return sendJson(res, { student_name: student, range, rules, courses, can_edit_fee: !userReadonly(user) && roleCan(user, "students", "write"), can_edit_rule: userHasAnyPermission(user, ["studentPricing"]) && !userReadonly(user) && roleCan(user, "students", "write") });
   }
@@ -14774,6 +14781,12 @@ async function handleApi(req, res, url) {
       }, 409);
     }
     withTransaction(() => {
+      if (body.expected_prices !== undefined) {
+        const expected=Array.isArray(body.expected_prices) ? new Map(body.expected_prices.map(row=>[Number(row?.id),row?.custom_price])) : new Map();
+        const current=all(`SELECT id,custom_price FROM student_pricing WHERE id IN (${placeholders})`,ids);
+        if (expected.size!==ids.length || current.length!==ids.length || current.some(row=>!expected.has(Number(row.id)) || Number(expected.get(Number(row.id)))!==Number(row.custom_price)))
+          throw Object.assign(new Error('规则费用已变化，请刷新核对后重新修改'),{status:409});
+      }
       const statement = db.prepare("UPDATE student_pricing SET custom_price=? WHERE id=?");
       for (const id of ids) statement.run(moneyRound(price), id);
     });
@@ -14801,7 +14814,13 @@ async function handleApi(req, res, url) {
     }
     const payload = { ...body };
     if (Object.prototype.hasOwnProperty.call(payload, "student_names")) payload.student_names = normalizedStudents(payload.student_names);
-    const row = auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "grade", "subject", "student_names", "custom_price", "notes"], payload, "student_pricing");
+    const row = withTransaction(()=>{
+      if (body.expected_price !== undefined) {
+        const current=get('SELECT custom_price FROM student_pricing WHERE id=?',[Number(studentPricingMatch[1])]);
+        if(!current || Number(current.custom_price)!==Number(body.expected_price))throw Object.assign(new Error('规则费用已变化，请刷新核对后重新修改'),{status:409});
+      }
+      return auditedPatchTable(req, user, "student_pricing", "id", Number(studentPricingMatch[1]), ["student_name", "grade", "subject", "student_names", "custom_price", "notes"], payload, "student_pricing");
+    });
     writeOperationLog(user, { operation_type: "修改学生单价", operation_content: `${row.student_name} ${row.grade} ${row.subject} ${row.student_names} ¥${row.custom_price}`, target_type: "student_pricing", target_id: String(studentPricingMatch[1]) });
     const enriched = studentPricingRow(resolveMonthKey(url), row.id) || row;
     return sendJson(res, { ...enriched, warnings: pricingWarnings(row) });
@@ -15013,30 +15032,33 @@ async function handleApi(req, res, url) {
         const ids=[...new Set((Array.isArray(body.lesson_ids) ? body.lesson_ids : []).map(Number))].sort((a,b)=>a-b);
         const student=text(body.student_name), range=studentStatementRangeFromUrl(url);
         if (!ids.length || ids.length>1000 || ids.some(id=>!Number.isSafeInteger(id)||id<=0) || !student || !range) return sendError(res,400,'学生、课程ID和日期范围必须有效，单次最多1000节');
-        const plan=feeRestorePlan(ids,student,user,range), token=crypto.randomUUID();
+        const mode=body.mode || 'restore';
+        if (!['restore','set_actual'].includes(mode) || (mode === 'set_actual' && ids.length !== body.lesson_ids.length)) return sendError(res,400,'操作方式无效或课程身份重复');
+        const plan=feeRestorePlan(ids,student,user,range,mode), token=crypto.randomUUID();
         for (const [key,value] of feeRestorePreviews) if(value.expires<Date.now()) feeRestorePreviews.delete(key);
         if (feeRestorePreviews.size>=100) feeRestorePreviews.delete(feeRestorePreviews.keys().next().value);
-        feeRestorePreviews.set(token,{owner:user.id,ids,student,range,signature:plan.signature,expires:Date.now()+300000});
-        return sendJson(res,{token,items:plan.items.map(({fingerprint,...item})=>item),warning:'历史已上课程恢复可能改变历史消费和余额；当前系统不能还原未保存的历史费率版本。仅处理已明确列出的可恢复项目。'});
+        feeRestorePreviews.set(token,{owner:user.id,ids,student,range,mode,signature:plan.signature,expires:Date.now()+300000});
+        return sendJson(res,{token,items:plan.items.map(({fingerprint,...item})=>item),mode,warning:mode === 'set_actual' ? '将保存本次规则金额为人工费用覆盖，影响历史消费和余额；不改变课程收费来源。' : '清除单节覆盖，恢复当前课程自动收费；影响历史消费和余额。'});
       }
       if (body.action !== 'apply') return sendError(res,400,'无效操作');
       const preview=feeRestorePreviews.get(body.token);
       if (!preview || preview.owner!==user.id || preview.expires<Date.now()) return sendError(res,409,'预览已过期，请重新预览并确认');
       const result=withTransaction(()=>{
-        const plan=feeRestorePlan(preview.ids,preview.student,user,preview.range);
+        const plan=feeRestorePlan(preview.ids,preview.student,user,preview.range,preview.mode);
         if(plan.signature!==preview.signature) throw Object.assign(new Error('课程、费用或规则已变化，请重新预览并确认'),{status:409});
-        const changed=plan.items.filter(item=>item.action==='restore');
+        const changed=plan.items.filter(item=>['restore','set'].includes(item.action));
         for(const item of changed) {
           const before=get('SELECT * FROM fee_overrides WHERE lesson_id=? AND student_name=?',[item.lesson_id,item.student_name]);
-          db.prepare('DELETE FROM fee_overrides WHERE lesson_id=? AND student_name=?').run(item.lesson_id,item.student_name);
-          recordAuditEvent(req,user,{action:'restore_rule',entity_type:'fee_overrides',entity_id:`${item.lesson_id}|${item.student_name}`,before,after:null});
-          writeOperationLog(user,{operation_type:'批量恢复学生规则收费',operation_content:`课程ID ${item.lesson_id} ${item.student_name}：${item.actual} → ${item.target}；清除单节覆盖`,target_type:'fee_overrides',target_id:`${item.lesson_id}|${item.student_name}`});
+          saveStudentFeeOverride(item.lesson_id,item.student_name,item.action === 'set' ? item.target : null);
+          const after=get('SELECT * FROM fee_overrides WHERE lesson_id=? AND student_name=?',[item.lesson_id,item.student_name]) || null;
+          recordAuditEvent(req,user,{action:item.action === 'set' ? 'set_actual_to_rule' : 'restore_rule',entity_type:'fee_overrides',entity_id:`${item.lesson_id}|${item.student_name}`,before,after});
+          writeOperationLog(user,{operation_type:item.action === 'set' ? '批量设置学生实际费用' : '批量恢复学生规则收费',operation_content:`课程ID ${item.lesson_id} ${item.student_name}：${item.actual} → ${item.target}；${item.action === 'set' ? '保存规则金额快照，收费来源不变' : '清除单节覆盖'}`,target_type:'fee_overrides',target_id:`${item.lesson_id}|${item.student_name}`});
         }
-        return {updated:changed.length,unchanged:plan.items.filter(item=>item.action==='unchanged').length,skipped:plan.items.filter(item=>item.action==='skip').length};
+        return {rows:changed.map(item=>({lesson_id:item.lesson_id,student_name:item.student_name,unit_price:item.target,rule_fee:item.target})),updated:changed.length,unchanged:plan.items.filter(item=>item.action==='unchanged').length,skipped:plan.items.filter(item=>item.action==='skip').length};
       });
       feeRestorePreviews.delete(body.token);
       return sendJson(res,{ok:true,...result});
-    } catch(error) { return sendError(res,error.status || 500,error.status ? error.message : '批量恢复失败，整批已回滚'); }
+    } catch(error) { return sendError(res,error.status || 500,error.status ? error.message : '批量费用修改失败，整批已回滚'); }
   }
 
   if (req.method === "POST" && url.pathname === "/api/fee-overrides") {
@@ -15053,17 +15075,7 @@ async function handleApi(req, res, url) {
     const actualPrice = () => unitPriceFor({studentName, subject:lesson.subject, grade:lesson.grade, studentCount:splitStudents(lesson.student_names).length, lessonId, status:deriveStatus(lesson, new Set(courseStatusValues())), studentNames:normalizedStudents(lesson.student_names)});
     const previousPrice = actualPrice().unit_price;
     const before = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
-    if (body.unit_price === "" || body.unit_price == null) {
-      db.prepare("DELETE FROM fee_overrides WHERE lesson_id = ? AND student_name = ?").run(lessonId, studentName);
-    } else {
-      db.prepare(`
-        INSERT INTO fee_overrides(lesson_id, student_name, unit_price, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(lesson_id, student_name) DO UPDATE SET
-          unit_price = excluded.unit_price,
-          updated_at = CURRENT_TIMESTAMP
-      `).run(lessonId, studentName, unitPrice);
-    }
+    saveStudentFeeOverride(lessonId,studentName,unitPrice);
     const after = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     recordAuditEvent(req, user, { action: after ? "upsert" : "delete", entity_type: "fee_overrides", entity_id: `${lessonId}|${studentName}`, before, after });
     writeOperationLog(user, { operation_type: after ? "修改学生课次费用" : "删除学生课次费用", operation_content: `课程ID ${lessonId} ${studentName}：${previousPrice} → ${actualPrice().unit_price}`, target_type: "fee_overrides", target_id: `${lessonId}|${studentName}` });

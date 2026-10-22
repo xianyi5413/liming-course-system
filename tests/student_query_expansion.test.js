@@ -220,7 +220,7 @@ test('Chromium five widths: scoped selections, expand/collapse, both fee batches
   await b.evaluate("document.querySelector('.query-batch-price').value='180'");await b.click('.query-batch-confirm');await b.waitFor("!document.querySelector('.query-batch-confirm')&&studentQueryRules[0].rule_fee===180");
   await b.click('.student-pricing-rule-row td:nth-child(3)');await b.waitFor("document.querySelector('.query-course-select')");
   await b.click('.query-course-select-all');await b.click('.query-course-batch');await b.waitFor("document.querySelector('.query-fee-confirm')");
-  assert.equal(await b.evaluate("document.querySelector('.query-fee-confirm').disabled"),true);assert.match(await b.evaluate("[...document.querySelectorAll('.shared-course-dialog')].at(-1).textContent"),/现有收费机制不能安全恢复/);
+  assert.equal(await b.evaluate("document.querySelector('.query-fee-confirm').disabled"),false);assert.match(await b.evaluate("[...document.querySelectorAll('.shared-course-dialog')].at(-1).textContent"),/不会切换课程收费模式/);
   await b.click('.query-fee-cancel');await b.click('.dialog-close');
   await api('/api/student-pricing/batch?'+scope,{method:'PATCH',body:{ids:[ruleId],price:0}});
   await api('/api/fee-overrides',{method:'POST',body:{lesson_id:9001,student_name:'张三',unit_price:130}});

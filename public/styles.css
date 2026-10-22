@@ -14285,3 +14285,13 @@ table.adaptive-table td.single-line-note,
 .query-rule-heading { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 
 .query-course-view > .table-wrap { scrollbar-gutter: auto; }
+
+/* Shared simple forms keep the existing input theme and full-size course dialogs. */
+.responsive-content-panel.compact-form-panel { width: 480px; max-width: 100%; }
+.money-form-field { display: grid; gap: 8px; justify-items: start; }
+.money-form-field .currency-input-wrap { width: 190px; max-width: 100%; min-width: 0; }
+.money-form-field .currency-input { text-align: right; }
+.fee-change-totals { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; }
+.fee-change-totals dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.student-query-results :is(.query-head,.metric,.metric-value,.band,.cell-input,.currency-display),
+.student-fee-editor :is(.cell-input,.currency-display) { animation: none; transition: none; }

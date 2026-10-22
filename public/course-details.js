@@ -21,10 +21,10 @@ const CourseDetails = (() => {
   function shell(title, body, extra = '', closeClass = 'dialog-close', closeAttributes = '') {
     return `<div class="modal-panel salary-workflow-panel responsive-content-panel ${extra}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="modal-head"><div class="modal-title">${escapeHtml(title)}</div><button class="btn ${closeClass}" ${closeAttributes}>关闭</button></div>${body}</div>`;
   }
-  function dialog(title, body, { onClose = () => {}, beforeClose = () => {} } = {}) {
+  function dialog(title, body, { onClose = () => {}, beforeClose = () => {}, size = 'content' } = {}) {
     const focus = document.activeElement, element = document.createElement('div');
     element.className = 'modal-backdrop shared-course-dialog';
-    element.innerHTML = shell(title, body);
+    element.innerHTML = shell(title, body, size === 'compact' ? 'compact-form-panel' : '');
     const close = () => { beforeClose(); element.remove(); focus?.focus({ preventScroll: true }); onClose(); };
     element.querySelector('.dialog-close').onclick = close;
     element.addEventListener('keydown', event => {
