@@ -52,7 +52,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261022-student-fee-local-updates";
+const APP_VERSION = process.env.APP_VERSION || "20261024-summary-profile-layout";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -2671,11 +2671,18 @@ function firstStudentLessonDate(name) {
 }
 
 function teacherProfiles() {
+  // The legacy lesson association uses teachers.name (UNIQUE); retain profile IDs.
+  // Aggregate once for all months/statuses, including courses without a date.
   return all(`
-    SELECT *
+    SELECT teachers.*, (courses.teacher_name IS NOT NULL) AS has_courses,
+      COALESCE(courses.first_lesson_date, '') AS first_lesson_date
     FROM teachers
+    LEFT JOIN (
+      SELECT teacher_name, MIN(CASE WHEN TRIM(date) <> '' THEN date END) AS first_lesson_date
+      FROM lessons GROUP BY teacher_name
+    ) courses ON courses.teacher_name = teachers.name
     ORDER BY CASE status WHEN '在职' THEN 0 WHEN '离职' THEN 2 ELSE 1 END, name
-  `).map((row) => ({ ...row, first_lesson_date: firstTeacherLessonDate(row.name) }));
+  `);
 }
 
 function teacherDetailTeacherCandidates(user, includeInactive = false) {

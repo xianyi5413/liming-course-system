@@ -100,12 +100,12 @@ async function expandQueryRuleCourses() {
     const result = await request('/api/student-pricing-query?' + new URLSearchParams({student:selectedStudent,...currentStudentQueryRange(),include_courses:'flat'}), {cache:false});
     if (!current()) return;
     const fees = row => studentCourseFeeCell(row,result)+`<td class="right pricing-course-rule-fee">${row.rule_fee==null?'—':formatMoney(row.rule_fee)}</td>`;
-    root.innerHTML = '<div class="query-course-progress">正在加载课程…</div>'+CourseDetails.table([], {feeCells:fees,selection:result.can_edit_fee && canWriteData()});
+    root.innerHTML = '<div class="query-course-progress">正在加载课程…</div>'+CourseDetails.table([], {studentAlignment:'left',feeCells:fees,selection:result.can_edit_fee && canWriteData()});
     const body=root.querySelector('tbody');
     for(let start=0;start<result.lessons.length;start+=48){
       if(!current())return;
       const holder=document.createElement('div');
-      holder.innerHTML=CourseDetails.table(result.lessons.slice(start,start+48),{feeCells:fees,selection:result.can_edit_fee && canWriteData(),indexOffset:start});
+      holder.innerHTML=CourseDetails.table(result.lessons.slice(start,start+48),{studentAlignment:'left',feeCells:fees,selection:result.can_edit_fee && canWriteData(),indexOffset:start});
       body.append(...holder.querySelector('tbody').children);
       await new Promise(resolve=>setTimeout(resolve,0));
     }

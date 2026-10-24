@@ -157,6 +157,10 @@ test('manual backup API applies saved retention immediately after success', asyn
 });
 
 test('Chromium: logo, sidebar, teacher serials, query model, refresh and sticky headers at four viewports', async () => {
+  // Directory serials are tested with course-backed profiles; new unscheduled
+  // teachers remain available as candidates but no longer belong to this list.
+  const scheduled = await api('/api/lessons', 'POST', {teacher_name:'合成老师乙',grade:'高一',subject:'数学',student_names:'序号合成学生',date:'2032-01-01',time_slot:'09:00-11:00',classroom:'序号教室',status:'待上'});
+  assert.equal(scheduled.status,201);
   const { session: browser, child } = await launchChrome(path.join(temp, 'chrome'));
   try {
     await browser.send('Page.navigate', { url: `http://127.0.0.1:${port}` }); await browser.login();

@@ -623,7 +623,7 @@ function cacheInvalidationPrefixes(path = "") {
   if (base.startsWith("/api/recharges")) return ["/api/recharges", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/student-pricing")) return ["/api/student/", "/api/student-pricing", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/teacher-salary-rules")) return ["/api/teacher-salary-rules", "/api/lessons-range", "/api/bootstrap", "/api/dashboard", "/api/finance-summary"];
-  if (base.startsWith("/api/lessons")) return ["/api/class-groups", "/api/student-pricing", "/api/teacher-detail", "/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
+  if (base.startsWith("/api/lessons")) return ["/api/teachers", "/api/class-groups", "/api/student-pricing", "/api/teacher-detail", "/api/bootstrap", "/api/lessons", "/api/schedule-conflicts", "/api/dashboard", "/api/finance-summary"];
   if (base.startsWith("/api/auth")) return [];
   return [];
 }
@@ -1891,8 +1891,10 @@ async function load(options = {}) {
   const refreshBootstrap = refreshGlobal || !previousState.settings || options.refreshBootstrap === true
     || (fullBootstrap && previousState.full_bootstrap_key !== requestedFullKey);
   if (refreshBootstrap) {
+    const bootstrapResult = await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`);
+    if (loadGeneration !== thisGeneration) return;
     state = normalizeBootstrapState(
-      await request(`/api/bootstrap${bootstrapQuery(!fullBootstrap)}`),
+      bootstrapResult,
       previousState,
       !fullBootstrap,
     );
@@ -8449,8 +8451,8 @@ function renderMatrixDateFilter() {
   ensureMatrixRange();
   return `
     <div class="filter-bar compact matrix-date-filter">
-      <label>日期范围</label>
-      ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}
+      <div class="filter-field matrix-range-field"><span>日期范围</span>
+      ${dateRangePickerControl({ scope: "matrix", start: matrixRange.start, end: matrixRange.end, placeholder: "选择矩阵课表日期范围" })}</div>
       <div class="matrix-tabs-region">${renderMatrixViewTabs()}</div>
 
     </div>
@@ -8549,18 +8551,31 @@ function appendProgressiveRows(table, rows, markup, offset, batchSize = 72, { is
   if (offset < rows.length) schedule();
 }
 
+// Aggregate settled table fields in integer cents without recalculating balances.
+function summaryCardTotals(rows) {
+  const fields = ['total_fee', 'prev_actual', 'prev_gift', 'cur_recharge', 'cur_gift', 'actual_balance', 'gift_balance'];
+  const totals = Object.fromEntries(fields.map(field => [field, 0]));
+  for (const row of rows) for (const field of fields) totals[field] += Math.round(numberValue(row[field]) * 100);
+  return Object.fromEntries(fields.map(field => [field, totals[field] / 100]));
+}
+
+function renderSummaryCards(totals) {
+  const cards = [['本月课程总费用', 'total_fee'], ['本月实际结转 / 赠送结转', 'prev_actual', 'prev_gift'], ['本月实际充值 / 赠送充值', 'cur_recharge', 'cur_gift'], ['本月实际余额 / 赠送余额', 'actual_balance', 'gift_balance']];
+  return `<div class="summary-grid student-summary-metrics">${cards.map(([label, ...fields]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${fields.map(field => `<span data-summary-amount="${field}" class="${totals[field] < 0 ? 'negative' : ''}">${formatMoney(totals[field])}</span>`).join('<span> / </span>')}</div></div>`).join('')}</div>`;
+}
+
 function renderSummary() {
   const rows = summaryRows();
   const visibleRows = rows.filter((row) => summaryMatchesFilter(row));
-  const totalFee = visibleRows.reduce((sum, row) => sum + numberValue(row.total_fee), 0);
-  const totalBalance = visibleRows.reduce((sum, row) => sum + numberValue(row.actual_balance) + numberValue(row.gift_balance), 0);
+  const totals = summaryCardTotals(visibleRows);
   renderTopbar(
     `${monthLabel()} 学生费用汇总`,
-    `课程费用 ${formatMoney(totalFee)}，余额合计 ${formatMoney(totalBalance)}`,
+    `共 ${visibleRows.length} 名学生`,
   );
   contentEl.innerHTML = `
     <div class="band">
       ${renderSummaryFilterBar(rows, visibleRows)}
+      ${renderSummaryCards(totals)}
       <div class="table-wrap smooth-table-wrap student-summary-scroll">
         <table class="student-summary-table uniform-table nowrap-table">
           <colgroup>${rowIndexColumn()}${Array(12).fill("<col>").join("")}</colgroup>
@@ -11525,7 +11540,7 @@ function renderClassGroups() {
 
 function profileRows(kind = profileTab) {
   const rows = kind === "teachers" ? state.profile_teachers || [] : state.profile_students || [];
-  const scopedRows = rows;
+  const scopedRows = kind === "teachers" ? rows.filter(row => row.has_courses) : rows;
   const statusFilter = profileStatusFilter[kind] || "";
   const statusRows = statusFilter ? scopedRows.filter((row) => textContains(row.status || "", statusFilter)) : scopedRows;
   const gradeFilter = kind === "students" ? (profileGradeFilter.students || "") : "";
