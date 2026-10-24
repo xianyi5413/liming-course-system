@@ -197,6 +197,8 @@ test('Chromium five widths: scoped selections, expand/collapse, both fee batches
    assert.equal(await b.evaluate("document.documentElement.scrollWidth>innerWidth"),false);
    assert.equal(await b.evaluate("document.querySelectorAll('.student-pricing-table,.query-rule-details,.query-course-view table table').length"),0);
    assert.equal(await b.evaluate("document.querySelectorAll('.query-course-view table thead tr').length"),1);
+   await b.waitFor("document.querySelector('.query-course-view td.student-set-cell')?.dataset.adaptiveAlignment==='left'");
+   assert.equal(await b.evaluate("(()=>{const cell=document.querySelector('.query-course-view td.student-set-cell');const head=cell.closest('table').tHead.rows[0].cells[cell.cellIndex];return getComputedStyle(cell).textAlign==='left'&&getComputedStyle(head).textAlign==='center'&&getComputedStyle(cell.firstElementChild).flexWrap==='nowrap'})()"),true);
    assert.equal(await b.evaluate("document.querySelectorAll('.query-course-batch').length"),1);
    const extent=await b.evaluate("(()=>{const outer=document.querySelector('.query-course-view .table-wrap'),last=document.querySelector('.query-course-view tbody tr').lastElementChild;outer.scrollLeft=outer.scrollWidth;return {right:last.getBoundingClientRect().right,visibleRight:outer.getBoundingClientRect().left+outer.clientLeft+outer.clientWidth}})()");
    assert.ok(extent.right<=extent.visibleRight+2,JSON.stringify(extent));
