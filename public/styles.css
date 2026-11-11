@@ -14303,3 +14303,17 @@ table.adaptive-table td.single-line-note,
 .fee-change-totals dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .student-query-results :is(.query-head,.metric,.metric-value,.band,.cell-input,.currency-display),
 .student-fee-editor :is(.cell-input,.currency-display) { animation: none; transition: none; }
+.tg-panel { padding: 20px; }
+.tg-panel .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.tg-scroll { overflow:auto; max-width:100%; }
+.tg-scroll th,.tg-scroll td { white-space:nowrap; padding:9px 12px; }
+.tg-scroll th:first-child,.tg-scroll td:first-child { position:sticky; left:0; background:var(--panel-bg, #fff); z-index:1; }
+.tg-dialog { border:1px solid #b7c9db; border-radius:12px; padding:24px; width:min(480px,90vw); max-height:85vh; overflow:auto; }
+.tg-dialog label { display:flex; flex-direction:column; gap:5px; margin:10px 0; }
+.tg-dialog::backdrop { background:#0006; }
+.tg-panel input:not([type=checkbox]), .tg-panel select, .tg-dialog input, .tg-dialog select { font:inherit; color:inherit; background:var(--panel-bg,#fff); border:1px solid #cbd5e1; border-radius:8px; padding:8px 10px; min-height:38px; max-width:100%; }
+.tg-panel h2 { margin:0 0 16px; }
+.tg-panel p { line-height:1.7; }
+.tg-panel #tg-msg:empty { display:none; }
+body:has(.tg-panel) .month-toolbar { display:none; }
+@media(max-width:600px) { .tg-panel { padding:12px; } .tg-panel .toolbar { gap:6px; } .tg-panel #tg-query { width:150px; } .tg-panel .tg-scroll { max-height:65vh; } }

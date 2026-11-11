@@ -9,6 +9,8 @@ const { CleanupPreviewJobs } = require("./backup/cleanup_jobs");
 const { rechargeMonth, normalizeHistoricalRecharge, migrateRechargeDates } = require("./domain/recharge_date");
 const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseTypes } = require("./domain/course_type");
 const http = require("node:http");
+const Tuoguan = require('./domain/tuoguan');
+const TuoguanImport = require('./domain/tuoguan_import');
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
@@ -52,7 +54,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261024-summary-profile-layout";
+const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -133,6 +135,7 @@ const SYSTEM_ROLE_DEFS = [
 ];
 const SYSTEM_ROLE_CODES = SYSTEM_ROLE_DEFS.map((role) => role.code);
 const PERMISSION_TREE = [
+  { key: 'tuoguan', label: '托管管理', children: [{key:'tgAttendance',label:'托管签到'}, {key:'tgFinance',label:'托管学生、财务与设置'}] },
   { key: "dashboard", label: "首页" },
   {
     key: "schedule",
@@ -1067,6 +1070,8 @@ function initDb() {
 }
 
 if (!readOnlyBalanceCli) initDb();
+if (!readOnlyBalanceCli) Tuoguan.migrate(db);
+const tuoguanStore = Tuoguan.createStore(db);
 
 let backupServiceInstance = null;
 let backupCleanupInstance = null;
@@ -10087,6 +10092,7 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
+  if (url.pathname.startsWith('/api/tuoguan/')) return userHasAnyPermission(user,['tgAttendance','tgFinance']);
   if (url.pathname.startsWith("/api/data-center/preflight")) return canViewDataPreflight(user);
   if (url.pathname.startsWith("/api/data-center")) return canManageDataCenter(user);
   const pageKeys = apiPagePermissionKeys(req, url);
@@ -12427,6 +12433,25 @@ async function handleApi(req, res, url) {
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
   if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
+
+  if (url.pathname.startsWith('/api/tuoguan/')) {
+    const action=url.pathname.slice('/api/tuoguan/'.length);
+    const finance=isSuperRole(user.role)||userHasAnyPermission(user,['tgFinance']);
+    const allowed=finance||userHasAnyPermission(user,['tgAttendance']);
+    if(!allowed || (!finance && !['snapshot','attendance'].includes(action))) return sendError(res,403,'无托管操作权限');
+    try {
+      if(req.method==='GET'&&action==='snapshot') return sendJson(res,tuoguanStore.snapshot(url.searchParams.get('month'),finance));
+      if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
+      const body=await readBody(req), actor=String(user.username||user.id);
+      if(action==='preview') {
+        if(typeof body.base64!=='string'||body.base64.length>16000000) return sendError(res,400,'文件过大或无效');
+        return sendJson(res,TuoguanImport.stage(tuoguanStore,TuoguanImport.preview(Buffer.from(body.base64,'base64')),actor));
+      }
+      if(action==='import') return sendJson(res,TuoguanImport.commit(tuoguanStore,body,actor));
+      const result=tuoguanStore.mutate(action,body,actor);
+      return sendJson(res,!finance&&action==='attendance'?{ok:true}:result);
+    }catch(error){return sendError(res,error.status||400,error.message);}
+  }
 
 
   if (req.method === "GET" && url.pathname === "/api/roles") {

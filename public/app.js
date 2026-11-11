@@ -1,5 +1,6 @@
 const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
+  {key:'tuoguan',label:'托管管理',views:[['tgAttendance','每日签到'],['tgFinance','学生、财务与设置']]},
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
@@ -139,6 +140,7 @@ const READONLY_SAFE_MUTATION_PATHS = new Set([
 ]);
 const TEACHER_ALL_VALUE = "__all_teacher_scope__";
 const NAV_ICONS = {
+  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="17" rx="2"></rect><path d="M8 3v3M16 3v3M8 13l3 3 5-6"></path></svg>`,
   home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"></path><path d="M6.5 10v9h11v-9"></path><path d="M10 19v-5h4v5"></path></svg>`,
   schedule: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M8 3.5v3M16 3.5v3M4 10h16"></path></svg>`,
   students: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 19c.7-3.4 2.6-5 5.5-5s4.8 1.6 5.5 5"></path><path d="M16 10.5c1.7.2 3 1.5 3.4 3.2M17 19h3.5"></path></svg>`,
@@ -14327,6 +14329,8 @@ function render() {
   lastRenderedView = view;
   renderNav();
   const renderers = {
+    tgAttendance: () => window.TuoguanUI.mount(contentEl, false),
+    tgFinance: () => window.TuoguanUI.mount(contentEl, true),
     dashboard: renderDashboard,
     lessons: renderLessons,
     weekMatrix: renderWeekMatrix,

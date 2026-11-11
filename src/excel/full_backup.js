@@ -3,6 +3,7 @@ const StudentDisplay = require('../../public/student-display');
 const { parseTimeRange } = require("../domain/lesson_time");
 const SalaryWorkflow = require("../domain/salary_workflow");
 const SALARY_TABLES = new Set(["salary_tables", "salary_table_rules", "teacher_monthly_performance", "salary_table_templates", "salary_table_template_rules"]);
+const OPTIONAL_SOURCE_TABLES = new Set([...SALARY_TABLES, ...require('../domain/tuoguan').TABLES]);
 const { migrateRechargeDates } = require("../domain/recharge_date");
 const { migrateCourseTypes, defaultCourseType } = require("../domain/course_type");
 const crypto = require("node:crypto");
@@ -90,7 +91,7 @@ function recordKey(table, row) { const fields = sourceDefinition(table)?.key_fie
 function safeSettingRows(rows) { return rows.filter((row) => SETTING_LABELS[row.key] && !SECRET_SETTING_PATTERN.test(row.key)); }
 
 function ensureSchemaCompatible(db) {
-  for (const definition of SOURCE_TABLE_DEFINITIONS) if (!tableExists(db, definition.source_table) && !SALARY_TABLES.has(definition.source_table)) throw new FullExcelError("FULL_EXCEL_SCHEMA_MISSING", `缺少数据表：${definition.source_table}`);
+  for (const definition of SOURCE_TABLE_DEFINITIONS) if (!tableExists(db, definition.source_table) && !OPTIONAL_SOURCE_TABLES.has(definition.source_table)) throw new FullExcelError("FULL_EXCEL_SCHEMA_MISSING", `缺少数据表：${definition.source_table}`);
 }
 
 function customStatuses(sourceData) {
@@ -146,7 +147,7 @@ function sourceDataFromDb(db, options = {}) {
   const includeOperationLogs = options.includeOperationLogs !== false;
   const result = {};
   for (const definition of SOURCE_TABLE_DEFINITIONS) {
-    let rows = (definition.source_table === "operation_logs" && !includeOperationLogs) || (SALARY_TABLES.has(definition.source_table) && !tableExists(db, definition.source_table))
+    let rows = (definition.source_table === "operation_logs" && !includeOperationLogs) || (OPTIONAL_SOURCE_TABLES.has(definition.source_table) && !tableExists(db, definition.source_table))
       ? []
       : db.prepare(`SELECT * FROM ${definition.source_table}`).all();
     if (definition.source_table === "settings") rows = safeSettingRows(rows);
@@ -536,6 +537,7 @@ function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
     db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
       SalaryWorkflow.migrateSalaryWorkflow(db);
+      require('../domain/tuoguan').migrate(db);
       ensureSchemaCompatible(db);
       migrateStudentFeeMode(db);
       migrateCourseTypes(db, { backfill: false });
