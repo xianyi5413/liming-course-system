@@ -16,13 +16,13 @@ const TABLES = [
   "tg_import_sources",
 ];
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',class_name TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_legacy_student_map(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL UNIQUE REFERENCES tg_students(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),grade TEXT NOT NULL,class_name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),grade TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS tg_period_dates ON tg_periods(student_id,start_date,end_date);
 CREATE TABLE IF NOT EXISTS tg_rules(id INTEGER PRIMARY KEY,student_id INTEGER REFERENCES tg_students(id),effective_date TEXT NOT NULL,present INTEGER NOT NULL,leave_fee INTEGER NOT NULL,absent INTEGER NOT NULL,notes TEXT NOT NULL DEFAULT '',created_by TEXT NOT NULL,end_date TEXT,pending INTEGER NOT NULL DEFAULT 0,source_import_id TEXT);
 CREATE TABLE IF NOT EXISTS tg_calendar(date TEXT PRIMARY KEY,enabled INTEGER NOT NULL,teacher_id INTEGER REFERENCES teachers(id),time_slot TEXT NOT NULL DEFAULT '18:30—21:30',leave_deadline TEXT NOT NULL DEFAULT '17:30',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE IF NOT EXISTS tg_attendance(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),date TEXT NOT NULL,status TEXT NOT NULL,notes TEXT NOT NULL DEFAULT '',grade TEXT NOT NULL,class_name TEXT NOT NULL,rule_json TEXT NOT NULL,fee INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,pending INTEGER NOT NULL DEFAULT 0,reference_fee INTEGER NOT NULL DEFAULT 0,source_import_id TEXT,source_key TEXT,source_cell TEXT,raw_status TEXT,UNIQUE(student_id,date));
+CREATE TABLE IF NOT EXISTS tg_attendance(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),date TEXT NOT NULL,status TEXT NOT NULL,notes TEXT NOT NULL DEFAULT '',grade TEXT NOT NULL,rule_json TEXT NOT NULL,fee INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,pending INTEGER NOT NULL DEFAULT 0,reference_fee INTEGER NOT NULL DEFAULT 0,source_import_id TEXT,source_key TEXT,source_cell TEXT,raw_status TEXT,UNIQUE(student_id,date));
 CREATE TABLE IF NOT EXISTS tg_ledger(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),date TEXT NOT NULL,kind TEXT NOT NULL,amount INTEGER NOT NULL,method TEXT NOT NULL DEFAULT '',voucher TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL,actor TEXT NOT NULL,attendance_id INTEGER REFERENCES tg_attendance(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS tg_ledger_student_date ON tg_ledger(student_id,date);
 CREATE TABLE IF NOT EXISTS tg_requests(key TEXT PRIMARY KEY,payload TEXT NOT NULL,result TEXT NOT NULL);
@@ -51,7 +51,6 @@ function legacyProfiles(data) {
       id,
       name: s.name,
       grade: p?.grade || s.grade || "",
-      class_name: p?.class_name || "",
       notes: "从旧托管引用独立迁移",
       version: 1,
       created_at: new Date().toISOString(),
@@ -70,6 +69,11 @@ function upgradeLegacyBackup(data) {
     created_at: s.created_at,
   }));
   data.tg_import_sources ||= [];
+  return data;
+}
+function simplifyBackup(data) {
+  for (const table of ["tg_students", "tg_periods", "tg_attendance"])
+    for (const row of data[table] || []) delete row.class_name;
   return data;
 }
 function legacyReference(a) {
@@ -98,9 +102,17 @@ function migrate(db) {
         .all()
         .some((f) => f.table === "students"),
   );
+  const classTables = ["tg_students", "tg_periods", "tg_attendance"].filter(
+    (t) =>
+      exists(t) &&
+      db
+        .prepare("PRAGMA table_info(" + t + ")")
+        .all()
+        .some((c) => c.name === "class_name"),
+  );
   const foreignKeys = db.prepare("PRAGMA foreign_keys").get().foreign_keys;
   let backup = null;
-  if (legacy.length) {
+  if (legacy.length || classTables.length) {
     const file = db
       .prepare("PRAGMA database_list")
       .all()
@@ -110,10 +122,7 @@ function migrate(db) {
       fs.mkdirSync(dir, { recursive: true });
       backup = path.join(
         dir,
-        path.basename(file) +
-          ".pre-tuoguan-independent-" +
-          Date.now() +
-          ".sqlite",
+        path.basename(file) + ".pre-tuoguan-schema-" + Date.now() + ".sqlite",
       );
       db.prepare("VACUUM INTO ?").run(backup);
     }
@@ -137,8 +146,8 @@ function migrate(db) {
       db.exec(SCHEMA);
       for (const s of profiles) {
         db.prepare(
-          "INSERT INTO tg_students(id,name,grade,class_name,notes) VALUES (?,?,?,?,?)",
-        ).run(s.id, s.name, s.grade, s.class_name, s.notes);
+          "INSERT INTO tg_students(id,name,grade,notes) VALUES (?,?,?,?)",
+        ).run(s.id, s.name, s.grade, s.notes);
         db.prepare(
           "INSERT INTO tg_legacy_student_map(id,student_id) VALUES (?,?)",
         ).run(s.id, s.id);
@@ -223,6 +232,28 @@ function migrate(db) {
           put.run(legacyReference(row), row.id);
       }
     }
+    const archived = {};
+    for (const table of ["tg_students", "tg_periods", "tg_attendance"]) {
+      if (
+        !db
+          .prepare("PRAGMA table_info(" + table + ")")
+          .all()
+          .some((c) => c.name === "class_name")
+      )
+        continue;
+      const rows = db.prepare("SELECT * FROM " + table + " ORDER BY id").all();
+      archived[table] = rows.map(({ id, class_name }) => ({ id, class_name }));
+      db.exec("ALTER TABLE " + table + " DROP COLUMN class_name");
+      if (
+        digest(rows.map(({ class_name, ...row }) => row)) !==
+        digest(db.prepare("SELECT * FROM " + table + " ORDER BY id").all())
+      )
+        throw Error("托管班级迁移校验失败");
+    }
+    if (Object.keys(archived).length)
+      db.prepare(
+        "INSERT INTO tg_audit(actor,action,payload) VALUES (?,?,?)",
+      ).run("system", "取消托管班级", JSON.stringify(archived));
     if (db.prepare("PRAGMA foreign_key_check").all().length)
       throw Error("迁移外键校验失败，已回滚");
     if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
@@ -236,4 +267,4 @@ function migrate(db) {
     db.exec("PRAGMA foreign_keys=" + foreignKeys);
   }
 }
-module.exports = { TABLES, migrate, upgradeLegacyBackup };
+module.exports = { TABLES, migrate, upgradeLegacyBackup, simplifyBackup };

@@ -1,7 +1,7 @@
 const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
-  { key: "tuoguan", label: "托管管理", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "费用汇总"], ["tgSettings", "托管设置"]] },
+  { key: "tuoguan", label: "托管", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "费用汇总"], ["tgSettings", "托管设置"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
@@ -140,7 +140,7 @@ const READONLY_SAFE_MUTATION_PATHS = new Set([
 ]);
 const TEACHER_ALL_VALUE = "__all_teacher_scope__";
 const NAV_ICONS = {
-  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="17" rx="2"></rect><path d="M8 3v3M16 3v3M8 13l3 3 5-6"></path></svg>`,
+  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-7h6v7"></path></svg>`,
   home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"></path><path d="M6.5 10v9h11v-9"></path><path d="M10 19v-5h4v5"></path></svg>`,
   schedule: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M8 3.5v3M16 3.5v3M4 10h16"></path></svg>`,
   students: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 19c.7-3.4 2.6-5 5.5-5s4.8 1.6 5.5 5"></path><path d="M16 10.5c1.7.2 3 1.5 3.4 3.2M17 19h3.5"></path></svg>`,
@@ -12619,7 +12619,7 @@ function renderTeacherSalary() {
   const pending = rows.some(row => row.total_salary == null);
   renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐薪资规则" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
   contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>绩效基数</th><th>绩效分数</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
-    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-score-input" aria-label="${escapeHtml(row.teacher_name)}绩效分数" data-teacher="${escapeHtml(row.teacher_name)}" inputmode="numeric" placeholder="-" value="${row.performance_score ?? ""}" title="0—100 整数；清空保留当前系数" ${SalaryUI.writable() ? "" : "disabled"}></td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${row.performance_score == null ? "" : "readonly"} title="${row.performance_score == null ? "历史/手工系数（未评分）" : "按绩效分数自动计算；清空分数后可手工修改"}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
+    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-score-input" aria-label="${escapeHtml(row.teacher_name)}绩效分数" data-teacher="${escapeHtml(row.teacher_name)}" data-month="${escapeHtml(state.settings.month_key)}" inputmode="numeric" placeholder="-" value="${row.performance_score ?? ""}" title="0—100 整数；清空保留当前系数" ${SalaryUI.writable() ? "" : "disabled"}></td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" data-month="${escapeHtml(state.settings.month_key)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${row.performance_score == null ? "" : "readonly"} title="${row.performance_score == null ? "历史/手工系数（未评分）" : "按绩效分数自动计算；清空分数后可手工修改"}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
     <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
 
@@ -14639,7 +14639,9 @@ function rerenderCurrentView(renderAction) {
 }
 
 async function refreshDerivedForActiveMonth(renderAction) {
+  const month = activeMonth, page = view, account = auth.user?.id, generation = ++loadGeneration;
   const data = await request(`/api/bootstrap${bootstrapQuery(false)}`);
+  if (generation !== loadGeneration || month !== activeMonth || page !== view || account !== auth.user?.id) return;
   state = normalizeBootstrapState(data, state, true);
   syncActiveMonthState(state.active_month_key || state.settings?.month_key || activeMonth);
   state.full_bootstrap_key = fullBootstrapCacheKey(activeMonth);
@@ -14715,6 +14717,7 @@ async function refreshMonthRelatedActiveView() {
 
 async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
   if (!newMonth) return;
+  ++loadGeneration;
   syncActiveMonthState(newMonth);
   closeOpenMultiSelectMenus();
   closeDateRangePicker();

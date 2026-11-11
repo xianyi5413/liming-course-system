@@ -15,11 +15,11 @@ function fixture(t) {
   }
   const db=new DatabaseSync(sourcePath);
   db.exec(`INSERT INTO tg_students(id,name) VALUES(1,'Synthetic history');
-    INSERT INTO tg_periods(student_id,grade,class_name,start_date,end_date) VALUES(1,'初一','A','2026-09-01','2026-09-30');
+    INSERT INTO tg_periods(student_id,grade,start_date,end_date) VALUES(1,'初一','2026-09-01','2026-09-30');
     INSERT INTO tg_imports(id,payload,result) VALUES('hash','{}','{}');
     INSERT INTO tg_import_sources(id,import_id,source_key,student_id,status) VALUES('hash:1','hash','1',1,'已导入');
     INSERT INTO tg_calendar(date,enabled) VALUES('2026-09-01',1);
-    INSERT INTO tg_attendance(student_id,date,status,grade,class_name,rule_json,fee,pending,reference_fee,source_import_id,source_key,raw_status) VALUES(1,'2026-09-01','未登记','初一','A','{}',0,1,0,'hash','1','26');`);
+    INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending,reference_fee,source_import_id,source_key,raw_status) VALUES(1,'2026-09-01','未登记','初一','{}',0,1,0,'hash','1','26');`);
   db.close();
   return {sourcePath,targetPath,backupDir:path.join(dir,'backups')};
 }

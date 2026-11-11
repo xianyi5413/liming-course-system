@@ -1,7 +1,7 @@
 // Only cached values are read. Formulas are never executed; source files stay unchanged.
 const crypto = require("node:crypto");
 const { readZip, zipStore, parseWorkbook } = require("../excel/xlsx_codec");
-const { STATUSES, fail, date } = require("./tuoguan");
+const { HISTORY_STATUSES: STATUSES, GRADES, fail, date } = require("./tuoguan");
 function columnName(index) {
   let name = "";
   for (let n = index + 1; n; n = Math.floor((n - 1) / 26))
@@ -41,7 +41,6 @@ function preview(buffer) {
         source_id: String(r[1]),
         name: String(r[2]),
         grade,
-        class_name: String(r[3] || ""),
         opening_pending: Math.round(Number(r[4] || 0) * 100),
         reference_fee: Math.round(Number(r[5] || 0) * 100),
       });
@@ -124,7 +123,6 @@ function preview(buffer) {
               status
             ] || 0,
           grade: p.grade,
-          class_name: p.class_name,
         });
       }
     }
@@ -188,14 +186,8 @@ function suggestions(store, p) {
           s.source_key,
           { create: true, basis: "无同名托管档案，新建来源身份" },
         ];
-      const exact = same.filter(
-        (t) =>
-          t.grade === s.grade &&
-          t.class_name === s.class_name &&
-          s.grade &&
-          s.class_name,
-      );
-      // An imported prior-month identity with the same name, grade and class is
+      const exact = same.filter((t) => t.grade === s.grade && s.grade);
+      // An imported prior-month identity with the same name and grade is
       // stronger evidence than a manually entered name alone. Ambiguities stay pending.
       const matches = exact.filter((t) =>
         prior.some((r) => {
@@ -205,8 +197,7 @@ function suggestions(store, p) {
             r.student_id === t.id &&
             old.month !== p.month &&
             source?.name === s.name &&
-            source.grade === s.grade &&
-            source.class_name === s.class_name
+            source.grade === s.grade
           );
         }),
       );
@@ -215,12 +206,12 @@ function suggestions(store, p) {
           s.source_key,
           {
             student_id: matches[0].id,
-            basis: "跨月姓名、年级、班级一致，来源与现有档案均唯一",
+            basis: "跨月姓名、年级一致，来源与现有档案均唯一",
           },
         ];
       return [
         s.source_key,
-        { pending: true, basis: "同名或年级班级变化，无法自动确认身份" },
+        { pending: true, basis: "同名或年级变化，无法自动确认身份" },
       ];
     }),
   );
@@ -294,13 +285,13 @@ function commit(store, b, actor) {
       }
       store.run("SAVEPOINT tg_import_student");
       try {
+        if (!GRADES.includes(s.grade)) fail("托管年级仅支持初一、初二、初三");
         const id = selected.create
           ? Number(
               store.run(
-                "INSERT INTO tg_students(name,grade,class_name,notes) VALUES (?,?,?,?)",
+                "INSERT INTO tg_students(name,grade,notes) VALUES (?,?,?)",
                 s.name,
                 s.grade,
-                s.class_name,
                 "历史来源建档；实际入退托日期待核对",
               ).lastInsertRowid,
             )
@@ -324,25 +315,27 @@ function commit(store, b, actor) {
                 (t) =>
                   t.start_date <= r.date &&
                   (!t.end_date || t.end_date >= r.date) &&
-                  t.grade === r.grade &&
-                  t.class_name === r.class_name,
+                  t.grade === r.grade,
               ),
           )
         )
-          fail("历史周期或年级班级与既有周期冲突");
+          fail("历史周期或年级与既有周期冲突");
         if (!overlap.length)
           store.run(
-            "INSERT INTO tg_periods(student_id,grade,class_name,start_date,end_date,status,notes) VALUES (?,?,?,?,?,'在托',?)",
+            "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes) VALUES (?,?,?,?,'在托',?)",
             id,
             s.grade,
-            s.class_name,
             start,
             end,
             "历史月份范围，实际入退托日期待核对",
           );
         for (const r of records) {
           date(r.date);
-          if (!r.date.startsWith(p.month) || !STATUSES.includes(r.status))
+          if (
+            !r.date.startsWith(p.month) ||
+            !STATUSES.includes(r.status) ||
+            !GRADES.includes(r.grade)
+          )
             fail("导入考勤日期或状态无效");
           const existing = store.get(
             "SELECT * FROM tg_attendance WHERE student_id=? AND date=?",
@@ -361,12 +354,11 @@ function commit(store, b, actor) {
             r.date,
           );
           store.run(
-            "INSERT INTO tg_attendance(student_id,date,status,grade,class_name,rule_json,fee,pending,reference_fee,source_import_id,source_key,source_cell,raw_status) VALUES (?,?,?,?,?,?,0,1,?,?,?,?,?)",
+            "INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending,reference_fee,source_import_id,source_key,source_cell,raw_status) VALUES (?,?,?,?,?,0,1,?,?,?,?,?)",
             id,
             r.date,
             r.status,
             r.grade,
-            r.class_name,
             JSON.stringify(p.rules),
             r.reference_fee ??
               ({

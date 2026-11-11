@@ -61,19 +61,14 @@ test("historical import conflict rolls back prior rows and calendar atomically",
 test("pending historical charge requires explicit resolution and keeps zero-fee states free", () => {
   const { s, write, db } = fixture();
   s.run(
-    "INSERT INTO tg_attendance(student_id,date,status,grade,class_name,rule_json,fee,pending) VALUES(1,'2026-09-20','未登记','初一','A','{}',0,1)",
+    "INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending) VALUES(1,'2026-09-20','未登记','初一','{}',0,1)",
   );
-  assert.throws(
-    () =>
-      write("attendance", {
-        date: "2026-09-20",
-        rows: [{ student_id: 1, status: "出勤", version: 1 }],
-      }),
-    /待核对/,
-  );
+  write("attendance", {date:"2026-09-20",rows:[{student_id:1,status:"出勤",version:1}]});
+  assert.equal(s.get('SELECT pending FROM tg_attendance').pending,1);
+  assert.equal(s.all('SELECT * FROM tg_ledger').length,0);
   const b = {
     id: 1,
-    version: 1,
+    version: 2,
     status: "出勤",
     present: 5000,
     leave_fee: 2500,
@@ -136,7 +131,7 @@ function fixture() {
   );
   migrate(db);
   db.exec(
-    "INSERT INTO tg_students(id,name,grade,class_name) VALUES(1,'合成学生甲','初一','A'),(2,'合成学生乙','初二','B')",
+    "INSERT INTO tg_students(id,name,grade) VALUES(1,'合成学生甲','初一'),(2,'合成学生乙','初二')",
   );
   const s = createStore(db);
   const write = (a, b) =>
@@ -169,11 +164,9 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
   );
   let version = 0;
   for (const [status, fee] of [
-    ["未登记", 0],
     ["出勤", 5000],
     ["请假", 2500],
-    ["缺勤", 5000],
-    ["停课", 0],
+    ["放假", 0],
     ["不适用", 0],
   ]) {
     const b = {

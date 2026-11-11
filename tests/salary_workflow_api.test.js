@@ -279,3 +279,61 @@ after(async () => {
     } catch {}
   }
 });
+
+test('monthly salary UI isolates delayed saves and month responses, refreshes persisted scores and single-course type',async()=>{
+  const name='月度合成教师',other='另一月度教师';
+  const db=new DatabaseSync(databasePath);
+  db.prepare("INSERT INTO teachers(id,name,status) VALUES(9901,?,'在职'),(9902,?,'在职')").run(name,other);
+  const insert=db.prepare("INSERT INTO lessons(teacher_name,date,month_key,time_slot,grade,subject,course_type,student_names,status,teacher_salary,teacher_salary_source) VALUES(?,?,?,'09:00-11:00','初一','数学','1V1','月度合成学生','已上',0,'auto')");
+  for(const teacher of [name,other])for(const month of ['09','10'])insert.run(teacher,`2026-${month}-15`,`2026-${month}-01`);
+  db.close();
+  for(const teacher_id of [9901,9902]) assert.equal((await api('/api/salary-tables',{method:'POST',body:{teacher_id,effective_start:'2026-09-01',effective_end:'2026-10-31',rules:[{grade:'初一',course_type:'1V1',formula:'100+40K'},{grade:'初一',course_type:'1V2',formula:'180+20K'}]}})).response.status,200);
+  const save=(month,values,teacher=name)=>api('/api/teacher-monthly-performance',{method:'PUT',body:{teacher_name:teacher,month_key:month,...values}});
+  await save('2026-09-01',{performance_score:90});await save('2026-10-01',{performance_score:95});await save('2026-09-01',{performance_score:80},other);
+  const read=async month=>(await api('/api/bootstrap?month='+month)).payload.derived.teacher_summary.find(r=>r.teacher_name===name);
+  const financeMatches = async month => {
+    const rows=(await api('/api/bootstrap?month='+month+'-01')).payload.derived.teacher_summary;
+    const expected=rows.reduce((sum,row)=>sum+Math.round(((row.total_salary||0)-(row.transport_total||0))*100),0)/100;
+    const result=await api('/api/finance-summary?start='+month+'-01&end='+month+'-30');
+    assert.equal(result.response.status,200);assert.equal(result.payload.overview.teacher_cost.current,expected);
+  };
+  assert.equal((await read('2026-09-01')).total_salary,136);assert.equal((await read('2026-10-01')).total_salary,138);
+  await financeMatches('2026-09');await financeMatches('2026-10');
+  const browser=await launchChrome(path.join(tempRoot,'month-isolation')),c=browser.session;
+  const scoreSelector='.salary-score-input[data-teacher="'+name+'"]';
+  try {
+    await c.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await c.login();
+    await c.evaluate("activeMonth='2026-09-01';setActiveView('teacherSalary');load({refreshGlobal:true})");
+    await c.waitFor('document.querySelector('+JSON.stringify(scoreSelector)+')?.dataset.month==="2026-09-01"');
+    // Hold October loading while the September input remains visible. The old
+    // implementation used the changed global month and wrote into October.
+    await c.evaluate(`window.realMonthFetch=window.fetch;window.fetch=async(...args)=>{const response=await window.realMonthFetch(...args);if(String(args[0]).includes('/api/bootstrap')&&String(args[0]).includes('2026-10'))await new Promise(r=>window.releaseOctober=r);return response;};requestCache.clear();onActiveMonthChanged('2026-10-01','2026-09-01');void 0;`);
+    await c.waitFor('typeof window.releaseOctober==="function"');
+    await c.evaluate(`const input=document.querySelector(${JSON.stringify(scoreSelector)});input.value='85';input.dispatchEvent(new Event('change',{bubbles:true}));`);
+    await c.waitFor('document.querySelector('+JSON.stringify(scoreSelector)+')?.disabled===false');
+    await c.evaluate('window.releaseOctober();window.fetch=window.realMonthFetch');
+    await c.waitFor('document.querySelector('+JSON.stringify(scoreSelector)+')?.dataset.month==="2026-10-01"');
+    assert.equal(await c.evaluate('document.querySelector('+JSON.stringify(scoreSelector)+').value'),'95');
+    assert.equal((await read('2026-09-01')).performance_score,85);assert.equal((await read('2026-10-01')).performance_score,95);
+    await save('2026-10-01',{performance_score:99});assert.equal((await read('2026-09-01')).performance_score,85);
+    await save('2026-09-01',{coefficient:0.5});assert.equal((await read('2026-10-01')).performance_score,99);
+    await save('2026-09-01',{performance_score:null});assert.equal((await read('2026-09-01')).performance_coefficient,0.5);
+    await save('2026-10-01',{coefficient:null});assert.equal((await read('2026-09-01')).performance_coefficient,0.5);assert.equal((await read('2026-10-01')).performance_coefficient,1);
+    assert.equal((await api('/api/bootstrap?month=2026-09-01')).payload.derived.teacher_summary.find(r=>r.teacher_name===other).performance_score,80);
+    await c.send('Page.reload');await c.waitFor('Boolean(document.querySelector(".nav-btn"))');
+    await c.evaluate("activeMonth='2026-09-01';setActiveView('teacherSalary');load({refreshGlobal:true})");
+    await c.waitFor('document.querySelector('+JSON.stringify(scoreSelector)+')?.dataset.month==="2026-09-01"');
+    assert.equal(await c.evaluate('document.querySelector('+JSON.stringify('.salary-coefficient-input[data-teacher="'+name+'"]')+').value'),'0.50');
+    await c.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");await c.waitFor('Boolean(document.querySelector(".teacher-class-summary-table"))');
+    await c.evaluate(`selectedTeacherDetail=${JSON.stringify(name)};SalaryUI.applyRange('teacher-detail-salary','2026-09-01','2026-10-31')`);
+    await c.waitFor('document.querySelectorAll("[data-salary-class]").length===1');await c.click('[data-salary-class]');await c.waitFor('document.querySelectorAll(".teacher-class-lessons tbody tr").length===2');
+    await c.click('.teacher-class-lessons .class-course-type');await c.click('.custom-select-menu.open [data-value="1V2"]');
+    await c.waitFor('document.querySelector(".teacher-class-lessons .class-course-type")?.textContent.includes("1V2")');
+    const workflow=(await api('/api/teacher-detail/workflow?'+new URLSearchParams({teacher:name,start:'2026-09-01',end:'2026-10-31'}))).payload;
+    assert.equal(workflow.classes.length,1);assert.deepEqual(workflow.lessons.map(r=>r.course_type),['1V2','1V1']);
+    assert.deepEqual(workflow.lessons.map(r=>r.teacher_payroll_amount),[190,140]);
+    assert.equal((await read('2026-09-01')).total_salary,190);assert.equal((await read('2026-10-01')).total_salary,140);
+    await financeMatches('2026-09');await financeMatches('2026-10');
+    assert.deepEqual(c.exceptions,[]);
+  } finally {await browser.close();}
+});

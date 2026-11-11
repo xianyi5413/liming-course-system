@@ -45,19 +45,25 @@ const ClassCourseUI = (() => {
   let active = null, generation = 0;
   const editable = () => canWriteData() && canView('classGroups') && ['owner', 'boss', 'admin', 'academic', 'jiaowu'].includes(auth.user?.role);
   const saveType = (groupKey, ids, type, mode) => request('/api/class-groups/course-type', { method: 'PATCH', body: { group_key: groupKey, lesson_ids: ids, course_type: type, mode } });
+  const typeCell = row => `<td class="class-course-type" data-id="${row.id}" ${editable() ? 'role="button" tabindex="0" aria-haspopup="listbox"' : ''}><span class="lesson-inline-picker">${escapeHtml(row.course_type)}</span></td>`;
+  function bindTypes(element, rows, save) {
+    element.querySelectorAll('.class-course-type').forEach(cell => {
+      const row = rows.find(row => row.id === Number(cell.dataset.id));
+      const open = () => { if (editable()) openInlineCustomPicker(cell, { id: row.id, field: 'course_type', choices: courseTypeSelectOptions(row.grade, row.course_type, false), onChange: async input => { try { await save(row, input.value); } catch (error) { cell.innerHTML = `<span class="lesson-inline-picker">${escapeHtml(row.course_type)}</span>`; showToast(error.message, 'error'); } } }); };
+      cell.onclick = event => { if (!event.target.closest('.custom-select')) open(); };
+      cell.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); open(); } };
+    });
+  }
   function close() { generation++; active?.close(); active = null; }
   async function details(group) {
     close();
     const token = generation;
     const result = await request('/api/class-groups/courses?' + new URLSearchParams({ key: group.group_key }), { cache: false });
     if (token !== generation || !auth.user || view !== 'classGroups' || !result.lessons.length) return;
-    const typeCell = row => `<td class="class-course-type" data-id="${row.id}" ${editable() ? 'role="button" tabindex="0" aria-haspopup="listbox"' : ''}><span class="lesson-inline-picker">${escapeHtml(row.course_type)}</span></td>`;
     active = CourseDetails.dialog(`${group.teacher} · ${group.grade} · ${group.subject} · ${(group.course_types || [group.course_type]).join("、")} · 共${result.lessons.length}节课`, CourseDetails.table(result.lessons, { typeCell, className: 'class-course-details' }), { onClose: () => { active = null; generation++; } });
-    active.element.querySelectorAll('.class-course-type').forEach(cell => {
-      const row = result.lessons.find(row => row.id === Number(cell.dataset.id));
-      const open = () => { if (editable()) openInlineCustomPicker(cell, { id: row.id, field: 'course_type', choices: courseTypeSelectOptions(row.grade, row.course_type, false), onChange: async input => { try { await change(group, [row.id], input.value, 'lesson'); await details((state.class_groups || []).find(row => row.group_key === group.group_key) || group); } catch (error) { showToast(error.message, 'error'); } } }); };
-      cell.onclick = event => { if (!event.target.closest('.custom-select')) open(); };
-      cell.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); open(); } };
+    bindTypes(active.element, result.lessons, async (row, type) => {
+      await change(group, [row.id], type, 'lesson');
+      if (view === 'classGroups' && token === generation) await details((state.class_groups || []).find(row => row.group_key === group.group_key) || group);
     });
   }
   async function change(group, ids, type, mode) {
@@ -88,5 +94,5 @@ const ClassCourseUI = (() => {
       cell.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); event.stopPropagation(); open(); } };
     });
   }
-  return { bind, close, editable, saveType };
+  return { bind, close, editable, saveType, typeCell, bindTypes };
 })();

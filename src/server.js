@@ -54,7 +54,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan-edge-data";
+const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-matrix-salary";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -12454,7 +12454,7 @@ async function handleApi(req, res, url) {
       }
       if(action==='import') return sendJson(res,TuoguanImport.commit(tuoguanStore,body,actor));
       const result=tuoguanStore.mutate(action,body,actor);
-      return sendJson(res,!finance&&action==='attendance'?{ok:true}:result);
+      return sendJson(res,!finance&&action==='attendance'?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
     }catch(error){return sendError(res,error.status||400,error.message);}
   }
 

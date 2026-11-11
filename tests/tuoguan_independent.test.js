@@ -15,7 +15,7 @@ test("legacy pending attendance gains a reference amount without posting funds",
   });
   legacy(db);
   db.exec(
-    "ALTER TABLE tg_attendance DROP COLUMN reference_fee;INSERT INTO tg_attendance(student_id,date,status,grade,class_name,rule_json,fee,pending) VALUES(1,'2026-11-11','出勤','初一','A','{\"present\":5000}',0,1)",
+    "ALTER TABLE tg_attendance DROP COLUMN reference_fee;INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending) VALUES(1,'2026-11-11','出勤','初一','{\"present\":5000}',0,1)",
   );
   migrate(db);
   const a = s.get("SELECT * FROM tg_attendance");
@@ -299,6 +299,33 @@ test("cross-month unique identity reuse, partial conflict isolation and retry wi
   assert.equal(s.all("SELECT * FROM students").length, 1);
   db.close();
 });
+test("import ignores obsolete classes and isolates invalid grades", () => {
+  const { db, s } = fixture();
+  const first = source("2026-09", [["合成升月", "初一", "旧班"]]);
+  const run = (p) => {
+    stage(s, p, "测试");
+    return commit(
+      s,
+      { id: p.id, auto: true, partial: true, request_id: crypto.randomUUID() },
+      "测试",
+    );
+  };
+  assert.equal(run(first).created, 1);
+  const next = source("2026-10", [
+    ["合成升月", "初一", "不同旧班"],
+    ["合成高中", "高一", "无效"],
+  ]);
+  const result = run(next);
+  assert.equal(result.existing, 1);
+  assert.equal(result.success, 1);
+  assert.equal(result.conflicts.length, 1);
+  assert.match(result.conflicts[0].reason, /年级/);
+  assert.equal(s.all("SELECT * FROM tg_students").length, 1);
+  assert.equal(s.all("SELECT * FROM tg_attendance").length, 2);
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 0);
+  db.close();
+});
+
 test("legacy backup identity reconstruction copies only custody references", () => {
   const d = {
     students: [

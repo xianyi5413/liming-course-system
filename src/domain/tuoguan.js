@@ -1,5 +1,7 @@
 const crypto = require("node:crypto");
-const STATUSES = ["未登记", "出勤", "请假", "缺勤", "停课", "不适用"];
+const STATUSES = ["出勤", "请假", "放假", "不适用"];
+const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
+const GRADES = ["初一", "初二", "初三"];
 const { TABLES, migrate } = require("./tuoguan_schema");
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
@@ -94,19 +96,35 @@ function createStore(db) {
       );
       if ((old?.version || 0) !== r.version)
         fail("记录已被他人修改，请刷新后重试", 409);
-      if (old?.pending) fail("历史考勤尚待核对，请先处理导入核对");
       const p = period(r.student_id, b.date);
       if (!p) fail("学生当天不在托管周期内");
+      if (old?.pending) {
+        const notes = String(r.notes ?? old.notes).slice(0, 2000);
+        if (old.status === r.status && old.notes === notes) return old;
+        const originalRules = JSON.parse(old.rule_json);
+        const reference =
+          { 出勤: originalRules.present, 请假: originalRules.leave_fee }[
+            r.status
+          ] || 0;
+        run(
+          "UPDATE tg_attendance SET status=?,notes=?,reference_fee=?,version=version+1 WHERE id=?",
+          r.status,
+          notes,
+          reference,
+          old.id,
+        );
+        const saved = get("SELECT * FROM tg_attendance WHERE id=?", old.id);
+        audit(actor, "历史考勤更正（不入账）", { before: old, after: saved });
+        return saved;
+      }
       const rules =
         old && Object.hasOwn(JSON.parse(old.rule_json), "present")
           ? JSON.parse(old.rule_json)
           : rule(r.student_id, b.date);
-      if (!rules && !["未登记", "停课", "不适用"].includes(r.status))
+      if (!rules && !["放假", "不适用"].includes(r.status))
         fail("当天没有有效收费规则");
       const fee =
-        { 出勤: rules?.present, 请假: rules?.leave_fee, 缺勤: rules?.absent }[
-          r.status
-        ] || 0;
+        { 出勤: rules?.present, 请假: rules?.leave_fee }[r.status] || 0;
       const notes = String(r.notes || "").slice(0, 2000);
       if (old && old.status === r.status && old.notes === notes) return old;
       if (old)
@@ -119,13 +137,12 @@ function createStore(db) {
         );
       else
         run(
-          "INSERT INTO tg_attendance(student_id,date,status,notes,grade,class_name,rule_json,fee) VALUES (?,?,?,?,?,?,?,?)",
+          "INSERT INTO tg_attendance(student_id,date,status,notes,grade,rule_json,fee) VALUES (?,?,?,?,?,?,?)",
           r.student_id,
           b.date,
           r.status,
           notes,
           p.grade,
-          p.class_name,
           JSON.stringify(rules || {}),
           fee,
         );
@@ -164,7 +181,7 @@ function createStore(db) {
     if (b.end_date) date(b.end_date);
     if (b.end_date && b.end_date < b.start_date)
       fail("退托日期不能早于入托日期");
-    if (!b.grade || !b.class_name) fail("请填写年级和班级");
+    if (!GRADES.includes(b.grade)) fail("年级仅支持初一、初二、初三");
     if (!["在托", "暂停", "退托"].includes(b.status)) fail("托管状态无效");
     if (b.status !== "在托" && !b.end_date)
       fail("暂停或退托需填写最后在托日期；恢复请新增周期");
@@ -198,9 +215,8 @@ function createStore(db) {
       fail("托管周期重叠");
     if (old)
       run(
-        "UPDATE tg_periods SET grade=?,class_name=?,start_date=?,end_date=?,status=?,notes=?,version=version+1 WHERE id=?",
+        "UPDATE tg_periods SET grade=?,start_date=?,end_date=?,status=?,notes=?,version=version+1 WHERE id=?",
         b.grade,
-        b.class_name,
         b.start_date,
         b.end_date || null,
         b.status,
@@ -209,10 +225,9 @@ function createStore(db) {
       );
     else
       run(
-        "INSERT INTO tg_periods(student_id,grade,class_name,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?)",
         b.student_id,
         b.grade,
-        b.class_name,
         b.start_date,
         b.end_date || null,
         b.status,
@@ -224,10 +239,9 @@ function createStore(db) {
       let result;
       if (action === "student") {
         const name = String(b.name || "").trim(),
-          grade = String(b.grade || "").trim(),
-          className = String(b.class_name || "").trim();
-        if (!name || name.length > 80 || !grade || !className)
-          fail("请填写姓名、年级和班级");
+          grade = String(b.grade || "").trim();
+        if (!name || name.length > 80 || !GRADES.includes(grade))
+          fail("请填写姓名并选择初一、初二或初三");
         const notes = String(b.notes || "").slice(0, 2000);
         let id;
         if (b.id) {
@@ -235,10 +249,9 @@ function createStore(db) {
           if (!old || old.version !== b.version)
             fail("托管档案已变更，请刷新", 409);
           run(
-            "UPDATE tg_students SET name=?,grade=?,class_name=?,notes=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE tg_students SET name=?,grade=?,notes=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             name,
             grade,
-            className,
             notes,
             b.id,
           );
@@ -246,10 +259,9 @@ function createStore(db) {
         } else {
           id = Number(
             run(
-              "INSERT INTO tg_students(name,grade,class_name,notes) VALUES (?,?,?,?)",
+              "INSERT INTO tg_students(name,grade,notes) VALUES (?,?,?)",
               name,
               grade,
-              className,
               notes,
             ).lastInsertRowid,
           );
@@ -257,7 +269,6 @@ function createStore(db) {
             savePeriod({
               student_id: id,
               grade,
-              class_name: className,
               start_date: b.start_date,
               status: "在托",
               notes,
@@ -355,7 +366,7 @@ function createStore(db) {
         if (
           !b.enabled &&
           get(
-            "SELECT id FROM tg_attendance WHERE date=? AND status NOT IN ('停课','不适用','未登记')",
+            "SELECT id FROM tg_attendance WHERE date=? AND status NOT IN ('放假','停课','不适用','未登记')",
             b.date,
           )
         )
@@ -395,11 +406,10 @@ function createStore(db) {
     const data = {
       students: finance
         ? students
-        : students.map(({ id, name, grade, class_name }) => ({
+        : students.map(({ id, name, grade }) => ({
             id,
             name,
             grade,
-            class_name,
           })),
       periods,
       calendar,
@@ -459,4 +469,14 @@ function createStore(db) {
   }
   return { mutate, snapshot, atomic, audit, all, get, run };
 }
-module.exports = { STATUSES, TABLES, migrate, createStore, date, cents, fail };
+module.exports = {
+  GRADES,
+  HISTORY_STATUSES,
+  STATUSES,
+  TABLES,
+  migrate,
+  createStore,
+  date,
+  cents,
+  fail,
+};
