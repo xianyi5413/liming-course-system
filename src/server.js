@@ -54,7 +54,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan";
+const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan-independent";
 const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
@@ -15621,7 +15621,7 @@ const server = http.createServer(async (req, res) => {
 const recoveredBackupJobs = backupService().recoverInterruptedJobs();
 if (recoveredBackupJobs.length) console.warn(`Recovered interrupted backup jobs: ${recoveredBackupJobs.join(",")}`);
 
-server.listen(port, () => {
+server.listen(port, process.env.HOST || undefined, () => {
   console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);

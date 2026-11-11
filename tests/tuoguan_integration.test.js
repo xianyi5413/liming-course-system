@@ -5,9 +5,14 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
-const { DatabaseSync } = require("node:sqlite");
+const { DatabaseSync, backup } = require("node:sqlite");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
 const { exportFullData, restoreFullData } = require("../src/excel/full_backup");
+const {
+  buildFullDataBufferFromSourceData,
+  verifyFullData,
+} = require("../src/excel/full_backup");
+const { parseWorkbook, createWorkbook } = require("../src/excel/xlsx_codec");
 const root = path.resolve(__dirname, "..");
 test("custody mobile batch control remains readable and operable", async () => {
   const chrome = await launchChrome(path.join(dir, "chrome-mobile")),
@@ -108,6 +113,9 @@ before(async () => {
   });
   assert.equal(init.status, 0, init.stderr);
   const db = new DatabaseSync(env.DB_PATH);
+  db.exec(
+    "INSERT INTO tg_students(name,grade,class_name) VALUES ('合成验收学生','初一','A班')",
+  );
   db.exec(
     "INSERT INTO students(name,grade) VALUES ('合成验收学生','初一');INSERT INTO users(username,display_name,role,password_hash,readonly_override,permission_override_enabled) SELECT 'tg-teacher','合成老师','teacher',password_hash,0,1 FROM users WHERE username='boss'; INSERT INTO user_page_permissions(user_id,permission_key) SELECT id,'tgAttendance' FROM users WHERE username='tg-teacher';",
   );
@@ -225,6 +233,158 @@ test("full Excel backup restores all custody data and financial audit", () => {
   b.close();
 });
 
+test("legacy v7 custody backup restores into independent identities", () => {
+  const source = path.join(dir, "legacy-source.xlsx");
+  exportFullData({ dbPath: env.DB_PATH, outputPath: source });
+  const data = verifyFullData(source).data;
+  // A v7 file contains custody foreign IDs but no independent identity table.
+  delete data.tg_students;
+  delete data.tg_legacy_student_map;
+  delete data.tg_import_sources;
+  const sheets = parseWorkbook(
+    buildFullDataBufferFromSourceData(data).buffer,
+  ).sheets.map((s) => ({
+    name: s.name,
+    state: s.state,
+    rows: s.rows.map((r) => [...r]),
+  }));
+  const info = sheets.find((s) => s.name === "导出说明"),
+    meta = sheets.find((s) => s.name === "__恢复元数据");
+  info.rows.find((r) => r[0] === "格式版本")[1] = 7;
+  meta.rows.find((r) => r[1] === "format_version")[2] = 7;
+  meta.rows.find((r) => r[0] === "工作表" && r[1] === "导出说明")[3] = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(info.rows))
+    .digest("hex");
+  const file = path.join(dir, "legacy-v7.xlsx"),
+    target = path.join(dir, "legacy-v7.sqlite");
+  fs.writeFileSync(file, createWorkbook(sheets));
+  const init = spawnSync(process.execPath, ["src/server.js", "--init-db"], {
+    cwd: root,
+    env: { ...env, DB_PATH: target },
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  restoreFullData({ dbPath: target, inputPath: file });
+  const db = new DatabaseSync(target);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM tg_students").get().n, 1);
+  assert.equal(db.prepare("SELECT id FROM tg_students").get().id, 1);
+  assert.equal(
+    db.prepare("SELECT COUNT(*) n FROM tg_ledger").get().n,
+    data.tg_ledger.length,
+  );
+  assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+  db.close();
+});
+
+test("legacy SQLite export upgrades custody identities in memory without modifying its source", async () => {
+  const target = path.join(dir, "legacy-sqlite.sqlite"),
+    file = path.join(dir, "legacy-sqlite-v8.xlsx");
+  const source = new DatabaseSync(env.DB_PATH, { readOnly: true });
+  await backup(source, target);
+  source.close();
+  const db = new DatabaseSync(target);
+  db.exec("PRAGMA foreign_keys=OFF");
+  const tables = ["tg_periods", "tg_rules", "tg_attendance", "tg_ledger"];
+  for (const t of tables) {
+    const sql = db
+      .prepare("SELECT sql FROM sqlite_schema WHERE name=?")
+      .get(t).sql;
+    db.exec(
+      sql
+        .replace(/^CREATE TABLE[^\(]+\(/i, "CREATE TABLE " + t + "_legacy(")
+        .replaceAll("REFERENCES tg_students(", "REFERENCES students("),
+    );
+    db.exec(`INSERT INTO ${t}_legacy SELECT * FROM ${t}`);
+  }
+  for (const t of [...tables].reverse()) db.exec(`DROP TABLE ${t}`);
+  for (const t of tables) db.exec(`ALTER TABLE ${t}_legacy RENAME TO ${t}`);
+  db.exec(
+    "DROP TABLE tg_import_sources;DROP TABLE tg_legacy_student_map;DROP TABLE tg_students;PRAGMA foreign_keys=ON",
+  );
+  const before = JSON.stringify(db.prepare("SELECT * FROM students").all());
+  db.close();
+  exportFullData({ dbPath: target, outputPath: file });
+  const result = verifyFullData(file);
+  assert.equal(result.version, 8);
+  assert.equal(result.data.tg_students.length, 1);
+  assert.equal(result.data.tg_students[0].id, 1);
+  const check = new DatabaseSync(target, { readOnly: true });
+  assert.equal(
+    check
+      .prepare("SELECT name FROM sqlite_schema WHERE name='tg_students'")
+      .get(),
+    undefined,
+  );
+  assert.equal(
+    JSON.stringify(check.prepare("SELECT * FROM students").all()),
+    before,
+  );
+  check.close();
+});
+
+test("custody UI creates and edits its own profile without changing tutoring candidates", async () => {
+  const chrome = await launchChrome(path.join(dir, "chrome-profile")),
+    c = chrome.session;
+  try {
+    const db = new DatabaseSync(env.DB_PATH),
+      before = JSON.stringify(db.prepare("SELECT * FROM students").all());
+    db.close();
+    await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
+    await c.login();
+    await c.evaluate(
+      '(async()=>{setActiveView("tgStudents");await load({refreshGlobal:false});})()',
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-new"))');
+    await c.click("#tg-new");
+    await c.evaluate(
+      'document.querySelector(".tg-form [name=name]").value="合成独立新生";document.querySelector(".tg-form [name=start_date]").value="2027-01-01"',
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    const student = (await api("snapshot?month=2027-01")).data.students.find(
+      (s) => s.name === "合成独立新生",
+    );
+    assert.ok(student);
+    await c.waitFor(
+      'Boolean(document.querySelector(".tg-profile[data-id=\\"' +
+        student.id +
+        '\\"]"))',
+    );
+    await c.click('.tg-profile[data-id="' + student.id + '"]');
+    await c.evaluate(
+      'document.querySelector(".tg-form [name=notes]").value="合成独立档案备注"',
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    assert.equal(
+      (await api("snapshot?month=2027-01")).data.students.find(
+        (s) => s.id === student.id,
+      ).notes,
+      "合成独立档案备注",
+    );
+    const after = new DatabaseSync(env.DB_PATH);
+    assert.equal(
+      JSON.stringify(after.prepare("SELECT * FROM students").all()),
+      before,
+    );
+    after.close();
+    assert.equal(
+      await c.evaluate('state.students.some(s=>s.name==="合成独立新生")'),
+      false,
+    );
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await c.close();
+    if (chrome.child.exitCode == null) {
+      const exited = new Promise((r) => chrome.child.once("exit", r));
+      chrome.child.kill();
+      await exited;
+    }
+  }
+});
+
 test("custody UI: five routes, drafts, filtering, batch, shared controls, themes and permissions", async () => {
   const chrome = await launchChrome(path.join(dir, "chrome"));
   const c = chrome.session;
@@ -332,7 +492,8 @@ test("custody UI: five routes, drafts, filtering, batch, shared controls, themes
       'document.querySelector("#tg-msg")?.textContent==="已保存"',
     );
     assert.equal(
-      (await api("snapshot?month=2026-11")).data.summary[0].fee,
+      (await api("snapshot?month=2026-11")).data.summary.find((s) => s.id === 1)
+        .fee,
       2500,
     );
     await c.evaluate(
@@ -351,7 +512,8 @@ test("custody UI: five routes, drafts, filtering, batch, shared controls, themes
       'document.querySelector("#tg-msg")?.textContent==="已保存"',
     );
     assert.equal(
-      (await api("snapshot?month=2026-11")).data.summary[0].fee,
+      (await api("snapshot?month=2026-11")).data.summary.find((s) => s.id === 1)
+        .fee,
       5000,
     );
     await shot("attendance-desktop");

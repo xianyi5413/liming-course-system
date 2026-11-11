@@ -1,15 +1,6 @@
 const crypto = require("node:crypto");
 const STATUSES = ["未登记", "出勤", "请假", "缺勤", "停课", "不适用"];
-const TABLES = [
-  "tg_periods",
-  "tg_rules",
-  "tg_calendar",
-  "tg_attendance",
-  "tg_ledger",
-  "tg_requests",
-  "tg_audit",
-  "tg_imports",
-];
+const { TABLES, migrate } = require("./tuoguan_schema");
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
 }
@@ -25,20 +16,6 @@ function cents(value) {
   if (!Number.isSafeInteger(value) || Math.abs(value) > 10000000000)
     fail("金额必须为整数分且不超过一亿元");
   return value;
-}
-function migrate(db) {
-  db.exec(`
- CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),grade TEXT NOT NULL,class_name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
- CREATE INDEX IF NOT EXISTS tg_period_dates ON tg_periods(student_id,start_date,end_date);
- CREATE TABLE IF NOT EXISTS tg_rules(id INTEGER PRIMARY KEY,student_id INTEGER REFERENCES students(id),effective_date TEXT NOT NULL,present INTEGER NOT NULL,leave_fee INTEGER NOT NULL,absent INTEGER NOT NULL,notes TEXT NOT NULL DEFAULT '',created_by TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS tg_calendar(date TEXT PRIMARY KEY,enabled INTEGER NOT NULL,teacher_id INTEGER REFERENCES teachers(id),time_slot TEXT NOT NULL DEFAULT '18:30—21:30',leave_deadline TEXT NOT NULL DEFAULT '17:30',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
- CREATE TABLE IF NOT EXISTS tg_attendance(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),date TEXT NOT NULL,status TEXT NOT NULL,notes TEXT NOT NULL DEFAULT '',grade TEXT NOT NULL,class_name TEXT NOT NULL,rule_json TEXT NOT NULL,fee INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,pending INTEGER NOT NULL DEFAULT 0,UNIQUE(student_id,date));
- CREATE TABLE IF NOT EXISTS tg_ledger(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),date TEXT NOT NULL,kind TEXT NOT NULL,amount INTEGER NOT NULL,method TEXT NOT NULL DEFAULT '',voucher TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL,actor TEXT NOT NULL,attendance_id INTEGER REFERENCES tg_attendance(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
- CREATE INDEX IF NOT EXISTS tg_ledger_student_date ON tg_ledger(student_id,date);
- CREATE TABLE IF NOT EXISTS tg_requests(key TEXT PRIMARY KEY,payload TEXT NOT NULL,result TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS tg_audit(id INTEGER PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS tg_imports(id TEXT PRIMARY KEY,payload TEXT NOT NULL,result TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
- `);
 }
 function createStore(db) {
   const all = (sql, ...p) => db.prepare(sql).all(...p),
@@ -81,12 +58,14 @@ function createStore(db) {
     }
   }
   function student(id) {
-    if (!get("SELECT id FROM students WHERE id=?", id)) fail("学生不存在");
+    if (!get("SELECT id FROM tg_students WHERE id=?", id))
+      fail("托管学生不存在");
   }
   function rule(id, day) {
     return get(
-      "SELECT * FROM tg_rules WHERE (student_id=? OR student_id IS NULL) AND effective_date<=? ORDER BY (student_id IS NOT NULL) DESC,effective_date DESC,id DESC LIMIT 1",
+      "SELECT * FROM tg_rules WHERE (student_id=? OR student_id IS NULL) AND effective_date<=? AND (end_date IS NULL OR end_date>=?) AND pending=0 ORDER BY (student_id IS NOT NULL) DESC,effective_date DESC,id DESC LIMIT 1",
       id,
+      day,
       day,
     );
   }
@@ -179,10 +158,113 @@ function createStore(db) {
       return saved;
     });
   }
+  function savePeriod(b) {
+    student(b.student_id);
+    date(b.start_date);
+    if (b.end_date) date(b.end_date);
+    if (b.end_date && b.end_date < b.start_date)
+      fail("退托日期不能早于入托日期");
+    if (!b.grade || !b.class_name) fail("请填写年级和班级");
+    if (!["在托", "暂停", "退托"].includes(b.status)) fail("托管状态无效");
+    if (b.status !== "在托" && !b.end_date)
+      fail("暂停或退托需填写最后在托日期；恢复请新增周期");
+    const old = b.id ? get("SELECT * FROM tg_periods WHERE id=?", b.id) : null;
+    if (
+      b.id &&
+      (!old || old.version !== b.version || old.student_id !== b.student_id)
+    )
+      fail("周期已变更，请刷新", 409);
+    if (
+      old &&
+      all(
+        "SELECT date FROM tg_attendance WHERE student_id=? AND date>=? AND date<=?",
+        b.student_id,
+        old.start_date,
+        old.end_date || "9999-12-31",
+      ).some(
+        (r) => r.date < b.start_date || r.date > (b.end_date || "9999-12-31"),
+      )
+    )
+      fail("新周期范围不能排除已有考勤");
+    if (
+      get(
+        "SELECT id FROM tg_periods WHERE student_id=? AND id!=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=?",
+        b.student_id,
+        b.id || 0,
+        b.end_date || "9999-12-31",
+        b.start_date,
+      )
+    )
+      fail("托管周期重叠");
+    if (old)
+      run(
+        "UPDATE tg_periods SET grade=?,class_name=?,start_date=?,end_date=?,status=?,notes=?,version=version+1 WHERE id=?",
+        b.grade,
+        b.class_name,
+        b.start_date,
+        b.end_date || null,
+        b.status,
+        b.notes || "",
+        b.id,
+      );
+    else
+      run(
+        "INSERT INTO tg_periods(student_id,grade,class_name,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?,?)",
+        b.student_id,
+        b.grade,
+        b.class_name,
+        b.start_date,
+        b.end_date || null,
+        b.status,
+        b.notes || "",
+      );
+  }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
       let result;
-      if (action === "attendance") result = attendance(b, actor);
+      if (action === "student") {
+        const name = String(b.name || "").trim(),
+          grade = String(b.grade || "").trim(),
+          className = String(b.class_name || "").trim();
+        if (!name || name.length > 80 || !grade || !className)
+          fail("请填写姓名、年级和班级");
+        const notes = String(b.notes || "").slice(0, 2000);
+        let id;
+        if (b.id) {
+          const old = get("SELECT * FROM tg_students WHERE id=?", b.id);
+          if (!old || old.version !== b.version)
+            fail("托管档案已变更，请刷新", 409);
+          run(
+            "UPDATE tg_students SET name=?,grade=?,class_name=?,notes=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            name,
+            grade,
+            className,
+            notes,
+            b.id,
+          );
+          id = b.id;
+        } else {
+          id = Number(
+            run(
+              "INSERT INTO tg_students(name,grade,class_name,notes) VALUES (?,?,?,?)",
+              name,
+              grade,
+              className,
+              notes,
+            ).lastInsertRowid,
+          );
+          if (b.start_date)
+            savePeriod({
+              student_id: id,
+              grade,
+              class_name: className,
+              start_date: b.start_date,
+              status: "在托",
+              notes,
+            });
+        }
+        result = get("SELECT * FROM tg_students WHERE id=?", id);
+      } else if (action === "attendance") result = attendance(b, actor);
       else if (action === "resolve") {
         const old = get("SELECT * FROM tg_attendance WHERE id=?", b.id);
         if (!old || !old.pending || old.version !== b.version)
@@ -218,68 +300,7 @@ function createStore(db) {
           );
         result = { ok: true };
       } else if (action === "period") {
-        student(b.student_id);
-        date(b.start_date);
-        if (b.end_date) date(b.end_date);
-        if (b.end_date && b.end_date < b.start_date)
-          fail("退托日期不能早于入托日期");
-        if (!b.grade || !b.class_name) fail("请填写年级和班级");
-        if (!["在托", "暂停", "退托"].includes(b.status)) fail("托管状态无效");
-        if (b.status !== "在托" && !b.end_date)
-          fail("暂停或退托需填写最后在托日期；恢复请新增周期");
-        const old = b.id
-          ? get("SELECT * FROM tg_periods WHERE id=?", b.id)
-          : null;
-        if (
-          b.id &&
-          (!old || old.version !== b.version || old.student_id !== b.student_id)
-        )
-          fail("周期已变更，请刷新", 409);
-        if (
-          old &&
-          all(
-            "SELECT date FROM tg_attendance WHERE student_id=? AND date>=? AND date<=?",
-            b.student_id,
-            old.start_date,
-            old.end_date || "9999-12-31",
-          ).some(
-            (r) =>
-              r.date < b.start_date || r.date > (b.end_date || "9999-12-31"),
-          )
-        )
-          fail("新周期范围不能排除已有考勤");
-        if (
-          get(
-            "SELECT id FROM tg_periods WHERE student_id=? AND id!=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=?",
-            b.student_id,
-            b.id || 0,
-            b.end_date || "9999-12-31",
-            b.start_date,
-          )
-        )
-          fail("托管周期重叠");
-        if (old)
-          run(
-            "UPDATE tg_periods SET grade=?,class_name=?,start_date=?,end_date=?,status=?,notes=?,version=version+1 WHERE id=?",
-            b.grade,
-            b.class_name,
-            b.start_date,
-            b.end_date || null,
-            b.status,
-            b.notes || "",
-            b.id,
-          );
-        else
-          run(
-            "INSERT INTO tg_periods(student_id,grade,class_name,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?,?)",
-            b.student_id,
-            b.grade,
-            b.class_name,
-            b.start_date,
-            b.end_date || null,
-            b.status,
-            b.notes || "",
-          );
+        savePeriod(b);
         result = { ok: true };
       } else if (action === "money") {
         student(b.student_id);
@@ -359,7 +380,7 @@ function createStore(db) {
     date(month + "-01");
     const start = month + "-01",
       end = month + "-31";
-    const students = all("SELECT id,name,grade FROM students ORDER BY name");
+    const students = all("SELECT * FROM tg_students ORDER BY name,id");
     const periods = all("SELECT * FROM tg_periods ORDER BY start_date DESC");
     const attendance = all(
       "SELECT * FROM tg_attendance WHERE date BETWEEN ? AND ?",
@@ -372,12 +393,19 @@ function createStore(db) {
       end,
     );
     const data = {
-      students,
+      students: finance
+        ? students
+        : students.map(({ id, name, grade, class_name }) => ({
+            id,
+            name,
+            grade,
+            class_name,
+          })),
       periods,
       calendar,
       attendance: finance
         ? attendance
-        : attendance.map(({ fee, rule_json, ...r }) => r),
+        : attendance.map(({ fee, reference_fee, rule_json, ...r }) => r),
       teachers: all("SELECT id,name FROM teachers"),
       finance,
     };
@@ -391,40 +419,41 @@ function createStore(db) {
         end,
       );
       data.imports = all("SELECT * FROM tg_imports");
+      data.import_sources = all("SELECT * FROM tg_import_sources");
       data.audit = all("SELECT * FROM tg_audit ORDER BY id DESC LIMIT 300");
-      data.summary = students
-        .filter((s) => periods.some((p) => p.student_id === s.id))
-        .map((s) => {
-          const sums = get(
-            `SELECT COALESCE(SUM(CASE WHEN date<? THEN amount ELSE 0 END),0) opening,COALESCE(SUM(amount),0) balance,COALESCE(SUM(CASE WHEN date>=? AND kind='充值' THEN amount ELSE 0 END),0) recharge,COALESCE(SUM(CASE WHEN date>=? AND kind='退款' THEN -amount ELSE 0 END),0) refund,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('考勤扣费','考勤冲正') THEN -amount ELSE 0 END),0) fee,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('优惠','调整','期初核定') THEN amount ELSE 0 END),0) adjustment FROM tg_ledger WHERE student_id=? AND date<=?`,
-            start,
-            start,
-            start,
-            start,
-            start,
-            s.id,
-            end,
-          );
-          const unregistered = calendar.filter(
-            (c) =>
-              c.enabled &&
-              period(s.id, c.date) &&
-              !attendance.some(
-                (a) =>
-                  a.student_id === s.id &&
-                  a.date === c.date &&
-                  a.status !== "未登记",
-              ),
-          ).length;
-          return {
-            ...s,
-            ...sums,
-            unregistered,
-            pending: attendance.filter(
-              (a) => a.student_id === s.id && a.pending,
-            ).length,
-          };
-        });
+      data.summary = students.map((s) => {
+        const sums = get(
+          `SELECT COALESCE(SUM(CASE WHEN date<? THEN amount ELSE 0 END),0) opening,COALESCE(SUM(amount),0) balance,COALESCE(SUM(CASE WHEN date>=? AND kind='充值' THEN amount ELSE 0 END),0) recharge,COALESCE(SUM(CASE WHEN date>=? AND kind='退款' THEN -amount ELSE 0 END),0) refund,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('考勤扣费','考勤冲正') THEN -amount ELSE 0 END),0) fee,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('优惠','调整','期初核定') THEN amount ELSE 0 END),0) adjustment FROM tg_ledger WHERE student_id=? AND date<=?`,
+          start,
+          start,
+          start,
+          start,
+          start,
+          s.id,
+          end,
+        );
+        const unregistered = calendar.filter(
+          (c) =>
+            c.enabled &&
+            period(s.id, c.date) &&
+            !attendance.some(
+              (a) =>
+                a.student_id === s.id &&
+                a.date === c.date &&
+                a.status !== "未登记",
+            ),
+        ).length;
+        return {
+          ...s,
+          ...sums,
+          unregistered,
+          reference_pending: attendance
+            .filter((a) => a.student_id === s.id && a.pending)
+            .reduce((sum, a) => sum + a.reference_fee, 0),
+          pending: attendance.filter((a) => a.student_id === s.id && a.pending)
+            .length,
+        };
+      });
     }
     return data;
   }

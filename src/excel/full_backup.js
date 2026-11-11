@@ -19,7 +19,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 7;
+const FORMAT_VERSION = 8;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -346,6 +346,7 @@ function buildFullDataBuffer(db, options = {}) {
   if (integrity.length !== 1 || integrity[0] !== "ok") throw new FullExcelError("FULL_EXCEL_SOURCE_INTEGRITY_FAILED", "源数据库完整性检查失败");
   if (foreignKeys.length) throw new FullExcelError("FULL_EXCEL_SOURCE_FOREIGN_KEY_FAILED", "源数据库存在外键错误");
   const sourceData = sourceDataFromDb(db, options); const allSettingCount = Number(db.prepare("SELECT COUNT(*) AS count FROM settings").get().count);
+  if (['tg_periods','tg_rules','tg_attendance','tg_ledger'].some(t => tableExists(db,t) && db.prepare(`PRAGMA foreign_key_list(${t})`).all().some(f=>f.table==='students'))) require('../domain/tuoguan_schema').upgradeLegacyBackup(sourceData);
   return { ...buildFullDataBufferFromSourceData(sourceData, { ...options, schemaVersion: Number(db.prepare("PRAGMA user_version").get().user_version || 0), excludedSettings: allSettingCount - sourceData.settings.length }), preflight };
 }
 
@@ -412,7 +413,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, 6, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 完整数据文件");
+  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, 6, 7, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v8 完整数据文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -507,6 +508,9 @@ function validateData(data, parsedVisible) {
 
   const ids = (table, field = "id") => new Set((data[table] || []).map((row) => row[field])); const requireRef = (rows, field, valid, label, nullable = false) => rows.forEach((row) => { if (nullable && (row[field] === null || row[field] === "" || row[field] === undefined)) return; if (!valid.has(row[field])) throw new FullExcelError("FULL_EXCEL_RELATION_INVALID", `${label}关联不存在`); });
   requireRef(data.fee_overrides, "lesson_id", ids("lessons"), "单节费用课程"); requireRef([...data.staff_salary_monthly, ...data.staff_attendance], "staff_id", ids("staff"), "员工"); requireRef([...data.user_teacher_bindings, ...data.user_page_permissions, ...data.user_filter_presets], "user_id", ids("users"), "账号"); requireRef(data.users, "role", ids("roles", "code"), "账号角色"); requireRef(data.lessons, "teacher_salary_rule_id", ids("teacher_salary_rules"), "课程薪资规则", true);
+  for (const table of ['tg_periods','tg_rules','tg_attendance','tg_ledger','tg_import_sources','tg_legacy_student_map']) requireRef(data[table] || [], 'student_id', ids('tg_students'), '托管学生', table==='tg_rules'||table==='tg_import_sources');
+  requireRef(data.tg_ledger || [], 'attendance_id', ids('tg_attendance'), '托管考勤', true);
+  requireRef(data.tg_import_sources || [], 'import_id', ids('tg_imports'), '托管导入');
   const openingStudents = new Set();
   for (const row of data.student_opening_balances || []) { const name = text(row.student_name); if (openingStudents.has(name)) throw new FullExcelError("FULL_EXCEL_OPENING_BALANCE_DUPLICATE", `期初余额存在重复学生：${name}`); openingStudents.add(name); }
   for (const row of parsedVisible.students) validateGradeStages(row.value);
@@ -516,7 +520,7 @@ function verifyFullData(input, { onProgress = () => {} } = {}) {
   onProgress('read_workbook', 20, '正在读取工作簿');
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
   onProgress('structure', 35, '正在校验结构');
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 完整数据文件");
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, 7, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v8 完整数据文件");
   if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
   const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
@@ -526,7 +530,7 @@ function verifyFullData(input, { onProgress = () => {} } = {}) {
   // v4 files created before this optional flag existed contained operation logs.
   const operationLogsIncluded = metadata.has("operation_logs_included") ? metadata.get("operation_logs_included") === "true" : true;
   if (!operationLogsIncluded && parsedVisible.operation_logs.length) throw new FullExcelError("FULL_EXCEL_OPERATION_LOGS_UNEXPECTED", "未包含操作日志的文件中存在操作日志数据");
-  const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); onProgress('validate', 70, '正在执行数据预检'); validateData(data, parsedVisible);
+  const longTexts = parseLongChunks(workbook.sheetMap.get("__长文本分片")); const mappings = parseMappings(workbook.sheetMap.get("__关系映射"), longTexts); const data = reconstructData(workbook, parsedVisible, mappings); if (Number(metadata.get('format_version')) < 8) require('../domain/tuoguan_schema').upgradeLegacyBackup(data); onProgress('validate', 70, '正在执行数据预检'); validateData(data, parsedVisible);
   const counts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
   return { ok: true, file_type: FILE_TYPE, format: FILE_TYPE, version: Number(metadata.get("format_version")), operation_logs_included: operationLogsIncluded, data, counts, visible_counts: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.sheet_name, parsedVisible[definition.key].length])), workbook, structure };
 }
@@ -534,10 +538,10 @@ function verifyFullData(input, { onProgress = () => {} } = {}) {
 function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
   const verified = verifyFullData(inputPath, { onProgress }); const target = path.resolve(dbPath); if (!fs.existsSync(target)) throw new FullExcelError("FULL_EXCEL_TARGET_DB_NOT_FOUND", "目标数据库不存在，请先初始化数据库结构"); const db = new DatabaseSync(target);
   try {
+    require('../domain/tuoguan').migrate(db);
     db.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     try {
       SalaryWorkflow.migrateSalaryWorkflow(db);
-      require('../domain/tuoguan').migrate(db);
       ensureSchemaCompatible(db);
       migrateStudentFeeMode(db);
       migrateCourseTypes(db, { backfill: false });

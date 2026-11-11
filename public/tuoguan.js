@@ -121,7 +121,12 @@ window.TuoguanUI = (() => {
         "年级",
         '<select class="control" id="tg-grade">' +
           opt(
-            [["", "全部年级"], ...new Set(data.periods.map((p) => p.grade))],
+            [
+              ["", "全部年级"],
+              ...new Set(
+                [...data.periods, ...data.students].map((p) => p.grade),
+              ),
+            ],
             grade,
           ) +
           "</select>",
@@ -132,7 +137,9 @@ window.TuoguanUI = (() => {
           opt(
             [
               ["", "全部班级"],
-              ...new Set(data.periods.map((p) => p.class_name)),
+              ...new Set(
+                [...data.periods, ...data.students].map((p) => p.class_name),
+              ),
             ],
             cls,
           ) +
@@ -157,6 +164,8 @@ window.TuoguanUI = (() => {
                   ["暂停", "暂停"],
                   ["退托", "退托"],
                   ["历史周期", "历史周期"],
+                  ["待入托", "待入托"],
+                  ["未入托", "未入托"],
                 ],
                 periodStatus,
               ) +
@@ -242,7 +251,7 @@ window.TuoguanUI = (() => {
   function studentDetail(id) {
     const summary = data.summary.find((r) => r.id === id);
     CourseDetails.dialog(
-      studentName(id) + " · 托管详情",
+      studentName(id) + " (#" + id + ") · 托管详情",
       '<div class="tg-detail-content"><p class="muted">' +
         day.slice(0, 7) +
         " · " +
@@ -272,7 +281,13 @@ window.TuoguanUI = (() => {
           ["日期", "状态", "备注"],
           data.attendance
             .filter((a) => a.student_id === id)
-            .map((a) => tr([a.date, badge(a.status), esc(a.notes)])),
+            .map((a) =>
+              tr([
+                a.date,
+                badge(a.status) + (a.pending ? " · 待核对" : ""),
+                esc(a.notes),
+              ]),
+            ),
         ) +
         "<h3>当月资金明细</h3>" +
         table(
@@ -313,6 +328,8 @@ window.TuoguanUI = (() => {
     host.querySelector("#tg-retry").onclick = () =>
       mount(host.parentElement, page);
   }
+  const studentLabel = (s) =>
+    s.name + " · " + s.grade + "/" + s.class_name + " (#" + s.id + ")";
   const studentName = (id) =>
     data.students.find((s) => s.id === id)?.name || id;
   const period = (id, d) =>
@@ -374,8 +391,8 @@ window.TuoguanUI = (() => {
   const studentSelect = () =>
     select(
       "student_id",
-      "统一学生档案",
-      data.students.map((s) => [s.id, s.name]),
+      "托管学生档案",
+      data.students.map((s) => [s.id, studentLabel(s)]),
     );
   const pendingRequests = new Map();
   const post = async (action, b) => {
@@ -477,11 +494,15 @@ window.TuoguanUI = (() => {
               tr([
                 esc(s.name),
                 ...dates.map((d) =>
-                  badge(
-                    data.attendance.find(
+                  (() => {
+                    const a = data.attendance.find(
                       (a) => a.student_id === s.id && a.date === d,
-                    )?.status || (period(s.id, d) ? "未登记" : "—"),
-                  ),
+                    );
+                    return (
+                      badge(a?.status || (period(s.id, d) ? "未登记" : "—")) +
+                      (a?.pending ? '<span class="muted"> 待核对</span>' : "")
+                    );
+                  })(),
                 ),
               ]),
             ),
@@ -561,36 +582,82 @@ window.TuoguanUI = (() => {
         ),
       );
     } else if (tab === "学生") {
+      const studentRows = [
+        ...data.periods,
+        ...data.students
+          .filter((s) => !data.periods.some((p) => p.student_id === s.id))
+          .map((s) => ({
+            student_id: s.id,
+            grade: s.grade,
+            class_name: s.class_name,
+            start_date: "",
+            end_date: "",
+            status: "未入托",
+          })),
+      ];
+      const profileForm = (s) =>
+        form(
+          s ? "编辑托管档案" : "新建托管学生",
+          input("name", "姓名", s?.name || "") +
+            select(
+              "grade",
+              "年级",
+              [
+                ...new Set(
+                  [
+                    ...(state?.lookups?.grades || [
+                      "初一",
+                      "初二",
+                      "初三",
+                      "高一",
+                      "高二",
+                      "高三",
+                    ]),
+                    s?.grade,
+                  ].filter(Boolean),
+                ),
+              ],
+              s?.grade || "初一",
+            ) +
+            input("class_name", "班级", s?.class_name || "A班") +
+            (s ? "" : input("start_date", "入托日期", day, "date")) +
+            input("notes", "备注", s?.notes || ""),
+          (v) => post("student", { ...v, id: s?.id, version: s?.version }),
+        );
       body.innerHTML =
-        '<div class="tg-actions"><span class="muted">按托管周期展示；到期周期保留历史。新学生先建立统一档案。</span><button class="btn primary" id="tg-add">学生入托</button></div>' +
+        '<div class="tg-actions"><span class="muted">独立托管档案；按周期展示，历史记录保留。</span><div class="tg-batch-actions"><button class="btn" id="tg-add">已有学生入托</button><button class="btn primary" id="tg-new">新建托管学生</button></div></div>' +
         table(
           ["学生", "年级", "班级", "入托", "最后在托", "状态", "操作"],
-          data.periods
+          studentRows
             .filter(
               (p) =>
                 matches({ name: studentName(p.student_id) }, p) &&
                 (!periodStatus ||
                   (periodStatus === "当前在托"
-                    ? p.start_date <= today() &&
+                    ? p.id &&
+                      p.start_date <= today() &&
                       (!p.end_date || p.end_date >= today())
                     : periodLabel(p) === periodStatus)),
             )
             .map((p) =>
               tr([
-                esc(studentName(p.student_id)),
+                esc(studentName(p.student_id)) +
+                  ' <span class="muted">#' +
+                  p.student_id +
+                  "</span>",
                 esc(p.grade),
                 esc(p.class_name),
-                p.start_date,
+                p.start_date || "—",
                 p.end_date || "—",
                 badge(periodLabel(p)),
-                `<button class="btn tg-edit" data-id="${p.id}">编辑周期</button><button class="btn tg-detail" data-id="${p.student_id}">明细</button>`,
+                `${p.id ? `<button class="btn tg-edit" data-id="${p.id}">编辑周期</button>` : ""}<button class="btn tg-profile" data-id="${p.student_id}">编辑资料</button><button class="btn tg-detail" data-id="${p.student_id}">明细</button>`,
               ]),
             ),
         );
       if (!data.periods.length)
         body.insertAdjacentHTML(
           "afterbegin",
-          '<p class="tg-section-note">尚无托管周期。请选择已有学生档案办理入托。</p>',
+          '<p class="tg-section-note">可直接新建托管学生；补课档案不参与此列表。</p>',
         );
       const open = (p) =>
         form(
@@ -653,6 +720,16 @@ window.TuoguanUI = (() => {
             }),
         );
       root.querySelector("#tg-add").onclick = () => open();
+      root.querySelector("#tg-new").onclick = () => profileForm();
+      root
+        .querySelectorAll(".tg-profile")
+        .forEach(
+          (b) =>
+            (b.onclick = () =>
+              profileForm(
+                data.students.find((s) => s.id === Number(b.dataset.id)),
+              )),
+        );
       root
         .querySelectorAll(".tg-edit")
         .forEach(
@@ -673,7 +750,8 @@ window.TuoguanUI = (() => {
                 (!rangeEnd || l.date <= rangeEnd) &&
                 matches(
                   { name: studentName(l.student_id) },
-                  period(l.student_id, l.date),
+                  period(l.student_id, l.date) ||
+                    data.students.find((s) => s.id === l.student_id),
                 ),
             )
             .map((l) =>
@@ -716,12 +794,17 @@ window.TuoguanUI = (() => {
       const rows = data.summary.filter((s) =>
         matches(
           s,
-          period(s.id, day) || data.periods.find((p) => p.student_id === s.id),
+          period(s.id, day) ||
+            data.periods.find((p) => p.student_id === s.id) ||
+            s,
         ),
       );
       body.innerHTML =
         metrics([
-          ["本月托管费", "¥" + money(rows.reduce((a, s) => a + s.fee, 0))],
+          [
+            "本月已入账托管费",
+            "¥" + money(rows.reduce((a, s) => a + s.fee, 0)),
+          ],
           ["本月充值", "¥" + money(rows.reduce((a, s) => a + s.recharge, 0))],
           [
             "月末预存",
@@ -736,7 +819,7 @@ window.TuoguanUI = (() => {
         day.slice(0, 7) +
         " · 当前筛选 " +
         rows.length +
-        ' 名学生</span><button class="btn" id="tg-export">导出 CSV</button></div>' +
+        ' 名学生 · 账面金额不含未核定期初与待核对费用</span><button class="btn" id="tg-export">导出 CSV</button></div>' +
         table(
           [
             "学生",
@@ -744,10 +827,11 @@ window.TuoguanUI = (() => {
             "充值",
             "退款",
             "优惠/调整/期初",
-            "托管费",
-            "月末余额",
+            "已入账托管费",
+            "账面月末余额",
             "未登记",
             "待核对",
+            "待核对参考费",
           ],
           rows.map((s) =>
             tr([
@@ -758,6 +842,7 @@ window.TuoguanUI = (() => {
               `<span class="${s.balance < 0 ? "tg-negative" : ""}">${money(s.balance)}</span>`,
               s.unregistered,
               s.pending,
+              money(s.reference_pending),
             ]),
           ),
         );
@@ -772,11 +857,12 @@ window.TuoguanUI = (() => {
           "balance",
           "unregistered",
           "pending",
+          "reference_pending",
         ];
         const csv =
           "\ufeff" +
           [
-            "学生,上月结转(元),充值(元),退款(元),调整(元),托管费(元),余额(元),未登记,待核对",
+            "学生,上月结转(元),充值(元),退款(元),调整(元),已入账托管费(元),账面余额(元),未登记,待核对,待核对参考费(元)",
             ...rows.map((s) =>
               keys
                 .map(
@@ -805,10 +891,21 @@ window.TuoguanUI = (() => {
       body.innerHTML =
         '<section class="tg-settings-section"><div class="tg-actions"><div><h3>收费规则</h3><p class="muted">按生效日期新增，历史考勤沿用原规则。</p></div><button class="btn primary" id="tg-rule">新增收费标准</button></div>' +
         table(
-          ["生效日期", "适用学生", "出勤", "请假", "缺勤", "说明"],
+          [
+            "生效日期",
+            "截止日期",
+            "状态",
+            "适用学生",
+            "出勤",
+            "请假",
+            "缺勤",
+            "说明",
+          ],
           data.rules.map((r) =>
             tr([
               r.effective_date,
+              r.end_date || "长期",
+              r.pending ? "待核对" : "已确定",
               r.student_id ? esc(studentName(r.student_id)) : "所有学生",
               money(r.present),
               money(r.leave_fee),
@@ -844,7 +941,7 @@ window.TuoguanUI = (() => {
           "新增收费标准",
           select("student_id", "适用学生", [
             [0, "所有学生"],
-            ...data.students.map((s) => [s.id, s.name]),
+            ...data.students.map((s) => [s.id, studentLabel(s)]),
           ]) +
             input("effective_date", "生效日期", day, "date") +
             input("present", "出勤（元）", 50, "number") +
@@ -899,14 +996,16 @@ window.TuoguanUI = (() => {
       };
     } else if (tab === "导入核对") {
       body.innerHTML =
-        '<button class="btn" data-tab="设置">返回托管设置</button><p>选择原始工作簿先预览。逐人确认统一学生身份后，仅导入历史考勤。历史费用与期初余额保持待核对，不产生充值或扣费。</p><input id="tg-file" type="file" accept=".xlsx"><div id="tg-preview"></div>' +
+        '<button class="btn" data-tab="设置">返回托管设置</button><p>选择原始工作簿先预览。识别独立托管学生后导入历史考勤；同名冲突暂留待确认，不影响其他学生。历史费用与期初余额保持待核对，不产生充值或扣费。</p><input id="tg-file" type="file" accept=".xlsx"><div id="tg-preview"></div>' +
         table(
           ["批次月份", "状态", "操作"],
           data.imports.map((i) => {
             const p = JSON.parse(i.payload);
             return tr([
               esc(p.month),
-              i.result ? "已导入考勤 / 资金待核对" : "待确认",
+              i.result
+                ? `已导入 ${JSON.parse(i.result).success} 条 / 身份待确认 ${JSON.parse(i.result).pending || 0} / 冲突 ${JSON.parse(i.result).conflicts?.length || 0} / 资金待核对`
+                : "待确认",
               `<button class="btn tg-preview" data-id="${i.id}">核对</button>`,
             ]);
           }),
@@ -923,17 +1022,36 @@ window.TuoguanUI = (() => {
               " · ",
             )}</p><ul>${p.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` +
           table(
-            ["来源姓名", "来源年级/班级", "期初待核对", "确认统一档案"],
+            [
+              "来源姓名",
+              "来源年级/班级",
+              "期初待核对",
+              "匹配托管档案",
+              "处理结果",
+            ],
             p.students.map((s) =>
               tr([
                 esc(s.name),
                 esc(s.grade + "/" + s.class_name),
                 money(s.opening_pending),
-                `<select data-source="${s.source_key}">${opt([["", "请选择"], ...data.students.map((s) => [s.id, s.name])])}</select>`,
+                `<select data-source="${s.source_key}">${opt([["auto", "自动识别；不确定则保留"], ["", "暂不导入"], ["new", "新建独立托管档案"], ...data.students.map((s) => [s.id, studentLabel(s)])], data.import_sources?.find((x) => x.import_id === p.id && x.source_key === s.source_key)?.student_id || "auto")}</select>`,
+                esc(
+                  (data.import_sources?.find(
+                    (x) =>
+                      x.import_id === p.id && x.source_key === s.source_key,
+                  )?.status || "待导入") +
+                    " · " +
+                    (data.import_sources?.find(
+                      (x) =>
+                        x.import_id === p.id && x.source_key === s.source_key,
+                    )?.basis ||
+                      p.suggestions?.[s.source_key]?.basis ||
+                      "由姓名、年级、班级及来源共同识别"),
+                ),
               ]),
             ),
           ) +
-          '<button class="btn primary" id="tg-import">确认身份并导入考勤</button>';
+          '<button class="btn primary" id="tg-import">导入可确认档案与考勤</button>';
         box.querySelector("#tg-import").onclick = () =>
           act(async () => {
             const mapping = Object.fromEntries(
@@ -942,7 +1060,7 @@ window.TuoguanUI = (() => {
                 e.value,
               ]),
             );
-            await post("import", { id: p.id, mapping });
+            await post("import", { id: p.id, mapping, partial: true });
           });
         if (isReadonlyUser())
           box
@@ -989,7 +1107,15 @@ window.TuoguanUI = (() => {
         "beforeend",
         "<h3>当月待核对考勤</h3>" +
           table(
-            ["学生", "日期", "考勤", "操作"],
+            [
+              "学生",
+              "日期",
+              "考勤",
+              "来源单元格",
+              "原值",
+              "参考费（待核对）",
+              "操作",
+            ],
             data.attendance
               .filter((a) => a.pending)
               .map((a) =>
@@ -997,6 +1123,9 @@ window.TuoguanUI = (() => {
                   esc(studentName(a.student_id)),
                   a.date,
                   a.status,
+                  esc(a.source_cell || "—"),
+                  esc(a.raw_status == null ? "未留存" : a.raw_status || "空白"),
+                  money(a.reference_fee),
                   `<button class="btn tg-resolve" data-id="${a.id}">核对并入账</button>`,
                 ]),
               ),
@@ -1209,7 +1338,7 @@ window.TuoguanUI = (() => {
     if (typeof isReadonlyUser === "function" && isReadonlyUser())
       root
         .querySelectorAll(
-          "#tg-save,.tg-one,#tg-add,.tg-edit,#tg-money,#tg-rule,#tg-calendar,#tg-file,#tg-import,.tg-resolve,.tg-state,.tg-note,.tg-check,#tg-all",
+          "#tg-save,.tg-one,#tg-add,#tg-new,.tg-profile,.tg-edit,#tg-money,#tg-rule,#tg-calendar,#tg-file,#tg-import,.tg-resolve,.tg-state,.tg-note,.tg-check,#tg-all",
         )
         .forEach((e) => {
           e.disabled = true;

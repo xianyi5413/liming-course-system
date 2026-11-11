@@ -1,4 +1,4 @@
-﻿const { test } = require("node:test");
+const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { DatabaseSync } = require("node:sqlite");
 const crypto = require("node:crypto");
@@ -83,8 +83,14 @@ test("pending historical charge requires explicit resolution and keeps zero-fee 
   };
   write("resolve", b);
   write("resolve", b);
-  assert.equal(s.snapshot("2026-09", true).summary[0].fee, 5000);
-  assert.equal(s.snapshot("2026-09", true).summary[0].pending, 0);
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).fee,
+    5000,
+  );
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).pending,
+    0,
+  );
   assert.throws(
     () => write("resolve", { ...b, request_id: crypto.randomUUID() }),
     /变更/,
@@ -109,7 +115,10 @@ test("student specific rates, effective dates and calendar integrity", () => {
     date: "2026-09-21",
     rows: [{ student_id: 1, status: "出勤", version: 0 }],
   });
-  assert.equal(s.snapshot("2026-09", true).summary[0].fee, 8000);
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).fee,
+    8000,
+  );
   assert.throws(
     () => write("calendar", { date: "2026-09-20", enabled: 0, version: 1 }),
     /先更正/,
@@ -126,6 +135,9 @@ function fixture() {
     "PRAGMA foreign_keys=ON;CREATE TABLE students(id INTEGER PRIMARY KEY,name TEXT,grade TEXT);CREATE TABLE teachers(id INTEGER PRIMARY KEY,name TEXT);INSERT INTO students VALUES(1,'合成学生甲','初一'),(2,'合成学生乙','初二');CREATE TABLE lessons(id INTEGER PRIMARY KEY,student_names TEXT);INSERT INTO lessons VALUES(1,'合成学生甲');",
   );
   migrate(db);
+  db.exec(
+    "INSERT INTO tg_students(id,name,grade,class_name) VALUES(1,'合成学生甲','初一','A'),(2,'合成学生乙','初二','B')",
+  );
   const s = createStore(db);
   const write = (a, b) =>
     s.mutate(a, { request_id: crypto.randomUUID(), ...b }, "合成管理员");
@@ -147,8 +159,14 @@ function fixture() {
 }
 test("all statuses, immutable rate snapshot, correction and idempotency", () => {
   const { s, write, db } = fixture();
-  assert.equal(s.snapshot("2026-09", true).summary[0].balance, 0);
-  assert.equal(s.snapshot("2026-09", true).summary[0].unregistered, 1);
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).balance,
+    0,
+  );
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).unregistered,
+    1,
+  );
   let version = 0;
   for (const [status, fee] of [
     ["未登记", 0],
@@ -167,7 +185,7 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
     version = r[0].version;
     assert.deepEqual(write("attendance", b), JSON.parse(JSON.stringify(r)));
     assert.equal(
-      s.snapshot("2026-09", true).summary[0].balance,
+      s.snapshot("2026-09", true).summary.find((s) => s.id === 1).balance,
       fee ? -fee : 0,
     );
   }
@@ -189,7 +207,10 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
     date: "2026-09-20",
     rows: [{ student_id: 1, status: "出勤", version }],
   });
-  assert.equal(s.snapshot("2026-09", true).summary[0].fee, 5000);
+  assert.equal(
+    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).fee,
+    5000,
+  );
   assert.equal(db.prepare("SELECT count(*) n FROM lessons").get().n, 1);
   db.close();
 });
@@ -236,7 +257,10 @@ test("money types, duplicate requests, monthly rollover and atomic batch rollbac
       amount,
       notes: "测试",
     });
-  assert.equal(s.snapshot("2026-10", true).summary[0].opening, 9300);
+  assert.equal(
+    s.snapshot("2026-10", true).summary.find((s) => s.id === 1).opening,
+    9300,
+  );
   assert.throws(
     () =>
       write("money", {
