@@ -1,5 +1,81 @@
 # 托管管理实施与验收记录（2026-11-11）
 
+## Edge与日常数据库修复（2026-11-11）
+
+### 实际根因与环境证据
+
+只读检查确认5177原监听进程PID 71368，命令 `node src/server.js`，可执行文件 `D:\Program Files\nodejs\node.exe`，工作目录为本项目；进程未设置 `DATA_DIR`、`DB_PATH`、`PORT`、`NODE_ENV`，按代码默认打开 `data/liming-local.sqlite`。32856原进程PID 62892明确设置隔离目录、历史库路径及 `HOST=127.0.0.1`。两个接口原均返回 `20261111-tuoguan-independent`，不是旧服务代码导致差异。两库均为本机普通文件，项目目录和数据路径不是重解析链接；未发现生产数据库连接或双向同步映射。本地库已有自动本地/远程备份设置，属于备份归档而非生产库同步，本轮未修改这些设置、未部署生产服务。
+
+Windows TCP表实际能读到5177监听PID；初始 `-State Listen` 筛选未返回记录，去掉该筛选按端口定位后得到监听进程，且HTTP持续可达，因此没有误判服务不存在。对两个Node进程只读取工作目录及数据库相关环境变量，没有打印其他环境凭据。停止服务前再次核对端口、PID、命令及此前确认的工作目录，只重启该项目5177进程。运行日志保存在本地忽略目录。
+
+Edge实际路径 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`，版本157.0.4341.42；HKLM/HKCU未发现配置的Edge远程调试限制项。内置浏览器工具在执行浏览器初始化前报 `codex/sandbox-state-meta: missing field sandboxPolicy`，故该失败不能归因为页面、Edge版本、端口或用户配置冲突。直接CDP实际返回 `Edg/157.0.4341.42`、协议1.3，并可正常登录5177；这验证了当前本机Edge/CDP可用，不能据此推断所有安全软件均不存在，也不代表内置工具缺失字段已修复。
+
+现有 `tests/helpers/chrome_cdp.js` 原按路径顺序优先Chrome，缺少明确Edge选择。现保留 `launchChrome` 兼容导出并新增同一函数的 `launchBrowser` 别名，支持 `TEST_BROWSER=edge|chrome|auto`、`EDGE_PATH`、`CHROME_PATH`。指定Edge不会静默回退Chrome，连接后还校验产品名。始终在调用方目录内新建独立子配置目录，使用 `--remote-debugging-port=0` 和回环地址，通过该目录的 `DevToolsActivePort` 获取本次实例端口，避免预选端口的竞争及误连旧浏览器。启动、HTTP、WebSocket和命令有超时；`close()` 清理本次进程和临时配置，失败路径也清理。没有终止所有Edge进程、修改注册表、复用日常Cookie或重装浏览器。
+
+实现依据：[Microsoft Edge DevTools Protocol](https://learn.microsoft.com/en-us/microsoft-edge/devtools/protocol/)（独立配置、HTTP目标与WebSocket），[OpenAI插件排障](https://developers.openai.com/plugins/deploy/troubleshooting)（区分客户端、工具服务与组件故障）。官方资料未提供此次 `sandboxPolicy` 缺失的确切修复；该层仍需工具宿主修复后重新验收。
+
+### 两库差异及选择的合并方案
+
+| 托管表 | 日常库合并前 | 源库及日常库合并后 |
+| --- | ---: | ---: |
+| tg_students | 0 | 18 |
+| tg_periods | 0 | 28 |
+| tg_attendance | 0 | 564 |
+| tg_rules | 0 | 2 |
+| tg_calendar | 0 | 40 |
+| tg_ledger | 0 | 0 |
+| tg_imports | 0 | 2 |
+| tg_import_sources | 0 | 28 |
+| tg_requests | 0 | 4 |
+| tg_audit | 0 | 6 |
+| tg_legacy_student_map | 0 | 0 |
+
+9月15人、330格、参考14650元；10月13人、234格、逐日参考8975元，原表9075元及100元差异保留。全部564格 `pending=1, fee=0`；10月43格未登记包含3个原始数字和40个空白，原状态、来源单元格、规则争议、28条身份映射完整保留。两库合并前后完整性均为ok，外键检查均无异常。日常库包含真实补课业务，源库还有上轮临时核对账号；没有复制该账号或覆盖日常库文件。
+
+比较重新解析Excel与复制已核对托管快照后，选择后者：本次目标11张托管表全空、结构相同，可原样保留已确认ID及嵌入JSON中的映射，避免重新推测身份或改变导入结果。`scripts/merge_tuoguan_history.js` 是本次场景的有限工具，不是通用数据库合并器：
+
+1. 默认只读预检两库完整性、表/外键/索引结构和待核对、零入账边界。源库含资金、旧补课映射或值班教师关联时拒绝直接搬运。
+2. 仅允许空托管目标，或来源所有记录在目标中已经逐字段一致的重复执行。其他已有数据、部分合并或ID冲突一律明确停止，保留原记录；不得通过删除目标记录绕过检查，须另做人工身份与ID对照。
+3. 使用SQLite原生备份产生源库稳定快照和目标完整备份；校验备份，再开启 `BEGIN IMMEDIATE`，比较目标与备份的全部业务表摘要，发现备份后的并发写入就取消，防止覆盖新数据。
+4. 仅按外键顺序插入11张托管表；事务内复查完整性、源/目标逐行一致及38张非托管表数量和SHA-256。任何失败整体回滚。没有数据库文件替换、没有重新分配或猜测身份、没有金额入账。
+5. 本次实际执行后再执行一次返回 `already_present`，新增记录0。若后续人工修改了来源对应记录，再执行会报告冲突而非覆盖。
+
+预检命令：
+
+```powershell
+node scripts/merge_tuoguan_history.js --source .tuoguan-local/independent-import-20261111/liming-history.sqlite --target data/liming-local.sqlite
+```
+
+首次实际合并使用同一命令加 `--apply --backup-dir .tuoguan-local/edge-data-fix-20261111`。本次已完成，无需再次导入。CLI输出包含本地路径和表摘要，应保留在私有日志。
+
+### 保护、备份与回滚
+
+实际备份：`.tuoguan-local/edge-data-fix-20261111/history-5zRmt2/source.sqlite` 与 `target-before.sqlite`。该目录的核验清单及 `.tuoguan-local/edge-merge-result-private.json` 记录事务前后每表数量和摘要；后者明确记录提交完成。备份已用SQLite重新打开验证完整性，并在独立恢复副本核对所有表，未覆盖现用数据库。
+
+合并事务中的38张非托管表完全不变，包括158名补课学生、1864条课程、355条充值、16个现有账号及所有权限表。随后正常重启和登录产生两种预期元数据变化：原系统启动逻辑刷新5条内置角色的 `updated_at`，浏览器登录/访问增加操作日志。已单独逐字段验证角色除时间戳外完全一致；账户、角色权限、课程、充值等业务内容和数量仍一致，托管表未因页面浏览变化。
+
+事务内失败自动回滚，无需替换文件。已提交后的人工回滚先核对端口进程与工作目录、暂停写入并再备份现库；如果合并后没有其他业务写入，才可在停止该项目服务后使用已验证的 `target-before.sqlite` 完整恢复。若已有新业务或人工托管核对，不能直接拿旧全库覆盖，需按本次来源映射制定只撤销本次托管数据的方案并验证；不得盲删后重导。保留源库和两份备份，不对生产环境执行恢复。
+
+### 实际验收与剩余边界
+
+Edge在 `http://localhost:5177/` 用用户提供的现有管理员账号登录，通过真实导航点击查看全部/历史周期、今天空状态、9月20日和10月8日签到、两个月矩阵、费用汇总及导入核对。DOM验证18个唯一托管ID/28行周期、9月330格、10月234格及各格待核对标记；没有将历史学生带入今天。真实截图位于 `.tuoguan-local/edge-data-fix-20261111/daily-*.png`；浏览器报告记录Console 0、未捕获异常0、本地HTTP失败0，数据库另核对43格异常/空白、流水0。凭据及真实学生信息不进入Git。
+
+定向命令与结果：
+
+```powershell
+$env:TEST_BROWSER='edge'
+node --test --test-concurrency=1 tests/browser_selection.test.js tests/tuoguan_history_merge.test.js
+# 7通过：选择/错误路径、实际Edge/清理、双实例端口隔离、备份/幂等、ID冲突、事务回滚、账务/结构拒绝
+node --test --test-concurrency=1 --test-name-pattern='HTTP permission|five routes|edge cases|creates and edits|save completion' tests/tuoguan_integration.test.js
+# 5通过：HTTP权限、独立档案隔离、5页面操作、跨页异步保存、空状态/草稿/只读
+```
+
+共12项自动化测试通过；真实库合并、再次执行及5177浏览器验收另行执行，不与上轮95项测试重复计数。数据库与页面权限边界未变；原课程业务通过38表事务校验和浏览器后的业务字段校验保护，没有无关全量重测。
+
+本轮价值在于把已经正确的历史数据放进实际使用的数据库，并建立可区分Edge与内置工具故障的验收路径。多个数据库来自刻意隔离的测试/核对流程，不能把“隔离库导入成功”当作“日常系统可用”。以后导入前核对端口、PID、启动日志SQLite路径和 `/api/version`，导入后在同一实际地址复核。新增启动日志仅在本机终端显示路径；公开版本接口只返回版本、Git提交和启动时工作树标志。
+
+优先人工核对100元差异、异常考勤、9月规则、实际入退托日期及期初资金，然后补齐11月真实周期；不要自动延长历史周期。内置浏览器限制保留为工具环境问题。暂不引入新浏览器框架、数据库管理后台、自动双库同步或大规模UI重构；已有工具和现有页面足以覆盖当前工作。
+
 ## 架构与边界
 
 沿用 Node.js 24、SQLite、原生前端，不增加运行依赖。学生身份使用独立的 `tg_students.id`；`tg_periods`、`tg_attendance`、`tg_ledger` 和学生专属 `tg_rules` 均引用该表，不再引用补课 `students`。教师安排仍复用 `teachers.id`。不生成普通课程、不计教师课薪、不读取或抵扣学科余额。复用认证、数据库连接、页面外壳和完整备份，身份与资金独立。

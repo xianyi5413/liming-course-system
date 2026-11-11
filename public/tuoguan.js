@@ -1308,7 +1308,9 @@ window.TuoguanUI = (() => {
                 : "当前日期没有在托学生",
             hasPeriod
               ? "调整姓名、年级、班级或考勤状态后重试。"
-              : "请核对托管周期，或选择其他日期。",
+              : data.periods.length
+                ? "可切换到历史日期或月度矩阵查看考勤；全部历史档案可在托管学生中查询。"
+                : "请核对托管周期，或选择其他日期。",
           );
         root.querySelectorAll("[data-go]").forEach(
           (b) =>

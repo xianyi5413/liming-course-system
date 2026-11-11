@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
+const os = require("node:os");
 const { spawn } = require("node:child_process");
 
 async function freePort() {
@@ -15,18 +16,30 @@ async function freePort() {
   });
 }
 
-function chromeExecutable() {
-  const candidates = [
-    process.env.CHROME_PATH,
+function browserExecutable(browser = process.env.TEST_BROWSER || "auto", env = process.env) {
+  if (!["auto", "edge", "chrome"].includes(browser)) throw new Error("BROWSER_SELECTION_INVALID: use edge, chrome or auto");
+  const explicit = browser === "edge" ? env.EDGE_PATH : env.CHROME_PATH;
+  if (explicit) {
+    if (!fs.existsSync(explicit)) throw new Error(`BROWSER_EXECUTABLE_NOT_FOUND: ${explicit}`);
+    return explicit;
+  }
+  const chrome = [
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
-  ].filter(Boolean);
+  ];
+  const edge = [
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    ...(env.LOCALAPPDATA ? [path.join(env.LOCALAPPDATA, "Microsoft/Edge/Application/msedge.exe")] : []),
+    "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  ];
+  const candidates = browser === "edge" ? edge : browser === "chrome" ? chrome : [...chrome, ...edge];
   const executable = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!executable) throw new Error("DATA_CENTER_BROWSER_NOT_FOUND: set CHROME_PATH to Chrome or Chromium");
+  if (!executable) throw new Error(`BROWSER_NOT_FOUND: ${browser}; set ${browser === "edge" ? "EDGE_PATH" : "CHROME_PATH"}`);
   return executable;
 }
 
@@ -175,40 +188,68 @@ class CdpSession {
   }
 }
 
-async function launchChrome(profileDirectory) {
-  const port = await freePort();
-  const child = spawn(chromeExecutable(), [
+async function launchChrome(profileDirectory, options = {}) {
+  const browser = options.browser || process.env.TEST_BROWSER || 'auto';
+  const executable = browserExecutable(browser);
+  let port = 0;
+  // Always own a fresh child profile, even when callers supply a directory.
+  const parent = path.resolve(profileDirectory || os.tmpdir());
+  fs.mkdirSync(parent, { recursive: true });
+  const profile = fs.mkdtempSync(path.join(parent, "cdp-"));
+  const child = spawn(executable, [
     "--headless=new",
     "--disable-gpu",
-    "--no-sandbox",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-background-networking",
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profileDirectory}`,
+    "--remote-debugging-port=0",
+    "--remote-debugging-address=127.0.0.1",
+    `--user-data-dir=${profile}`,
     "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   let startupError = "";
-  child.stderr.on("data", (chunk) => { startupError += String(chunk); });
+  let spawnError;
+  child.once("error", error => { spawnError = error; });
+  child.stderr.on("data", (chunk) => { startupError = (startupError + String(chunk)).slice(-2000); });
+  let socket, session;
+  const cleanup = async () => {
+    if (session) await session.close();
+    else if (socket) socket.close();
+    if (child.pid && child.exitCode == null && child.signalCode == null) {
+      const ended = new Promise(resolve => child.once("exit", resolve));
+      child.kill();
+      await Promise.race([ended, new Promise(resolve => setTimeout(resolve, 1500))]);
+    }
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  };
+  try {
   let target;
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`Chrome exited during startup: ${startupError.slice(0, 500)}`);
+    if (spawnError) throw new Error(`BROWSER_START_FAILED: ${spawnError.message}`);
+    if (child.exitCode != null) throw new Error(`BROWSER_EXITED: ${startupError.slice(-500)}`);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+      // Browser allocates its own port atomically. The file belongs to our fresh
+      // profile, so we cannot accidentally attach to an existing browser.
+      port = Number(fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split(/\r?\n/)[0]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid DevToolsActivePort');
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
       const targets = await response.json();
       target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
       if (target) break;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  if (!target) { child.kill("SIGTERM"); throw new Error("Chrome DevTools endpoint did not become ready"); }
-  const socket = new WebSocket(target.webSocketDebuggerUrl);
+  if (!target) throw new Error(`BROWSER_CDP_TIMEOUT: ${executable}; loopback port ${port}; check policy/profile/port conflict; ${startupError.slice(-500)}`);
+  const endpoint = new URL(target.webSocketDebuggerUrl);
+  if (endpoint.protocol !== "ws:" || endpoint.hostname !== "127.0.0.1" || Number(endpoint.port) !== port) throw new Error("BROWSER_CDP_ENDPOINT_INVALID");
+  socket = new WebSocket(endpoint);
   await new Promise((resolve, reject) => {
-    socket.addEventListener("open", resolve, { once: true });
-    socket.addEventListener("error", reject, { once: true });
+    const timer = setTimeout(() => reject(new Error("BROWSER_WEBSOCKET_TIMEOUT")), 5000);
+    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("BROWSER_WEBSOCKET_FAILED")); }, { once: true });
   });
-  const session = new CdpSession(socket);
+  session = new CdpSession(socket);
   await Promise.all([
     session.send("Page.enable"),
     session.send("Runtime.enable"),
@@ -218,7 +259,13 @@ async function launchChrome(profileDirectory) {
     session.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] }),
   ]);
   await session.send("Network.setBlockedURLs", { urls: ["https://cdn.jsdelivr.net/*"] });
-  return { child, session };
+  const version = await session.send("Browser.getVersion");
+  if (browser === 'edge' && !version.product.startsWith('Edg/')) throw new Error(`BROWSER_PRODUCT_MISMATCH: expected Edge, got ${version.product}`);
+  return { child, session, executable, port, profile, version, close: cleanup };
+  } catch (error) {
+    await cleanup().catch(() => {});
+    throw error;
+  }
 }
 
-module.exports = { freePort, launchChrome, CdpSession };
+module.exports = { freePort, launchChrome, launchBrowser: launchChrome, browserExecutable, CdpSession };

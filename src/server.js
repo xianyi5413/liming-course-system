@@ -15,7 +15,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, execFileSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
@@ -54,8 +54,13 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan-independent";
-const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
+const APP_VERSION = process.env.APP_VERSION || "20261111-tuoguan-edge-data";
+function gitInfo(...args) {
+  try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
+  catch { return ''; }
+}
+const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || gitInfo('rev-parse', 'HEAD')).slice(0, 40);
+const APP_SOURCE_DIRTY = Boolean(gitInfo('status', '--porcelain', '--untracked-files=no'));
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -12316,7 +12321,7 @@ function createLessonsBatch(rows) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/version") {
-    return sendJson(res, { app_version: APP_VERSION });
+    return sendJson(res, { app_version: APP_VERSION, git_commit: APP_GIT_COMMIT, source_dirty: APP_SOURCE_DIRTY });
   }
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
     const user = currentUser(req);
@@ -15625,6 +15630,10 @@ server.listen(port, process.env.HOST || undefined, () => {
   console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
+  console.log(`Runtime: pid=${process.pid}; cwd=${process.cwd()}; environment=${process.env.NODE_ENV || 'development (default)'}`);
+  console.log(`Git: ${APP_GIT_COMMIT || 'unavailable'}${APP_SOURCE_DIRTY ? ' (working tree modified at startup)' : ''}`);
+  console.log(`Database config: DATA_DIR=${process.env.DATA_DIR ? 'explicit' : 'default'}; DB_PATH=${process.env.DB_PATH ? 'explicit' : 'default'}; custody=initialized`);
+  if (process.env.DATA_DIR || process.env.DB_PATH) console.log('数据库路径已被环境变量覆盖；导入前请核对上方 SQLite 路径。');
 });
 
 const backupScheduler = startBackupScheduler({ dbPath, dataDir });
