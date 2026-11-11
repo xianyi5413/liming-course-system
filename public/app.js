@@ -1,7 +1,7 @@
 const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
-  {key:'tuoguan',label:'托管管理',views:[['tgAttendance','每日签到'],['tgFinance','学生、财务与设置']]},
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
+  { key: "tuoguan", label: "托管管理", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "费用汇总"], ["tgSettings", "托管设置"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
@@ -395,6 +395,7 @@ let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
 if (view === "profiles") view = profileTab === "students" ? "studentProfiles" : "teacherProfiles";
+if (view === "tgFinance") view = "tgStudents";
 let profileNameFilter = { teachers: "", students: "" };
 let profileKeywordFilter = { teachers: "", students: "" };
 let profileGradeFilter = { students: "" };
@@ -779,6 +780,7 @@ async function downloadBlob(path, fallbackFilename) {
 }
 
 function canView(viewKey) {
+  if (["tgStudents", "tgLedger", "tgSummary", "tgSettings"].includes(viewKey)) viewKey = "tgFinance";
   if (!auth.user) return false;
   if (Array.isArray(auth.user.permissions)) return auth.user.permissions.includes(viewKey);
   const allowed = ROLE_VIEWS[auth.user.role];
@@ -872,6 +874,7 @@ function firstAllowedView() {
 }
 
 function setActiveView(nextView) {
+  if (nextView === "tgFinance") nextView = "tgStudents";
   if (nextView === "studentPricing") nextView = canView("studentQuery") ? "studentQuery" : firstAllowedView();
   if (nextView === "feeDetails") nextView = "summary";
   if ((nextView || "") !== view) {
@@ -5709,7 +5712,7 @@ function renderTopbar(title, meta = "", actions = "") {
     </div>
     <div class="toolbar">
       ${actions}
-      ${monthToolbar()}
+      ${view.startsWith('tg') ? '' : monthToolbar()}
       ${renderUserMenu()}
     </div>
     ${monthDeleteModal()}
@@ -14329,8 +14332,11 @@ function render() {
   lastRenderedView = view;
   renderNav();
   const renderers = {
-    tgAttendance: () => window.TuoguanUI.mount(contentEl, false),
-    tgFinance: () => window.TuoguanUI.mount(contentEl, true),
+    tgAttendance: () => { renderTopbar("每日签到"); window.TuoguanUI.mount(contentEl, "签到"); },
+    tgStudents: () => { renderTopbar("托管学生"); window.TuoguanUI.mount(contentEl, "学生"); },
+    tgLedger: () => { renderTopbar("充值流水"); window.TuoguanUI.mount(contentEl, "流水"); },
+    tgSummary: () => { renderTopbar("费用汇总"); window.TuoguanUI.mount(contentEl, "汇总"); },
+    tgSettings: () => { renderTopbar("托管设置"); window.TuoguanUI.mount(contentEl, "设置"); },
     dashboard: renderDashboard,
     lessons: renderLessons,
     weekMatrix: renderWeekMatrix,

@@ -9,6 +9,66 @@ const { DatabaseSync } = require("node:sqlite");
 const { freePort, launchChrome } = require("./helpers/chrome_cdp");
 const { exportFullData, restoreFullData } = require("../src/excel/full_backup");
 const root = path.resolve(__dirname, "..");
+test("custody mobile batch control remains readable and operable", async () => {
+  const chrome = await launchChrome(path.join(dir, "chrome-mobile")),
+    c = chrome.session;
+  try {
+    await c.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
+    await c.login();
+    await c.evaluate(
+      '(async()=>{setActiveView("tgAttendance");await load({refreshGlobal:false});})()',
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-day"))');
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    await c.click(".sidebar-toggle");
+    assert.equal(
+      await c.evaluate(
+        'document.querySelector("#tg-batch + .custom-select").getBoundingClientRect().width >= 105',
+      ),
+      true,
+    );
+    await c.click("#tg-batch + .custom-select .custom-select-button");
+    await c.click('.custom-select-menu.open [data-value="出勤"]');
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-batch").value'),
+      "出勤",
+    );
+    assert.equal(
+      await c.evaluate("document.documentElement.scrollWidth <= innerWidth+1"),
+      true,
+    );
+    for (const theme of ["light", "dark"]) {
+      await c.evaluate(
+        "document.documentElement.dataset.theme=" + JSON.stringify(theme),
+      );
+      fs.writeFileSync(
+        path.join(dir, "mobile-final-" + theme + ".png"),
+        Buffer.from(
+          (await c.send("Page.captureScreenshot", { format: "png" })).data,
+          "base64",
+        ),
+      );
+    }
+    assert.deepEqual(c.exceptions, []);
+    console.log("Mobile screenshots:", dir);
+  } finally {
+    await c.close();
+    if (chrome.child.exitCode == null) {
+      const exited = new Promise((r) => chrome.child.once("exit", r));
+      chrome.child.kill();
+      await exited;
+    }
+  }
+});
 let dir, env, server, port, cookie;
 const key = () => crypto.randomUUID();
 async function api(action, body, auth = cookie) {
@@ -65,36 +125,6 @@ before(async () => {
     await new Promise((r) => setTimeout(r, 50));
   }
   cookie = await login("boss");
-});
-after(async () => {
-  if (server?.exitCode == null) {
-    const p = new Promise((r) => server.once("exit", r));
-    server.kill();
-    await p;
-  } // Synthetic files kept under OS temp for screenshot review.
-});
-test("HTTP permission isolation and transactional optimistic conflict", async () => {
-  assert.equal((await api("snapshot?month=2026-11", null, "")).status, 401);
-  const teacher = await login("tg-teacher");
-  assert.equal(
-    (
-      await api(
-        "money",
-        {
-          student_id: 1,
-          date: "2026-11-11",
-          kind: "充值",
-          amount: 100,
-          notes: "测试",
-        },
-        teacher,
-      )
-    ).status,
-    403,
-  );
-  const data = (await api("snapshot?month=2026-11", null, teacher)).data;
-  assert.equal(data.finance, false);
-  assert.equal(data.ledger, undefined);
   for (const [action, b] of [
     [
       "period",
@@ -128,6 +158,36 @@ test("HTTP permission isolation and transactional optimistic conflict", async ()
     ],
   ])
     assert.equal((await api(action, b)).status, 200);
+});
+after(async () => {
+  if (server?.exitCode == null) {
+    const p = new Promise((r) => server.once("exit", r));
+    server.kill();
+    await p;
+  } // Synthetic files kept under OS temp for screenshot review.
+});
+test("HTTP permission isolation and transactional optimistic conflict", async () => {
+  assert.equal((await api("snapshot?month=2026-11", null, "")).status, 401);
+  const teacher = await login("tg-teacher");
+  assert.equal(
+    (
+      await api(
+        "money",
+        {
+          student_id: 1,
+          date: "2026-11-11",
+          kind: "充值",
+          amount: 100,
+          notes: "测试",
+        },
+        teacher,
+      )
+    ).status,
+    403,
+  );
+  const data = (await api("snapshot?month=2026-11", null, teacher)).data;
+  assert.equal(data.finance, false);
+  assert.equal(data.ledger, undefined);
   const b = {
     date: "2026-11-11",
     rows: [{ student_id: 1, status: "出勤", version: 0 }],
@@ -164,9 +224,24 @@ test("full Excel backup restores all custody data and financial audit", () => {
   a.close();
   b.close();
 });
-test("browser navigation, modal, attendance correction, matrix and mobile", async () => {
+
+test("custody UI: five routes, drafts, filtering, batch, shared controls, themes and permissions", async () => {
   const chrome = await launchChrome(path.join(dir, "chrome"));
   const c = chrome.session;
+  const shot = async (name) =>
+    fs.writeFileSync(
+      path.join(dir, name + ".png"),
+      Buffer.from(
+        (await c.send("Page.captureScreenshot", { format: "png" })).data,
+        "base64",
+      ),
+    );
+  const goto = async (key, selector) => {
+    await c.click('[data-view="' + key + '"]');
+    await c.waitFor(
+      "Boolean(document.querySelector(" + JSON.stringify(selector) + "))",
+    );
+  };
   try {
     await c.send("Emulation.setDeviceMetricsOverride", {
       width: 1440,
@@ -174,41 +249,151 @@ test("browser navigation, modal, attendance correction, matrix and mobile", asyn
       deviceScaleFactor: 1,
       mobile: false,
     });
-    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
     await c.login();
-    await c.click('[data-nav-group="tuoguan"]');
-    await c.click('[data-view="tgFinance"]');
-    await c.waitFor("Boolean(document.querySelector('#tg-add'))");
-    await c.evaluate(
-      `window.tgPreviousAdd=document.querySelector('#tg-add');document.querySelector('#tg-day').value='2026-11-11';document.querySelector('#tg-day').dispatchEvent(new Event('change'))`,
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".nav-btn")].map(e=>e.dataset.navGroup)',
+      ),
+      [
+        "home",
+        "tuoguan",
+        "schedule",
+        "students",
+        "teachers",
+        "operations",
+        "finance",
+        "settings",
+      ],
     );
-    await c.waitFor(
-      "Boolean(document.querySelector('#tg-add')) && document.querySelector('#tg-add')!==window.tgPreviousAdd",
+    await c.click('[data-nav-group="tuoguan"]');
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".nav-sub-btn[data-view^=tg]")].map(e=>e.dataset.view)',
+      ),
+      ["tgAttendance", "tgStudents", "tgLedger", "tgSummary", "tgSettings"],
+    );
+    await c.click('[data-nav-group="tuoguan"]');
+    assert.equal(
+      await c.evaluate(
+        '!!document.querySelector(".nav-sub-btn[data-view=tgAttendance]")',
+      ),
+      false,
+    );
+    await c.click('[data-nav-group="tuoguan"]');
+    await goto("tgStudents", "#tg-add");
+    assert.equal(
+      await c.evaluate('document.querySelector(".page-title").textContent'),
+      "托管学生",
+    );
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-panel h2, #tg-day, #tg-month").length',
+      ),
+      0,
     );
     await c.click("#tg-add");
-    await c.waitFor("Boolean(document.querySelector('dialog[open]'))");
+    await c.waitFor('Boolean(document.querySelector(".tg-form"))');
+    assert.equal(
+      await c.evaluate(
+        '!!document.querySelector(".tg-form .custom-select-button")',
+      ),
+      true,
+    );
+    await shot("student-dialog");
     await c.click("[data-cancel]");
-    await c.click('[data-tab="签到"]');
-    await c.waitFor("Boolean(document.querySelector('.tg-one'))");
-    await c.evaluate("document.querySelector('.tg-state').value='请假'");
+    await c.click(".tg-detail");
+    await c.waitFor('Boolean(document.querySelector(".tg-detail-content"))');
+    await c.click(".dialog-close");
+    await goto("tgAttendance", "#tg-day");
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-day").dataset.customDate'),
+      "1",
+    );
+    await c.evaluate(
+      'document.querySelector(".tg-state").value="请假";document.querySelector(".tg-state").dispatchEvent(new Event("change"));document.querySelector(".tg-note").value="合成未保存备注";document.querySelector(".tg-note").dispatchEvent(new Event("input"))',
+    );
+    assert.match(
+      await c.evaluate('document.querySelector("#tg-dirty").textContent'),
+      /1 条未保存/,
+    );
+    await goto("tgLedger", "#tg-money");
+    await goto("tgAttendance", ".tg-one");
+    assert.equal(
+      await c.evaluate('document.querySelector(".tg-note").value'),
+      "合成未保存备注",
+    );
     await c.click(".tg-one");
     await c.waitFor(
-      "document.querySelector('#tg-msg')?.textContent==='已保存'",
+      'document.querySelector("#tg-msg")?.textContent==="已保存"',
     );
     assert.equal(
       (await api("snapshot?month=2026-11")).data.summary[0].fee,
       2500,
     );
-    await c.click("#tg-matrix");
-    await c.waitFor(
-      "document.querySelector('#tg-body')?.textContent.includes('11-11')",
+    await c.evaluate(
+      'document.querySelector("#tg-query").value="不存在的合成姓名"',
     );
-    await c.click('[data-tab="汇总"]');
-    await c.waitFor("Boolean(document.querySelector('#tg-export'))");
-    const shot = await c.send("Page.captureScreenshot", { format: "png" });
-    fs.writeFileSync(
-      path.join(dir, "desktop.png"),
-      Buffer.from(shot.data, "base64"),
+    await c.click("#tg-search");
+    assert.match(
+      await c.evaluate('document.querySelector("#tg-body").textContent'),
+      /当前筛选没有结果/,
+    );
+    await c.click("#tg-reset");
+    await c.click("#tg-all");
+    await c.evaluate('document.querySelector("#tg-batch").value="出勤"');
+    await c.click("#tg-save");
+    await c.waitFor(
+      'document.querySelector("#tg-msg")?.textContent==="已保存"',
+    );
+    assert.equal(
+      (await api("snapshot?month=2026-11")).data.summary[0].fee,
+      5000,
+    );
+    await shot("attendance-desktop");
+    await c.click("#tg-matrix");
+    assert.equal(
+      await c.evaluate('document.querySelectorAll("#tg-day").length'),
+      0,
+    );
+    assert.equal(
+      await c.evaluate('document.querySelectorAll("#tg-month").length'),
+      1,
+    );
+    await shot("matrix");
+    await goto("tgSummary", "#tg-export");
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-metrics .metric").length',
+      ),
+      4,
+    );
+    await shot("summary-desktop");
+    await goto("tgSettings", "#tg-rule");
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-settings-section").length',
+      ),
+      2,
+    );
+    await c.click("#tg-rule");
+    await c.waitFor('Boolean(document.querySelector(".tg-form"))');
+    await c.click("[data-cancel]");
+    await c.click('[data-tab="导入核对"]');
+    await c.waitFor('Boolean(document.querySelector("#tg-file"))');
+    await c.click('[data-tab="设置"]');
+    await shot("settings");
+    await c.evaluate('document.documentElement.dataset.theme="dark"');
+    await shot("settings-dark");
+    assert.equal(
+      await c.evaluate(
+        'getComputedStyle(document.querySelector(".tg-table td")).backgroundColor==="rgb(255, 255, 255)"',
+      ),
+      false,
     );
     await c.send("Emulation.setDeviceMetricsOverride", {
       width: 390,
@@ -216,26 +401,224 @@ test("browser navigation, modal, attendance correction, matrix and mobile", asyn
       deviceScaleFactor: 1,
       mobile: true,
     });
-    await c.click('[data-tab="签到"]');
+    await goto("tgAttendance", "#tg-matrix");
     await c.click("#tg-matrix");
-    await c.waitFor("Boolean(document.querySelector('.tg-one'))");
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
     await c.click(".sidebar-toggle");
-    await c.evaluate('document.querySelector("#tg-body").scrollIntoView()');
-    fs.writeFileSync(
-      path.join(dir, "mobile.png"),
-      Buffer.from(
-        (await c.send("Page.captureScreenshot", { format: "png" })).data,
-        "base64",
+    await shot("attendance-mobile-dark");
+    assert.equal(
+      await c.evaluate(
+        "document.documentElement.scrollWidth <= window.innerWidth+1",
       ),
+      true,
     );
+    await c.evaluate('document.documentElement.dataset.theme="light"');
+    await shot("attendance-mobile");
+    // Existing routes still render through the normal dispatcher.
+    for (const key of ["lessons", "studentProfiles", "summary"])
+      await c.evaluate(
+        "(async()=>{setActiveView(" +
+          JSON.stringify(key) +
+          ");await load({refreshGlobal:false});})()",
+      );
     assert.deepEqual(c.exceptions, []);
-    console.log("Synthetic screenshots:", dir);
+    // Reload with a teacher session; financial routes must not leak into the menu.
+    await c.evaluate(
+      '(async()=>{await fetch("/api/auth/logout",{method:"POST"});location.reload();})()',
+    );
+    await c.waitFor('Boolean(document.querySelector(".login-panel"))');
+    await c.evaluate(
+      'document.querySelector(".login-username").value="tg-teacher";document.querySelector(".login-password").value="123456";document.querySelector(".login-submit").click()',
+    );
+    await c.waitFor(
+      'Boolean(document.querySelector(".nav-btn[data-nav-group=tuoguan]"))',
+    );
+    assert.equal(await c.evaluate('canView("tgStudents")'), false);
+    assert.equal(await c.evaluate('canView("tgAttendance")'), true);
+    console.log("Synthetic UI screenshots:", dir);
   } finally {
     await c.close();
     if (chrome.child.exitCode == null) {
-      const p = new Promise((r) => chrome.child.once("exit", r));
+      const ended = new Promise((r) => chrome.child.once("exit", r));
       chrome.child.kill();
-      await p;
+      await ended;
+    }
+  }
+});
+
+test("custody save completion cannot overwrite another page", async () => {
+  const chrome = await launchChrome(path.join(dir, "chrome-save")),
+    c = chrome.session;
+  const route = async (key, selector) => {
+    await c.evaluate(
+      "(async()=>{setActiveView(" +
+        JSON.stringify(key) +
+        ");await load({refreshGlobal:false});})()",
+    );
+    await c.waitFor(
+      "Boolean(document.querySelector(" + JSON.stringify(selector) + "))",
+    );
+  };
+  try {
+    await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
+    await c.login();
+    await route("tgAttendance", "#tg-day");
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    await c.evaluate(
+      'document.querySelector(".tg-note").value="合成延迟保存";document.querySelector(".tg-note").dispatchEvent(new Event("input"));const originalFetch=window.fetch;window.fetch=async(...args)=>{const response=await originalFetch(...args);if(String(args[0]).endsWith("/attendance")){window.__tgWaiting=true;await new Promise(resolve=>window.__tgRelease=resolve);}return response;}',
+    );
+    await c.click(".tg-one");
+    await c.waitFor("window.__tgWaiting===true");
+    await route("tgStudents", "#tg-add");
+    await c.evaluate("window.__tgRelease()");
+    await c.waitFor('!document.querySelector("#tg-msg")?.textContent');
+    await route("tgAttendance", ".tg-one");
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-dirty").textContent'),
+      "",
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector(".tg-note").value'),
+      "合成延迟保存",
+    );
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await c.close();
+    if (chrome.child.exitCode == null) {
+      const exited = new Promise((r) => chrome.child.once("exit", r));
+      chrome.child.kill();
+      await exited;
+    }
+  }
+});
+
+test("custody UI edge cases: stale drafts, empty dates, retry and readonly", async () => {
+  const chrome = await launchChrome(path.join(dir, "chrome-edges")),
+    c = chrome.session;
+  const route = async (key, selector) => {
+    await c.evaluate(
+      "(async()=>{setActiveView(" +
+        JSON.stringify(key) +
+        ");await load({refreshGlobal:false});})()",
+    );
+    await c.waitFor(
+      "Boolean(document.querySelector(" + JSON.stringify(selector) + "))",
+    );
+  };
+  try {
+    await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
+    await c.login();
+    await route("tgAttendance", "#tg-day");
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    await c.click(".tg-state + .custom-select .custom-select-button");
+    await c.waitFor(
+      'Boolean(document.querySelector(".custom-select-menu.open"))',
+    );
+    await c.click('.custom-select-menu.open [data-value="请假"]');
+    await c.evaluate(
+      'document.querySelector(".tg-note").value="合成并发草稿";document.querySelector(".tg-note").dispatchEvent(new Event("input"))',
+    );
+    const old = (await api("snapshot?month=2026-11")).data.attendance.find(
+      (r) => r.student_id === 1,
+    );
+    assert.equal(
+      (
+        await api("attendance", {
+          date: "2026-11-11",
+          rows: [
+            {
+              student_id: 1,
+              status: "停课",
+              notes: "合成其他操作员更正",
+              version: old?.version || 0,
+            },
+          ],
+        })
+      ).status,
+      200,
+    );
+    await route("tgStudents", "#tg-add");
+    await route("tgAttendance", ".tg-one");
+    await c.click(".tg-one");
+    await c.waitFor(
+      'document.querySelector("#tg-msg")?.textContent.includes("他人修改")',
+    );
+    assert.equal(
+      (await api("snapshot?month=2026-11")).data.attendance[0].status,
+      "停课",
+    );
+    await c.click("#tg-discard");
+    await c.waitFor('document.querySelector(".tg-state")?.value==="停课"');
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-dirty").textContent'),
+      "",
+    );
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-10-01";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor(
+      'document.querySelector("#tg-body")?.textContent.includes("当前日期没有在托学生")',
+    );
+    await c.send("Network.setBlockedURLs", {
+      urls: ["*api/tuoguan/snapshot*"],
+    });
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-retry"))');
+    assert.equal(
+      await c.evaluate('document.querySelectorAll(".tg-one").length'),
+      0,
+    );
+    await c.send("Network.setBlockedURLs", { urls: [] });
+    await c.click("#tg-retry");
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    await route("tgSummary", "#tg-export");
+    await c.evaluate(
+      'document.querySelector("#tg-query").value="无匹配的合成学生"',
+    );
+    await c.click("#tg-search");
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".metric-value")].map(e=>e.textContent)',
+      ),
+      ["¥0.00", "¥0.00", "¥0.00", "¥0.00"],
+    );
+    // Change only the synthetic teacher account, then check the visible readonly controls.
+    const db = new DatabaseSync(env.DB_PATH);
+    db.exec("UPDATE users SET readonly_override=1 WHERE username='tg-teacher'");
+    db.close();
+    await c.evaluate(
+      '(async()=>{await fetch("/api/auth/logout",{method:"POST"});location.reload();})()',
+    );
+    await c.waitFor('Boolean(document.querySelector(".login-panel"))');
+    await c.evaluate(
+      'document.querySelector(".login-username").value="tg-teacher";document.querySelector(".login-password").value="123456";document.querySelector(".login-submit").click()',
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-day"))');
+    await c.evaluate(
+      'document.querySelector("#tg-day").value="2026-11-11";document.querySelector("#tg-day").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor('Boolean(document.querySelector(".tg-one"))');
+    assert.equal(
+      await c.evaluate(
+        'document.querySelector(".tg-one").disabled && document.querySelector(".tg-state + .custom-select .custom-select-button").disabled',
+      ),
+      true,
+    );
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await c.close();
+    if (chrome.child.exitCode == null) {
+      const exited = new Promise((r) => chrome.child.once("exit", r));
+      chrome.child.kill();
+      await exited;
     }
   }
 });
