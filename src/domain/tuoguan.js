@@ -3,6 +3,7 @@ const STATUSES = ["出勤", "请假", "放假", "不适用"];
 const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
 const GRADES = ["初一", "初二", "初三"];
 const { TABLES, migrate } = require("./tuoguan_schema");
+const Billing = require("./tuoguan_settlement");
 const { account: custodyAccount } = require("./tuoguan_account");
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
@@ -64,14 +65,6 @@ function createStore(db) {
     if (!get("SELECT id FROM tg_students WHERE id=?", id))
       fail("托管学生不存在");
   }
-  function rule(id, day) {
-    return get(
-      "SELECT * FROM tg_rules WHERE (student_id=? OR student_id IS NULL) AND effective_date<=? AND (end_date IS NULL OR end_date>=?) AND pending=0 ORDER BY (student_id IS NOT NULL) DESC,effective_date DESC,id DESC LIMIT 1",
-      id,
-      day,
-      day,
-    );
-  }
   function period(id, day) {
     return get(
       "SELECT * FROM tg_periods WHERE student_id=? AND start_date<=? AND (end_date IS NULL OR end_date>=?) ORDER BY start_date DESC LIMIT 1",
@@ -105,79 +98,36 @@ function createStore(db) {
         fail("记录已被他人修改，请刷新后重试", 409);
       const p = period(r.student_id, b.date);
       if (!p) fail("学生当天不在托管周期内");
-      if (old?.pending) {
-        const notes = String(r.notes ?? old.notes).slice(0, 2000);
-        if (old.status === r.status && old.notes === notes) return old;
-        const originalRules = JSON.parse(old.rule_json);
-        const reference =
-          { 出勤: originalRules.present, 请假: originalRules.leave_fee }[
-            r.status
-          ] || 0;
+      const notes = String(r.notes ?? old?.notes ?? "").slice(0, 2000);
+      if (old && (old.status !== r.status || old.notes !== notes))
         run(
-          "UPDATE tg_attendance SET status=?,notes=?,reference_fee=?,version=version+1 WHERE id=?",
+          "UPDATE tg_attendance SET status=?,notes=?,version=version+1 WHERE id=?",
           r.status,
           notes,
-          reference,
           old.id,
         );
-        const saved = get("SELECT * FROM tg_attendance WHERE id=?", old.id);
-        audit(actor, "历史考勤更正（不入账）", { before: old, after: saved });
-        return saved;
-      }
-      const rules =
-        old && Object.hasOwn(JSON.parse(old.rule_json), "present")
-          ? JSON.parse(old.rule_json)
-          : rule(r.student_id, b.date);
-      if (!rules && !["放假", "不适用"].includes(r.status))
-        fail("当天没有有效收费规则");
-      const fee =
-        { 出勤: rules?.present, 请假: rules?.leave_fee }[r.status] || 0;
-      const notes = String(r.notes || "").slice(0, 2000);
-      if (old && old.status === r.status && old.notes === notes) return old;
-      if (old)
+      else if (!old)
         run(
-          "UPDATE tg_attendance SET status=?,notes=?,fee=?,version=version+1 WHERE id=?",
-          r.status,
-          notes,
-          fee,
-          old.id,
-        );
-      else
-        run(
-          "INSERT INTO tg_attendance(student_id,date,status,notes,grade,rule_json,fee) VALUES (?,?,?,?,?,?,?)",
+          "INSERT INTO tg_attendance(student_id,date,status,notes,grade,rule_json,fee) VALUES (?,?,?,?,?,'{}',0)",
           r.student_id,
           b.date,
           r.status,
           notes,
           p.grade,
-          JSON.stringify(rules || {}),
-          fee,
         );
-      const saved = get(
+      const current = get(
         "SELECT * FROM tg_attendance WHERE student_id=? AND date=?",
         r.student_id,
         b.date,
       );
-      if (old?.fee)
-        run(
-          "INSERT INTO tg_ledger(student_id,date,kind,amount,notes,actor,attendance_id) VALUES (?,?,'考勤冲正',?,?,?,?)",
-          r.student_id,
-          b.date,
-          old.fee,
-          "更正原考勤",
-          actor,
-          saved.id,
-        );
-      if (fee)
-        run(
-          "INSERT INTO tg_ledger(student_id,date,kind,amount,notes,actor,attendance_id) VALUES (?,?,'考勤扣费',?,?,?,?)",
-          r.student_id,
-          b.date,
-          -fee,
-          notes,
-          actor,
-          saved.id,
-        );
+      const settlement = Billing.settle(db, actor, {
+        attendance: [current],
+        bumpVersion: !!old && current.version === old.version,
+        reason: "考勤自动结算",
+      });
+      const saved = get("SELECT * FROM tg_attendance WHERE id=?", current.id);
+      if (old && current.version === old.version && !settlement.updated)
+        return old;
       audit(actor, "考勤", { before: old || null, after: saved });
       return saved;
     });
@@ -394,41 +344,7 @@ function createStore(db) {
         }
         result = get("SELECT * FROM tg_students WHERE id=?", id);
       } else if (action === "attendance") result = attendance(b, actor);
-      else if (action === "resolve") {
-        const old = get("SELECT * FROM tg_attendance WHERE id=?", b.id);
-        if (!old || !old.pending || old.version !== b.version)
-          fail("待核对记录已变更", 409);
-        if (!b.notes || !STATUSES.includes(b.status))
-          fail("请填写确认状态和核对依据");
-        for (const k of ["present", "leave_fee", "absent"])
-          if (cents(b[k]) < 0) fail("收费标准不能为负");
-        const rules = {
-          present: b.present,
-          leave_fee: b.leave_fee,
-          absent: b.absent,
-        };
-        const fee =
-          { 出勤: b.present, 请假: b.leave_fee, 缺勤: b.absent }[b.status] || 0;
-        run(
-          "UPDATE tg_attendance SET status=?,notes=?,rule_json=?,fee=?,pending=0,version=version+1 WHERE id=?",
-          b.status,
-          b.notes,
-          JSON.stringify(rules),
-          fee,
-          b.id,
-        );
-        if (fee)
-          run(
-            "INSERT INTO tg_ledger(student_id,date,kind,amount,notes,actor,attendance_id) VALUES (?,?,'考勤扣费',?,?,?,?)",
-            old.student_id,
-            old.date,
-            -fee,
-            b.notes,
-            actor,
-            old.id,
-          );
-        result = { ok: true };
-      } else if (action === "period") {
+      else if (action === "period") {
         savePeriod(b);
         result = { ok: true };
       } else if (action === "money") {
@@ -489,6 +405,11 @@ function createStore(db) {
         result = { ok: true };
       } else if (action === "rule") {
         date(b.effective_date);
+        if (
+          b.present !== Billing.RULE.present ||
+          b.leave_fee !== Billing.RULE.leave_fee
+        )
+          fail("当前统一标准为出勤50元、请假25元");
         for (const k of ["present", "leave_fee", "absent"])
           if (cents(b[k]) < 0) fail("收费标准不能为负");
         if (b.student_id) student(b.student_id);
@@ -536,7 +457,9 @@ function createStore(db) {
     date(month + "-01");
     const start = month + "-01",
       end = month + "-31";
-    const students = all("SELECT * FROM tg_students ORDER BY name,id");
+    const students = all(
+      "SELECT s.*,a.first_attendance_date,a.last_attendance_date FROM tg_students s LEFT JOIN (SELECT student_id,MIN(date) first_attendance_date,MAX(date) last_attendance_date FROM tg_attendance WHERE status='出勤' GROUP BY student_id) a ON a.student_id=s.id ORDER BY s.name,s.id",
+    );
     const periods = all("SELECT * FROM tg_periods ORDER BY start_date DESC");
     const attendance = all(
       "SELECT * FROM tg_attendance WHERE date BETWEEN ? AND ?",
@@ -570,6 +493,7 @@ function createStore(db) {
       finance,
     };
     if (finance) {
+      data.billing_rule = Billing.FEES;
       data.rules = all(
         "SELECT * FROM tg_rules ORDER BY effective_date DESC,id DESC",
       );
@@ -591,11 +515,6 @@ function createStore(db) {
       data.ledger = [...accounts.values()]
         .flatMap((a) => a.ledger)
         .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-      const recorded = new Set(
-        attendance
-          .filter((a) => a.status !== "未登记")
-          .map((a) => a.student_id + ":" + a.date),
-      );
       data.summary = students.map((s) => {
         const { ledger, ...sums } = accounts.get(s.id);
         const saved = attendance
@@ -610,34 +529,17 @@ function createStore(db) {
               (!p.end_date || p.end_date >= start),
           )?.grade ||
           s.grade;
-        const unregistered = calendar.filter(
-          (c) =>
-            c.enabled &&
-            periods.some(
-              (p) =>
-                p.student_id === s.id &&
-                p.start_date <= c.date &&
-                (!p.end_date || p.end_date >= c.date),
-            ) &&
-            !recorded.has(s.id + ":" + c.date),
-        ).length;
         return {
           ...s,
           ...sums,
           grade: historicalGrade,
           has_attendance: saved.some((a) => a.status !== "未登记"),
-          unregistered,
-          reference_pending: attendance
-            .filter((a) => a.student_id === s.id && a.pending)
-            .reduce((sum, a) => sum + a.reference_fee, 0),
-          pending: attendance.filter((a) => a.student_id === s.id && a.pending)
-            .length,
         };
       });
     }
     return data;
   }
-  return { mutate, snapshot, atomic, audit, all, get, run };
+  return { db, mutate, snapshot, atomic, audit, all, get, run };
 }
 module.exports = {
   GRADES,

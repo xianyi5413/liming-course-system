@@ -5,7 +5,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { migrate, createStore, TABLES } = require("../src/domain/tuoguan");
 const { stage, commit, suggestions } = require("../src/domain/tuoguan_import");
 const { upgradeLegacyBackup } = require("../src/domain/tuoguan_schema");
-test("legacy pending attendance gains a reference amount without posting funds", () => {
+test("legacy pending attendance preserves reference evidence while automatically posting", () => {
   const { db, s, write } = fixture();
   write("student", {
     name: "合成同名学生",
@@ -20,9 +20,9 @@ test("legacy pending attendance gains a reference amount without posting funds",
   migrate(db);
   const a = s.get("SELECT * FROM tg_attendance");
   assert.equal(a.reference_fee, 5000);
-  assert.equal(a.fee, 0);
-  assert.equal(a.pending, 1);
-  assert.equal(s.all("SELECT * FROM tg_ledger").length, 0);
+  assert.equal(a.fee, 5000);
+  assert.equal(a.pending, 0);
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 1);
   const b = { ...a };
   delete b.reference_fee;
   const data = {
@@ -30,7 +30,7 @@ test("legacy pending attendance gains a reference amount without posting funds",
     tg_attendance: [b],
   };
   upgradeLegacyBackup(data);
-  assert.equal(data.tg_attendance[0].reference_fee, 5000);
+  assert.equal(data.tg_attendance[0].reference_fee, 0);
   db.close();
 });
 test("restaging an uncommitted old preview refreshes conflict metadata", () => {
@@ -44,7 +44,7 @@ test("restaging an uncommitted old preview refreshes conflict metadata", () => {
     true,
   );
   commit(s, { id: p.id, auto: true, request_id: crypto.randomUUID() }, "测试");
-  assert.equal(s.get("SELECT pending FROM tg_rules").pending, 1);
+  assert.equal(s.get("SELECT pending FROM tg_rules WHERE source_import_id IS NOT NULL").pending, 1);
   db.close();
 });
 function fixture() {
@@ -245,7 +245,7 @@ function source(month, names) {
     difference: 0,
   };
 }
-test("cross-month unique identity reuse, partial conflict isolation and retry without money", () => {
+test("cross-month unique identity reuse, partial conflict isolation and retry without duplicate charges", () => {
   const { db, s } = fixture();
   const p = source("2026-09", [
     ["合成甲", "初一", "A"],
@@ -281,10 +281,10 @@ test("cross-month unique identity reuse, partial conflict isolation and retry wi
   const resolved = run(q, { mapping: { 1: "new" } });
   assert.equal(resolved.success, 3);
   assert.equal(resolved.pending, 0);
-  assert.equal(s.all("SELECT * FROM tg_ledger").length, 0);
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 5);
   assert.equal(
     s.get("SELECT COUNT(*) n FROM tg_attendance WHERE pending=1").n,
-    5,
+    0,
   );
   const c = source("2026-10", [
     ["合成新", "初一", "A"],
@@ -322,7 +322,7 @@ test("import ignores obsolete classes and isolates invalid grades", () => {
   assert.match(result.conflicts[0].reason, /年级/);
   assert.equal(s.all("SELECT * FROM tg_students").length, 1);
   assert.equal(s.all("SELECT * FROM tg_attendance").length, 2);
-  assert.equal(s.all("SELECT * FROM tg_ledger").length, 0);
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 2);
   db.close();
 });
 

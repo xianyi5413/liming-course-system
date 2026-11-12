@@ -116,8 +116,8 @@ function account(ledger, month, cutoff = month + "-31") {
           const previous = allocations.get(prior.row.id);
           allocations.set(row.id, {
             ...row,
-            actual_amount: -previous.actual_amount,
-            gift_amount: -previous.gift_amount,
+            actual_amount: -previous.actual_amount || 0,
+            gift_amount: -previous.gift_amount || 0,
           });
           result.actual_consumption += previous.actual_amount;
           result.gift_consumption += previous.gift_amount;
@@ -135,8 +135,8 @@ function account(ledger, month, cutoff = month + "-31") {
           });
           const allocation = {
             ...row,
-            actual_amount: -charge.actual_consumption,
-            gift_amount: -charge.gift_consumption,
+            actual_amount: -charge.actual_consumption || 0,
+            gift_amount: -charge.gift_consumption || 0,
           };
           allocations.set(row.id, allocation);
           active.set(row.id, allocation);

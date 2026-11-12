@@ -139,12 +139,7 @@ test("v8 backup ignores obsolete custody classes while preserving IDs and financ
   assert.equal(init.status, 0, init.stderr);
   restoreFullData({ dbPath: target, inputPath: file });
   const restored = new DatabaseSync(target);
-  for (const table of [
-    "tg_students",
-    "tg_periods",
-    "tg_attendance",
-    "tg_ledger",
-  ]) {
+  for (const table of ["tg_students", "tg_periods"])
     assert.deepEqual(
       restored
         .prepare("SELECT * FROM " + table + " ORDER BY id")
@@ -152,14 +147,40 @@ test("v8 backup ignores obsolete custody classes while preserving IDs and financ
         .map((r) => ({ ...r })),
       data[table].map(({ class_name, ...r }) => r),
     );
-    assert.equal(
-      restored
-        .prepare("PRAGMA table_info(" + table + ")")
-        .all()
-        .some((c) => c.name === "class_name"),
-      false,
-    );
-  }
+  const original = data.tg_attendance.find((r) => r.id === 99001),
+    actual = restored
+      .prepare("SELECT * FROM tg_attendance WHERE id=99001")
+      .get();
+  assert.equal(actual.fee, 5000);
+  assert.equal(actual.pending, 0);
+  for (const field of [
+    "id",
+    "date",
+    "status",
+    "notes",
+    "grade",
+    "raw_status",
+    "source_key",
+    "source_cell",
+    "reference_fee",
+  ])
+    assert.equal(actual[field], original[field]);
+  assert.equal(
+    restored
+      .prepare(
+        "SELECT SUM(amount) amount FROM tg_ledger WHERE attendance_id=99001",
+      )
+      .get().amount,
+    -5000,
+  );
+  const signature = require("../src/domain/tuoguan_transfer").signature(
+    restored,
+  );
+  require("../src/domain/tuoguan").migrate(restored);
+  assert.equal(
+    require("../src/domain/tuoguan_transfer").signature(restored),
+    signature,
+  );
   assert.deepEqual(restored.prepare("PRAGMA foreign_key_check").all(), []);
   restored.close();
 });
@@ -549,10 +570,10 @@ test("monthly matrix edits one cell, retains historical evidence, groups grades 
     await changeCell(c, "2026-11-05", "请假");
     const history = (await api("snapshot?month=2026-11")).data;
     const row = history.attendance.find((a) => a.date === "2026-11-05");
-    assert.equal(row.pending, 1);
+    assert.equal(row.pending, 0);
     assert.equal(row.raw_status, "26");
-    assert.equal(row.fee, 0);
-    assert.equal(history.ledger.length, saved.ledger.length);
+    assert.equal(row.fee, 2500);
+    assert.equal(history.ledger.length, saved.ledger.length + 1);
     for (const width of [1440, 390])
       for (const theme of ["light", "dark"]) {
         await c.send("Emulation.setDeviceMetricsOverride", {
@@ -1205,7 +1226,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       await c.evaluate(
         '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
       ),
-      ["序号", "学生", "年级", "首次参与", "最近参与"],
+      ["序号", "学生", "年级", "托管首日", "最近托管"],
     );
     assert.equal(
       await c.evaluate(

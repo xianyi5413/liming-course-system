@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const Billing = require("./tuoguan_settlement");
 const CHILDREN = ["tg_periods", "tg_rules", "tg_attendance", "tg_ledger"];
 const TABLES = [
   "tg_students",
@@ -98,7 +99,7 @@ function legacyReference(a) {
     return 0;
   }
 }
-function migrate(db) {
+function migrate(db, { settle = true } = {}) {
   const exists = (t) =>
     !!db
       .prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?")
@@ -133,6 +134,7 @@ function migrate(db) {
     );
   let backup = null;
   if (
+    (settle && Billing.needsMigration(db)) ||
     oldLedger ||
     legacy.length ||
     classTables.length ||
@@ -280,12 +282,13 @@ function migrate(db) {
       db.prepare(
         "INSERT INTO tg_audit(actor,action,payload) VALUES (?,?,?)",
       ).run("system", "取消托管班级", JSON.stringify(archived));
+    const settlement = settle ? Billing.settle(db) : null;
     if (db.prepare("PRAGMA foreign_key_check").all().length)
       throw Error("迁移外键校验失败，已回滚");
     if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
       throw Error("迁移完整性校验失败，已回滚");
     db.exec("COMMIT");
-    return { migrated, backup };
+    return { migrated, backup, settlement };
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;

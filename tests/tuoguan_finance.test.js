@@ -250,7 +250,7 @@ test("legacy nonzero ledgers migrate idempotently with original values and unres
     null,
   );
 });
-test("v2 transfer preserves split balances and IDs; v1 compatibility retains legacy amounts and conflicts", async (t) => {
+test("v3 transfer preserves split balances and IDs; v1 compatibility retains legacy amounts and conflicts", async (t) => {
   const a = fixture(t, true),
     b = fixture(t, true);
   b.db.exec(
@@ -260,7 +260,7 @@ test("v2 transfer preserves split balances and IDs; v1 compatibility retains leg
   a.attend();
   a.money(1000, 0, "2026-10-01");
   const bundle = T.exportData(a.db);
-  assert.equal(bundle.version, 2);
+  assert.equal(bundle.version, 3);
   let input = JSON.stringify(bundle);
   const plan = T.plan(b.db, T.parse(b.db, input));
   assert.equal(plan.summary.gift_recharge, 6000);

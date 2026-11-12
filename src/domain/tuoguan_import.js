@@ -373,6 +373,15 @@ function commit(store, b, actor) {
             r.raw_status ?? r.status,
           );
         }
+        for (const attendance of store.all(
+          "SELECT * FROM tg_attendance WHERE student_id=? AND source_import_id=?",
+          id,
+          p.id,
+        ))
+          require("./tuoguan_settlement").settle(store.db, actor, {
+            attendance: [attendance],
+            reason: "历史导入自动结算",
+          });
         store.run(
           "UPDATE tg_import_sources SET student_id=?,status='已导入',basis=? WHERE id=?",
           id,
@@ -409,7 +418,7 @@ function commit(store, b, actor) {
           ? "来源历史规则与已有规则重叠，待核对"
           : p.rules_pending
             ? "来源参数与制度说明冲突，待核对"
-            : "来源月度收费参数，历史考勤仍待核对",
+            : "来源历史参数（归档），有效考勤按现行统一标准自动计费",
         actor,
         p.rules_pending || conflict ? 1 : 0,
         p.id,
@@ -420,7 +429,7 @@ function commit(store, b, actor) {
       p.id,
     );
     const counts = store.get(
-      "SELECT COUNT(*) n,COALESCE(SUM(reference_fee),0) reference FROM tg_attendance WHERE source_import_id=?",
+      "SELECT COUNT(*) n,COALESCE(SUM(fee),0) consumed FROM tg_attendance WHERE source_import_id=?",
       p.id,
     );
     const result = {
@@ -435,10 +444,10 @@ function commit(store, b, actor) {
       conflicts: sources
         .filter((s) => s.status === "冲突")
         .map((s) => ({ source_key: s.source_key, reason: s.basis })),
-      reference_pending: counts.reference,
+
       difference: p.difference,
-      posted_amount: 0,
-      note: "仅导入档案和考勤；全部历史资金保持待核对",
+      posted_amount: counts.consumed,
+      note: "有效考勤已自动计费；历史期初与异常来源保留",
     };
     store.run(
       "UPDATE tg_imports SET result=? WHERE id=?",

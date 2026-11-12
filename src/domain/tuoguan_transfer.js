@@ -30,7 +30,8 @@ const REFS = {
   import_id: "tg_imports",
 };
 const TYPE = "liming_custody";
-const VERSION = 2;
+const VERSION = 3;
+const Billing = require("./tuoguan_settlement");
 const uuid = (value) =>
   typeof value === "string" &&
   /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value);
@@ -135,7 +136,7 @@ function parse(db, text) {
   } catch {
     fail("托管文本不是有效JSON");
   }
-  if (bundle?.type !== TYPE || ![1, VERSION].includes(bundle.version))
+  if (bundle?.type !== TYPE || ![1, 2, VERSION].includes(bundle.version))
     fail("托管文本格式或版本不兼容");
   const { checksum, ...content } = bundle;
   if (typeof checksum !== "string" || hash(content) !== checksum)
@@ -332,6 +333,71 @@ function parse(db, text) {
         .sort()
         .at(-1),
     );
+  // Normalize legacy evidence before planning, so a repeated old import compares
+  // against the same settled records instead of generating consumption twice.
+  const attendanceRows = bundle.records.tg_attendance.map((i) => ({
+    ...i.record,
+    id: i.uid,
+  }));
+  const ledgerRows = bundle.records.tg_ledger.map((i, n) => ({
+    ...i.record,
+    id: Number(i.source_key) || n + 1,
+  }));
+  const changes = Billing.plan(attendanceRows, ledgerRows);
+  if (bundle.version === VERSION && changes.length)
+    fail("自动计费文本包含未结算考勤，请在来源升级后重新复制");
+  let nextLedger = Math.max(0, ...ledgerRows.map((r) => r.id)) + 1;
+  let nextAudit =
+    Math.max(
+      0,
+      ...bundle.records.tg_audit.map((i) => Number(i.source_key) || 0),
+    ) + 1;
+  for (const c of changes) {
+    const item = bundle.records.tg_attendance.find(
+      (i) => i.uid === c.before.id,
+    );
+    const { id, ...after } = c.after;
+    item.record = after;
+    for (const [index, e] of c.entries.entries())
+      bundle.records.tg_ledger.push({
+        uid: Billing.entryUid(item.uid, c.ordinal + index),
+        source_key: String(nextLedger++),
+        record: {
+          student_id: after.student_id,
+          date: after.date,
+          ...e,
+          method: "",
+          voucher: "",
+          notes: "旧文本自动结算",
+          actor: "auto-migration",
+          attendance_id: item.uid,
+          created_at: bundle.exported_at,
+          actual_amount: null,
+          gift_amount: null,
+        },
+      });
+    bundle.records.tg_audit.push({
+      uid: Billing.entryUid(
+        item.uid,
+        "audit:" + c.ordinal + ":" + after.version,
+      ),
+      source_key: String(nextAudit++),
+      record: {
+        actor: "auto-migration",
+        action: "旧文本自动结算",
+        payload: JSON.stringify(c),
+        created_at: bundle.exported_at,
+      },
+    });
+  }
+  bundle.settlement = {
+    attendance: changes.map((c) => c.before.id),
+    ledger: changes.flatMap((c) =>
+      c.entries.map((e, index) =>
+        Billing.entryUid(c.before.id, c.ordinal + index),
+      ),
+    ),
+  };
   return bundle;
 }
 function plan(db, bundle) {
@@ -427,10 +493,29 @@ function plan(db, bundle) {
       [r.date, r.start_date, r.end_date, r.effective_date].filter(Boolean),
     ),
   ).sort();
+  const convertedAttendance = new Set(bundle.settlement?.attendance || []);
+  const convertedLedger = new Set(bundle.settlement?.ledger || []);
   return {
     actions,
     conflicts,
     summary: {
+      settlement: {
+        updated: actions.filter(
+          (a) =>
+            a.table === "tg_attendance" &&
+            a.status === "create" &&
+            convertedAttendance.has(a.uid),
+        ).length,
+        net_change:
+          -actions
+            .filter(
+              (a) =>
+                a.table === "tg_ledger" &&
+                a.status === "create" &&
+                convertedLedger.has(a.uid),
+            )
+            .reduce((n, a) => n + a.record.amount, 0) || 0,
+      },
       actual_recharge: bundle.records.tg_ledger
         .filter((i) => i.record.kind === "充值")
         .reduce((n, i) => n + (i.record.actual_amount ?? i.record.amount), 0),

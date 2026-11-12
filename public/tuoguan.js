@@ -170,6 +170,9 @@ window.TuoguanUI = (() => {
       '<div class="tg-detail-content"></div>',
       { onClose: () => sequence++ },
     );
+    dialog.element
+      .querySelector(".modal-panel")
+      .classList.add("tg-student-detail-panel");
     const content = dialog.element.querySelector(".tg-detail-content");
     const current = () =>
       dialog.element.isConnected && host === root && owner === auth.user?.id;
@@ -193,7 +196,6 @@ window.TuoguanUI = (() => {
             ? [
                 date,
                 record.status,
-                record.pending ? "历史费用未核定" : "",
                 record.raw_status ? "原始记录：" + record.raw_status : "",
                 record.notes,
               ]
@@ -243,7 +245,9 @@ window.TuoguanUI = (() => {
               metrics([
                 ["实际充值", money(a.actual_recharge)],
                 ["赠送充值", money(a.gift_recharge)],
-                ["已消费托管费", money(a.fee)],
+                ["本月托管消费", money(a.fee)],
+                ["本月实际消费", money(a.actual_consumption)],
+                ["本月赠送消费", money(a.gift_consumption)],
                 ["月末实际余额", money(a.actual_balance)],
                 ["月末赠送余额", money(a.gift_balance)],
               ]) +
@@ -622,6 +626,13 @@ window.TuoguanUI = (() => {
               ? " · 旧账归属待核对 " + r.legacy_unallocated + " 笔"
               : "") +
             "</p>" +
+            (r.settlement?.updated
+              ? "<p>旧考勤自动结算 " +
+                r.settlement.updated +
+                " 条，净补记 " +
+                money(r.settlement.net_change) +
+                "</p>"
+              : "") +
             (result.conflicts.length
               ? "<ul>" +
                 result.conflicts
@@ -979,12 +990,8 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions"><button class="btn primary" id="tg-new">新建托管学生</button></div>' +
       listTable(
-        ["学生", "年级", "首次参与", "最近参与"],
+        ["学生", "年级", "托管首日", "最近托管"],
         students.map((s) => {
-          const periods = data.periods
-              .filter((p) => p.student_id === s.id)
-              .sort((a, b) => a.start_date.localeCompare(b.start_date)),
-            last = periods.at(-1);
           return tr([
             '<button class="tg-profile-link" data-id="' +
               s.id +
@@ -996,8 +1003,8 @@ window.TuoguanUI = (() => {
               studentBadge(s.id) +
               "</button>",
             renderGradeBadge(s.grade),
-            periods[0]?.start_date || "—",
-            last ? last.end_date || "持续参与" : "—",
+            s.first_attendance_date || "—",
+            s.last_attendance_date || "—",
           ]);
         }),
       );
@@ -1077,34 +1084,37 @@ window.TuoguanUI = (() => {
         .filter((s) => s.has_attendance && matches(s, s))
         .sort(compareStudentGradeName),
       keys = [
+        "fee",
+        "actual_consumption",
+        "gift_consumption",
         "opening_actual",
         "opening_gift",
         "actual_recharge",
         "gift_recharge",
-        "fee",
         "actual_balance",
         "gift_balance",
       ];
     const headers = [
       "学生",
       "年级",
+      "本月托管消费",
+      "本月实际消费",
+      "本月赠送消费",
       "上月实际结转",
       "上月赠送结转",
       "本月实际充值",
       "本月赠送充值",
-      "已消费托管费",
       "月末实际余额",
       "月末赠送余额",
     ];
     const sum = (k) => money(rows.reduce((n, r) => n + r[k], 0));
     body.innerHTML =
       metrics([
-        ["本月已消费托管费", sum("fee")],
+        ["本月托管消费", sum("fee")],
         ["本月实际充值", sum("actual_recharge")],
         ["本月赠送充值", sum("gift_recharge")],
         ["月末剩余余额", sum("balance")],
       ]) +
-      '<div class="tg-actions"><button class="btn" id="tg-export">导出 CSV</button></div>' +
       listTable(
         headers,
         rows.map((r) =>
@@ -1141,32 +1151,6 @@ window.TuoguanUI = (() => {
         }
       };
     });
-    root.querySelector("#tg-export").onclick = () => {
-      const quote = (v) =>
-        '"' +
-        String(v)
-          .replace(/^[=+@-]/, "'")
-          .replace(/"/g, '""') +
-        '"';
-      const csv =
-        "\ufeff" +
-        [
-          ["序号", ...headers],
-          ...rows.map((r, i) => [
-            i + 1,
-            r.name,
-            r.grade,
-            ...keys.map((k) => (r[k] / 100).toFixed(2)),
-          ]),
-        ]
-          .map((row) => row.map(quote).join(","))
-          .join("\r\n");
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-      a.download = "托管费用-" + day.slice(0, 7) + ".csv";
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    };
   }
   function deleteMatrixDate(date) {
     const month = day.slice(0, 7),
@@ -1228,55 +1212,16 @@ window.TuoguanUI = (() => {
       renderFees(body);
     } else if (tab === "设置") {
       body.innerHTML =
-        '<section class="tg-settings-section"><div class="tg-actions"><div><h3>收费规则</h3></div><button class="btn primary" id="tg-rule">新增收费标准</button></div>' +
+        '<section class="tg-settings-section"><h3>收费规则</h3>' +
         table(
-          [
-            "生效日期",
-            "截止日期",
-            "状态",
-            "适用学生",
-            "出勤",
-            "请假",
-            "缺勤",
-            "说明",
-          ],
-          data.rules.map((r) =>
-            tr([
-              r.effective_date,
-              r.end_date || "长期",
-              r.pending ? "待核对" : "已确定",
-              r.student_id ? studentBadge(r.student_id) : "所有学生",
-              money(r.present),
-              money(r.leave_fee),
-              money(r.absent),
-              esc(r.notes),
-            ]),
+          ["考勤状态", "每日费用"],
+          Object.entries(data.billing_rule).map(([status, fee]) =>
+            tr([badge(status), money(fee)]),
           ),
         ) +
         '</section><div class="tg-actions"><button class="btn" id="tg-copy">复制托管信息</button><button class="btn" id="tg-paste">导入托管信息</button></div>';
       root.querySelector("#tg-copy").onclick = () => transferDialog(false);
       root.querySelector("#tg-paste").onclick = () => transferDialog(true);
-      root.querySelector("#tg-rule").onclick = () =>
-        form(
-          "新增收费标准",
-          select("student_id", "适用学生", [
-            [0, "所有学生"],
-            ...data.students.map((s) => [s.id, studentLabel(s)]),
-          ]) +
-            input("effective_date", "生效日期", day, "date") +
-            input("present", "出勤（元）", 50, "number") +
-            input("leave_fee", "请假（元）", 25, "number") +
-            input("absent", "缺勤（元）", 50, "number") +
-            input("notes", "说明"),
-          (v) =>
-            post("rule", {
-              ...v,
-              student_id: Number(v.student_id),
-              present: toCents(v.present),
-              leave_fee: toCents(v.leave_fee),
-              absent: toCents(v.absent),
-            }),
-        );
     }
     const changeDay = async (value) => {
       if (
@@ -1372,7 +1317,7 @@ window.TuoguanUI = (() => {
       const heads = [...t.querySelectorAll("th")];
       heads.forEach((th, i) => {
         if (
-          /金额|余额|结转|充值|退款|托管费|优惠|出勤|请假|缺勤/.test(
+          /金额|余额|结转|充值|退款|托管费|消费|优惠|出勤|请假|缺勤/.test(
             th.textContent,
           ) &&
           !["考勤", "状态"].some((x) => th.textContent.includes(x))

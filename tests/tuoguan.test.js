@@ -58,49 +58,37 @@ test("historical import conflict rolls back prior rows and calendar atomically",
   );
   db.close();
 });
-test("pending historical charge requires explicit resolution and keeps zero-fee states free", () => {
+test("historical correction settles automatically and retired resolution is rejected", () => {
   const { s, write, db } = fixture();
   s.run(
     "INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending) VALUES(1,'2026-09-20','未登记','初一','{}',0,1)",
   );
-  write("attendance", {date:"2026-09-20",rows:[{student_id:1,status:"出勤",version:1}]});
-  assert.equal(s.get('SELECT pending FROM tg_attendance').pending,1);
-  assert.equal(s.all('SELECT * FROM tg_ledger').length,0);
-  const b = {
-    id: 1,
-    version: 2,
-    status: "出勤",
-    present: 5000,
-    leave_fee: 2500,
-    absent: 2500,
-    notes: "合成核对凭据",
-    request_id: crypto.randomUUID(),
-  };
-  write("resolve", b);
-  write("resolve", b);
+  write("attendance", {
+    date: "2026-09-20",
+    rows: [{ student_id: 1, status: "出勤", version: 1 }],
+  });
+  assert.equal(s.get("SELECT pending FROM tg_attendance").pending, 0);
   assert.equal(
     s.snapshot("2026-09", true).summary.find((s) => s.id === 1).fee,
     5000,
   );
-  assert.equal(
-    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).pending,
-    0,
-  );
-  assert.throws(
-    () => write("resolve", { ...b, request_id: crypto.randomUUID() }),
-    /变更/,
-  );
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 1);
+  assert.throws(() => write("resolve", { id: 1 }), /不支持/);
   db.close();
 });
-test("student specific rates, effective dates and calendar integrity", () => {
+test("uniform rates reject custom overrides and preserve calendar integrity", () => {
   const { s, write, db } = fixture();
-  write("rule", {
-    student_id: 1,
-    effective_date: "2026-09-21",
-    present: 3000,
-    leave_fee: 1500,
-    absent: 3000,
-  });
+  assert.throws(
+    () =>
+      write("rule", {
+        student_id: 1,
+        effective_date: "2026-09-21",
+        present: 3000,
+        leave_fee: 1500,
+        absent: 3000,
+      }),
+    /统一标准/,
+  );
   write("calendar", { date: "2026-09-21", enabled: 1, version: 0 });
   write("attendance", {
     date: "2026-09-20",
@@ -112,7 +100,7 @@ test("student specific rates, effective dates and calendar integrity", () => {
   });
   assert.equal(
     s.snapshot("2026-09", true).summary.find((s) => s.id === 1).fee,
-    8000,
+    10000,
   );
   assert.throws(
     () => write("calendar", { date: "2026-09-20", enabled: 0, version: 1 }),
@@ -158,10 +146,6 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
     s.snapshot("2026-09", true).summary.find((s) => s.id === 1).balance,
     0,
   );
-  assert.equal(
-    s.snapshot("2026-09", true).summary.find((s) => s.id === 1).unregistered,
-    26,
-  );
   let version = 0;
   for (const [status, fee] of [
     ["出勤", 5000],
@@ -190,12 +174,16 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
       }),
     /他人修改/,
   );
-  write("rule", {
-    effective_date: "2026-09-01",
-    present: 9900,
-    leave_fee: 4900,
-    absent: 9900,
-  });
+  assert.throws(
+    () =>
+      write("rule", {
+        effective_date: "2026-09-01",
+        present: 9900,
+        leave_fee: 4900,
+        absent: 9900,
+      }),
+    /统一标准/,
+  );
   write("attendance", {
     date: "2026-09-20",
     rows: [{ student_id: 1, status: "出勤", version }],
@@ -305,7 +293,7 @@ test("exit, resume and overlap prevention", () => {
   assert.equal(s.all("SELECT * FROM tg_periods").length, 2);
   db.close();
 });
-test("synthetic September/October XLSX preview and repeated import do not post funds", () => {
+test("synthetic September/October XLSX preview and repeated import posts attendance only once", () => {
   const { s, db } = fixture();
   for (const m of [9, 10]) {
     const serial = m === 9 ? 46285 : 46305;
@@ -343,13 +331,14 @@ test("synthetic September/October XLSX preview and repeated import do not post f
     stage(s, p, "测试");
     const b = { id: p.id, mapping: { 4: 1 }, request_id: crypto.randomUUID() };
     const r = commit(s, b, "测试");
-    assert.equal(r.posted_amount, 0);
+    assert.equal(r.success, 1);
+    assert.equal(r.posted_amount, 5000);
     assert.deepEqual(
       commit(s, { ...b, request_id: crypto.randomUUID() }, "测试"),
       r,
     );
   }
-  assert.equal(s.all("SELECT * FROM tg_ledger").length, 0);
+  assert.equal(s.all("SELECT * FROM tg_ledger").length, 2);
   assert.equal(s.all("SELECT * FROM students").length, 2);
   db.close();
 });

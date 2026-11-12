@@ -94,7 +94,7 @@ test("a failed class migration rolls back schema and records", (t) => {
   );
   assert.equal(JSON.stringify(store.all("SELECT * FROM tg_students")), before);
 });
-test("four statuses, explicit default save, historical edits without posting, conflict and source retention", (t) => {
+test("four statuses, explicit default save, historical edits auto posting, conflict and source retention", (t) => {
   const { db, store, write } = fixture(t);
   assert.deepEqual(STATUSES, ["出勤", "请假", "放假", "不适用"]);
   store.snapshot("2026-09", true);
@@ -125,12 +125,12 @@ test("four statuses, explicit default save, historical edits without posting, co
     date: "2026-09-06",
     rows: [{ student_id: 1, status: "请假", version: 1 }],
   })[0];
-  assert.equal(changed.pending, 1);
-  assert.equal(changed.fee, 0);
-  assert.equal(changed.reference_fee, 2500);
+  assert.equal(changed.pending, 0);
+  assert.equal(changed.fee, 2500);
+  assert.equal(changed.reference_fee, 0);
   assert.equal(changed.raw_status, "26");
   assert.equal(changed.source_cell, "E13");
-  assert.equal(store.all("SELECT * FROM tg_ledger").length, 1);
+  assert.equal(store.all("SELECT * FROM tg_ledger").length, 2);
   assert.throws(
     () =>
       write("attendance", {

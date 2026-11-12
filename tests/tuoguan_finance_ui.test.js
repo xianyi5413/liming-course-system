@@ -280,6 +280,24 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
       }
     await go("tgStudents");
     assert.deepEqual(await indices(), [1, 2, 3, 4]);
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
+      ),
+      ["序号", "学生", "年级", "托管首日", "最近托管"],
+    );
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelector(".tg-profile-link[data-id=\\"1\\"]").closest("tr").cells].slice(3).map(e=>e.textContent)',
+      ),
+      ["2026-09-02", "2026-09-02"],
+    );
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelector(".tg-profile-link[data-id=\\"2\\"]").closest("tr").cells].slice(3).map(e=>e.textContent)',
+      ),
+      ["—", "—"],
+    );
     assert.doesNotMatch(
       await c.evaluate('document.querySelector("#tg-body").textContent'),
       /明细|操作/,
@@ -306,6 +324,29 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
     );
     await go("tgSummary");
     await month("2026-09");
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
+      ),
+      [
+        "序号",
+        "学生",
+        "年级",
+        "本月托管消费",
+        "本月实际消费",
+        "本月赠送消费",
+        "上月实际结转",
+        "上月赠送结转",
+        "本月实际充值",
+        "本月赠送充值",
+        "月末实际余额",
+        "月末赠送余额",
+      ],
+    );
+    assert.equal(
+      await c.evaluate('Boolean(document.querySelector("#tg-export"))'),
+      false,
+    );
     assert.deepEqual(await indices(), [1, 2, 3]);
     assert.doesNotMatch(
       await c.evaluate('document.querySelector("#tg-body").textContent'),
@@ -331,6 +372,58 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
       "document.querySelector('.tg-scroll').scrollLeft=90;window.outerScroll=document.querySelector('.tg-scroll').scrollLeft;document.querySelector('.tg-fee-row[data-student=\"1\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))",
     );
     await c.waitFor('Boolean(document.querySelector(".tg-detail-calendar"))');
+    const expected = (await call("snapshot?month=2026-09")).data.summary.find(
+      (s) => s.id === 1,
+    );
+    for (const [label, key] of [
+      ["本月托管消费", "fee"],
+      ["本月实际消费", "actual_consumption"],
+      ["本月赠送消费", "gift_consumption"],
+    ]) {
+      const card = await c.evaluate(
+        `(()=>{const elements=[...document.querySelectorAll('.tg-detail-content .metric')];return elements.find(e=>e.textContent.includes('${label}'))?.textContent})()`,
+      );
+      assert.ok(
+        card?.includes((expected[key] / 100).toFixed(2)),
+        label + " " + card,
+      );
+    }
+    for (const width of [1440, 390])
+      for (const theme of ["light", "dark"]) {
+        await c.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: width === 390,
+        });
+        await c.evaluate(`document.documentElement.dataset.theme='${theme}'`);
+        await c.evaluate("new Promise(requestAnimationFrame)");
+        const layout = await c.evaluate(
+          `(()=>{const panel=document.querySelector('.tg-student-detail-panel'),calendar=document.querySelector('.tg-detail-calendar');return{width:panel.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth+1,columns:getComputedStyle(calendar).gridTemplateColumns.split(' ').length,scroll:getComputedStyle(panel).overflowY}})()`,
+        );
+        assert.ok(layout.width <= width);
+        if (width === 1440)
+          assert.ok(layout.width >= 900 && layout.width <= 1100);
+        assert.equal(layout.overflow, false);
+        assert.equal(layout.columns, 7);
+        assert.equal(layout.scroll, "auto");
+        assert.equal(
+          await c.evaluate(
+            '[...document.querySelectorAll(".tg-calendar-status")].every(e=>e.scrollWidth<=e.clientWidth+1)',
+          ),
+          true,
+        );
+        fs.writeFileSync(
+          path.join(dir, `auto-detail-${width}-${theme}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+      }
+    await c.evaluate(
+      "window.outerScroll=document.querySelector('.tg-scroll').scrollLeft",
+    );
     assert.equal(
       await c.evaluate('document.querySelectorAll(".tg-calendar-day").length'),
       30,
@@ -498,4 +591,46 @@ test("full v11 split balances round trip and v10 ledger converts without changin
     source.close();
     db.close();
   }
+});
+test("failed old backup settlement rolls back the entire restore including existing pending target data", () => {
+  const source = path.join(dir, "rollback-source.xlsx");
+  exportFullData({ dbPath: env.DB_PATH, outputPath: source });
+  const data = verifyFullData(source).data,
+    record = data.tg_attendance.find((a) => a.status === "出勤");
+  record.pending = 1;
+  record.fee = 0;
+  record.rule_json = "{}";
+  data.tg_ledger = data.tg_ledger.filter((l) => l.attendance_id !== record.id);
+  const removedKeys = new Set(
+    data.tg_transfer_keys
+      .filter(
+        (k) =>
+          k.table_name === "tg_ledger" &&
+          !data.tg_ledger.some((l) => String(l.id) === k.row_key),
+      )
+      .map((k) => k.id),
+  );
+  data.tg_transfer_keys = data.tg_transfer_keys.filter(
+    (k) => !removedKeys.has(k.id),
+  );
+  fs.writeFileSync(source, buildFullDataBufferFromSourceData(data).buffer);
+  const target = path.join(dir, "rollback-target.sqlite"),
+    init = spawnSync(process.execPath, ["src/server.js", "--init-db"], {
+      cwd: root,
+      env: { ...env, DB_PATH: target },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+  assert.equal(init.status, 0, init.stderr);
+  const db = new DatabaseSync(target);
+  db.exec(
+    "INSERT INTO tg_students(id,name,grade) VALUES(1,'合成原目标','初一');INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending) VALUES(1,'2026-08-01','出勤','初一','{}',0,1);CREATE TRIGGER reject_auto_restore BEFORE INSERT ON tg_ledger WHEN NEW.kind='考勤扣费' BEGIN SELECT RAISE(ABORT,'synthetic restore settlement failure');END",
+  );
+  const before = T.signature(db);
+  assert.throws(
+    () => restoreFullData({ dbPath: target, inputPath: source }),
+    /synthetic restore settlement failure/,
+  );
+  assert.equal(T.signature(db), before);
+  db.close();
 });
