@@ -1,7 +1,7 @@
 const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
-  { key: "tuoguan", label: "托管", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "费用汇总"], ["tgSettings", "托管设置"]] },
+  { key: "tuoguan", label: "托管", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "托管费用"], ["tgSettings", "托管设置"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
@@ -1062,6 +1062,7 @@ function filterCustomSelectOptions(wrapper) {
 }
 
 function renderCustomSelectBadge(select, value) {
+  if (select?._renderOption) return select._renderOption(value);
   const field = select?.dataset?.field || "";
   if (field === "status") return renderCourseStatusBadge(value);
   if (field === "grade") return renderGradeBadge(value);
@@ -1079,7 +1080,7 @@ function selectDisplayText(select) {
 function syncCustomSelect(select, wrapper) {
   const valueNode = wrapper.querySelector(".custom-select-value");
   const field = select.dataset.field || "";
-  if (["status", "grade", "subject"].includes(field)) valueNode.innerHTML = renderCustomSelectBadge(select, selectDisplayText(select));
+  if (select._renderOption || ["status", "grade", "subject"].includes(field)) valueNode.innerHTML = renderCustomSelectBadge(select, selectDisplayText(select));
   else valueNode.textContent = selectDisplayText(select);
   const selectedOption = select.selectedOptions?.[0] || select.options?.[select.selectedIndex];
   wrapper.classList.toggle("candidate-conflict", selectedOption?.dataset?.candidateConflict === "1");
@@ -1261,7 +1262,7 @@ function enhanceCustomSelects() {
         stateNode.className = "custom-select-candidate-state";
         stateNode.textContent = nativeOption.dataset.candidateConflict === "1" ? "冲突" : "可选";
         option.append(valueNode, stateNode);
-      } else if (["status", "grade", "subject"].includes(field)) {
+      } else if (select._renderOption || ["status", "grade", "subject"].includes(field)) {
         const rawValue = nativeOption.dataset.candidateConflict !== undefined ? nativeOption.value : nativeOption.textContent;
         option.innerHTML = renderCustomSelectBadge(select, rawValue);
       } else option.textContent = nativeOption.textContent;
@@ -3702,7 +3703,10 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     const start = Number(table.dataset.uniformFrom), width = Math.max(...widths.slice(start));
     for (let i = start; i < widths.length; i++) widths[i] = width;
   }
-  if (table.dataset.frozenColumns === '2') table.style.setProperty('--frozen-first-width', `${widths[0]}px`);
+  if (Number(table.dataset.frozenColumns) >= 2) {
+    table.style.setProperty('--frozen-first-width', `${widths[0]}px`);
+    table.style.setProperty('--frozen-second-edge', `${widths[0]+widths[1]}px`);
+  }
   columns.forEach((column, index) => {
     const definition = definitions[index];
     column.style.width = `${Math.ceil(widths[index])}px`;
@@ -6293,7 +6297,7 @@ async function saveScheduleCourseType(input) {
   if (display?.isConnected) display.innerHTML = lessonInlinePickerDisplay({...row, course_type:type}, 'course_type');
 }
 
-function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
+function openInlineCustomPicker(trigger, { id, field, choices, onChange, renderOption }) {
   if (trigger?.getAttribute("aria-busy") === "true") return;
   if (!trigger || isReadonlyUser()) return;
   closeScheduleInlinePicker();
@@ -6302,6 +6306,7 @@ function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
   select.className = `schedule-inline-picker-native ${field === "status" ? "status-select" : ""}`;
   select.dataset.id = String(id);
   select.dataset.field = field;
+  select._renderOption = renderOption;
   select.innerHTML = choices;
   trigger.appendChild(select);
   enhanceCustomSelects();
@@ -14340,7 +14345,7 @@ function render() {
     tgAttendance: () => { renderTopbar("每日签到"); window.TuoguanUI.mount(contentEl, "签到"); },
     tgStudents: () => { renderTopbar("托管学生"); window.TuoguanUI.mount(contentEl, "学生"); },
     tgLedger: () => { renderTopbar("充值流水"); window.TuoguanUI.mount(contentEl, "流水"); },
-    tgSummary: () => { renderTopbar("费用汇总"); window.TuoguanUI.mount(contentEl, "汇总"); },
+    tgSummary: () => { renderTopbar("托管费用"); window.TuoguanUI.mount(contentEl, "汇总"); },
     tgSettings: () => { renderTopbar("托管设置"); window.TuoguanUI.mount(contentEl, "设置"); },
     dashboard: renderDashboard,
     lessons: renderLessons,

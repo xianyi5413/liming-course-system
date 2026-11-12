@@ -77,6 +77,10 @@ function upgradeLegacyBackup(data) {
   return data;
 }
 function simplifyBackup(data) {
+  for (const row of data.tg_ledger || []) {
+    row.actual_amount ??= null;
+    row.gift_amount ??= null;
+  }
   for (const table of ["tg_students", "tg_periods", "tg_attendance"])
     for (const row of data[table] || []) delete row.class_name;
   return data;
@@ -116,8 +120,20 @@ function migrate(db) {
         .some((c) => c.name === "class_name"),
   );
   const foreignKeys = db.prepare("PRAGMA foreign_keys").get().foreign_keys;
+  const ledgerColumns = exists("tg_ledger")
+    ? db
+        .prepare("PRAGMA table_info(tg_ledger)")
+        .all()
+        .map((c) => c.name)
+    : null;
+  const oldLedger =
+    ledgerColumns &&
+    ["actual_amount", "gift_amount"].some(
+      (name) => !ledgerColumns.includes(name),
+    );
   let backup = null;
   if (
+    oldLedger ||
     legacy.length ||
     classTables.length ||
     (exists("tg_students") && !exists("tg_transfer_keys"))
@@ -208,6 +224,7 @@ function migrate(db) {
     }
     db.exec(SCHEMA);
     const additions = {
+      tg_ledger: { actual_amount: "INTEGER", gift_amount: "INTEGER" },
       tg_rules: {
         end_date: "TEXT",
         pending: "INTEGER NOT NULL DEFAULT 0",

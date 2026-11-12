@@ -394,7 +394,7 @@ test("legacy SQLite export upgrades custody identities in memory without modifyi
   db.close();
   exportFullData({ dbPath: target, outputPath: file });
   const result = verifyFullData(file);
-  assert.equal(result.version, 10);
+  assert.equal(result.version, 11);
   assert.equal(result.data.tg_students.length, 1);
   assert.equal(result.data.tg_students[0].id, 1);
   const check = new DatabaseSync(target, { readOnly: true });
@@ -435,12 +435,11 @@ test("custody UI creates and edits its own profile without changing tutoring can
     );
     assert.ok(student);
     await c.waitFor(
-      'Boolean(document.querySelector(".tg-detail[data-id=\\"' +
+      'Boolean(document.querySelector(".tg-profile-link[data-id=\\"' +
         student.id +
         '\\"]"))',
     );
-    await c.click('.tg-detail[data-id="' + student.id + '"]');
-    await c.click("#tg-detail-profile");
+    await c.click('.tg-profile-link[data-id="' + student.id + '"]');
     await c.evaluate(
       'document.querySelector(".tg-form [name=notes]").value="合成独立档案备注"',
     );
@@ -1005,7 +1004,7 @@ test("transfer HTTP preview is read-only, confirmation is scoped and stale-safe,
   }
 });
 
-test("Edge streamlined UI, default dates, persisted removals, automatic filters, dual sticky columns and transfer dialogs", async () => {
+test("Edge streamlined UI, default dates, persisted removals, automatic filters, three sticky columns and transfer dialogs", async () => {
   const browser = await launchChrome(path.join(dir, "ux-transfer")),
     c = browser.session;
   const go = async (view) => {
@@ -1028,7 +1027,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       await c.evaluate(
         'document.querySelectorAll(".tg-matrix thead th").length',
       ),
-      29,
+      30,
     );
     assert.equal(
       await c.evaluate('Boolean(document.querySelector("#tg-search"))'),
@@ -1179,7 +1178,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
           'document.querySelector(".tg-scroll").scrollLeft=999999',
         );
         const geometry = await c.evaluate(
-          `(()=>{const w=document.querySelector('.tg-scroll'),t=document.querySelector('.tg-matrix'),a=t.querySelector('tbody td'),b=a.nextElementSibling;return {first:a.getBoundingClientRect().left-w.getBoundingClientRect().left,second:b.getBoundingClientRect().left-a.getBoundingClientRect().right,opaque:getComputedStyle(b).backgroundColor,overflow:document.documentElement.scrollWidth>innerWidth+1,badges:a.querySelectorAll('.student-badge').length,grade:b.querySelectorAll('.grade-badge').length};})()`,
+          `(()=>{const w=document.querySelector('.tg-scroll'),t=document.querySelector('.tg-matrix'),a=t.querySelector('tbody td'),b=a.nextElementSibling;return {first:a.getBoundingClientRect().left-w.getBoundingClientRect().left,second:b.getBoundingClientRect().left-a.getBoundingClientRect().right,opaque:getComputedStyle(b).backgroundColor,overflow:document.documentElement.scrollWidth>innerWidth+1,badges:b.querySelectorAll('.student-badge').length,grade:b.nextElementSibling.querySelectorAll('.grade-badge').length};})()`,
         );
         assert.ok(
           Math.abs(geometry.first) < 3 && Math.abs(geometry.second) < 3,
@@ -1206,7 +1205,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       await c.evaluate(
         '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
       ),
-      ["学生", "年级", "首次参与", "最近参与", "操作"],
+      ["序号", "学生", "年级", "首次参与", "最近参与"],
     );
     assert.equal(
       await c.evaluate(

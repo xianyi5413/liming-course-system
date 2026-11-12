@@ -3,6 +3,7 @@ const STATUSES = ["出勤", "请假", "放假", "不适用"];
 const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
 const GRADES = ["初一", "初二", "初三"];
 const { TABLES, migrate } = require("./tuoguan_schema");
+const { account: custodyAccount } = require("./tuoguan_account");
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
 }
@@ -433,12 +434,37 @@ function createStore(db) {
       } else if (action === "money") {
         student(b.student_id);
         date(b.date);
-        cents(b.amount);
+        const split =
+          b.actual_amount !== undefined || b.gift_amount !== undefined;
+        const actual = split ? cents(b.actual_amount) : cents(b.amount),
+          gift = split ? cents(b.gift_amount) : 0;
+        const amount = cents(actual + gift);
         if (!["充值", "退款", "优惠", "调整", "期初核定"].includes(b.kind))
           fail("资金类型无效");
-        if (!b.notes || !b.amount) fail("请填写非零金额及原因/核对依据");
-        if (b.kind !== "调整" && b.kind !== "期初核定" && b.amount < 0)
+        if (!b.notes || (!actual && !gift))
+          fail("请填写非零金额及原因/核对依据");
+        if (
+          b.kind !== "调整" &&
+          b.kind !== "期初核定" &&
+          (actual < 0 || gift < 0)
+        )
           fail("充值、退款、优惠请填写正金额");
+        if (b.kind === "退款") {
+          const balance = custodyAccount(
+            all(
+              "SELECT * FROM tg_ledger WHERE student_id=? AND date<=?",
+              b.student_id,
+              b.date,
+            ),
+            b.date.slice(0, 7),
+            b.date,
+          );
+          if (
+            actual > Math.max(0, balance.actual_balance) ||
+            gift > balance.gift_balance
+          )
+            fail("退款不能超过对应的实际或赠送余额");
+        }
         if (
           b.kind === "期初核定" &&
           get(
@@ -448,15 +474,17 @@ function createStore(db) {
         )
           fail("已核定期初，请使用有凭据的调整");
         run(
-          "INSERT INTO tg_ledger(student_id,date,kind,amount,method,voucher,notes,actor) VALUES (?,?,?,?,?,?,?,?)",
+          "INSERT INTO tg_ledger(student_id,date,kind,amount,method,voucher,notes,actor,actual_amount,gift_amount) VALUES (?,?,?,?,?,?,?,?,?,?)",
           b.student_id,
           b.date,
           b.kind,
-          b.kind === "退款" ? -b.amount : b.amount,
+          b.kind === "退款" ? -amount : amount,
           b.method || "",
           b.voucher || "",
           b.notes,
           actor,
+          (b.kind === "退款" ? -1 : 1) * actual,
+          (b.kind === "退款" ? -1 : 1) * gift,
         );
         result = { ok: true };
       } else if (action === "rule") {
@@ -545,36 +573,43 @@ function createStore(db) {
       data.rules = all(
         "SELECT * FROM tg_rules ORDER BY effective_date DESC,id DESC",
       );
-      data.ledger = all(
-        "SELECT * FROM tg_ledger WHERE date BETWEEN ? AND ? ORDER BY date DESC,id DESC",
-        start,
+      const ledgerByStudent = new Map();
+      for (const row of all(
+        "SELECT * FROM tg_ledger WHERE date<=? ORDER BY date,id",
         end,
+      )) {
+        if (!ledgerByStudent.has(row.student_id))
+          ledgerByStudent.set(row.student_id, []);
+        ledgerByStudent.get(row.student_id).push(row);
+      }
+      const accounts = new Map(
+        students.map((s) => [
+          s.id,
+          custodyAccount(ledgerByStudent.get(s.id) || [], month),
+        ]),
       );
-      const totals = new Map(
-        all(
-          `SELECT student_id,COALESCE(SUM(CASE WHEN date<? THEN amount ELSE 0 END),0) opening,SUM(amount) balance,SUM(CASE WHEN date>=? AND kind='充值' THEN amount ELSE 0 END) recharge,SUM(CASE WHEN date>=? AND kind='退款' THEN -amount ELSE 0 END) refund,SUM(CASE WHEN date>=? AND kind IN ('考勤扣费','考勤冲正') THEN -amount ELSE 0 END) fee,SUM(CASE WHEN date>=? AND kind IN ('优惠','调整','期初核定') THEN amount ELSE 0 END) adjustment FROM tg_ledger WHERE date<=? GROUP BY student_id`,
-          start,
-          start,
-          start,
-          start,
-          start,
-          end,
-        ).map((r) => [r.student_id, r]),
-      );
+      data.ledger = [...accounts.values()]
+        .flatMap((a) => a.ledger)
+        .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
       const recorded = new Set(
         attendance
           .filter((a) => a.status !== "未登记")
           .map((a) => a.student_id + ":" + a.date),
       );
       data.summary = students.map((s) => {
-        const sums = totals.get(s.id) || {
-          opening: 0,
-          balance: 0,
-          recharge: 0,
-          refund: 0,
-          fee: 0,
-          adjustment: 0,
-        };
+        const { ledger, ...sums } = accounts.get(s.id);
+        const saved = attendance
+          .filter((a) => a.student_id === s.id)
+          .sort((a, b) => a.date.localeCompare(b.date));
+        const historicalGrade =
+          saved.find((a) => a.grade)?.grade ||
+          periods.find(
+            (p) =>
+              p.student_id === s.id &&
+              p.start_date <= end &&
+              (!p.end_date || p.end_date >= start),
+          )?.grade ||
+          s.grade;
         const unregistered = calendar.filter(
           (c) =>
             c.enabled &&
@@ -589,6 +624,8 @@ function createStore(db) {
         return {
           ...s,
           ...sums,
+          grade: historicalGrade,
+          has_attendance: saved.some((a) => a.status !== "未登记"),
           unregistered,
           reference_pending: attendance
             .filter((a) => a.student_id === s.id && a.pending)

@@ -18,7 +18,7 @@ window.TuoguanUI = (() => {
     new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(
       new Date(),
     );
-  const money = (n) => (Number(n || 0) / 100).toFixed(2);
+  const money = (n) => formatMoney(Number(n || 0) / 100);
   const opt = (a, value) =>
     a
       .map((x) => {
@@ -39,16 +39,17 @@ window.TuoguanUI = (() => {
     rangeEnd = "",
     account = null;
   const filters = new Map();
-  const badge = (value) => {
-    const tones = {
+  const statusTone = (value) =>
+    ({
       出勤: DEFAULT_COURSE_STATUS_COLORS["已上"],
       不适用: DEFAULT_GENERIC_STATUS_COLORS["暂停"],
       请假: DEFAULT_COURSE_STATUS_COLORS["待上"],
       放假: DEFAULT_COURSE_STATUS_COLORS["请假"],
-    };
-    return tones[value]
+    })[value];
+  const badge = (value) => {
+    return statusTone(value)
       ? '<span class="entity-badge status-badge"' +
-          badgeColorStyle(tones[value]) +
+          badgeColorStyle(statusTone(value)) +
           ">" +
           esc(value) +
           "</span>"
@@ -157,71 +158,144 @@ window.TuoguanUI = (() => {
       '</div><div class="filter-summary"><button class="btn" id="tg-reset">清空筛选</button></div></div>'
     );
   }
-  function periodLabel(p) {
-    return p.end_date && p.end_date < today()
-      ? p.status === "在托"
-        ? "历史周期"
-        : p.status
-      : p.start_date > today()
-        ? "待入托"
-        : p.status;
-  }
   function studentDetail(id) {
-    const summary = data.summary.find((r) => r.id === id);
+    const host = root,
+      owner = auth.user?.id,
+      student = data.students.find((s) => s.id === id);
+    if (!student) return;
+    let month = day.slice(0, 7),
+      sequence = 0;
     const dialog = CourseDetails.dialog(
-      studentName(id) + " · 托管详情",
-      '<div class="tg-detail-content"><div class="tg-actions">' +
-        studentBadge(id) +
-        '<button class="btn" id="tg-detail-profile" ' +
-        (isReadonlyUser() ? "disabled" : "") +
-        '>修改资料</button></div><p class="muted">' +
-        day.slice(0, 7) +
-        " · " +
-        (summary ? "月末余额 ¥" + money(summary.balance) : "") +
-        "</p><h3>托管周期</h3>" +
-        table(
-          ["年级", "起始日期", "最后在托", "状态"],
-          data.periods
-            .filter((p) => p.student_id === id)
-            .map((p) =>
-              tr([
-                renderGradeBadge(p.grade),
-                p.start_date,
-                p.end_date || "—",
-                badge(periodLabel(p)),
-              ]),
-            ),
-        ) +
-        "<h3>当月考勤</h3>" +
-        table(
-          ["日期", "状态", "备注"],
-          data.attendance
-            .filter((a) => a.student_id === id)
-            .map((a) =>
-              tr([
-                a.date,
-                badge(a.status === "停课" ? "放假" : a.status),
-                esc(a.notes),
-              ]),
-            ),
-        ) +
-        "<h3>当月资金明细</h3>" +
-        table(
-          ["日期", "类型", "金额（元）", "备注"],
-          data.ledger
-            .filter((l) => l.student_id === id)
-            .map((l) =>
-              tr([l.date, esc(l.kind), money(l.amount), esc(l.notes)]),
-            ),
-        ) +
-        "</div>",
+      student.name + " · 托管详情",
+      '<div class="tg-detail-content"></div>',
+      { onClose: () => sequence++ },
     );
-    dialog.element.querySelector("#tg-detail-profile").onclick = () => {
-      dialog.close();
-      profileForm(data.students.find((s) => s.id === id));
-    };
+    const content = dialog.element.querySelector(".tg-detail-content");
+    const current = () =>
+      dialog.element.isConnected && host === root && owner === auth.user?.id;
+    function render(snapshot, loading = false, error = "") {
+      const a = snapshot?.summary.find((r) => r.id === id),
+        history = snapshot?.attendance.filter((r) => r.student_id === id) || [],
+        byDate = new Map(history.map((r) => [r.date, r]));
+      const [year, m] = month.split("-").map(Number),
+        first = new Date(Date.UTC(year, m - 1, 1)).getUTCDay(),
+        days = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      const cells = Array.from(
+        { length: first },
+        () => '<span aria-hidden="true"></span>',
+      );
+      for (let n = 1; n <= days; n++) {
+        const date = month + "-" + String(n).padStart(2, "0"),
+          record = byDate.get(date),
+          status = record?.status === "停课" ? "放假" : record?.status;
+        const tone = statusTone(status),
+          title = record
+            ? [
+                date,
+                record.status,
+                record.pending ? "历史费用未核定" : "",
+                record.raw_status ? "原始记录：" + record.raw_status : "",
+                record.notes,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : date + " 无已保存考勤";
+        cells.push(
+          '<div class="tg-calendar-day" data-date="' +
+            date +
+            '" data-status="' +
+            esc(status || "") +
+            '" title="' +
+            esc(title) +
+            '"' +
+            (tone ? badgeColorStyle(tone) : "") +
+            "><span>" +
+            n +
+            '</span><span class="tg-calendar-status">' +
+            esc(status === "未登记" ? "异常/空白" : status || "—") +
+            "</span></div>",
+        );
+      }
+      const header =
+        '<div class="tg-actions">' +
+        renderStudentBadge(student, { grade: a?.grade || student.grade }) +
+        renderGradeBadge(a?.grade || student.grade) +
+        '</div><div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong>' +
+        year +
+        "年" +
+        m +
+        '月</strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button></div>';
+      content.innerHTML =
+        header +
+        (loading
+          ? '<p role="status">正在加载…</p>'
+          : error
+            ? '<p role="alert">' + esc(error) + "</p>"
+            : '<div class="date-range-weekdays">' +
+              [..."日一二三四五六"]
+                .map((d) => "<span>" + d + "</span>")
+                .join("") +
+              '</div><div class="tg-detail-calendar">' +
+              cells.join("") +
+              '</div><div class="tg-calendar-legend">' +
+              statuses.map(badge).join("") +
+              "</div>" +
+              metrics([
+                ["实际充值", money(a.actual_recharge)],
+                ["赠送充值", money(a.gift_recharge)],
+                ["已消费托管费", money(a.fee)],
+                ["月末实际余额", money(a.actual_balance)],
+                ["月末赠送余额", money(a.gift_balance)],
+              ]) +
+              (a.unpaid_current_fee
+                ? '<p class="muted-tip">本月费用含未付 ' +
+                  money(a.unpaid_current_fee) +
+                  "</p>"
+                : "") +
+              (a.prior_debt_gift_offset
+                ? '<p class="muted-tip">赠送余额抵扣结转或调整欠费 ' +
+                  money(a.prior_debt_gift_offset) +
+                  "</p>"
+                : "") +
+              table(
+                ["日期", "类型", "实际金额", "赠送金额", "备注"],
+                snapshot.ledger
+                  .filter((r) => r.student_id === id)
+                  .map((r) =>
+                    tr([
+                      r.date,
+                      esc(r.kind),
+                      money(r.actual_amount),
+                      money(r.gift_amount),
+                      esc(r.notes) +
+                        (r.legacy_unallocated ? "（旧账归属待核对）" : ""),
+                    ]),
+                  ),
+              ));
+      content.dataset.month = month;
+      content.dataset.loading = loading ? "true" : "false";
+      for (const b of content.querySelectorAll("[data-detail-step]"))
+        b.onclick = async () => {
+          month = offsetMonth(
+            month + "-01",
+            Number(b.dataset.detailStep),
+          ).slice(0, 7);
+          const wanted = month,
+            request = ++sequence;
+          render(null, true);
+          try {
+            const next = await api("snapshot?month=" + wanted);
+            if (current() && request === sequence && wanted === month)
+              render(next);
+          } catch (e) {
+            if (current() && request === sequence)
+              render(null, false, e.message);
+          }
+        };
+      scheduleAdaptiveTableColumns();
+    }
+    render(data);
   }
-
   async function api(action, body) {
     const r = await fetch("/api/tuoguan/" + action, {
       method: body ? "POST" : "GET",
@@ -282,10 +356,11 @@ window.TuoguanUI = (() => {
   function matches(s, p = {}) {
     return (!query || s.name.includes(query)) && (!grade || p?.grade === grade);
   }
-  const table = (headers, rows) =>
-    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${headers.map((h) => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td class="empty" colspan="${headers.length}">${empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
-  const tr = (values) =>
-    `<tr>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
+  const table = (headers, rows, indexed = false) =>
+    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${indexed ? rowIndexColumn() : ""}${headers.map((h) => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(/^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed)}">${empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
+  const listTable = (headers, rows) => table(headers, rows, true);
+  const tr = (values, attrs = "") =>
+    `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
   function form(title, fields, save) {
     const host = root,
       owner = auth.user?.id,
@@ -535,6 +610,17 @@ window.TuoguanUI = (() => {
             r.skipped +
             " · 冲突 " +
             r.conflicts +
+            "</p><p>实际充值 " +
+            money(r.actual_recharge) +
+            " · 赠送充值 " +
+            money(r.gift_recharge) +
+            "；本次新增实际 " +
+            money(r.new_actual_recharge) +
+            "、赠送 " +
+            money(r.new_gift_recharge) +
+            (r.legacy_unallocated
+              ? " · 旧账归属待核对 " + r.legacy_unallocated + " 笔"
+              : "") +
             "</p>" +
             (result.conflicts.length
               ? "<ul>" +
@@ -718,8 +804,16 @@ window.TuoguanUI = (() => {
         ? '<button class="btn" id="tg-add-student">添加学生</button><button class="btn" id="tg-remove-students">删除学生</button><button class="btn" id="tg-add-date">添加日期</button><button class="btn" id="tg-remove-dates">删除日期</button>'
         : "") +
       "</div>" +
-      table(
-        ["学生", "年级", ...dates.map((d) => d.slice(5))],
+      listTable(
+        [
+          "学生",
+          "年级",
+          ...dates.map((d) =>
+            finance
+              ? `<button class="tg-date-header" data-remove-date="${d}" aria-label="删除${d}托管日期" ${isReadonlyUser() ? "disabled" : ""}>${d.slice(5)}</button>`
+              : d.slice(5),
+          ),
+        ],
         monthStudents.map(
           (s) =>
             '<tr data-student="' +
@@ -759,10 +853,15 @@ window.TuoguanUI = (() => {
             "</tr>",
         ),
       );
+    body
+      .querySelectorAll("[data-remove-date]")
+      .forEach(
+        (b) => (b.onclick = () => deleteMatrixDate(b.dataset.removeDate)),
+      );
     const matrix = body.querySelector(".tg-table");
     matrix.classList.add("tg-matrix");
-    matrix.dataset.frozenColumns = "2";
-    matrix.dataset.uniformFrom = "2";
+    matrix.dataset.frozenColumns = "3";
+    matrix.dataset.uniformFrom = "3";
     body
       .querySelector("#tg-remove-students")
       ?.addEventListener("click", () => removeMatrixStudents(monthStudents));
@@ -786,6 +885,7 @@ window.TuoguanUI = (() => {
         openInlineCustomPicker(button, {
           id,
           field: "status",
+          renderOption: badge,
           choices: opt(statuses, shown),
           onChange: async (control) => {
             cellWrites++;
@@ -872,6 +972,241 @@ window.TuoguanUI = (() => {
         }
       };
   }
+  function renderStudents(body) {
+    const students = data.students
+      .filter((s) => matches(s, s))
+      .sort(compareStudentGradeName);
+    body.innerHTML =
+      '<div class="tg-actions"><button class="btn primary" id="tg-new">新建托管学生</button></div>' +
+      listTable(
+        ["学生", "年级", "首次参与", "最近参与"],
+        students.map((s) => {
+          const periods = data.periods
+              .filter((p) => p.student_id === s.id)
+              .sort((a, b) => a.start_date.localeCompare(b.start_date)),
+            last = periods.at(-1);
+          return tr([
+            '<button class="tg-profile-link" data-id="' +
+              s.id +
+              '" aria-label="修改' +
+              esc(s.name) +
+              '的资料" ' +
+              (isReadonlyUser() ? "disabled" : "") +
+              ">" +
+              studentBadge(s.id) +
+              "</button>",
+            renderGradeBadge(s.grade),
+            periods[0]?.start_date || "—",
+            last ? last.end_date || "持续参与" : "—",
+          ]);
+        }),
+      );
+    root.querySelector("#tg-new").onclick = () => profileForm();
+    body
+      .querySelectorAll(".tg-profile-link")
+      .forEach(
+        (b) =>
+          (b.onclick = () =>
+            profileForm(
+              data.students.find((s) => s.id === Number(b.dataset.id)),
+            )),
+      );
+  }
+  function renderLedger(body) {
+    const rows = data.ledger.filter(
+      (l) =>
+        (!ledgerKind || l.kind === ledgerKind) &&
+        (!rangeStart || l.date >= rangeStart) &&
+        (!rangeEnd || l.date <= rangeEnd) &&
+        matches(
+          { name: studentName(l.student_id) },
+          period(l.student_id, l.date) ||
+            data.students.find((s) => s.id === l.student_id),
+        ),
+    );
+    body.innerHTML =
+      '<div class="tg-actions"><button class="btn primary" id="tg-money">新增资金记录</button></div>' +
+      listTable(
+        [
+          "日期",
+          "学生",
+          "类型",
+          "实际金额",
+          "赠送金额",
+          "方式",
+          "经办人",
+          "凭证",
+          "备注",
+        ],
+        rows.map((l) =>
+          tr([
+            l.date,
+            studentBadge(l.student_id, period(l.student_id, l.date)?.grade),
+            esc(l.kind),
+            money(l.actual_amount),
+            money(l.gift_amount),
+            esc(l.method),
+            esc(l.actor),
+            esc(l.voucher),
+            esc(l.notes) + (l.legacy_unallocated ? "（旧账归属待核对）" : ""),
+          ]),
+        ),
+      );
+    root.querySelector("#tg-money").onclick = () =>
+      form(
+        "托管资金记录",
+        studentSelect() +
+          input("date", "业务日期", day, "date") +
+          select("kind", "类型", ["充值", "退款", "优惠", "调整", "期初核定"]) +
+          input("actual_amount", "实际金额（元）", "0", "number") +
+          input("gift_amount", "赠送金额（元）", "0", "number") +
+          input("method", "支付方式") +
+          input("voucher", "凭证 / 单号") +
+          input("notes", "原因及核对依据（必填）"),
+        (v) =>
+          post("money", {
+            ...v,
+            student_id: Number(v.student_id),
+            actual_amount: toCents(v.actual_amount),
+            gift_amount: toCents(v.gift_amount),
+          }),
+      );
+  }
+  function renderFees(body) {
+    const rows = data.summary
+        .filter((s) => s.has_attendance && matches(s, s))
+        .sort(compareStudentGradeName),
+      keys = [
+        "opening_actual",
+        "opening_gift",
+        "actual_recharge",
+        "gift_recharge",
+        "fee",
+        "actual_balance",
+        "gift_balance",
+      ];
+    const headers = [
+      "学生",
+      "年级",
+      "上月实际结转",
+      "上月赠送结转",
+      "本月实际充值",
+      "本月赠送充值",
+      "已消费托管费",
+      "月末实际余额",
+      "月末赠送余额",
+    ];
+    const sum = (k) => money(rows.reduce((n, r) => n + r[k], 0));
+    body.innerHTML =
+      metrics([
+        ["本月已消费托管费", sum("fee")],
+        ["本月实际充值", sum("actual_recharge")],
+        ["本月赠送充值", sum("gift_recharge")],
+        ["月末剩余余额", sum("balance")],
+      ]) +
+      '<div class="tg-actions"><button class="btn" id="tg-export">导出 CSV</button></div>' +
+      listTable(
+        headers,
+        rows.map((r) =>
+          tr(
+            [
+              renderStudentBadge(r, { grade: r.grade }),
+              renderGradeBadge(r.grade),
+              ...keys.map(
+                (k) =>
+                  '<span class="' +
+                  (r[k] < 0 ? "tg-negative" : "") +
+                  '">' +
+                  money(r[k]) +
+                  "</span>",
+              ),
+            ],
+            ' class="tg-fee-row" data-student="' +
+              r.id +
+              '" tabindex="0" role="button" aria-label="查看' +
+              esc(r.name) +
+              '托管详情"',
+          ),
+        ),
+      );
+    body.querySelectorAll(".tg-fee-row").forEach((row) => {
+      row.onclick = (e) => {
+        if (!e.target.closest("button,a,input,select,textarea"))
+          studentDetail(Number(row.dataset.student));
+      };
+      row.onkeydown = (e) => {
+        if (e.target === row && ["Enter", " "].includes(e.key)) {
+          e.preventDefault();
+          studentDetail(Number(row.dataset.student));
+        }
+      };
+    });
+    root.querySelector("#tg-export").onclick = () => {
+      const quote = (v) =>
+        '"' +
+        String(v)
+          .replace(/^[=+@-]/, "'")
+          .replace(/"/g, '""') +
+        '"';
+      const csv =
+        "\ufeff" +
+        [
+          ["序号", ...headers],
+          ...rows.map((r, i) => [
+            i + 1,
+            r.name,
+            r.grade,
+            ...keys.map((k) => (r[k] / 100).toFixed(2)),
+          ]),
+        ]
+          .map((row) => row.map(quote).join(","))
+          .join("\r\n");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      a.download = "托管费用-" + day.slice(0, 7) + ".csv";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+  }
+  function deleteMatrixDate(date) {
+    const month = day.slice(0, 7),
+      host = root,
+      owner = auth.user?.id,
+      version = data.calendar.find((c) => c.date === date)?.version || 0;
+    const [y, m, d] = date.split("-").map(Number);
+    const dialog = CourseDetails.dialog(
+      "删除托管日期",
+      '<div class="tg-detail-content"><p>确定删除' +
+        y +
+        "年" +
+        m +
+        "月" +
+        d +
+        '日的托管日期吗？</p><p role="alert"></p><div class="modal-actions"><button class="btn" data-date-cancel>取消</button><button class="btn primary" data-date-confirm>确认删除</button></div></div>',
+      { size: "compact" },
+    );
+    dialog.element.querySelector("[data-date-cancel]").onclick = dialog.close;
+    const button = dialog.element.querySelector("[data-date-confirm]");
+    button.onclick = async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        if (
+          host !== root ||
+          owner !== auth.user?.id ||
+          month !== day.slice(0, 7)
+        )
+          throw Error("页面已变化，请重新选择");
+        await post("remove-dates", { month, dates: [{ date, version }] });
+        dialog.close();
+        if (host === root && month === day.slice(0, 7)) await refresh();
+      } catch (e) {
+        dialog.element.querySelector("[role=alert]").textContent = e.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+  }
   function draw() {
     if (!root?.isConnected) return;
     const focus = document.activeElement,
@@ -886,177 +1221,11 @@ window.TuoguanUI = (() => {
     if (tab === "签到") {
       renderMatrix(body);
     } else if (tab === "学生") {
-      const students = data.students
-        .filter((s) => matches(s, s))
-        .sort(compareStudentGradeName);
-      body.innerHTML =
-        '<div class="tg-actions"><button class="btn primary" id="tg-new">新建托管学生</button></div>' +
-        table(
-          ["学生", "年级", "首次参与", "最近参与", "操作"],
-          students.map((s) => {
-            const periods = data.periods
-              .filter((p) => p.student_id === s.id)
-              .sort((a, b) => a.start_date.localeCompare(b.start_date));
-            const last = periods.at(-1);
-            return tr([
-              studentBadge(s.id),
-              renderGradeBadge(s.grade),
-              periods[0]?.start_date || "—",
-              last ? last.end_date || "持续参与" : "—",
-              '<button class="btn tg-detail" data-id="' +
-                s.id +
-                '">明细</button>',
-            ]);
-          }),
-        );
-      root.querySelector("#tg-new").onclick = () => profileForm();
+      renderStudents(body);
     } else if (tab === "流水") {
-      body.innerHTML =
-        '<div class="tg-actions"><button class="btn primary" id="tg-money">新增资金记录</button></div>' +
-        table(
-          ["日期", "学生", "类型", "金额", "方式", "经办人", "凭证", "备注"],
-          data.ledger
-            .filter(
-              (l) =>
-                (!ledgerKind || l.kind === ledgerKind) &&
-                (!rangeStart || l.date >= rangeStart) &&
-                (!rangeEnd || l.date <= rangeEnd) &&
-                matches(
-                  { name: studentName(l.student_id) },
-                  period(l.student_id, l.date) ||
-                    data.students.find((s) => s.id === l.student_id),
-                ),
-            )
-            .map((l) =>
-              tr([
-                l.date,
-                `<button class="btn tg-detail" data-id="${l.student_id}">${studentBadge(l.student_id)}</button>`,
-                l.kind,
-                money(l.amount),
-                esc(l.method),
-                esc(l.actor),
-                esc(l.voucher),
-                esc(l.notes),
-              ]),
-            ),
-        );
-      root.querySelector("#tg-money").onclick = () =>
-        form(
-          "托管资金记录",
-          studentSelect() +
-            input("date", "业务日期", day, "date") +
-            select("kind", "类型", [
-              "充值",
-              "退款",
-              "优惠",
-              "调整",
-              "期初核定",
-            ]) +
-            input("amount", "金额（元）", "", "number") +
-            input("method", "支付方式") +
-            input("voucher", "凭证 / 单号") +
-            input("notes", "原因及核对依据（必填）"),
-          (v) =>
-            post("money", {
-              ...v,
-              student_id: Number(v.student_id),
-              amount: toCents(v.amount),
-            }),
-        );
+      renderLedger(body);
     } else if (tab === "汇总") {
-      const rows = data.summary.filter((s) =>
-        matches(
-          s,
-          period(s.id, day) ||
-            data.periods.find((p) => p.student_id === s.id) ||
-            s,
-        ),
-      );
-      body.innerHTML =
-        metrics([
-          [
-            "本月已入账托管费",
-            "¥" + money(rows.reduce((a, s) => a + s.fee, 0)),
-          ],
-          ["本月充值", "¥" + money(rows.reduce((a, s) => a + s.recharge, 0))],
-          [
-            "月末预存",
-            "¥" + money(rows.reduce((a, s) => a + Math.max(s.balance, 0), 0)),
-          ],
-          [
-            "月末欠费",
-            "¥" + money(rows.reduce((a, s) => a + Math.max(-s.balance, 0), 0)),
-          ],
-        ]) +
-        '<div class="tg-actions"><span class="muted">' +
-        day.slice(0, 7) +
-        " · 当前筛选 " +
-        rows.length +
-        ' 名学生 · 参考费未入账</span><button class="btn" id="tg-export">导出 CSV</button></div>' +
-        table(
-          [
-            "学生",
-            "上月结转",
-            "充值",
-            "退款",
-            "优惠/调整/期初",
-            "已入账托管费",
-            "账面月末余额",
-            "未登记",
-            "未入账参考费",
-          ],
-          rows.map((s) =>
-            tr([
-              renderStudentBadge(s, { grade: s.grade }),
-              ...["opening", "recharge", "refund", "adjustment", "fee"].map(
-                (k) => money(s[k]),
-              ),
-              `<span class="${s.balance < 0 ? "tg-negative" : ""}">${money(s.balance)}</span>`,
-              s.unregistered,
-              money(s.reference_pending),
-            ]),
-          ),
-        );
-      root.querySelector("#tg-export").onclick = () => {
-        const keys = [
-          "name",
-          "opening",
-          "recharge",
-          "refund",
-          "adjustment",
-          "fee",
-          "balance",
-          "unregistered",
-          "reference_pending",
-        ];
-        const csv =
-          "\ufeff" +
-          [
-            "学生,上月结转(元),充值(元),退款(元),调整(元),已入账托管费(元),账面余额(元),未登记,未入账参考费(元)",
-            ...rows.map((s) =>
-              keys
-                .map(
-                  (k) =>
-                    '"' +
-                    String(
-                      typeof s[k] === "number" &&
-                        !["unregistered", "pending"].includes(k)
-                        ? money(s[k])
-                        : s[k],
-                    )
-                      .replace(/^[=+@-]/, "'")
-                      .replace(/"/g, '""') +
-                    '"',
-                )
-                .join(","),
-            ),
-          ].join("\r\n");
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-        a.download = "托管汇总-" + day.slice(0, 7) + ".csv";
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      };
+      renderFees(body);
     } else if (tab === "设置") {
       body.innerHTML =
         '<section class="tg-settings-section"><div class="tg-actions"><div><h3>收费规则</h3></div><button class="btn primary" id="tg-rule">新增收费标准</button></div>' +
@@ -1196,9 +1365,6 @@ window.TuoguanUI = (() => {
           load({ refreshGlobal: false });
         }),
     );
-    root
-      .querySelectorAll(".tg-detail")
-      .forEach((b) => (b.onclick = () => studentDetail(Number(b.dataset.id))));
     root
       .querySelectorAll("input:not([type=checkbox]),select")
       .forEach((e) => e.classList.add("control"));

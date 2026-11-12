@@ -30,7 +30,7 @@ const REFS = {
   import_id: "tg_imports",
 };
 const TYPE = "liming_custody";
-const VERSION = 1;
+const VERSION = 2;
 const uuid = (value) =>
   typeof value === "string" &&
   /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value);
@@ -135,7 +135,7 @@ function parse(db, text) {
   } catch {
     fail("托管文本不是有效JSON");
   }
-  if (bundle?.type !== TYPE || bundle.version !== VERSION)
+  if (bundle?.type !== TYPE || ![1, VERSION].includes(bundle.version))
     fail("托管文本格式或版本不兼容");
   const { checksum, ...content } = bundle;
   if (typeof checksum !== "string" || hash(content) !== checksum)
@@ -185,6 +185,15 @@ function parse(db, text) {
       seen.add(item.uid);
       const r = item.record;
       if (!r || typeof r !== "object" || Array.isArray(r)) fail("记录格式无效");
+      if (bundle.version === 1 && t === "tg_ledger") {
+        if (
+          Object.hasOwn(r, "actual_amount") ||
+          Object.hasOwn(r, "gift_amount")
+        )
+          fail("旧版文本包含不兼容的分账字段");
+        r.actual_amount = null;
+        r.gift_amount = null;
+      }
       const expected = [...fields.keys()].filter((k) => k !== "id");
       if (canonical(Object.keys(r).sort()) !== canonical(expected.sort()))
         fail("记录字段与当前版本不一致：" + t);
@@ -250,6 +259,22 @@ function parse(db, text) {
           if (rule[k] != null && cents(rule[k]) < 0) fail("收费快照无效");
       }
       if (t === "tg_ledger") {
+        const split = r.actual_amount !== null || r.gift_amount !== null;
+        if (
+          split &&
+          (r.actual_amount === null ||
+            r.gift_amount === null ||
+            cents(r.actual_amount) + cents(r.gift_amount) !== r.amount)
+        )
+          fail("实际与赠送金额不一致");
+        if (split && r.attendance_id !== null) fail("考勤分配应由统一账务计算");
+        if (
+          split &&
+          ((["充值", "优惠"].includes(r.kind) &&
+            (r.actual_amount < 0 || r.gift_amount < 0)) ||
+            (r.kind === "退款" && (r.actual_amount > 0 || r.gift_amount > 0)))
+        )
+          fail("分账方向无效");
         if (
           ![
             "充值",
@@ -293,6 +318,20 @@ function parse(db, text) {
     }
   for (const [uid, a] of attendance)
     if ((fees.get(uid) || 0) !== -a.fee) fail("考勤金额与资金流水不一致");
+  const ledgers = new Map();
+  for (const [i, item] of bundle.records.tg_ledger.entries()) {
+    const r = { ...item.record, id: Number(item.source_key) || i + 1 };
+    if (!ledgers.has(r.student_id)) ledgers.set(r.student_id, []);
+    ledgers.get(r.student_id).push(r);
+  }
+  for (const list of ledgers.values())
+    require("./tuoguan_account").account(
+      list,
+      list
+        .map((r) => r.date.slice(0, 7))
+        .sort()
+        .at(-1),
+    );
   return bundle;
 }
 function plan(db, bundle) {
@@ -392,6 +431,32 @@ function plan(db, bundle) {
     actions,
     conflicts,
     summary: {
+      actual_recharge: bundle.records.tg_ledger
+        .filter((i) => i.record.kind === "充值")
+        .reduce((n, i) => n + (i.record.actual_amount ?? i.record.amount), 0),
+      gift_recharge: bundle.records.tg_ledger
+        .filter((i) => i.record.kind === "充值")
+        .reduce((n, i) => n + (i.record.gift_amount || 0), 0),
+      new_actual_recharge: actions
+        .filter(
+          (a) =>
+            a.table === "tg_ledger" &&
+            a.status === "create" &&
+            a.record.kind === "充值",
+        )
+        .reduce((n, a) => n + (a.record.actual_amount ?? a.record.amount), 0),
+      new_gift_recharge: actions
+        .filter(
+          (a) =>
+            a.table === "tg_ledger" &&
+            a.status === "create" &&
+            a.record.kind === "充值",
+        )
+        .reduce((n, a) => n + (a.record.gift_amount || 0), 0),
+      legacy_unallocated: bundle.records.tg_ledger.filter(
+        (i) =>
+          i.record.attendance_id === null && i.record.actual_amount === null,
+      ).length,
       students: bundle.records.tg_students.length,
       attendance: bundle.records.tg_attendance.length,
       rules: bundle.records.tg_rules.length,

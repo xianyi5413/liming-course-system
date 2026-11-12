@@ -14329,11 +14329,24 @@ table.adaptive-table td.single-line-note,
 .tg-table td:first-child, .tg-table th:first-child { position: sticky; left: 0; z-index: 1; background: var(--panel); }
 .tg-table th:first-child { z-index: 3; background: var(--table-head); }
 .tg-table.tg-matrix th, .tg-table.tg-matrix td { text-align: center; }
-.tg-table.tg-matrix :is(th,td):first-child { text-align: left; }
+.tg-table .row-index, .tg-table.tg-matrix :is(th,td):first-child { text-align: center; }
+.tg-table.tg-matrix :is(th,td):nth-child(2) { text-align: left; }
 .tg-matrix :is(th,td):nth-child(2) { position: sticky; left: var(--frozen-first-width, 0px); z-index: 1; background: var(--panel); }
+.tg-matrix :is(th,td):nth-child(3) { position: sticky; left: var(--frozen-second-edge, 0px); z-index: 1; background: var(--panel); }
 .tg-matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--table-head); }
-.tg-matrix thead :is(th:first-child,th:nth-child(2)) { z-index: 4; background: var(--table-head); }
-.tg-matrix tbody tr:hover :is(td:first-child,td:nth-child(2)) { background: var(--panel); }
+.tg-matrix thead :is(th:first-child,th:nth-child(2),th:nth-child(3)) { z-index: 4; background: var(--table-head); }
+.tg-matrix tbody tr:hover :is(td:first-child,td:nth-child(2),td:nth-child(3)) { background: var(--panel); }
+.tg-date-header, .tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.tg-date-header:hover { color: var(--accent); text-decoration: underline; }
+.tg-fee-row { cursor: pointer; }
+.tg-fee-row:hover td, .tg-fee-row:focus-visible td { background: var(--table-head); }
+.tg-detail-month { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin: var(--space-3) 0; }
+.tg-detail-calendar { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: var(--space-2); }
+.tg-calendar-day { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; min-width: 0; min-height: 65px; text-align: center; border-radius: var(--radius-sm); background: var(--badge-bg,var(--panel)); color: var(--badge-fg,var(--muted)); border: 1px solid color-mix(in srgb,currentColor 18%,transparent); }
+.tg-calendar-status { font-size: var(--text-caption); white-space: nowrap; }
+.tg-calendar-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+.tg-detail-content { width: min(780px,100%); box-sizing: border-box; }
+.tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); }
 .tg-matrix-actions { justify-content: flex-start; }
 .tg-choice-list { display: grid; gap: var(--space-2); max-height: 50vh; overflow: auto; }
 .tg-date-nav { flex-wrap: nowrap; }
@@ -14358,6 +14371,10 @@ table.adaptive-table td.single-line-note,
 .tg-panel details { margin-top: var(--space-4); }
 .tg-panel details > summary { padding: var(--space-3); color: var(--muted); cursor: pointer; }
 @media (max-width: 700px) {
+  .tg-detail-content { padding: var(--space-2); }
+  .tg-detail-calendar { gap: 3px; }
+  .tg-calendar-day { min-height: 58px; padding: 6px 1px; }
+  .tg-calendar-status { font-size: 11px; }
   .tg-filters .filter-controls { gap: var(--space-2); }
   .tg-filters .filter-field { flex: 1 1 120px; }
   .tg-filters .control { width: 100%; max-width: none; min-width: 0; }
