@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-auto-consumption";
+const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-calendar-management";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -12228,7 +12228,13 @@ async function handleApi(req, res, url) {
     const allowed=finance||userHasAnyPermission(user,['tgAttendance']);
     if(!allowed || (!finance && !['snapshot','attendance'].includes(action))) return sendError(res,403,'无托管操作权限');
     try {
-      if(req.method==='GET'&&action==='snapshot') return sendJson(res,tuoguanStore.snapshot(url.searchParams.get('month'),finance));
+      if(req.method==='GET'&&action==='snapshot') {
+        if(url.searchParams.get('calendar_only')==='1') {
+          if(!finance)return sendError(res,403,'无托管日期管理权限');
+          return sendJson(res,tuoguanStore.calendarSnapshot(url.searchParams.get('month')));
+        }
+        return sendJson(res,tuoguanStore.snapshot(url.searchParams.get('month'),finance));
+      }
       if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
       const body=await readBody(req,action.startsWith('transfer-')?14_000_000:2_000_000), actor=String(user.username||user.id);
       if(action==='transfer-export') return sendJson(res,{text:JSON.stringify(TuoguanTransfer.exportData(db),null,2)});

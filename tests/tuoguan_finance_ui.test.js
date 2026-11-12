@@ -181,7 +181,7 @@ test("HTTP split funds, saved membership, historical grade, privacy and readonly
     400,
   );
 });
-test("Edge indices, three frozen columns, safe header deletion, colored options, filtered fees and independent calendar", async () => {
+test("Edge indices, three frozen columns, calendar date management, colored options, filtered fees and independent calendar", async () => {
   const b = await launchBrowser(path.join(dir, "edge"), { browser: "edge" }),
     c = b.session;
   const go = async (view) => {
@@ -206,33 +206,32 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
     await go("tgAttendance");
     await month("2026-09");
     assert.deepEqual(await indices(), [1, 2, 3, 4]);
-    await c.click('[data-remove-date="2026-09-08"]');
-    assert.match(
+    assert.equal(
       await c.evaluate(
-        'document.querySelector(".shared-course-dialog").textContent',
+        'document.querySelectorAll(".tg-date-header,[data-remove-date],#tg-add-date,#tg-remove-dates").length',
       ),
-      /2026年9月8日/,
+      0,
     );
-    await c.click("[data-date-cancel]");
-    assert.ok(
+    await c.click("#tg-manage-dates");
+    await c.waitFor(
+      '!document.querySelector(`[data-manage-date="2026-09-08"]`).disabled',
+    );
+    await c.click('[data-manage-date="2026-09-08"]');
+    await c.waitFor(
+      'document.querySelector(`[data-manage-date="2026-09-08"]`).dataset.enabled==="false"',
+    );
+    await c.click('[data-manage-date="2026-09-02"]');
+    assert.equal(
       await c.evaluate(
-        'Boolean(document.querySelector("[data-remove-date=\\"2026-09-08\\"]"))',
+        'document.querySelector(".shared-course-dialog [role=alert]").textContent',
       ),
+      "该日期已有考勤或费用记录，无法直接删除。",
     );
-    await c.click('[data-remove-date="2026-09-08"]');
-    await c.click("[data-date-confirm]");
+    await c.click(".shared-course-dialog .dialog-close");
     await c.waitFor(
-      '!document.querySelector("[data-remove-date=\\"2026-09-08\\"]")',
+      '!document.querySelector(`.tg-cell-button[data-date="2026-09-08"]`)',
     );
-    await c.click('[data-remove-date="2026-09-02"]');
-    await c.click("[data-date-confirm]");
-    await c.waitFor(
-      'document.querySelector(".shared-course-dialog [role=alert]")?.textContent.includes("已有")',
-    );
-    await c.click("[data-date-cancel]");
-    assert.deepEqual(c.consoleErrors.splice(0), [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)",
-    ]);
+    assert.deepEqual(c.consoleErrors.splice(0), []);
     const cell = '.tg-cell-button[data-student="1"][data-date="2026-09-02"]';
     await c.click(cell);
     const tones = await c.evaluate(
@@ -372,6 +371,22 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
       "document.querySelector('.tg-scroll').scrollLeft=90;window.outerScroll=document.querySelector('.tg-scroll').scrollLeft;document.querySelector('.tg-fee-row[data-student=\"1\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))",
     );
     await c.waitFor('Boolean(document.querySelector(".tg-detail-calendar"))');
+    assert.deepEqual(
+      await c.evaluate(
+        `(()=>{const x=document.querySelector('.tg-detail-content');return {cards:x.querySelectorAll('.metric').length,tables:x.querySelectorAll('table').length,order:[...x.children].filter(e=>e.matches('.tg-actions,.tg-metrics,.tg-detail-month,.tg-detail-calendar,.tg-calendar-legend')).map(e=>e.className)}})()`,
+      ),
+      {
+        cards: 7,
+        tables: 0,
+        order: [
+          "tg-actions",
+          "summary-grid tg-metrics",
+          "tg-detail-month",
+          "tg-detail-calendar",
+          "tg-calendar-legend",
+        ],
+      },
+    );
     const expected = (await call("snapshot?month=2026-09")).data.summary.find(
       (s) => s.id === 1,
     );
@@ -379,6 +394,10 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
       ["本月托管消费", "fee"],
       ["本月实际消费", "actual_consumption"],
       ["本月赠送消费", "gift_consumption"],
+      ["本月实际充值", "actual_recharge"],
+      ["本月赠送充值", "gift_recharge"],
+      ["月末实际余额", "actual_balance"],
+      ["月末赠送余额", "gift_balance"],
     ]) {
       const card = await c.evaluate(
         `(()=>{const elements=[...document.querySelectorAll('.tg-detail-content .metric')];return elements.find(e=>e.textContent.includes('${label}'))?.textContent})()`,
@@ -463,6 +482,13 @@ test("Edge indices, three frozen columns, safe header deletion, colored options,
     );
     await c.click('[data-detail-step="1"]');
     await c.waitFor('typeof window.releaseDetail==="function"');
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-detail-content .metric,.tg-detail-content .tg-calendar-day").length',
+      ),
+      0,
+    );
+
     await c.click('[data-detail-step="1"]');
     await c.waitFor(
       'document.querySelector(".tg-detail-content")?.dataset.month==="2026-11"&&document.querySelector(".tg-detail-content")?.dataset.loading==="false"',
@@ -633,4 +659,391 @@ test("failed old backup settlement rolls back the entire restore including exist
   );
   assert.equal(T.signature(db), before);
   db.close();
+});
+
+test("calendar metadata protects saved zero-fee, unknown and money-only dates; rejects readonly and stale writes without changing funds", async () => {
+  const db = new DatabaseSync(env.DB_PATH);
+  const unchanged = () =>
+    JSON.stringify(
+      [
+        "tg_students",
+        "tg_periods",
+        "tg_attendance",
+        "tg_ledger",
+        "lessons",
+      ].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY id`).all()),
+    );
+  const baseline = unchanged();
+  try {
+    const snap = await call("snapshot?month=2026-09&calendar_only=1");
+    assert.equal(snap.status, 200);
+    assert.deepEqual(Object.keys(snap.data).sort(), [
+      "calendar",
+      "protected_dates",
+    ]);
+    for (const date of ["01", "02", "04", "05", "06"]) {
+      const full = "2026-09-" + date;
+      assert.ok(snap.data.protected_dates.includes(full));
+      assert.equal(
+        (
+          await call("remove-dates", {
+            month: "2026-09",
+            dates: [
+              {
+                date: full,
+                version:
+                  snap.data.calendar.find((c) => c.date === full)?.version || 0,
+              },
+            ],
+          })
+        ).status,
+        400,
+      );
+    }
+    assert.equal(
+      (await call("snapshot?month=2026-13&calendar_only=1")).status,
+      400,
+    );
+    const readonly = await login("finance-readonly");
+    for (const action of ["add-dates", "remove-dates"])
+      assert.equal(
+        (
+          await call(
+            action,
+            { month: "2027-02", dates: [{ date: "2027-02-06", version: 0 }] },
+            readonly,
+          )
+        ).status,
+        403,
+      );
+    const add = await call("add-dates", {
+      month: "2027-02",
+      dates: [{ date: "2027-02-06", version: 0 }],
+    });
+    assert.equal(add.status, 200);
+    assert.equal(
+      add.data.calendar.find((c) => c.date === "2027-02-06").enabled,
+      1,
+    );
+    assert.equal(
+      (
+        await call("remove-dates", {
+          month: "2027-02",
+          dates: [{ date: "2027-02-06", version: 0 }],
+        })
+      ).status,
+      409,
+    );
+    assert.equal(unchanged(), baseline);
+  } finally {
+    db.close();
+  }
+});
+
+test("Edge calendar queue, conflicts, errors, close synchronization, stale responses, geometry and readonly", async () => {
+  const b = await launchBrowser(path.join(dir, "edge-calendar"), {
+      browser: "edge",
+    }),
+    c = b.session;
+  const db = new DatabaseSync(env.DB_PATH, { readOnly: true });
+  const unchanged = () =>
+    JSON.stringify(
+      [
+        "tg_students",
+        "tg_periods",
+        "tg_attendance",
+        "tg_ledger",
+        "lessons",
+      ].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY id`).all()),
+    );
+  const baseline = unchanged();
+  const month = async (value) => {
+    await c.evaluate(
+      `document.querySelector('#tg-month').value='${value}';document.querySelector('#tg-month').dispatchEvent(new Event('change'))`,
+    );
+    await c.waitFor(
+      `document.querySelector('[data-loaded-month]')?.dataset.loadedMonth==='${value}'`,
+    );
+  };
+  const open = async () => {
+    await c.click("#tg-manage-dates");
+    await c.waitFor(
+      'Boolean(document.querySelector("[data-manage-date]:not(:disabled)"))',
+    );
+  };
+  const day = (date) => `[data-manage-date="${date}"]`;
+  const settled = (date) =>
+    c.waitFor(`!document.querySelector('${day(date)}').disabled`);
+  try {
+    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.login();
+    await c.evaluate(
+      "if(!sidebarCollapsed)document.querySelector('.sidebar-toggle').click()",
+    );
+    await c.evaluate(
+      "setActiveView('tgAttendance');load({refreshGlobal:false})",
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-month"))');
+    await month("2026-11");
+    await c.evaluate(
+      `document.querySelector('#tg-query').value='合成甲';document.querySelector('#tg-query').dispatchEvent(new Event('input'));document.querySelector('#tg-grade').value='初一';document.querySelector('#tg-grade').dispatchEvent(new Event('change'))`,
+    );
+    await c.waitFor(
+      'document.querySelectorAll(".tg-matrix tbody tr[data-student]").length===2',
+    );
+    await c.evaluate(
+      `window.oldRow=document.querySelector('.tg-matrix tbody tr');window.redraws=0;window.obs=new MutationObserver(()=>window.redraws++);obs.observe(document.querySelector('#tg-body'),{childList:true});window.baseFetch=fetch;window.dateRequests=[];window.fetch=async(...args)=>{if(/tuoguan\\/(add|remove)-dates$/.test(String(args[0]))){dateRequests.push(JSON.parse(args[1].body));const r=await baseFetch(...args);if(dateRequests.length===1)await new Promise(resolve=>window.releaseDate=resolve);return r;}return baseFetch(...args);}`,
+    );
+    await open();
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll("[data-manage-date]").length',
+      ),
+      30,
+    );
+    assert.equal(
+      await c.evaluate(
+        'document.querySelector(".tg-detail-calendar").firstElementChild.dataset.manageDate',
+      ),
+      "2026-11-01",
+    );
+    assert.equal(
+      await c.evaluate(
+        `document.querySelector('${day("2026-11-07")}').dataset.enabled`,
+      ),
+      "false",
+    );
+    await c.evaluate(
+      `document.querySelector('${day("2026-11-07")}').click();document.querySelector('${day("2026-11-07")}').click();document.querySelector('${day("2026-11-08")}').click();document.querySelector('${day("2026-11-09")}').click()`,
+    );
+    await c.waitFor('typeof releaseDate==="function"');
+    assert.equal(await c.evaluate("dateRequests.length"), 1);
+    assert.equal(
+      await c.evaluate(
+        'oldRow===document.querySelector(".tg-matrix tbody tr")&&redraws===0',
+      ),
+      true,
+    );
+    await c.evaluate("releaseDate()");
+    await settled("2026-11-09");
+    assert.equal(await c.evaluate("dateRequests.length"), 3);
+    for (const [date, enabled] of [
+      ["07", "true"],
+      ["08", "false"],
+      ["09", "false"],
+    ])
+      assert.equal(
+        await c.evaluate(
+          `document.querySelector('${day("2026-11-" + date)}').dataset.enabled`,
+        ),
+        enabled,
+      );
+    assert.equal(await c.evaluate("redraws"), 0);
+    for (const width of [1440, 390])
+      for (const theme of ["light", "dark"]) {
+        await c.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: width === 390,
+        });
+        await c.evaluate(`document.documentElement.dataset.theme='${theme}'`);
+        const geometry = await c.evaluate(
+          `(()=>{const grid=document.querySelector('.tg-detail-calendar'),panel=document.querySelector('.shared-course-dialog .modal-panel'),button=grid.querySelector('button');return {columns:getComputedStyle(grid).gridTemplateColumns.split(' ').length,width:panel.getBoundingClientRect().width,overflow:panel.scrollWidth>panel.clientWidth+1,height:button.getBoundingClientRect().height,colors:[...grid.querySelectorAll('button')].slice(5,8).map(e=>getComputedStyle(e).backgroundColor)}})()`,
+        );
+        assert.equal(geometry.columns, 7);
+        assert.ok(geometry.width <= width);
+        assert.equal(geometry.overflow, false);
+        assert.ok(geometry.height >= 44);
+        assert.ok(new Set(geometry.colors).size > 1);
+        fs.writeFileSync(
+          path.join(dir, `calendar-${width}-${theme}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+      }
+    await c.click(".shared-course-dialog .dialog-close");
+    await c.waitFor("redraws===1");
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-query").value'),
+      "合成甲",
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-grade").value'),
+      "初一",
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-month").value'),
+      "2026-11",
+    );
+    const columns = await c.evaluate(
+      '[...document.querySelectorAll(".tg-matrix th")].slice(3).map(e=>e.textContent)',
+    );
+    assert.ok(columns.includes("11-07"));
+    assert.ok(!columns.includes("11-08"));
+    assert.deepEqual(columns, [...columns].sort());
+    await c.evaluate("obs.disconnect();window.fetch=baseFetch");
+    await open();
+    assert.equal(
+      await c.evaluate(
+        `document.querySelector('${day("2026-11-08")}').dataset.enabled`,
+      ),
+      "false",
+    );
+    // A concurrent operator changes this date after our modal opened.
+    assert.equal(
+      (
+        await call("remove-dates", {
+          month: "2026-11",
+          dates: [{ date: "2026-11-10", version: 0 }],
+        })
+      ).status,
+      200,
+    );
+    await c.click(day("2026-11-10"));
+    await settled("2026-11-10");
+    assert.equal(
+      await c.evaluate(
+        `document.querySelector('${day("2026-11-10")}').dataset.enabled`,
+      ),
+      "false",
+    );
+    assert.match(
+      await c.evaluate(
+        'document.querySelector(".tg-date-management [role=alert]").textContent',
+      ),
+      /变化/,
+    );
+    // Network failure keeps the server's state and leaves the next date usable.
+    await c.evaluate(
+      `window.fetch=async(...args)=>{if(String(args[0]).endsWith('add-dates'))throw Error('合成网络失败');return baseFetch(...args)}`,
+    );
+    await c.click(day("2026-11-14"));
+    await settled("2026-11-14");
+    assert.equal(
+      await c.evaluate(
+        `document.querySelector('${day("2026-11-14")}').dataset.enabled`,
+      ),
+      "false",
+    );
+    assert.match(
+      await c.evaluate(
+        'document.querySelector(".tg-date-management [role=alert]").textContent',
+      ),
+      /合成网络失败/,
+    );
+    await c.evaluate("window.fetch=baseFetch");
+    // Native Enter activates a focused date button.
+    await c.evaluate(`document.querySelector('${day("2026-11-14")}').focus()`);
+    await c.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      text: "\r",
+    });
+    await c.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+    });
+    await c.waitFor(
+      `document.querySelector('${day("2026-11-14")}').dataset.enabled==='true'`,
+    );
+    // Closing during a save waits, then refreshes the matrix exactly once.
+    await c.evaluate(
+      `window.releaseDate=null;window.fetch=async(...args)=>{const r=await baseFetch(...args);if(String(args[0]).endsWith('add-dates'))await new Promise(resolve=>window.releaseDate=resolve);return r;}`,
+    );
+    await c.click(day("2026-11-21"));
+    await c.waitFor('typeof releaseDate==="function"');
+    await c.click(".shared-course-dialog .dialog-close");
+    await c.evaluate("releaseDate();window.fetch=baseFetch");
+    await c.waitFor(
+      'Boolean(document.querySelector(`.tg-cell-button[data-date="2026-11-21"]`))',
+    );
+    // A late response must not repaint a newly selected month.
+    await open();
+    await c.evaluate(
+      `window.releaseDate=null;window.fetch=async(...args)=>{const r=await baseFetch(...args);if(String(args[0]).endsWith('add-dates'))await new Promise(resolve=>window.releaseDate=resolve);return r;}`,
+    );
+    await c.click(day("2026-11-28"));
+    await c.waitFor('typeof releaseDate==="function"');
+    await c.click(".shared-course-dialog .dialog-close");
+    await month("2026-12");
+    await c.evaluate("releaseDate();window.fetch=baseFetch");
+    await c.evaluate("new Promise(requestAnimationFrame)");
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-month").value'),
+      "2026-12",
+    );
+    assert.equal(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-matrix th")].slice(3).every(e=>e.textContent.startsWith("12-"))',
+      ),
+      true,
+    );
+    for (const [value, count, first] of [
+      ["2027-02", 28, 1],
+      ["2028-02", 29, 2],
+      ["2026-12", 31, 2],
+    ]) {
+      await month(value);
+      await open();
+      assert.equal(
+        await c.evaluate(
+          'document.querySelectorAll("[data-manage-date]").length',
+        ),
+        count,
+      );
+      assert.equal(
+        await c.evaluate(
+          `document.querySelector('.tg-detail-calendar').children[${first}].dataset.manageDate`,
+        ),
+        value + "-01",
+      );
+      await c.click(".shared-course-dialog .dialog-close");
+    }
+    await month("2026-09");
+    await open();
+    for (const date of ["01", "04", "06"]) {
+      assert.equal(
+        await c.evaluate(
+          `document.querySelector('${day("2026-09-" + date)}').dataset.protected`,
+        ),
+        "true",
+      );
+      await c.click(day("2026-09-" + date));
+      assert.equal(
+        await c.evaluate(
+          'document.querySelector(".tg-date-management [role=alert]").textContent',
+        ),
+        "该日期已有考勤或费用记录，无法直接删除。",
+      );
+    }
+    await c.click(".shared-course-dialog .dialog-close");
+    assert.equal(unchanged(), baseline);
+    await c.send("Network.clearBrowserCookies");
+    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.waitFor('Boolean(document.querySelector(".login-panel"))');
+    await c.evaluate(
+      'document.querySelector(".login-username").value="finance-readonly";document.querySelector(".login-password").value="123456";document.querySelector(".login-submit").click()',
+    );
+    await c.waitFor('!document.querySelector(".login-panel")');
+    await c.evaluate(
+      "setActiveView('tgAttendance');load({refreshGlobal:false})",
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-manage-dates"))');
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-manage-dates").disabled'),
+      true,
+    );
+    assert.deepEqual(c.exceptions, []);
+    assert.ok(c.consoleErrors.every((e) => e.includes("409")));
+  } finally {
+    db.close();
+    await b.close();
+  }
 });

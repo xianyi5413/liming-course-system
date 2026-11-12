@@ -14336,8 +14336,7 @@ table.adaptive-table td.single-line-note,
 .tg-matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--table-head); }
 .tg-matrix thead :is(th:first-child,th:nth-child(2),th:nth-child(3)) { z-index: 4; background: var(--table-head); }
 .tg-matrix tbody tr:hover :is(td:first-child,td:nth-child(2),td:nth-child(3)) { background: var(--panel); }
-.tg-date-header, .tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.tg-date-header:hover { color: var(--accent); text-decoration: underline; }
+.tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .tg-fee-row { cursor: pointer; }
 .tg-fee-row:hover td, .tg-fee-row:focus-visible td { background: var(--table-head); }
 .tg-detail-month { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin: var(--space-3) 0; }
@@ -14345,6 +14344,12 @@ table.adaptive-table td.single-line-note,
 .tg-calendar-day { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; min-width: 0; min-height: 65px; text-align: center; border-radius: var(--radius-sm); background: var(--badge-bg,var(--panel)); color: var(--badge-fg,var(--muted)); border: 1px solid color-mix(in srgb,currentColor 18%,transparent); }
 .tg-calendar-status { font-size: var(--text-caption); white-space: normal; overflow-wrap: anywhere; }
 .tg-calendar-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+.tg-date-choice { justify-content: center; align-items: center; font: inherit; cursor: pointer; background: var(--table-head); color: var(--muted); }
+.tg-date-choice[data-enabled="true"] { background: var(--success-bg); color: var(--success); }
+.tg-date-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tg-date-choice:disabled { cursor: wait; opacity: .65; }
+.tg-date-management [role="alert"] { color: var(--danger); }
+.tg-date-management :is([role="alert"],[role="status"]):empty { display: none; }
 .tg-student-detail-panel { width: min(1040px, 100%); }
 .tg-detail-content { width: 100%; min-width: 0; box-sizing: border-box; }
 .tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); }

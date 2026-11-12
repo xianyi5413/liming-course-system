@@ -298,7 +298,10 @@ function createStore(db) {
         );
       }
     }
-    return { ok: true };
+    return {
+      ok: true,
+      ...(action === "remove-students" ? {} : calendarSnapshot(b.month)),
+    };
   }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
@@ -452,6 +455,34 @@ function createStore(db) {
       return result;
     });
   }
+  function calendarSnapshot(month, attendance = null, protection = true) {
+    const { start, end } = require("./tuoguan_calendar").bounds(month);
+    const saved =
+      attendance ||
+      all(
+        "SELECT date FROM tg_attendance WHERE date BETWEEN ? AND ?",
+        start,
+        end,
+      );
+    const calendar = require("./tuoguan_calendar").defaults(
+      month,
+      all(
+        "SELECT * FROM tg_calendar WHERE date BETWEEN ? AND ? ORDER BY date",
+        start,
+        end,
+      ),
+      saved,
+    );
+    if (!protection) return { calendar };
+    const protectedDates = new Set(saved.map((a) => a.date));
+    for (const r of all(
+      "SELECT DISTINCT date FROM tg_ledger WHERE date BETWEEN ? AND ?",
+      start,
+      end,
+    ))
+      protectedDates.add(r.date);
+    return { calendar, protected_dates: [...protectedDates].sort() };
+  }
   function snapshot(month, finance) {
     if (!/^\d{4}-\d{2}$/.test(month)) fail("月份无效");
     date(month + "-01");
@@ -466,16 +497,7 @@ function createStore(db) {
       start,
       end,
     );
-    const storedCalendar = all(
-      "SELECT * FROM tg_calendar WHERE date BETWEEN ? AND ? ORDER BY date",
-      start,
-      end,
-    );
-    const calendar = require("./tuoguan_calendar").defaults(
-      month,
-      storedCalendar,
-      attendance,
-    );
+    const calendarState = calendarSnapshot(month, attendance, finance);
     const data = {
       students: finance
         ? students
@@ -485,7 +507,7 @@ function createStore(db) {
             grade,
           })),
       periods,
-      calendar,
+      ...calendarState,
       attendance: finance
         ? attendance
         : attendance.map(({ fee, reference_fee, rule_json, ...r }) => r),
@@ -539,7 +561,17 @@ function createStore(db) {
     }
     return data;
   }
-  return { db, mutate, snapshot, atomic, audit, all, get, run };
+  return {
+    db,
+    mutate,
+    snapshot,
+    calendarSnapshot,
+    atomic,
+    audit,
+    all,
+    get,
+    run,
+  };
 }
 module.exports = {
   GRADES,

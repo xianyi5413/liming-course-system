@@ -1124,21 +1124,30 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       ).status,
       "不适用",
     );
-    await c.click("#tg-add-date");
-    await c.evaluate(
-      'document.querySelector(".tg-form [name=date]").value="2026-12-05"',
-    );
-    await c.click(".tg-form [type=submit]");
-    await c.waitFor('!document.querySelector(".tg-form")');
+    await c.click("#tg-manage-dates");
     await c.waitFor(
-      'Boolean(document.querySelector(".tg-cell-button[data-date=\\"2026-12-05\\"]"))',
+      '!document.querySelector(`[data-manage-date="2026-12-05"]`).disabled',
     );
-    await c.click("#tg-remove-dates");
-    await c.evaluate(
-      'document.querySelector(".tg-form [value=\\"2026-12-05\\"]").checked=true',
+    await c.click('[data-manage-date="2026-12-05"]');
+    await c.waitFor(
+      'document.querySelector(`[data-manage-date="2026-12-05"]`).dataset.enabled==="true"&&!document.querySelector(`[data-manage-date="2026-12-05"]`).disabled',
     );
-    await c.click(".tg-form [type=submit]");
-    await c.waitFor('!document.querySelector(".tg-form")');
+    await c.click(".shared-course-dialog .dialog-close");
+    await c.waitFor(
+      'Boolean(document.querySelector(`.tg-cell-button[data-date="2026-12-05"]`))',
+    );
+    await c.click("#tg-manage-dates");
+    await c.waitFor(
+      '!document.querySelector(`[data-manage-date="2026-12-05"]`).disabled',
+    );
+    await c.click('[data-manage-date="2026-12-05"]');
+    await c.waitFor(
+      'document.querySelector(`[data-manage-date="2026-12-05"]`).dataset.enabled==="false"',
+    );
+    await c.click(".shared-course-dialog .dialog-close");
+    await c.waitFor(
+      '!document.querySelector(`.tg-cell-button[data-date="2026-12-05"]`)',
+    );
     assert.equal(
       (await api("snapshot?month=2026-12")).data.calendar.find(
         (d) => d.date === "2026-12-05",

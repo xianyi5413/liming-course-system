@@ -1,8 +1,55 @@
 # 托管管理实施与验收记录
 
+## 2026-11-12 托管日期管理与详情精简
+
+完成时间：2026-11-12 22:48（北京时间）。基线 `33d9189caf2a3a4445545554301b959a0e543896`；分支 `feature/tuoguan-calendar-management`；应用版本 `20261112-tuoguan-calendar-management`。本节及“实际使用”为当前操作规范；后续旧章节保留历史事实，不再按旧按钮、日期表头删除或详情流水表操作。
+
+### 实现、复用与清理
+
+复用 `CourseDetails.dialog`、日期按钮及星期行样式，抽出 `monthCalendar(month, renderDay)`，管理日历和详情日历共享月首星期、完整日期及七列网格。管理日历用系统success颜色表达启用状态，考勤仍使用原状态色，二者业务含义独立。原有关闭按钮、Tab焦点循环、Escape关闭沿用，不另加确认窗或日历依赖。
+
+沿用add-dates／remove-dates、幂等请求、版本校验、事务及记录保护。`calendarSnapshot()`复用defaults，只读当月日历、已保存考勤及资金日期；snapshot支持 `calendar_only=1`，财务权限才能读取，响应不包含金额或账户计算。增删成功响应附同份日历状态。零费、未知考勤及仅有资金的日期同样受保护，后端仍作最终拦截。
+
+前端仅使用一个Map、保护集合、忙碌集合和请求队列。点击后不预先改变业务状态，成功才更新颜色；同日忙碌阻止重复请求，不同日期按最新版本顺序保存。失败读取服务器现状，409后不使用旧版本重试；重新读取失败时禁止操作并提示关闭重开。页面、月份、用户及快照身份保护阻止旧响应覆盖新页面。
+
+弹窗内只更新日期按钮；关闭等待已提交队列，必要时仅重绘一次矩阵并恢复滚动与焦点。打开前收尾180ms筛选任务，考勤尚在保存时暂不打开，避免未完成写入被重绘。没有日期变化时不刷新。不调用全页load或账户重算，也不新增考勤、学生行或账本。
+
+删除旧addMatrixDate／removeMatrixDates／deleteMatrixDate、tg-date-header、data-remove-date、对应事件和悬停CSS。保留学生移除共用chooseRemoval、各页共用table及账务接口。详情保留原month／sequence与用户校验，只重排七项metrics到月份上方，移除重复流水HTML；七项金额直接读取后端，不改变实际／赠送分配。
+
+主要文件：`public/tuoguan.js`、`public/styles.css`、`public/index.html`、`src/domain/tuoguan.js`、`src/server.js`、`tests/tuoguan_finance_ui.test.js`、`tests/tuoguan_integration.test.js`、`README.md`、本文件。没有修改schema、结算引擎、账户算法或依赖。
+
+### 定向验证与数据保护
+
+实际命令（Windows PowerShell），最终6项独立测试通过：
+
+- `node --test --test-name-pattern='Edge indices' tests/tuoguan_finance_ui.test.js`：1项通过。后续筛选收尾修改后，用 `node --test --test-name-pattern='Edge calendar|Edge indices' tests/tuoguan_finance_ui.test.js` 复测2项通过。
+- `node --test --test-name-pattern='calendar metadata|Edge calendar' tests/tuoguan_finance_ui.test.js`：元数据测试1项通过；Edge测试首次失败，修复筛选延迟重绘，并修正CDP原生Enter需传回车文本及只读账号无设置导航的测试等待条件。最终上述2项Edge复测全部通过，无遗留失败。
+- `node --test --test-name-pattern='defaults cover|date removal persists' tests/tuoguan_transfer.test.js`：2项通过。
+- `node --test --test-name-pattern='Edge streamlined' tests/tuoguan_integration.test.js`：1项通过。
+- `node --check public/tuoguan.js`、`node --check src/domain/tuoguan.js`、测试文件语法检查及 `git diff --check` 通过。不将重复执行累计计数，未跑无关财务全量回归。
+
+测试使用合成学生及隔离SQLite。覆盖28／29／30／31天、月首星期、跨年、默认周日到周五、周六添加、停用持久化、保护零费用／未知／仅资金日期、重复点击、连续请求、网络失败、409刷新、关闭时等待保存、旧月份响应、筛选保留、只读前后端、键盘Enter、桌面1440px与手机390px的明暗主题。检查了截图，日历七列和详情1040px宽度正常。七项详情金额与snapshot一致，加载中无旧金额，底部无table。合成日期变更前后学生、周期、考勤、资金和补课表逐行相同。
+
+本轮不迁移数据库，不操作线上库。日常5177更新前已读取进程工作目录、DATA_DIR和DB_PATH，确认指向当前项目的 `data/liming-local.sqlite`。只读数据指纹及浏览器核验留在被忽略的 `.tuoguan-local/calendar-management-20261112/`，不提交真实资料、截图、账号或数据库。
+
+日常5177通过 `node .tuoguan-local/calendar-daily-browser.cjs` 完成Edge 157只读验收：9／10月日期保护、七项详情金额、1040px面板及10月183条流水正常，脚本／接口错误均为0。通过 `node .tuoguan-local/calendar-data-check.cjs` 对比修改前后各业务表指纹：18档案、28参与记录、565考勤、480资金流水及补课数据均不变；9月消费14,650元、10月9,025元、净消费23,675元保持。启动和登录仅更新roles时间戳及operation_logs，完整性及外键检查正常。凭据使用已有授权账号，临时文件已删除。私有验收脚本含本地路径，不纳入提交，以上6项合成测试可在仓库复现。
+
+### 价值与后续取舍
+
+1. 值得：日期是否开放直观可见，详情先看金额，符合本轮日常操作目标。
+2. 日历增删比选日期再确认更快；连续操作只开一次弹窗。关闭后一次刷新是稳定性与即时反馈的折中。
+3. 删除重复入口和每次删除确认；只保留保存状态、保护与错误提示，不弹成功通知。
+4. 两种日历复用日期计算及布局，分别保留启用状态和考勤语义。
+5. 移除详情表不影响充值流水查询全部充值、消费、赠送、调整与冲正，后端账本完整保留。
+6. 已清理本轮失效函数、事件及CSS，共用工具保留，不重构无关模块。
+7. 后续优先处理真实历史凭据补录与异常考勤；若确有高频整周维护需求，再考虑批量日期选择。
+8. 暂不增加日历依赖、拖拽、复杂状态框架或新的账务展示层；当前逐日点击足以满足规模。
+
+本轮功能无待开发项。历史43格异常／空白及真实充值、期初凭据仍需机构按实际情况处理，与本轮界面无关。
+
 ## 2026-11-12 托管自动结算与宽版详情
 
-完成时间：2026-11-12 12:43（北京时间）。基线 `ea3a93ddb418fcae5ecacab47e7244ff37728674`；分支 `feature/tuoguan-auto-consumption-ui`；应用版本 `20261112-tuoguan-auto-consumption`。本节及下方“实际使用／备份与恢复”为当前规范，其余旧章节保留历史事实；旧待核定计费、参考费并列展示、托管CSV及旧列名已停用。
+完成时间：2026-11-12 12:43（北京时间）。基线 `ea3a93ddb418fcae5ecacab47e7244ff37728674`；分支 `feature/tuoguan-auto-consumption-ui`；应用版本 `20261112-tuoguan-auto-consumption`。本节记录当轮计费与备份规范，其余旧章节保留历史事实；旧待核定计费、参考费并列展示、托管CSV及旧列名已停用。
 
 ### 根因、界面与日期口径
 
@@ -473,8 +520,8 @@ node --test --test-concurrency=1 --test-name-pattern='HTTP permission|five route
 
 1. 学生页新建独立档案，点击姓名维护资料；重新参加在签到页添加原学生。托管首日／最近托管只取已保存出勤日期，无出勤显示“—”。
 2. 设置显示统一收费：出勤50元、请假25元、放假及不适用0元。默认格不收费，明确选择并保存才计费；历史有效考勤已自动补记，不需要另行核定。
-3. 日期表头和工具栏均可删除无关联日期；已有考勤或资金时拒绝删除。月份、姓名、年级筛选继续使用原机制。
-4. 费用页年级后查看托管／实际／赠送三项消费，整行打开宽版日历详情；退款、调整、期初仍可从资金记录操作。托管CSV已移除，其他导出保留。
+3. 每日签到点击“管理日期”，在完整月历中点选添加／停用日期，关闭后刷新矩阵；已有考勤或资金的日期锁定。日期表头只显示文字，月份、姓名、年级筛选保留。
+4. 费用页年级后查看托管／实际／赠送三项消费，整行打开宽版详情，按学生信息、七项费用、月份、日历和图例排列。详情不再列流水，全部资金记录仍在充值流水查询；退款、调整、期初入口保留。托管CSV已移除，其他导出保留。
 5. 来源设置复制v3托管文本，目标先升级本版，再粘贴、预览、确认；旧v1/v2会自动规范结算。已存在差异阻止整批覆盖，重复导入不重复消费。
 6. 直接在每日签到纠正43格异常／空白；历史期初和充值按凭证填写，不用参考差额替代真实资金。resolve核定接口已移除。
 

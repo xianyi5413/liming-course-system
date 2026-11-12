@@ -63,6 +63,7 @@ window.TuoguanUI = (() => {
   };
   let filterTimer,
     cellWrites = 0,
+    dateWrites = 0,
     filterQueued = false;
   const metrics = (items) =>
     '<div class="summary-grid tg-metrics">' +
@@ -158,6 +159,21 @@ window.TuoguanUI = (() => {
       '</div><div class="filter-summary"><button class="btn" id="tg-reset">清空筛选</button></div></div>'
     );
   }
+  function monthCalendar(month, renderDay) {
+    const [year, m] = month.split("-").map(Number),
+      first = new Date(Date.UTC(year, m - 1, 1)).getUTCDay(),
+      days = new Date(Date.UTC(year, m, 0)).getUTCDate();
+    return (
+      '<div class="date-range-weekdays">' +
+      [..."日一二三四五六"].map((d) => "<span>" + d + "</span>").join("") +
+      '</div><div class="tg-detail-calendar">' +
+      '<span aria-hidden="true"></span>'.repeat(first) +
+      Array.from({ length: days }, (_, i) =>
+        renderDay(month + "-" + String(i + 1).padStart(2, "0"), i + 1),
+      ).join("") +
+      "</div>"
+    );
+  }
   function studentDetail(id) {
     const host = root,
       owner = auth.user?.id,
@@ -180,18 +196,11 @@ window.TuoguanUI = (() => {
       const a = snapshot?.summary.find((r) => r.id === id),
         history = snapshot?.attendance.filter((r) => r.student_id === id) || [],
         byDate = new Map(history.map((r) => [r.date, r]));
-      const [year, m] = month.split("-").map(Number),
-        first = new Date(Date.UTC(year, m - 1, 1)).getUTCDay(),
-        days = new Date(Date.UTC(year, m, 0)).getUTCDate();
-      const cells = Array.from(
-        { length: first },
-        () => '<span aria-hidden="true"></span>',
-      );
-      for (let n = 1; n <= days; n++) {
-        const date = month + "-" + String(n).padStart(2, "0"),
-          record = byDate.get(date),
-          status = record?.status === "停课" ? "放假" : record?.status;
-        const tone = statusTone(status),
+      const [year, m] = month.split("-").map(Number);
+      const calendar = monthCalendar(month, (date, n) => {
+        const record = byDate.get(date),
+          status = record?.status === "停课" ? "放假" : record?.status,
+          tone = statusTone(status),
           title = record
             ? [
                 date,
@@ -202,52 +211,37 @@ window.TuoguanUI = (() => {
                 .filter(Boolean)
                 .join(" · ")
             : date + " 无已保存考勤";
-        cells.push(
+        return (
           '<div class="tg-calendar-day" data-date="' +
-            date +
-            '" data-status="' +
-            esc(status || "") +
-            '" title="' +
-            esc(title) +
-            '"' +
-            (tone ? badgeColorStyle(tone) : "") +
-            "><span>" +
-            n +
-            '</span><span class="tg-calendar-status">' +
-            esc(status === "未登记" ? "异常/空白" : status || "—") +
-            "</span></div>",
+          date +
+          '" data-status="' +
+          esc(status || "") +
+          '" title="' +
+          esc(title) +
+          '"' +
+          (tone ? badgeColorStyle(tone) : "") +
+          "><span>" +
+          n +
+          '</span><span class="tg-calendar-status">' +
+          esc(status === "未登记" ? "异常/空白" : status || "—") +
+          "</span></div>"
         );
-      }
-      const header =
+      });
+      content.innerHTML =
         '<div class="tg-actions">' +
         renderStudentBadge(student, { grade: a?.grade || student.grade }) +
         renderGradeBadge(a?.grade || student.grade) +
-        '</div><div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong>' +
-        year +
-        "年" +
-        m +
-        '月</strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button></div>';
-      content.innerHTML =
-        header +
+        "</div>" +
         (loading
           ? '<p role="status">正在加载…</p>'
           : error
             ? '<p role="alert">' + esc(error) + "</p>"
-            : '<div class="date-range-weekdays">' +
-              [..."日一二三四五六"]
-                .map((d) => "<span>" + d + "</span>")
-                .join("") +
-              '</div><div class="tg-detail-calendar">' +
-              cells.join("") +
-              '</div><div class="tg-calendar-legend">' +
-              statuses.map(badge).join("") +
-              "</div>" +
-              metrics([
-                ["实际充值", money(a.actual_recharge)],
-                ["赠送充值", money(a.gift_recharge)],
+            : metrics([
                 ["本月托管消费", money(a.fee)],
                 ["本月实际消费", money(a.actual_consumption)],
                 ["本月赠送消费", money(a.gift_consumption)],
+                ["本月实际充值", money(a.actual_recharge)],
+                ["本月赠送充值", money(a.gift_recharge)],
                 ["月末实际余额", money(a.actual_balance)],
                 ["月末赠送余额", money(a.gift_balance)],
               ]) +
@@ -260,22 +254,18 @@ window.TuoguanUI = (() => {
                 ? '<p class="muted-tip">赠送余额抵扣结转或调整欠费 ' +
                   money(a.prior_debt_gift_offset) +
                   "</p>"
-                : "") +
-              table(
-                ["日期", "类型", "实际金额", "赠送金额", "备注"],
-                snapshot.ledger
-                  .filter((r) => r.student_id === id)
-                  .map((r) =>
-                    tr([
-                      r.date,
-                      esc(r.kind),
-                      money(r.actual_amount),
-                      money(r.gift_amount),
-                      esc(r.notes) +
-                        (r.legacy_unallocated ? "（旧账归属待核对）" : ""),
-                    ]),
-                  ),
-              ));
+                : "")) +
+        '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong>' +
+        year +
+        "年" +
+        m +
+        '月</strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button></div>' +
+        (loading || error
+          ? ""
+          : calendar +
+            '<div class="tg-calendar-legend">' +
+            statuses.map(badge).join("") +
+            "</div>");
       content.dataset.month = month;
       content.dataset.loading = loading ? "true" : "false";
       for (const b of content.querySelectorAll("[data-detail-step]"))
@@ -513,29 +503,165 @@ window.TuoguanUI = (() => {
       }),
     );
   }
-  function removeMatrixDates(dates) {
-    const calendar = new Map(data.calendar.map((c) => [c.date, c]));
-    chooseRemoval(
-      "移除日期（已有记录将阻止删除）",
-      dates.map((d) => [d, esc(d)]),
-      "remove-dates",
-      (values) => ({
-        dates: values.map((date) => ({
-          date,
-          version: calendar.get(date)?.version || 0,
-        })),
-      }),
+  function manageMatrixDates() {
+    if (!finance || isReadonlyUser()) return;
+    if (cellWrites || dateWrites) return message("请等待保存完成");
+    clearTimeout(filterTimer);
+    const nextQuery = root.querySelector("#tg-query").value.trim(),
+      nextGrade = root.querySelector("#tg-grade").value;
+    if (nextQuery !== query || nextGrade !== grade) {
+      query = nextQuery;
+      grade = nextGrade;
+      draw();
+    }
+    const host = root,
+      source = data,
+      owner = auth.user?.id,
+      month = day.slice(0, 7);
+    const samePage = () =>
+      host === root &&
+      source === data &&
+      host.isConnected &&
+      owner === auth.user?.id &&
+      tab === "签到" &&
+      day.slice(0, 7) === month;
+    let calendar = new Map(),
+      protectedDates = new Set(),
+      ready = false,
+      changed = false,
+      queue = Promise.resolve();
+    const busy = new Set();
+    const scroll = root.querySelector(".table-wrap"),
+      left = scroll?.scrollLeft || 0,
+      top = scroll?.scrollTop || 0;
+    const [year, m] = month.split("-").map(Number);
+    const dialog = CourseDetails.dialog(
+      "管理日期",
+      '<div class="tg-detail-content tg-date-management"><div class="tg-detail-month"><strong>' +
+        year +
+        "年" +
+        m +
+        "月</strong></div>" +
+        monthCalendar(
+          month,
+          (date, n) =>
+            '<button type="button" class="tg-calendar-day tg-date-choice" data-manage-date="' +
+            date +
+            '" disabled><span>' +
+            n +
+            '</span><span class="tg-date-mark" aria-hidden="true">○</span></button>',
+        ) +
+        '<div class="tg-calendar-legend"><span>✓ 已启用</span><span>○ 未启用</span><span>🔒 受保护</span></div><p role="status">正在加载…</p><p role="alert"></p></div>',
+      {
+        size: "compact",
+        onClose: async () => {
+          await queue;
+          if (!changed || !samePage()) return;
+          renderMatrix(root.querySelector("#tg-body"));
+          scheduleAdaptiveTableColumns();
+          const next = root.querySelector(".table-wrap");
+          if (next) {
+            next.scrollLeft = left;
+            next.scrollTop = top;
+          }
+          root
+            .querySelector("#tg-manage-dates")
+            ?.focus({ preventScroll: true });
+        },
+      },
     );
-  }
-  function addMatrixDate() {
-    const month = day.slice(0, 7),
-      calendar = new Map(data.calendar.map((c) => [c.date, c]));
-    form("添加日期", input("date", "本月日期", day, "date"), (v) =>
-      post("add-dates", {
-        month,
-        dates: [{ date: v.date, version: calendar.get(v.date)?.version || 0 }],
-      }),
-    );
+    const content = dialog.element.querySelector(".tg-date-management"),
+      error = content.querySelector('[role="alert"]'),
+      status = content.querySelector('[role="status"]');
+    function paint() {
+      if (!dialog.element.isConnected || !samePage()) return;
+      status.textContent = !ready ? "正在加载…" : busy.size ? "正在保存…" : "";
+      for (const button of content.querySelectorAll("[data-manage-date]")) {
+        const date = button.dataset.manageDate,
+          locked = protectedDates.has(date),
+          enabled = locked || calendar.get(date)?.enabled === 1;
+        button.dataset.enabled = String(enabled);
+        button.dataset.protected = String(locked);
+        button.setAttribute("aria-pressed", String(enabled));
+        button.setAttribute("aria-busy", String(busy.has(date)));
+        button.setAttribute(
+          "aria-label",
+          date + (locked ? " 已启用，受保护" : enabled ? " 已启用" : " 未启用"),
+        );
+        button.disabled = !ready || busy.has(date);
+        button.querySelector(".tg-date-mark").textContent = locked
+          ? "🔒"
+          : enabled
+            ? "✓"
+            : "○";
+      }
+    }
+    function accept(next) {
+      if (!samePage()) return;
+      changed ||=
+        JSON.stringify(source.calendar) !== JSON.stringify(next.calendar);
+      source.calendar = next.calendar;
+      source.protected_dates = next.protected_dates;
+      calendar = new Map(next.calendar.map((c) => [c.date, c]));
+      protectedDates = new Set(next.protected_dates);
+      ready = true;
+      paint();
+    }
+    const latest = () => api("snapshot?month=" + month + "&calendar_only=1");
+    for (const button of content.querySelectorAll("[data-manage-date]"))
+      button.onclick = () => {
+        const date = button.dataset.manageDate;
+        if (!ready || busy.has(date) || !samePage()) return;
+        if (protectedDates.has(date)) {
+          error.textContent = "该日期已有考勤或费用记录，无法直接删除。";
+          return;
+        }
+        busy.add(date);
+        dateWrites++;
+        error.textContent = "";
+        paint();
+        // Serialize distinct dates; each request uses the latest server version.
+        queue = queue.then(async () => {
+          try {
+            if (!samePage() || !ready) return;
+            const record = calendar.get(date);
+            const next = await post(
+              record?.enabled === 1 ? "remove-dates" : "add-dates",
+              {
+                month,
+                dates: [{ date, version: record?.version || 0 }],
+              },
+            );
+            accept(next);
+          } catch (e) {
+            if (samePage()) {
+              error.textContent = e.message;
+              try {
+                accept(await latest());
+              } catch {
+                ready = false;
+                error.textContent += "；请关闭后重试";
+              }
+            }
+          } finally {
+            busy.delete(date);
+            dateWrites--;
+            paint();
+            if (!ready) status.textContent = "";
+          }
+        });
+      };
+    // Opening also checks for changes made by another operator.
+    queue = latest()
+      .then((next) => {
+        if (dialog.element.isConnected) accept(next);
+      })
+      .catch((e) => {
+        if (dialog.element.isConnected && samePage()) {
+          error.textContent = e.message;
+          status.textContent = "";
+        }
+      });
   }
   async function transferDialog(importing) {
     const host = root,
@@ -812,19 +938,11 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions tg-matrix-actions">' +
       (finance
-        ? '<button class="btn" id="tg-add-student">添加学生</button><button class="btn" id="tg-remove-students">删除学生</button><button class="btn" id="tg-add-date">添加日期</button><button class="btn" id="tg-remove-dates">删除日期</button>'
+        ? '<button class="btn" id="tg-add-student">添加学生</button><button class="btn" id="tg-remove-students">删除学生</button><button class="btn" id="tg-manage-dates">管理日期</button>'
         : "") +
       "</div>" +
       listTable(
-        [
-          "学生",
-          "年级",
-          ...dates.map((d) =>
-            finance
-              ? `<button class="tg-date-header" data-remove-date="${d}" aria-label="删除${d}托管日期" ${isReadonlyUser() ? "disabled" : ""}>${d.slice(5)}</button>`
-              : d.slice(5),
-          ),
-        ],
+        ["学生", "年级", ...dates.map((d) => d.slice(5))],
         monthStudents.map(
           (s) =>
             '<tr data-student="' +
@@ -864,11 +982,6 @@ window.TuoguanUI = (() => {
             "</tr>",
         ),
       );
-    body
-      .querySelectorAll("[data-remove-date]")
-      .forEach(
-        (b) => (b.onclick = () => deleteMatrixDate(b.dataset.removeDate)),
-      );
     const matrix = body.querySelector(".tg-table");
     matrix.classList.add("tg-matrix");
     matrix.dataset.frozenColumns = "3";
@@ -877,11 +990,8 @@ window.TuoguanUI = (() => {
       .querySelector("#tg-remove-students")
       ?.addEventListener("click", () => removeMatrixStudents(monthStudents));
     body
-      .querySelector("#tg-add-date")
-      ?.addEventListener("click", () => addMatrixDate());
-    body
-      .querySelector("#tg-remove-dates")
-      ?.addEventListener("click", () => removeMatrixDates(dates));
+      .querySelector("#tg-manage-dates")
+      ?.addEventListener("click", manageMatrixDates);
     body
       .querySelector("#tg-add-student")
       ?.addEventListener("click", addMatrixStudent);
@@ -1152,45 +1262,6 @@ window.TuoguanUI = (() => {
       };
     });
   }
-  function deleteMatrixDate(date) {
-    const month = day.slice(0, 7),
-      host = root,
-      owner = auth.user?.id,
-      version = data.calendar.find((c) => c.date === date)?.version || 0;
-    const [y, m, d] = date.split("-").map(Number);
-    const dialog = CourseDetails.dialog(
-      "删除托管日期",
-      '<div class="tg-detail-content"><p>确定删除' +
-        y +
-        "年" +
-        m +
-        "月" +
-        d +
-        '日的托管日期吗？</p><p role="alert"></p><div class="modal-actions"><button class="btn" data-date-cancel>取消</button><button class="btn primary" data-date-confirm>确认删除</button></div></div>',
-      { size: "compact" },
-    );
-    dialog.element.querySelector("[data-date-cancel]").onclick = dialog.close;
-    const button = dialog.element.querySelector("[data-date-confirm]");
-    button.onclick = async () => {
-      if (button.disabled) return;
-      button.disabled = true;
-      try {
-        if (
-          host !== root ||
-          owner !== auth.user?.id ||
-          month !== day.slice(0, 7)
-        )
-          throw Error("页面已变化，请重新选择");
-        await post("remove-dates", { month, dates: [{ date, version }] });
-        dialog.close();
-        if (host === root && month === day.slice(0, 7)) await refresh();
-      } catch (e) {
-        dialog.element.querySelector("[role=alert]").textContent = e.message;
-      } finally {
-        button.disabled = false;
-      }
-    };
-  }
   function draw() {
     if (!root?.isConnected) return;
     const focus = document.activeElement,
@@ -1330,7 +1401,7 @@ window.TuoguanUI = (() => {
     if (typeof isReadonlyUser === "function" && isReadonlyUser())
       root
         .querySelectorAll(
-          "#tg-add-student,#tg-remove-students,#tg-add-date,#tg-remove-dates,#tg-copy,#tg-paste,.tg-cell-button,#tg-new,#tg-money,#tg-rule",
+          "#tg-add-student,#tg-remove-students,#tg-manage-dates,#tg-copy,#tg-paste,.tg-cell-button,#tg-new,#tg-money,#tg-rule",
         )
         .forEach((e) => {
           e.disabled = true;
