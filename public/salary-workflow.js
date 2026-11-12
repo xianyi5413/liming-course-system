@@ -77,7 +77,14 @@ const SalaryUI = (() => {
     show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${(group.course_types || [group.course_type]).join("、")} · ${studentSetInlineText(group.student_names)} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, typeCell: ClassCourseUI.typeCell, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
     const generation = sessionGeneration, account = auth.user?.id;
     ClassCourseUI.bindTypes(modal, rows, async (row, type) => {
-      await ClassCourseUI.saveType(group.key, [row.id], type, 'lesson');
+      const editor = modal;
+      const scope = await new Promise(resolve => {
+        const dialog = CourseDetails.dialog('修改课程类型', `<p>改为 ${escapeHtml(type)}</p><div class="modal-actions"><button class="btn" data-type-scope="one">仅修改本节</button><button class="btn primary" data-type-scope="all">修改当前弹窗全部 ${rows.length} 节课程</button><button class="btn" data-type-scope="cancel">取消</button></div>`, { size:'compact', onClose:()=>resolve(null) });
+        dialog.element.querySelectorAll('[data-type-scope]').forEach(button=>button.onclick=()=>{resolve(button.dataset.typeScope);dialog.close();});
+      });
+      if (!scope || scope==='cancel' || editor!==modal || !editor?.isConnected || generation!==sessionGeneration || account!==auth.user?.id) return;
+      const selected = scope==='all' ? rows : [row];
+      await ClassCourseUI.saveType(group.key, selected.map(row=>row.id), type, 'selection', selected.map(({id,course_type,updated_at})=>({id,course_type,updated_at})));
       if (generation !== sessionGeneration || account !== auth.user?.id) return;
       state.lesson_loaded_range = null;
       markLessonDerivedDataDirty();

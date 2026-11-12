@@ -75,7 +75,7 @@ after(() => { if (tempRoot && path.basename(tempRoot).startsWith("liming-full-ex
 test("legacy corruption sample reproduces sheet33 audit G2 at 32767 UTF-16 units", () => { const parsed = parseWorkbook(legacyUnsafeWorkbook()); assert.equal(parsed.sheets[32].name, "审计事件"); assert.equal(parsed.sheets[32].rows[1][6].length, 32767); });
 test("structural validator rejects the legacy 32767-cell workbook", () => assert.throws(() => validateWorkbookStructure(legacyUnsafeWorkbook()), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
 test("writer rejects any unchunked cell above the 30000 limit", () => assert.throws(() => createWorkbook([{ name: "超长", rows: [["值"], ["x".repeat(30001)]] }]), (error) => error.code === "XLSX_CELL_TEXT_TOO_LONG"));
-test("full export uses v9", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 9); });
+test("full export uses v10", () => { assert.equal(verified.format, BACKUP_FORMAT); assert.equal(verified.version, FORMAT_VERSION); assert.equal(FORMAT_VERSION, 10); });
 test("v9 retains salary tables, formulas, monthly K and explicit special base source", () => {
   assert.equal(verified.data.salary_tables[0].name, '合成秋季薪资表');
   assert.equal(verified.data.salary_tables[0].teacher_id, 101);

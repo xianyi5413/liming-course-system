@@ -14,6 +14,65 @@ const {
 } = require("../src/excel/full_backup");
 const { parseWorkbook, createWorkbook } = require("../src/excel/xlsx_codec");
 const root = path.resolve(__dirname, "..");
+const Transfer = require("../src/domain/tuoguan_transfer");
+test("v10 full backup preserves portable identities and v9 without identity tables remains restorable", () => {
+  const original = new DatabaseSync(env.DB_PATH),
+    bundle = Transfer.exportData(original);
+  original.close();
+  const file = path.join(dir, "portable-v10.xlsx");
+  exportFullData({ dbPath: env.DB_PATH, outputPath: file });
+  const data = verifyFullData(file).data;
+  for (const version of [10, 9]) {
+    const copy = structuredClone(data);
+    if (version === 9) {
+      delete copy.tg_transfer_meta;
+      delete copy.tg_transfer_keys;
+    }
+    const sheets = parseWorkbook(
+      buildFullDataBufferFromSourceData(copy).buffer,
+    ).sheets.map((s) => ({
+      name: s.name,
+      state: s.state,
+      rows: s.rows.map((r) => [...r]),
+    }));
+    const info = sheets.find((s) => s.name === "导出说明"),
+      meta = sheets.find((s) => s.name === "__恢复元数据");
+    info.rows.find((r) => r[0] === "格式版本")[1] = version;
+    meta.rows.find((r) => r[1] === "format_version")[2] = version;
+    meta.rows.find((r) => r[0] === "工作表" && r[1] === "导出说明")[3] = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(info.rows))
+      .digest("hex");
+    const input = path.join(dir, `portable-${version}.xlsx`),
+      target = path.join(dir, `portable-${version}.sqlite`);
+    fs.writeFileSync(input, createWorkbook(sheets));
+    const init = spawnSync(process.execPath, ["src/server.js", "--init-db"], {
+      cwd: root,
+      env: { ...env, DB_PATH: target },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(init.status, 0, init.stderr);
+    restoreFullData({ dbPath: target, inputPath: input });
+    const restored = new DatabaseSync(target);
+    if (version === 10) {
+      assert.equal(Transfer.exportData(restored).source, bundle.source);
+      assert.deepEqual(Transfer.exportData(restored).records, bundle.records);
+    } else {
+      assert.equal(
+        restored.prepare("SELECT count(*) n FROM tg_transfer_keys").get().n,
+        0,
+      );
+      assert.equal(
+        restored.prepare("SELECT count(*) n FROM tg_students").get().n,
+        data.tg_students.length,
+      );
+    }
+    assert.deepEqual(restored.prepare("PRAGMA foreign_key_check").all(), []);
+    restored.close();
+  }
+});
+
 const matrixMonth = async (c) => {
   await c.evaluate(
     '(async()=>{setActiveView("tgAttendance");await load({refreshGlobal:false});})()',
@@ -335,7 +394,7 @@ test("legacy SQLite export upgrades custody identities in memory without modifyi
   db.close();
   exportFullData({ dbPath: target, outputPath: file });
   const result = verifyFullData(file);
-  assert.equal(result.version, 9);
+  assert.equal(result.version, 10);
   assert.equal(result.data.tg_students.length, 1);
   assert.equal(result.data.tg_students[0].id, 1);
   const check = new DatabaseSync(target, { readOnly: true });
@@ -376,11 +435,12 @@ test("custody UI creates and edits its own profile without changing tutoring can
     );
     assert.ok(student);
     await c.waitFor(
-      'Boolean(document.querySelector(".tg-profile[data-id=\\"' +
+      'Boolean(document.querySelector(".tg-detail[data-id=\\"' +
         student.id +
         '\\"]"))',
     );
-    await c.click('.tg-profile[data-id="' + student.id + '"]');
+    await c.click('.tg-detail[data-id="' + student.id + '"]');
+    await c.click("#tg-detail-profile");
     await c.evaluate(
       'document.querySelector(".tg-form [name=notes]").value="合成独立档案备注"',
     );
@@ -725,7 +785,7 @@ test("matrix keyboard, failed/conflicting writes, returning identity and delayed
       /请假/,
     );
     await c.evaluate(
-      'window.fetch=normalMatrixFetch;document.querySelector("#tg-query").value="无匹配";document.querySelector("#tg-search").click()',
+      'window.fetch=normalMatrixFetch;document.querySelector("#tg-query").value="无匹配";document.querySelector("#tg-query").dispatchEvent(new Event("input"))',
     );
     await c.click("#tg-add-student");
     await c.evaluate(
@@ -773,6 +833,429 @@ test("matrix keyboard, failed/conflicting writes, returning identity and delayed
       ).status,
       "不适用",
     );
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("transfer HTTP preview is read-only, confirmation is scoped and stale-safe, audit is concise and idempotent", async () => {
+  const source = new DatabaseSync(path.join(dir, "portable.sqlite"));
+  source.exec("CREATE TABLE teachers(id INTEGER PRIMARY KEY);");
+  const TG = require("../src/domain/tuoguan");
+  TG.migrate(source);
+  const store = TG.createStore(source);
+  const write = (a, b) =>
+    store.mutate(a, { request_id: key(), ...b }, "合成来源");
+  const student = write("student", {
+    name: "合成迁移专用",
+    grade: "初二",
+    start_date: "2027-01-01",
+  });
+  write("money", {
+    student_id: student.id,
+    date: "2027-01-01",
+    kind: "充值",
+    amount: 12345,
+    notes: "合成资金隐私备注",
+  });
+  const text = JSON.stringify(Transfer.exportData(source));
+  source.close();
+  const db = new DatabaseSync(env.DB_PATH);
+  try {
+    const outside = JSON.stringify(db.prepare("SELECT * FROM students").all()),
+      initial = Transfer.signature(db);
+    const teacher = await login("tg-teacher");
+    for (const action of [
+      "transfer-export",
+      "transfer-preview",
+      "transfer-confirm",
+      "remove-dates",
+    ])
+      assert.equal((await api(action, { text }, teacher)).status, 403);
+    assert.equal((await api("transfer-preview", { text }, "")).status, 401);
+    const wire = Buffer.from(JSON.stringify({ text })),
+      cut = wire.indexOf(Buffer.from("合成迁移")) + 1;
+    assert.ok(cut > 1);
+    const streamed = await new Promise((resolve, reject) => {
+      const request = require("node:http").request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: "/api/tuoguan/transfer-preview",
+          method: "POST",
+          headers: { cookie, "content-type": "application/json" },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode));
+        },
+      );
+      request.on("error", reject);
+      request.write(wire.subarray(0, cut));
+      setTimeout(() => request.end(wire.subarray(cut)), 10);
+    });
+    assert.equal(
+      streamed,
+      200,
+      "UTF-8 characters spanning body chunks must retain their checksum",
+    );
+    const preview = await api("transfer-preview", { text });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.data.allowed, true);
+    assert.equal(Transfer.signature(db), initial);
+    assert.equal(
+      (
+        await api("transfer-confirm", {
+          token: preview.data.token,
+          confirm: false,
+        })
+      ).status,
+      409,
+    );
+    const body = { name: "合成并发档案", grade: "初三", request_id: key() };
+    assert.equal((await api("student", body)).status, 200);
+    const logs = db
+      .prepare(
+        "SELECT count(*) n FROM operation_logs WHERE target_type='tuoguan'",
+      )
+      .get().n;
+    assert.equal((await api("student", body)).status, 200);
+    assert.equal(
+      db
+        .prepare(
+          "SELECT count(*) n FROM operation_logs WHERE target_type='tuoguan'",
+        )
+        .get().n,
+      logs,
+    );
+    assert.equal(
+      (
+        await api("transfer-confirm", {
+          token: preview.data.token,
+          confirm: true,
+        })
+      ).status,
+      409,
+    );
+    const fresh = await api("transfer-preview", { text }),
+      result = await api("transfer-confirm", {
+        token: fresh.data.token,
+        confirm: true,
+      });
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    assert.ok(result.data.created > 0);
+    assert.ok(
+      fs
+        .readdirSync(path.join(dir, "backups"))
+        .some((n) => n.startsWith("custody-transfer-")),
+    );
+    const ledger = db.prepare("SELECT * FROM tg_ledger").all();
+    const again = await api("transfer-preview", { text });
+    assert.equal(again.data.summary.created, 0);
+    assert.equal(
+      (
+        await api("transfer-confirm", {
+          token: again.data.token,
+          confirm: true,
+        })
+      ).status,
+      200,
+    );
+    assert.deepEqual(db.prepare("SELECT * FROM tg_ledger").all(), ledger);
+    assert.equal(
+      JSON.stringify(db.prepare("SELECT * FROM students").all()),
+      outside,
+    );
+    const imported = db
+      .prepare("SELECT id FROM tg_students WHERE name='合成迁移专用'")
+      .get();
+    assert.notEqual(imported.id, student.id);
+    assert.equal(
+      (await api("snapshot?month=2027-01")).data.summary.find(
+        (s) => s.id === imported.id,
+      ).balance,
+      12345,
+    );
+    const log = db
+      .prepare("SELECT * FROM operation_logs WHERE target_type='tuoguan'")
+      .all();
+    assert.equal(
+      log.filter((l) => l.operation_type === "导入托管信息").length,
+      1,
+    );
+    assert.ok(log.some((l) => l.result_status === "failure"));
+    assert.doesNotMatch(
+      JSON.stringify(log),
+      /合成资金隐私备注|合成迁移专用|"records"/,
+    );
+    db.exec(
+      "INSERT INTO users(username,display_name,role,password_hash,readonly_override,permission_override_enabled) SELECT 'ux-readonly','合成只读','academic',password_hash,1,1 FROM users WHERE username='boss'; INSERT INTO user_page_permissions(user_id,permission_key) SELECT id,'tgFinance' FROM users WHERE username='ux-readonly'",
+    );
+    const readonly = await login("ux-readonly");
+    for (const action of [
+      "transfer-export",
+      "transfer-preview",
+      "transfer-confirm",
+      "add-dates",
+    ])
+      assert.equal((await api(action, { text }, readonly)).status, 403);
+  } finally {
+    db.close();
+  }
+});
+
+test("Edge streamlined UI, default dates, persisted removals, automatic filters, dual sticky columns and transfer dialogs", async () => {
+  const browser = await launchChrome(path.join(dir, "ux-transfer")),
+    c = browser.session;
+  const go = async (view) => {
+    await c.evaluate(
+      `setActiveView(${JSON.stringify(view)});load({refreshGlobal:false})`,
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-body"))');
+  };
+  try {
+    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.login();
+    await go("tgAttendance");
+    await c.evaluate(
+      'document.querySelector("#tg-month").value="2026-12";document.querySelector("#tg-month").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2026-12"',
+    );
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-matrix thead th").length',
+      ),
+      29,
+    );
+    assert.equal(
+      await c.evaluate('Boolean(document.querySelector("#tg-search"))'),
+      false,
+    );
+    await c.evaluate(
+      'window.uxFetch=window.fetch;window.uxRequests=0;window.fetch=(...args)=>{if(String(args[0]).includes("/api/tuoguan/snapshot"))window.uxRequests++;return window.uxFetch(...args)};document.querySelector("#tg-query").value="无匹配";document.querySelector("#tg-query").dispatchEvent(new Event("input"))',
+    );
+    await c.waitFor('!document.querySelector(".tg-cell-button")');
+    assert.equal(await c.evaluate("window.uxRequests"), 0);
+    await c.click("#tg-reset");
+    await c.waitFor('Boolean(document.querySelector(".tg-cell-button"))');
+    await c.click('[data-tg-month-step="1"]');
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2027-01"',
+    );
+    await c.click('[data-tg-month-step="-1"]');
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2026-12"',
+    );
+    // Keep the newer February result when the held January request finishes late.
+    await c.evaluate(
+      'window.fetch=async(...args)=>{const response=await window.uxFetch(...args);if(String(args[0]).includes("/api/tuoguan/snapshot?month=2027-01"))await new Promise(r=>window.releaseJanuary=r);return response};',
+    );
+    await c.click('[data-tg-month-step="1"]');
+    await c.waitFor('typeof window.releaseJanuary==="function"');
+    await c.click('[data-tg-month-step="1"]');
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2027-02"',
+    );
+    await c.evaluate("window.releaseJanuary();window.fetch=window.uxFetch");
+    await c.evaluate("new Promise(requestAnimationFrame)");
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-month").value'),
+      "2027-02",
+    );
+    await c.evaluate(
+      'document.querySelector("#tg-month").value="2026-12";document.querySelector("#tg-month").dispatchEvent(new Event("change"))',
+    );
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2026-12"',
+    );
+    const button = '.tg-cell-button[data-student="1"][data-date="2026-12-01"]';
+    const green = await c.evaluate(
+      `document.querySelector('${button} .status-badge').getAttribute('style')`,
+    );
+    await c.evaluate(
+      'window.fetch=async(...args)=>{const response=await window.uxFetch(...args);if(String(args[0]).includes("/api/tuoguan/attendance"))await new Promise(r=>window.releaseAttendance=r);return response};',
+    );
+    await c.click(button);
+    await c.click('.custom-select-menu.open [data-value="不适用"]');
+    await c.waitFor('typeof window.releaseAttendance==="function"');
+    await c.evaluate(
+      'document.querySelector("#tg-query").value="无匹配";document.querySelector("#tg-query").dispatchEvent(new Event("input"))',
+    );
+    await c.evaluate("new Promise(r=>setTimeout(r,220))");
+    assert.ok(
+      await c.evaluate(
+        'Boolean(document.querySelector(".tg-cell-button[aria-busy=true]"))',
+      ),
+    );
+    await c.evaluate("window.releaseAttendance();window.fetch=window.uxFetch");
+    await c.waitFor('!document.querySelector(".tg-cell-button")');
+    await c.click("#tg-reset");
+    await c.waitFor('Boolean(document.querySelector(".tg-cell-button"))');
+    const yellow = await c.evaluate(
+      `document.querySelector('${button} .status-badge').getAttribute('style')`,
+    );
+    assert.notEqual(green, yellow);
+    assert.equal(
+      (await api("snapshot?month=2026-12")).data.attendance.find(
+        (a) => a.student_id === 1 && a.date === "2026-12-01",
+      ).status,
+      "不适用",
+    );
+    await c.click("#tg-add-date");
+    await c.evaluate(
+      'document.querySelector(".tg-form [name=date]").value="2026-12-05"',
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    await c.waitFor(
+      'Boolean(document.querySelector(".tg-cell-button[data-date=\\"2026-12-05\\"]"))',
+    );
+    await c.click("#tg-remove-dates");
+    await c.evaluate(
+      'document.querySelector(".tg-form [value=\\"2026-12-05\\"]").checked=true',
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    assert.equal(
+      (await api("snapshot?month=2026-12")).data.calendar.find(
+        (d) => d.date === "2026-12-05",
+      ).enabled,
+      0,
+    );
+    const student = await api("student", {
+      name: "合成移除矩阵行",
+      grade: "初三",
+      start_date: "2026-12-01",
+    });
+    await go("tgAttendance");
+    await c.click("#tg-remove-students");
+    await c.evaluate(
+      `document.querySelector('.tg-form [value="${student.data.id}"]').checked=true`,
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    assert.ok(
+      (await api("snapshot?month=2026-12")).data.students.some(
+        (s) => s.id === student.data.id,
+      ),
+    );
+    assert.equal(
+      await c.evaluate(
+        `Boolean(document.querySelector('.tg-cell-button[data-student="${student.data.id}"]'))`,
+      ),
+      false,
+    );
+    await c.click("#tg-add-student");
+    await c.evaluate(
+      `const picker=document.querySelector('.tg-form [name=student_id]');picker.value='${student.data.id}';picker.dispatchEvent(new Event('change'));document.querySelector('.tg-form [name=start_date]').value='2026-12-01'`,
+    );
+    await c.click(".tg-form [type=submit]");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    assert.equal(
+      (await api("snapshot?month=2026-12")).data.periods.find(
+        (p) =>
+          p.student_id === student.data.id && p.start_date === "2026-12-01",
+      ).end_date,
+      "2026-12-31",
+    );
+    for (const width of [1440, 390])
+      for (const theme of ["light", "dark"]) {
+        await c.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: width === 390,
+        });
+        await c.evaluate(
+          `document.documentElement.dataset.theme='${theme}';scheduleAdaptiveTableColumns();`,
+        );
+        await c.evaluate(
+          "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))",
+        );
+        await c.evaluate(
+          'document.querySelector(".tg-scroll").scrollLeft=999999',
+        );
+        const geometry = await c.evaluate(
+          `(()=>{const w=document.querySelector('.tg-scroll'),t=document.querySelector('.tg-matrix'),a=t.querySelector('tbody td'),b=a.nextElementSibling;return {first:a.getBoundingClientRect().left-w.getBoundingClientRect().left,second:b.getBoundingClientRect().left-a.getBoundingClientRect().right,opaque:getComputedStyle(b).backgroundColor,overflow:document.documentElement.scrollWidth>innerWidth+1,badges:a.querySelectorAll('.student-badge').length,grade:b.querySelectorAll('.grade-badge').length};})()`,
+        );
+        assert.ok(
+          Math.abs(geometry.first) < 3 && Math.abs(geometry.second) < 3,
+          JSON.stringify(geometry),
+        );
+        assert.equal(geometry.overflow, false);
+        assert.notEqual(geometry.opaque, "rgba(0, 0, 0, 0)");
+        assert.equal(geometry.badges, 1);
+        assert.equal(geometry.grade, 1);
+        if (width === 390)
+          await c.evaluate(
+            'document.querySelector(".tg-actions").scrollIntoView({block:"start"})',
+          );
+        fs.writeFileSync(
+          path.join(dir, `ux-${width}-${theme}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+      }
+    await go("tgStudents");
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
+      ),
+      ["学生", "年级", "首次参与", "最近参与", "操作"],
+    );
+    assert.equal(
+      await c.evaluate(
+        'Boolean(document.querySelector("#tg-month,.tg-profile,.tg-period,#tg-enroll"))',
+      ),
+      false,
+    );
+    await go("tgLedger");
+    assert.doesNotMatch(
+      await c.evaluate('document.querySelector("#tg-body").textContent'),
+      /最近操作/,
+    );
+    await go("tgSettings");
+    assert.doesNotMatch(
+      await c.evaluate('document.querySelector("#tg-body").textContent'),
+      /值班|历史导入|核对历史/,
+    );
+    await c.click("#tg-copy");
+    await c.waitFor(
+      'Boolean(document.querySelector("textarea.transfer-text"))',
+    );
+    const bundle = await c.evaluate(
+      'document.querySelector("textarea.transfer-text").value',
+    );
+    assert.equal(JSON.parse(bundle).type, "liming_custody");
+    await c.evaluate(
+      'Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async()=>{throw Error("synthetic clipboard unavailable")}}})',
+    );
+    await c.click("[data-transfer-submit]");
+    await c.waitFor(
+      'document.querySelector(".salary-template-form [role=alert]").textContent.includes("请复制")',
+    );
+    await c.click(".shared-course-dialog .dialog-close");
+    await c.click("#tg-paste");
+    await c.evaluate(
+      `document.querySelector('textarea.transfer-text').value=${JSON.stringify(bundle)}`,
+    );
+    await c.click("[data-transfer-submit]");
+    await c.waitFor(
+      'document.querySelector("[data-transfer-submit]")?.textContent==="确认导入"',
+    );
+    assert.match(
+      await c.evaluate(
+        'document.querySelector(".tg-transfer-preview").textContent',
+      ),
+      /新增 0/,
+    );
+    await c.click("[data-transfer-submit]");
+    await c.waitFor('!document.querySelector("textarea.transfer-text")');
     assert.deepEqual(c.exceptions, []);
   } finally {
     await browser.close();

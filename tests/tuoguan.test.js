@@ -160,7 +160,7 @@ test("all statuses, immutable rate snapshot, correction and idempotency", () => 
   );
   assert.equal(
     s.snapshot("2026-09", true).summary.find((s) => s.id === 1).unregistered,
-    1,
+    26,
   );
   let version = 0;
   for (const [status, fee] of [

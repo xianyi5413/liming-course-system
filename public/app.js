@@ -3698,6 +3698,11 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
   });
 
+  if (table.dataset.uniformFrom) {
+    const start = Number(table.dataset.uniformFrom), width = Math.max(...widths.slice(start));
+    for (let i = start; i < widths.length; i++) widths[i] = width;
+  }
+  if (table.dataset.frozenColumns === '2') table.style.setProperty('--frozen-first-width', `${widths[0]}px`);
   columns.forEach((column, index) => {
     const definition = definitions[index];
     column.style.width = `${Math.ceil(widths[index])}px`;

@@ -14,6 +14,8 @@ const TABLES = [
   "tg_audit",
   "tg_imports",
   "tg_import_sources",
+  "tg_transfer_meta",
+  "tg_transfer_keys",
 ];
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -29,6 +31,9 @@ CREATE TABLE IF NOT EXISTS tg_requests(key TEXT PRIMARY KEY,payload TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS tg_audit(id INTEGER PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_imports(id TEXT PRIMARY KEY,payload TEXT NOT NULL,result TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_import_sources(id TEXT PRIMARY KEY,import_id TEXT NOT NULL REFERENCES tg_imports(id),source_key TEXT NOT NULL,student_id INTEGER REFERENCES tg_students(id),status TEXT NOT NULL DEFAULT '待确认',basis TEXT NOT NULL DEFAULT '',UNIQUE(import_id,source_key));
+CREATE TABLE IF NOT EXISTS tg_transfer_meta(id TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tg_transfer_keys(id INTEGER PRIMARY KEY,table_name TEXT NOT NULL,row_key TEXT NOT NULL,uid TEXT NOT NULL,UNIQUE(table_name,uid));
+CREATE INDEX IF NOT EXISTS tg_transfer_row ON tg_transfer_keys(table_name,row_key);
 `;
 function digest(rows) {
   return crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex");
@@ -112,7 +117,11 @@ function migrate(db) {
   );
   const foreignKeys = db.prepare("PRAGMA foreign_keys").get().foreign_keys;
   let backup = null;
-  if (legacy.length || classTables.length) {
+  if (
+    legacy.length ||
+    classTables.length ||
+    (exists("tg_students") && !exists("tg_transfer_keys"))
+  ) {
     const file = db
       .prepare("PRAGMA database_list")
       .all()

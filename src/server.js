@@ -11,6 +11,8 @@ const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseT
 const http = require("node:http");
 const Tuoguan = require('./domain/tuoguan');
 const TuoguanImport = require('./domain/tuoguan_import');
+const TuoguanTransfer = require('./domain/tuoguan_transfer');
+const custodyTransferPreviews = new Map();
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
@@ -54,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-matrix-salary";
+const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-ux-transfer";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -10324,12 +10326,14 @@ function sanitizeBootstrap(data, user) {
   return sanitized;
 }
 
-function readBody(req) {
+function readBody(req, limit = 2_000_000) {
   return new Promise((resolve, reject) => {
     let raw = "";
+    // Preserve Chinese characters split between network chunks in pasted JSON.
+    req.setEncoding('utf8');
     req.on("data", (chunk) => {
       raw += chunk;
-      if (raw.length > 2_000_000) {
+      if (raw.length > limit) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -12447,15 +12451,34 @@ async function handleApi(req, res, url) {
     try {
       if(req.method==='GET'&&action==='snapshot') return sendJson(res,tuoguanStore.snapshot(url.searchParams.get('month'),finance));
       if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
-      const body=await readBody(req), actor=String(user.username||user.id);
+      const body=await readBody(req,action.startsWith('transfer-')?14_000_000:2_000_000), actor=String(user.username||user.id);
+      if(action==='transfer-export') return sendJson(res,{text:JSON.stringify(TuoguanTransfer.exportData(db),null,2)});
+      if(action==='transfer-preview') {
+        for(const [key,p] of custodyTransferPreviews)if(p.expires<Date.now())custodyTransferPreviews.delete(key);
+        if(custodyTransferPreviews.size>=20)return sendError(res,429,'预览过多，请稍后重试');
+        const bundle=TuoguanTransfer.parse(db,body.text),plan=TuoguanTransfer.plan(db,bundle),token=crypto.randomUUID();
+        custodyTransferPreviews.set(token,{text:body.text,signature:TuoguanTransfer.signature(db),user_id:user.id,expires:Date.now()+600000});
+        return sendJson(res,{token,allowed:!plan.conflicts.length,summary:plan.summary,conflicts:plan.conflicts});
+      }
+      if(action==='transfer-confirm') {
+        const p=custodyTransferPreviews.get(body.token);
+        if(!p||p.user_id!==user.id||p.expires<Date.now()||body.confirm!==true)return sendError(res,409,'预览已失效，请重新预览');
+        const result=await TuoguanTransfer.confirm(db,p.text,p.signature,path.join(dataDir,'backups'),actor);
+        custodyTransferPreviews.delete(body.token);
+        const {backup,...summary}=result;
+        if(result.created)writeOperationLog(user,{operation_type:'导入托管信息',operation_content:'托管数据合并完成',target_type:'tuoguan',details:summary},req);
+        return sendJson(res,{ok:true,...summary});
+      }
       if(action==='preview') {
         if(typeof body.base64!=='string'||body.base64.length>16000000) return sendError(res,400,'文件过大或无效');
         return sendJson(res,TuoguanImport.stage(tuoguanStore,TuoguanImport.preview(Buffer.from(body.base64,'base64')),actor));
       }
       if(action==='import') return sendJson(res,TuoguanImport.commit(tuoguanStore,body,actor));
+      const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
       const result=tuoguanStore.mutate(action,body,actor);
+      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤',money:'托管'+(body.kind||'资金'),rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期',resolve:'核定托管考勤'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.rows?.length||body.students?.length||body.dates?.length||1}},req);
       return sendJson(res,!finance&&action==='attendance'?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
-    }catch(error){return sendError(res,error.status||400,error.message);}
+    }catch(error){if(req.method==='POST')writeOperationLog(user,{operation_type:'托管操作失败',operation_content:action+'：操作未完成',target_type:'tuoguan',result_status:'failure'},req);return sendError(res,error.status||400,error.message);}
   }
 
 
@@ -13017,17 +13040,19 @@ async function handleApi(req, res, url) {
     const rows = classGroupCourseRows(user).filter(row => SalaryWorkflow.classKey(row) === key);
     const wanted = new Set(ids), selected = rows.filter(row => wanted.has(row.id));
     if (selected.length !== ids.length) return sendError(res, 409, "班级课程已变化或不在权限范围，请刷新后重试");
-    if (!["class", "lesson"].includes(body.mode) || (body.mode === "lesson" && ids.length !== 1) || (body.mode === "class" && rows.length !== ids.length)) return sendError(res, 409, "班级课程数量已变化，请刷新后重新确认");
+    if (!["class", "lesson", "selection"].includes(body.mode) || (body.mode === "lesson" && ids.length !== 1) || (body.mode === "class" && rows.length !== ids.length)) return sendError(res, 409, "班级课程数量已变化，请刷新后重新确认");
+    const expected = new Map((Array.isArray(body.expected) ? body.expected : []).filter(e=>e && Number.isSafeInteger(e.id)).map(e=>[e.id,e]));
+    if (body.mode === 'selection' && (expected.size !== selected.length || body.expected.length !== selected.length || selected.some(row => expected.get(row.id)?.course_type !== row.course_type || expected.get(row.id)?.updated_at !== row.updated_at))) return sendError(res,409,'课程已变化，请重新打开详情');
     const settings = Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]));
     if (!type || selected.some(row => !courseTypeOptions(row.grade, settings).includes(type))) return sendError(res, 400, "课程类型不属于当前年级的候选范围");
     withTransaction(() => {
-      const update = db.prepare("UPDATE lessons SET course_type=?,course_type_source='manual',updated_at=CURRENT_TIMESTAMP WHERE id=?");
-      for (const row of selected) update.run(type, row.id);
+      const update = db.prepare("UPDATE lessons SET course_type=?,course_type_source='manual',updated_at=CURRENT_TIMESTAMP WHERE id=? AND course_type=? AND updated_at=?");
+      for (const row of selected) if (update.run(type, row.id, row.course_type, row.updated_at).changes !== 1) throw Object.assign(new Error('课程已变化，本批未修改'), {status:409});
       const first = selected[0];
-      const description = body.mode === "class"
+      const description = body.mode !== "lesson"
         ? `修改班级类型：${first.grade}${first.subject}班由“${SalaryWorkflow.courseTypes(selected).join("、")}”调整为“${type}”，共更新${selected.length}节课程`
         : `修改课程类型：${first.date} ${first.grade}${first.subject}由“${first.course_type}”调整为“${type}”`;
-      writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(",") });
+      writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(","), details:{changes:selected.map(row=>({id:row.id,before:row.course_type,after:type}))} });
     });
     clearDerivedCache("class course type updated");
     return sendJson(res, { ok: true, updated: selected.length, class_groups: classGroupRows(user) });

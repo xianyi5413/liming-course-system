@@ -85,8 +85,14 @@ function createStore(db) {
       fail("请选择1至500名学生");
     if (new Set(b.rows.map((r) => r.student_id)).size !== b.rows.length)
       fail("重复学生");
-    if (!get("SELECT date FROM tg_calendar WHERE date=? AND enabled=1", b.date))
-      fail("请先在托管日历启用该日期");
+    const calendar = get("SELECT * FROM tg_calendar WHERE date=?", b.date);
+    if (
+      calendar?.enabled === 0 ||
+      (!calendar && new Date(b.date + "T00:00:00Z").getUTCDay() === 6)
+    )
+      fail("请先添加该日期");
+    if (!calendar)
+      run("INSERT INTO tg_calendar(date,enabled) VALUES (?,1)", b.date);
     return b.rows.map((r) => {
       if (!STATUSES.includes(r.status)) fail("考勤状态无效");
       const old = get(
@@ -234,10 +240,121 @@ function createStore(db) {
         b.notes || "",
       );
   }
+  function matrixChange(action, b) {
+    const { start, end, previous, next } = require("./tuoguan_calendar").bounds(
+      b.month,
+    );
+    if (action === "remove-students") {
+      if (
+        !Array.isArray(b.students) ||
+        !b.students.length ||
+        b.students.length > 500
+      )
+        fail("请选择学生");
+      for (const item of b.students) {
+        student(item.id);
+        if (
+          get(
+            "SELECT id FROM tg_attendance WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
+            item.id,
+            start,
+            end,
+          ) ||
+          get(
+            "SELECT id FROM tg_ledger WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
+            item.id,
+            start,
+            end,
+          )
+        )
+          fail("所选学生本月已有考勤或资金记录，不能移除签到行");
+        const rows = all(
+          "SELECT * FROM tg_periods WHERE student_id=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=? ORDER BY id",
+          item.id,
+          end,
+          start,
+        );
+        if (
+          JSON.stringify(rows.map((p) => [p.id, p.version])) !==
+          JSON.stringify(item.versions)
+        )
+          fail("参与范围已变化，请刷新", 409);
+        for (const p of rows) {
+          const before = p.start_date < start,
+            after = !p.end_date || p.end_date > end;
+          if (before)
+            run(
+              "UPDATE tg_periods SET end_date=?,version=version+1 WHERE id=?",
+              previous,
+              p.id,
+            );
+          else if (after)
+            run(
+              "UPDATE tg_periods SET start_date=?,version=version+1 WHERE id=?",
+              next,
+              p.id,
+            );
+          else {
+            run(
+              "UPDATE tg_transfer_keys SET row_key='removed:'||uid WHERE table_name=? AND row_key=?",
+              "tg_periods",
+              String(p.id),
+            );
+            run("DELETE FROM tg_periods WHERE id=?", p.id);
+          }
+          if (before && after)
+            run(
+              "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?)",
+              p.student_id,
+              p.grade,
+              next,
+              p.end_date,
+              p.status,
+              p.notes,
+            );
+        }
+      }
+    } else {
+      if (!Array.isArray(b.dates) || !b.dates.length || b.dates.length > 31)
+        fail("请选择日期");
+      if (new Set(b.dates.map((r) => r.date)).size !== b.dates.length)
+        fail("日期重复");
+      for (const item of b.dates) {
+        date(item.date);
+        if (item.date < start || item.date > end) fail("只能操作当前月份日期");
+        const old = get("SELECT * FROM tg_calendar WHERE date=?", item.date);
+        if ((old?.version || 0) !== item.version)
+          fail("日期已变化，请刷新", 409);
+        if (
+          action === "remove-dates" &&
+          (get(
+            "SELECT id FROM tg_attendance WHERE date=? LIMIT 1",
+            item.date,
+          ) ||
+            get("SELECT id FROM tg_ledger WHERE date=? LIMIT 1", item.date))
+        )
+          fail("所选日期已有考勤或资金记录，不能删除");
+        if (
+          action === "add-dates" &&
+          (old?.enabled === 1 ||
+            (!old && new Date(item.date + "T00:00:00Z").getUTCDay() !== 6))
+        )
+          fail("日期已在矩阵中");
+        run(
+          "INSERT INTO tg_calendar(date,enabled) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET enabled=excluded.enabled,version=tg_calendar.version+1",
+          item.date,
+          action === "add-dates" ? 1 : 0,
+        );
+      }
+    }
+    return { ok: true };
+  }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
       let result;
-      if (action === "student") {
+      if (["remove-students", "add-dates", "remove-dates"].includes(action))
+        result = matrixChange(action, b);
+      else if (action === "student") {
         const name = String(b.name || "").trim(),
           grade = String(b.grade || "").trim();
         if (!name || name.length > 80 || !GRADES.includes(grade))
@@ -398,10 +515,15 @@ function createStore(db) {
       start,
       end,
     );
-    const calendar = all(
+    const storedCalendar = all(
       "SELECT * FROM tg_calendar WHERE date BETWEEN ? AND ? ORDER BY date",
       start,
       end,
+    );
+    const calendar = require("./tuoguan_calendar").defaults(
+      month,
+      storedCalendar,
+      attendance,
     );
     const data = {
       students: finance
@@ -428,30 +550,41 @@ function createStore(db) {
         start,
         end,
       );
-      data.imports = all("SELECT * FROM tg_imports");
-      data.import_sources = all("SELECT * FROM tg_import_sources");
-      data.audit = all("SELECT * FROM tg_audit ORDER BY id DESC LIMIT 300");
-      data.summary = students.map((s) => {
-        const sums = get(
-          `SELECT COALESCE(SUM(CASE WHEN date<? THEN amount ELSE 0 END),0) opening,COALESCE(SUM(amount),0) balance,COALESCE(SUM(CASE WHEN date>=? AND kind='充值' THEN amount ELSE 0 END),0) recharge,COALESCE(SUM(CASE WHEN date>=? AND kind='退款' THEN -amount ELSE 0 END),0) refund,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('考勤扣费','考勤冲正') THEN -amount ELSE 0 END),0) fee,COALESCE(SUM(CASE WHEN date>=? AND kind IN ('优惠','调整','期初核定') THEN amount ELSE 0 END),0) adjustment FROM tg_ledger WHERE student_id=? AND date<=?`,
+      const totals = new Map(
+        all(
+          `SELECT student_id,COALESCE(SUM(CASE WHEN date<? THEN amount ELSE 0 END),0) opening,SUM(amount) balance,SUM(CASE WHEN date>=? AND kind='充值' THEN amount ELSE 0 END) recharge,SUM(CASE WHEN date>=? AND kind='退款' THEN -amount ELSE 0 END) refund,SUM(CASE WHEN date>=? AND kind IN ('考勤扣费','考勤冲正') THEN -amount ELSE 0 END) fee,SUM(CASE WHEN date>=? AND kind IN ('优惠','调整','期初核定') THEN amount ELSE 0 END) adjustment FROM tg_ledger WHERE date<=? GROUP BY student_id`,
           start,
           start,
           start,
           start,
           start,
-          s.id,
           end,
-        );
+        ).map((r) => [r.student_id, r]),
+      );
+      const recorded = new Set(
+        attendance
+          .filter((a) => a.status !== "未登记")
+          .map((a) => a.student_id + ":" + a.date),
+      );
+      data.summary = students.map((s) => {
+        const sums = totals.get(s.id) || {
+          opening: 0,
+          balance: 0,
+          recharge: 0,
+          refund: 0,
+          fee: 0,
+          adjustment: 0,
+        };
         const unregistered = calendar.filter(
           (c) =>
             c.enabled &&
-            period(s.id, c.date) &&
-            !attendance.some(
-              (a) =>
-                a.student_id === s.id &&
-                a.date === c.date &&
-                a.status !== "未登记",
-            ),
+            periods.some(
+              (p) =>
+                p.student_id === s.id &&
+                p.start_date <= c.date &&
+                (!p.end_date || p.end_date >= c.date),
+            ) &&
+            !recorded.has(s.id + ":" + c.date),
         ).length;
         return {
           ...s,

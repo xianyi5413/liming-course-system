@@ -44,7 +44,7 @@ const CourseDetails = (() => {
 const ClassCourseUI = (() => {
   let active = null, generation = 0;
   const editable = () => canWriteData() && canView('classGroups') && ['owner', 'boss', 'admin', 'academic', 'jiaowu'].includes(auth.user?.role);
-  const saveType = (groupKey, ids, type, mode) => request('/api/class-groups/course-type', { method: 'PATCH', body: { group_key: groupKey, lesson_ids: ids, course_type: type, mode } });
+  const saveType = (groupKey, ids, type, mode, expected = undefined) => request('/api/class-groups/course-type', { method: 'PATCH', body: { group_key: groupKey, lesson_ids: ids, course_type: type, mode, expected } });
   const typeCell = row => `<td class="class-course-type" data-id="${row.id}" ${editable() ? 'role="button" tabindex="0" aria-haspopup="listbox"' : ''}><span class="lesson-inline-picker">${escapeHtml(row.course_type)}</span></td>`;
   function bindTypes(element, rows, save) {
     element.querySelectorAll('.class-course-type').forEach(cell => {

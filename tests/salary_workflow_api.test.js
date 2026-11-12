@@ -13,6 +13,45 @@ const {
 } = require("../src/domain/teacher_salary_rule");
 
 const root = path.resolve(__dirname, "..");
+
+test('selection course type validates exact IDs and stale rows; Edge cancel and filtered batch refresh salary', async()=>{
+  const name='批量合成教师',other='批量范围外教师',db=new DatabaseSync(databasePath);
+  db.prepare("INSERT INTO teachers(id,name,status) VALUES(9911,?,'在职'),(9912,?,'在职')").run(name,other);
+  const insert=db.prepare("INSERT INTO lessons(teacher_name,date,month_key,time_slot,grade,subject,course_type,student_names,status,teacher_salary,teacher_salary_source) VALUES(?,?,?,'09:00-11:00','初一','数学','1V1','批量合成学生','已上',0,'auto')");
+  for(const [teacher,date] of [[name,'2027-01-04'],[name,'2027-01-05'],[name,'2027-02-01'],[other,'2027-01-04']])insert.run(teacher,date,date.slice(0,7)+'-01');
+  db.close();
+  assert.equal((await api('/api/salary-tables',{method:'POST',body:{teacher_id:9911,effective_start:'2027-01-01',effective_end:'2027-02-28',rules:[{grade:'初一',course_type:'1V1',formula:'100+40K'},{grade:'初一',course_type:'1V2',formula:'180+20K'}]}})).response.status,200);
+  const endpoint='/api/teacher-detail/workflow?'+new URLSearchParams({teacher:name,start:'2027-01-01',end:'2027-02-28'});
+  const workflow=async()=>(await api(endpoint)).payload;
+  const before=await workflow(),rows=before.lessons,selected=rows.slice(0,2),body={mode:'selection',group_key:before.classes[0].key,lesson_ids:selected.map(r=>r.id),course_type:'1V2',expected:selected.map(({id,course_type,updated_at})=>({id,course_type,updated_at}))};
+  assert.ok(body.expected.every(r=>r.updated_at));
+  const patch=b=>api('/api/class-groups/course-type',{method:'PATCH',body:b});
+  assert.equal((await patch({...body,expected:[{...body.expected[0],updated_at:'stale'},body.expected[1]]})).response.status,409);
+  assert.equal((await patch({...body,lesson_ids:[rows[0].id,999999999]})).response.status,409);
+  assert.equal((await patch({...body,course_type:'无效类型'})).response.status,400);
+  assert.equal((await patch({...body,expected:[null,null]})).response.status,409);
+  const concurrent=new DatabaseSync(databasePath);
+  concurrent.exec(`CREATE TRIGGER synthetic_type_conflict BEFORE UPDATE OF course_type ON lessons WHEN OLD.id=${selected[1].id} BEGIN SELECT RAISE(IGNORE); END`);
+  try {assert.equal((await patch(body)).response.status,409);}finally{concurrent.exec('DROP TRIGGER synthetic_type_conflict');concurrent.close();}
+  assert.equal((await api('/api/class-groups/course-type',{method:'PATCH',body,cookie:teacherCookie})).response.status,403);
+  assert.deepEqual((await workflow()).lessons.map(r=>r.course_type),['1V1','1V1','1V1']);
+  const browser=await launchChrome(path.join(tempRoot,'type-batch')),c=browser.session;
+  try {
+    await c.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});await c.login();
+    await c.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");await c.waitFor('Boolean(document.querySelector(".teacher-class-summary-table"))');
+    await c.evaluate(`selectedTeacherDetail=${JSON.stringify(name)};SalaryUI.applyRange('teacher-detail-salary','2027-01-01','2027-01-31')`);
+    await c.waitFor('document.querySelectorAll("[data-salary-class]").length===1');await c.click('[data-salary-class]');await c.waitFor('document.querySelectorAll(".teacher-class-lessons tbody tr").length===2');
+    const choose=async()=>{await c.click('.teacher-class-lessons .class-course-type');await c.click('.custom-select-menu.open [data-value="1V2"]');await c.waitFor('Boolean(document.querySelector("[data-type-scope=all]"))');};
+    await choose();await c.click('[data-type-scope=cancel]');assert.deepEqual((await workflow()).lessons.map(r=>r.course_type),['1V1','1V1','1V1']);
+    await choose();await c.click('[data-type-scope=all]');await c.waitFor('[...document.querySelectorAll(".teacher-class-lessons .class-course-type")].filter(e=>e.textContent.includes("1V2")).length===2');
+    const result=await workflow();assert.equal(result.classes.length,1);assert.deepEqual(result.lessons.map(r=>r.course_type),['1V2','1V2','1V1']);assert.deepEqual(result.lessons.map(r=>r.teacher_payroll_amount),[200,200,140]);
+    const summary=(await api('/api/bootstrap?month=2027-01-01')).payload.derived.teacher_summary.find(r=>r.teacher_name===name);assert.equal(summary.base_salary,360);assert.equal(summary.performance_base,40);
+    const outside=(await api('/api/teacher-detail/workflow?'+new URLSearchParams({teacher:other,start:'2027-01-01',end:'2027-01-31'}))).payload;assert.equal(outside.lessons[0].course_type,'1V1');
+    const finance=await api('/api/finance-summary?start=2027-01-01&end=2027-01-31');const summaries=(await api('/api/bootstrap?month=2027-01-01')).payload.derived.teacher_summary;assert.equal(finance.payload.overview.teacher_cost.current,summaries.reduce((sum,r)=>sum+(r.total_salary||0)-(r.transport_total||0),0));
+    assert.equal((await patch(body)).response.status,409);
+    assert.deepEqual(c.exceptions,[]);
+  } finally {await browser.close();}
+});
 const MONTH = "2026-07-01";
 let tempRoot;
 let databasePath;
@@ -327,7 +366,7 @@ test('monthly salary UI isolates delayed saves and month responses, refreshes pe
     await c.evaluate("setActiveView('teacherDetail');load({refreshGlobal:false})");await c.waitFor('Boolean(document.querySelector(".teacher-class-summary-table"))');
     await c.evaluate(`selectedTeacherDetail=${JSON.stringify(name)};SalaryUI.applyRange('teacher-detail-salary','2026-09-01','2026-10-31')`);
     await c.waitFor('document.querySelectorAll("[data-salary-class]").length===1');await c.click('[data-salary-class]');await c.waitFor('document.querySelectorAll(".teacher-class-lessons tbody tr").length===2');
-    await c.click('.teacher-class-lessons .class-course-type');await c.click('.custom-select-menu.open [data-value="1V2"]');
+    await c.click('.teacher-class-lessons .class-course-type');await c.click('.custom-select-menu.open [data-value="1V2"]');await c.click('[data-type-scope=one]');
     await c.waitFor('document.querySelector(".teacher-class-lessons .class-course-type")?.textContent.includes("1V2")');
     const workflow=(await api('/api/teacher-detail/workflow?'+new URLSearchParams({teacher:name,start:'2026-09-01',end:'2026-10-31'}))).payload;
     assert.equal(workflow.classes.length,1);assert.deepEqual(workflow.lessons.map(r=>r.course_type),['1V2','1V1']);

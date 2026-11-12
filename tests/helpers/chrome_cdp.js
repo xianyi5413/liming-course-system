@@ -220,7 +220,10 @@ async function launchChrome(profileDirectory, options = {}) {
       child.kill();
       await Promise.race([ended, new Promise(resolve => setTimeout(resolve, 1500))]);
     }
-    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // Windows may briefly retain Edge child-process handles after the browser exits.
+    // A locked temporary profile must not conceal the actual test failure.
+    try { await fs.promises.rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+    catch (error) { if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error.code)) throw error; }
   };
   try {
   let target;
