@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-calendar-management";
+const APP_VERSION = process.env.APP_VERSION || "20261112-tuoguan-ledger-modal-fix";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }

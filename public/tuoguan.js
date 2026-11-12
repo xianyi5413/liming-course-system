@@ -1,6 +1,10 @@
 /* Integrated native UI; all financial amounts sent as integer cents. */
 window.TuoguanUI = (() => {
   const statuses = ["出勤", "请假", "放假", "不适用"];
+  const manualMoneyKinds = ["充值", "退款", "优惠", "调整", "期初核定"];
+  const isManualMoney = (row) =>
+    manualMoneyKinds.includes(row.kind) && row.attendance_id == null;
+  let activeDetail = null;
   const grades = ["初一", "初二", "初三"];
   const esc = (v) =>
     String(v ?? "").replace(
@@ -129,10 +133,7 @@ window.TuoguanUI = (() => {
         ? field(
             "类型",
             '<select class="control" id="tg-kind">' +
-              opt(
-                [["", "全部类型"], ...new Set(data.ledger.map((l) => l.kind))],
-                ledgerKind,
-              ) +
+              opt([["", "全部类型"], ...manualMoneyKinds], ledgerKind) +
               "</select>",
           ) +
           field(
@@ -179,25 +180,68 @@ window.TuoguanUI = (() => {
       owner = auth.user?.id,
       student = data.students.find((s) => s.id === id);
     if (!student) return;
+    activeDetail?.close();
     let month = day.slice(0, 7),
-      sequence = 0;
+      sequence = 0,
+      controller;
+    const fields = [
+      ["本月托管消费", "fee"],
+      ["本月实际消费", "actual_consumption"],
+      ["本月赠送消费", "gift_consumption"],
+      ["本月实际充值", "actual_recharge"],
+      ["本月赠送充值", "gift_recharge"],
+      ["月末实际余额", "actual_balance"],
+      ["月末赠送余额", "gift_balance"],
+    ];
+    const initial = data.summary.find((r) => r.id === id);
     const dialog = CourseDetails.dialog(
       student.name + " · 托管详情",
       '<div class="tg-detail-content"></div>',
-      { onClose: () => sequence++ },
+      {
+        onClose: () => {
+          sequence++;
+          controller?.abort();
+          if (activeDetail === dialog) activeDetail = null;
+        },
+      },
     );
-    dialog.element
-      .querySelector(".modal-panel")
-      .classList.add("tg-student-detail-panel");
+    activeDetail = dialog;
+    const panel = dialog.element.querySelector(".modal-panel");
+    panel.classList.add("tg-student-detail-panel");
     const content = dialog.element.querySelector(".tg-detail-content");
+    // Keep the shell, cards and navigation alive throughout all month requests.
+    content.innerHTML =
+      '<div class="tg-actions">' +
+      renderStudentBadge(student, { grade: initial?.grade || student.grade }) +
+      renderGradeBadge(initial?.grade || student.grade) +
+      "</div>" +
+      metrics(fields.map(([label]) => [label, "—"])) +
+      '<div class="tg-detail-notes muted-tip"><div></div><div></div></div>' +
+      '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong></strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button><span class="tg-detail-loading" role="status" aria-live="polite"></span></div>' +
+      monthCalendar(month, () => "") +
+      '<div class="tg-calendar-legend">' +
+      statuses.map(badge).join("") +
+      '</div><p class="tg-detail-error" role="alert"></p>';
+    const values = [...content.querySelectorAll(".metric-value")],
+      notes = content.querySelector(".tg-detail-notes"),
+      grid = content.querySelector(".tg-detail-calendar"),
+      title = content.querySelector(".tg-detail-month strong"),
+      status = content.querySelector("[role=status]"),
+      error = content.querySelector("[role=alert]");
     const current = () =>
-      dialog.element.isConnected && host === root && owner === auth.user?.id;
-    function render(snapshot, loading = false, error = "") {
-      const a = snapshot?.summary.find((r) => r.id === id),
-        history = snapshot?.attendance.filter((r) => r.student_id === id) || [],
-        byDate = new Map(history.map((r) => [r.date, r]));
-      const [year, m] = month.split("-").map(Number);
-      const calendar = monthCalendar(month, (date, n) => {
+      dialog.element.isConnected &&
+      activeDetail === dialog &&
+      host === root &&
+      owner === auth.user?.id;
+    function render(snapshot, wanted) {
+      const a = snapshot.summary.find((r) => r.id === id);
+      if (!a) throw Error("学生档案已变化，请重新打开详情");
+      const byDate = new Map(
+        snapshot.attendance
+          .filter((r) => r.student_id === id)
+          .map((r) => [r.date, r]),
+      );
+      const calendar = monthCalendar(wanted, (date, n) => {
         const record = byDate.get(date),
           status = record?.status === "停课" ? "放假" : record?.status,
           tone = statusTone(status),
@@ -227,71 +271,69 @@ window.TuoguanUI = (() => {
           "</span></div>"
         );
       });
-      content.innerHTML =
-        '<div class="tg-actions">' +
-        renderStudentBadge(student, { grade: a?.grade || student.grade }) +
-        renderGradeBadge(a?.grade || student.grade) +
-        "</div>" +
-        (loading
-          ? '<p role="status">正在加载…</p>'
-          : error
-            ? '<p role="alert">' + esc(error) + "</p>"
-            : metrics([
-                ["本月托管消费", money(a.fee)],
-                ["本月实际消费", money(a.actual_consumption)],
-                ["本月赠送消费", money(a.gift_consumption)],
-                ["本月实际充值", money(a.actual_recharge)],
-                ["本月赠送充值", money(a.gift_recharge)],
-                ["月末实际余额", money(a.actual_balance)],
-                ["月末赠送余额", money(a.gift_balance)],
-              ]) +
-              (a.unpaid_current_fee
-                ? '<p class="muted-tip">本月费用含未付 ' +
-                  money(a.unpaid_current_fee) +
-                  "</p>"
-                : "") +
-              (a.prior_debt_gift_offset
-                ? '<p class="muted-tip">赠送余额抵扣结转或调整欠费 ' +
-                  money(a.prior_debt_gift_offset) +
-                  "</p>"
-                : "")) +
-        '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong>' +
-        year +
-        "年" +
-        m +
-        '月</strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button></div>' +
-        (loading || error
-          ? ""
-          : calendar +
-            '<div class="tg-calendar-legend">' +
-            statuses.map(badge).join("") +
-            "</div>");
-      content.dataset.month = month;
-      content.dataset.loading = loading ? "true" : "false";
-      for (const b of content.querySelectorAll("[data-detail-step]"))
-        b.onclick = async () => {
-          month = offsetMonth(
-            month + "-01",
-            Number(b.dataset.detailStep),
-          ).slice(0, 7);
-          const wanted = month,
-            request = ++sequence;
-          render(null, true);
-          try {
-            const next = await api("snapshot?month=" + wanted);
-            if (current() && request === sequence && wanted === month)
-              render(next);
-          } catch (e) {
-            if (current() && request === sequence)
-              render(null, false, e.message);
-          }
-        };
-      scheduleAdaptiveTableColumns();
+      const template = document.createElement("template");
+      template.innerHTML = calendar;
+      const scrollTop = panel.scrollTop;
+      // Commit the complete month synchronously; no empty/loading render in between.
+      values.forEach(
+        (node, index) => (node.textContent = money(a[fields[index][1]])),
+      );
+      notes.children[0].textContent = a.unpaid_current_fee
+        ? "本月费用含未付 " + money(a.unpaid_current_fee)
+        : "";
+      notes.children[1].textContent = a.prior_debt_gift_offset
+        ? "赠送余额抵扣结转或调整欠费 " + money(a.prior_debt_gift_offset)
+        : "";
+      const [year, m] = wanted.split("-").map(Number);
+      title.textContent = year + "年" + m + "月";
+      grid.replaceChildren(
+        ...template.content.querySelector(".tg-detail-calendar").childNodes,
+      );
+      content.dataset.month = wanted;
+      panel.scrollTop = scrollTop;
     }
-    render(data);
+    for (const button of content.querySelectorAll("[data-detail-step]"))
+      button.onclick = async () => {
+        month = offsetMonth(
+          month + "-01",
+          Number(button.dataset.detailStep),
+        ).slice(0, 7);
+        const wanted = month,
+          request = ++sequence;
+        controller?.abort();
+        controller = new AbortController();
+        content.dataset.loading = "true";
+        content.setAttribute("aria-busy", "true");
+        status.textContent = "…";
+        status.setAttribute("aria-label", "正在加载" + wanted);
+        error.textContent = "";
+        try {
+          const next = await api(
+            "snapshot?month=" + wanted,
+            undefined,
+            controller.signal,
+          );
+          if (current() && request === sequence) render(next, wanted);
+        } catch (e) {
+          if (current() && request === sequence) {
+            month = content.dataset.month;
+            error.textContent = e.message;
+          }
+        } finally {
+          if (current() && request === sequence) {
+            content.dataset.loading = "false";
+            content.setAttribute("aria-busy", "false");
+            status.textContent = "";
+            status.removeAttribute("aria-label");
+          }
+        }
+      };
+    render(data, month);
+    content.dataset.loading = "false";
   }
-  async function api(action, body) {
+  async function api(action, body, signal) {
     const r = await fetch("/api/tuoguan/" + action, {
+      signal,
       method: body ? "POST" : "GET",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
@@ -351,7 +393,7 @@ window.TuoguanUI = (() => {
     return (!query || s.name.includes(query)) && (!grade || p?.grade === grade);
   }
   const table = (headers, rows, indexed = false) =>
-    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${indexed ? rowIndexColumn() : ""}${headers.map((h) => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(/^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed)}">${empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
+    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${indexed ? rowIndexColumn() : ""}${headers.map((h) => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(/^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
   const listTable = (headers, rows) => table(headers, rows, true);
   const tr = (values, attrs = "") =>
     `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
@@ -1132,6 +1174,7 @@ window.TuoguanUI = (() => {
   function renderLedger(body) {
     const rows = data.ledger.filter(
       (l) =>
+        isManualMoney(l) &&
         (!ledgerKind || l.kind === ledgerKind) &&
         (!rangeStart || l.date >= rangeStart) &&
         (!rangeEnd || l.date <= rangeEnd) &&
@@ -1169,12 +1212,14 @@ window.TuoguanUI = (() => {
           ]),
         ),
       );
+    for (const index of [4, 5])
+      body.querySelectorAll("col")[index].dataset.alignment = "right";
     root.querySelector("#tg-money").onclick = () =>
       form(
         "托管资金记录",
         studentSelect() +
           input("date", "业务日期", day, "date") +
-          select("kind", "类型", ["充值", "退款", "优惠", "调整", "期初核定"]) +
+          select("kind", "类型", manualMoneyKinds) +
           input("actual_amount", "实际金额（元）", "0", "number") +
           input("gift_amount", "赠送金额（元）", "0", "number") +
           input("method", "支付方式") +

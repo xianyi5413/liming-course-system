@@ -486,7 +486,7 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
       await c.evaluate(
         'document.querySelectorAll(".tg-detail-content .metric,.tg-detail-content .tg-calendar-day").length',
       ),
-      0,
+      37,
     );
 
     await c.click('[data-detail-step="1"]');
@@ -1044,6 +1044,344 @@ test("Edge calendar queue, conflicts, errors, close synchronization, stale respo
     assert.ok(c.consoleErrors.every((e) => e.includes("409")));
   } finally {
     db.close();
+    await b.close();
+  }
+});
+
+test("Edge manual ledger excludes settlement, preserves filters, supports one split recharge and idempotent save", async () => {
+  const kinds = ["充值", "退款", "优惠", "调整", "期初核定"];
+  for (const [kind, actual, gift] of [
+    ["充值", 100000, 10000],
+    ["退款", 2000, 300],
+    ["优惠", 0, 200],
+    ["调整", -500, 500],
+    ["期初核定", 1000, 100],
+  ]) {
+    const result = await call("money", {
+      student_id: 3,
+      date: "2027-03-01",
+      kind,
+      actual_amount: actual,
+      gift_amount: gift,
+      notes: "合成流水" + kind,
+    });
+    assert.equal(result.status, 200);
+  }
+  for (const [status, version] of [
+    ["出勤", 0],
+    ["请假", 1],
+    ["出勤", 2],
+  ])
+    assert.equal(
+      (
+        await call("attendance", {
+          date: "2027-03-02",
+          rows: [{ student_id: 3, status, version }],
+        })
+      ).status,
+      200,
+    );
+  const before = (await call("snapshot?month=2027-03")).data;
+  assert.ok(before.ledger.some((r) => r.kind === "考勤冲正"));
+  assert.ok(before.ledger.some((r) => r.kind === "考勤扣费"));
+  const db = new DatabaseSync(env.DB_PATH, { readOnly: true }),
+    history = () =>
+      JSON.stringify(
+        db.prepare("SELECT * FROM tg_attendance ORDER BY id").all(),
+      ),
+    savedHistory = history();
+  const b = await launchBrowser(path.join(dir, "edge-manual-ledger"), {
+      browser: "edge",
+    }),
+    c = b.session;
+  const month = async (v) => {
+    await c.evaluate(
+      `document.querySelector('#tg-month').value='${v}';document.querySelector('#tg-month').dispatchEvent(new Event('change'))`,
+    );
+    await c.waitFor(
+      `document.querySelector('[data-loaded-month]')?.dataset.loadedMonth==='${v}'`,
+    );
+  };
+  const rows = () =>
+    c.evaluate(
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).map(r=>[...r.cells].map(c=>c.textContent))',
+    );
+  const filter = async (id, value) => {
+    await c.evaluate(
+      `document.querySelector('#${id}').value=${JSON.stringify(value)};document.querySelector('#${id}').dispatchEvent(new Event('change'))`,
+    );
+  };
+  try {
+    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.login();
+    await c.evaluate("setActiveView('tgLedger');load({refreshGlobal:false})");
+    await c.waitFor('Boolean(document.querySelector("#tg-month"))');
+    await month("2027-03");
+    assert.deepEqual(
+      await c.evaluate(
+        '[...document.querySelectorAll("#tg-kind option")].map(e=>e.value)',
+      ),
+      ["", ...kinds],
+    );
+    const all = await rows();
+    assert.equal(all.length, 5);
+    assert.deepEqual(
+      all.map((r) => Number(r[0])),
+      [1, 2, 3, 4, 5],
+    );
+    assert.deepEqual(
+      [...new Set(all.map((r) => r[3]))].sort(),
+      [...kinds].sort(),
+    );
+    assert.doesNotMatch(all.flat().join(" "), /考勤扣费|考勤冲正/);
+    assert.equal(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-table tbody tr")].every(r=>[4,5].every(i=>getComputedStyle(r.cells[i]).textAlign==="right"))',
+      ),
+      true,
+    );
+    for (const kind of kinds) {
+      await filter("tg-kind", kind);
+      assert.equal((await rows()).length, 1);
+      assert.equal((await rows())[0][0], "1");
+      assert.equal((await rows())[0][3], kind);
+    }
+    await filter("tg-kind", "");
+    await filter("tg-grade", "初一");
+    assert.match(
+      await c.evaluate('document.querySelector(".tg-table tbody").textContent'),
+      /暂无充值记录/,
+    );
+    await filter("tg-grade", "初二");
+    assert.equal((await rows()).length, 5);
+    await c.evaluate(
+      `document.querySelector('#tg-query').value='合成乙';document.querySelector('#tg-query').dispatchEvent(new Event('input'));document.querySelector('#tg-query').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`,
+    );
+    assert.equal((await rows()).length, 5);
+    await filter("tg-start", "2027-03-02");
+    assert.equal((await rows()).length, 0);
+    await c.click("#tg-reset");
+    await month("2027-04");
+    assert.equal(
+      await c.evaluate('document.querySelector(".tg-table tbody").textContent'),
+      "暂无充值记录",
+    );
+    await month("2027-03");
+    assert.deepEqual((await call("snapshot?month=2027-03")).data, before);
+    await c.click("#tg-money");
+    await c.evaluate(
+      `document.querySelector('.tg-form [name=student_id]').value='3';document.querySelector('.tg-form [name=date]').value='2027-03-15';document.querySelector('.tg-form [name=actual_amount]').value='1000';document.querySelector('.tg-form [name=gift_amount]').value='100';document.querySelector('.tg-form [name=notes]').value='合成一次双资金';window.moneyFetch=fetch;window.moneyRequests=[];window.fetch=async(...args)=>{if(String(args[0]).endsWith('/money')){moneyRequests.push(JSON.parse(args[1].body));const r=await moneyFetch(...args);await new Promise(resolve=>window.releaseMoney=resolve);return r;}return moneyFetch(...args)}`,
+    );
+    await c.evaluate(
+      `document.querySelector('.tg-form [type=submit]').click();document.querySelector('.tg-form [type=submit]').click()`,
+    );
+    await c.waitFor('typeof releaseMoney==="function"');
+    assert.equal(await c.evaluate("moneyRequests.length"), 1);
+    const payload = await c.evaluate("moneyRequests[0]");
+    await c.evaluate("releaseMoney();window.fetch=moneyFetch");
+    await c.waitFor('!document.querySelector(".tg-form")');
+    await c.waitFor(
+      'document.querySelector(".tg-table tbody").textContent.includes("合成一次双资金")',
+    );
+    const recharge = (await rows()).filter((r) => r[9] === "合成一次双资金");
+    assert.equal(recharge.length, 1);
+    assert.ok(recharge[0][4].replaceAll(",", "").includes("1000.00"));
+    assert.ok(recharge[0][5].includes("100.00"));
+    assert.equal(
+      (
+        await fetch(`http://127.0.0.1:${port}/api/tuoguan/money`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie },
+          body: JSON.stringify(payload),
+        })
+      ).status,
+      200,
+    );
+    const after = (await call("snapshot?month=2027-03")).data;
+    assert.equal(after.ledger.length, before.ledger.length + 1);
+    assert.equal(
+      after.ledger.filter((r) => r.notes === "合成一次双资金").length,
+      1,
+    );
+    const a = after.summary.find((s) => s.id === 3),
+      old = before.summary.find((s) => s.id === 3);
+    assert.equal(a.actual_balance - old.actual_balance, 100000);
+    assert.equal(a.gift_balance - old.gift_balance, 10000);
+    for (const key of ["fee", "actual_consumption", "gift_consumption"])
+      assert.equal(a[key], old[key]);
+    assert.equal(history(), savedHistory);
+    const priorIds = new Set(before.ledger.map((r) => r.id));
+    assert.deepEqual(
+      after.ledger.filter((r) => priorIds.has(r.id)),
+      before.ledger,
+    );
+    assert.ok(
+      db
+        .prepare(
+          "SELECT count(*) n FROM operation_logs WHERE target_type='tuoguan' AND operation_type='托管充值'",
+        )
+        .get().n > 0,
+    );
+    assert.deepEqual(c.exceptions, []);
+    assert.deepEqual(c.consoleErrors, []);
+  } finally {
+    db.close();
+    await b.close();
+  }
+});
+
+test("Edge stable detail retains nodes, height and scroll during delayed month loads, races, errors and close", async () => {
+  const b = await launchBrowser(path.join(dir, "edge-stable-detail"), {
+      browser: "edge",
+    }),
+    c = b.session;
+  const show = async () => {
+    await c.click('.tg-fee-row[data-student="1"]');
+    await c.waitFor(
+      'document.querySelector(".tg-detail-content")?.dataset.month==="2026-09"',
+    );
+  };
+  const settled = (m) =>
+    c.waitFor(
+      `document.querySelector('.tg-detail-content')?.dataset.month==='${m}'&&document.querySelector('.tg-detail-content').dataset.loading==='false'`,
+    );
+  const capture = () =>
+    c.evaluate(
+      `(()=>{const x=document.querySelector('.tg-detail-content'),p=x.closest('.modal-panel');return {month:x.dataset.month,amounts:[...x.querySelectorAll('.metric-value')].map(e=>e.textContent),dates:[...x.querySelectorAll('.tg-calendar-day')].map(e=>e.dataset.date),height:p.getBoundingClientRect().height,width:p.getBoundingClientRect().width,grid:x.querySelector('.tg-detail-calendar').getBoundingClientRect().height,top:p.scrollTop}})()`,
+    );
+  const stable = () =>
+    c.evaluate(
+      'stableNodes.every(e=>e.isConnected)&&stableNodes[0]===document.querySelector(".tg-detail-content")&&shellMutations===0',
+    );
+  try {
+    await c.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    await c.login();
+    await c.evaluate(
+      "if(!sidebarCollapsed)document.querySelector('.sidebar-toggle').click();setActiveView('tgSummary');load({refreshGlobal:false})",
+    );
+    await c.waitFor('Boolean(document.querySelector("#tg-month"))');
+    await c.evaluate(
+      "document.querySelector('#tg-month').value='2026-09';document.querySelector('#tg-month').dispatchEvent(new Event('change'))",
+    );
+    await c.waitFor(
+      'document.querySelector("[data-loaded-month]")?.dataset.loadedMonth==="2026-09"',
+    );
+    await c.evaluate(
+      `document.querySelector('#tg-query').value='合成甲';document.querySelector('#tg-query').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));document.querySelector('#tg-grade').value='初一';document.querySelector('#tg-grade').dispatchEvent(new Event('change'))`,
+    );
+    for (const width of [1440, 390])
+      for (const theme of ["light", "dark"]) {
+        await c.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: width === 390,
+        });
+        await c.evaluate(`document.documentElement.dataset.theme='${theme}'`);
+        await show();
+        await c.evaluate(
+          `window.stableNodes=[document.querySelector('.tg-detail-content'),...document.querySelectorAll('.tg-detail-content .tg-actions,.tg-detail-content .metric,.tg-detail-content .metric-value,.tg-detail-month,.tg-detail-month button,.tg-detail-calendar,.tg-calendar-legend')];window.shellMutations=0;window.observer=new MutationObserver(()=>shellMutations++);observer.observe(stableNodes[0],{childList:true});document.querySelector('.tg-student-detail-panel').scrollTop=100;window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('snapshot?month='))await new Promise(resolve=>window.releaseDetail=resolve);return r;}`,
+        );
+        const before = await capture();
+        await c.click('[data-detail-step="1"]');
+        await c.waitFor('typeof releaseDetail==="function"');
+        await c.evaluate("new Promise(r=>setTimeout(r,180))");
+        assert.deepEqual(await capture(), before);
+        assert.equal(await stable(), true);
+        fs.writeFileSync(
+          path.join(dir, `stable-loading-${width}-${theme}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+        await c.evaluate("releaseDetail();window.fetch=detailFetch");
+        await settled("2026-10");
+        const next = await capture();
+        for (const key of ["height", "width", "grid", "top"])
+          assert.ok(
+            Math.abs(next[key] - before[key]) <= 1,
+            `${key}: ${next[key]} vs ${before[key]}`,
+          );
+        assert.equal(next.dates.length, 31);
+        assert.ok(next.dates.every((d) => d.startsWith("2026-10")));
+        assert.equal(await stable(), true);
+        const expected = (
+          await call("snapshot?month=2026-10")
+        ).data.summary.find((s) => s.id === 1);
+        assert.deepEqual(
+          next.amounts.map((x) =>
+            Math.round(Number(x.replace(/[^0-9.-]/g, "")) * 100),
+          ),
+          [
+            "fee",
+            "actual_consumption",
+            "gift_consumption",
+            "actual_recharge",
+            "gift_recharge",
+            "actual_balance",
+            "gift_balance",
+          ].map((k) => expected[k]),
+        );
+        await c.click('[data-detail-step="-1"]');
+        await settled("2026-09");
+        assert.deepEqual(await capture(), before);
+        assert.equal(await stable(), true);
+        await c.evaluate("observer.disconnect()");
+        await c.click(".dialog-close");
+      }
+    await show();
+    await c.evaluate(
+      `window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('snapshot?month=2026-10'))await new Promise(resolve=>window.releaseDetail=resolve);return r}`,
+    );
+    await c.click('[data-detail-step="1"]');
+    await c.waitFor('typeof releaseDetail==="function"');
+    await c.click('[data-detail-step="1"]');
+    await settled("2026-11");
+    const november = await capture();
+    await c.evaluate("releaseDetail();window.fetch=detailFetch");
+    await c.evaluate("new Promise(requestAnimationFrame)");
+    assert.deepEqual(await capture(), november);
+    await c.evaluate(`window.fetch=async()=>{throw Error('合成请求失败')}`);
+    await c.click('[data-detail-step="1"]');
+    await c.waitFor(
+      'document.querySelector(".tg-detail-error").textContent.includes("合成请求失败")',
+    );
+    assert.deepEqual(await capture(), november);
+    await c.evaluate("window.fetch=detailFetch");
+    await c.click('[data-detail-step="1"]');
+    await settled("2026-12");
+    await c.click('[data-detail-step="1"]');
+    await settled("2027-01");
+    // Closing and opening another student must isolate a pending response.
+    await c.evaluate(
+      `window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);await new Promise(resolve=>window.releaseDetail=resolve);return r}`,
+    );
+    await c.click('[data-detail-step="1"]');
+    await c.waitFor('typeof releaseDetail==="function"');
+    await c.click(".dialog-close");
+    await c.evaluate("window.fetch=detailFetch");
+    await c.click('.tg-fee-row[data-student="4"]');
+    const other = await capture();
+    await c.evaluate("releaseDetail()");
+    await c.evaluate("new Promise(requestAnimationFrame)");
+    assert.deepEqual(await capture(), other);
+    await c.click(".dialog-close");
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-month").value'),
+      "2026-09",
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-query").value'),
+      "合成甲",
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector("#tg-grade").value'),
+      "初一",
+    );
+    assert.deepEqual(c.exceptions, []);
+    assert.deepEqual(c.consoleErrors, []);
+  } finally {
     await b.close();
   }
 });
