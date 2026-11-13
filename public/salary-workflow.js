@@ -74,7 +74,22 @@ const SalaryUI = (() => {
       const special = ['manual', 'legacy', 'import'].includes(row.teacher_base_salary_display_source || row.teacher_base_salary_source);
       return `<td class="price-cell-wrap ${special ? 'salary-special' : ''}"><span class="price-inline">${currencyInputMarkup(row.teacher_base_salary, { className: 'salary-base-input', displayValue: row.teacher_base_salary == null ? '未设置' : null, attrs: `data-id="${row.id}" step="0.01" min="0" ${disabled()}`, inputValue: row.teacher_base_salary == null ? '' : Number(row.teacher_base_salary).toFixed(2) })}<span class="status-badge salary-source-badge">${special ? '特' : (row.teacher_base_salary_display_source || row.teacher_base_salary_source) === 'auto' ? '自' : '—'}</span>${writable() && persistedSpecial && row.rule_base_salary != null ? `<button class="btn salary-auto-button" data-salary-action="auto" data-id="${row.id}">恢复自动</button>` : ''}</span></td><td>${formatMoney(row.performance_base)}</td><td title="${escapeHtml(row.salary_rule_reason || '')}">${escapeHtml(row.salary_rule_expression)}</td>`;
     };
-    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${(group.course_types || [group.course_type]).join("、")} · ${studentSetInlineText(group.student_names)} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
+    show(`${group.teacher_name} · ${group.grade} · ${group.subject} · ${(group.course_types || [group.course_type]).join("、")} · ${studentSetInlineText(group.student_names)} · 共${rows.length}节课`, '<p class="section-subtitle">仅已上课程贡献基础课薪和绩效基数；规则金额按课程时长折算。</p>' + CourseDetails.table(rows, { salaryCells, typeCell: ClassCourseUI.typeCell, className: 'teacher-class-lessons' }), 'salary-lessons-panel');
+    const generation = sessionGeneration, account = auth.user?.id;
+    ClassCourseUI.bindTypes(modal, rows, async (row, type) => {
+      const editor = modal;
+      const scope = await new Promise(resolve => {
+        const dialog = CourseDetails.dialog('修改课程类型', `<p>改为 ${escapeHtml(type)}</p><div class="modal-actions"><button class="btn" data-type-scope="one">仅修改本节</button><button class="btn primary" data-type-scope="all">修改当前弹窗全部 ${rows.length} 节课程</button><button class="btn" data-type-scope="cancel">取消</button></div>`, { size:'compact', onClose:()=>resolve(null) });
+        dialog.element.querySelectorAll('[data-type-scope]').forEach(button=>button.onclick=()=>{resolve(button.dataset.typeScope);dialog.close();});
+      });
+      if (!scope || scope==='cancel' || editor!==modal || !editor?.isConnected || generation!==sessionGeneration || account!==auth.user?.id) return;
+      const selected = scope==='all' ? rows : [row];
+      await ClassCourseUI.saveType(group.key, selected.map(row=>row.id), type, 'selection', selected.map(({id,course_type,updated_at})=>({id,course_type,updated_at})));
+      if (generation !== sessionGeneration || account !== auth.user?.id) return;
+      state.lesson_loaded_range = null;
+      markLessonDerivedDataDirty();
+      if (view === 'teacherDetail' && activeClass === key) await refresh();
+    });
   }
 
   async function showTables() {
@@ -247,17 +262,31 @@ const SalaryUI = (() => {
     }
   });
   document.addEventListener('input', event => { if (event.target.matches('.salary-formula-input')) previews(); });
+  async function savePerformance(input) {
+    if (!writable() || input.disabled) return;
+    const month = input.dataset.month, teacher = input.dataset.teacher;
+    const generation = sessionGeneration, account = auth.user?.id, previous = input.defaultValue;
+    if (!/^\d{4}-\d{2}-01$/.test(month || '')) throw new Error('月份已失效，请刷新当前月份后重试');
+    const score = input.matches('.salary-score-input');
+    const value = score ? PerformanceScore.normalize(input.value.trim()) : input.value.trim() === '' ? null : input.value;
+    input.disabled = true;
+    try {
+      await request('/api/teacher-monthly-performance', { method:'PUT', body:{ teacher_name:teacher, month_key:month, [score ? 'performance_score' : 'coefficient']:value } });
+      if (generation === sessionGeneration && account === auth.user?.id && month === activeMonth && view === 'teacherSalary') await refresh();
+    } catch (error) {
+      if (input.isConnected) input.value = previous;
+      throw error;
+    } finally { if (input.isConnected) input.disabled = false; }
+  }
   document.addEventListener('change', async event => {
     const input = event.target;
     try {
       if (input.id === 'salary-hide-departed') { hideDeparted = input.checked; await load({ refreshGlobal: false }); }
       if (input.matches('.salary-base-input')) { await request(`/api/teacher-detail/salary/${input.dataset.id}`, { method: 'PATCH', body: { source: 'manual', amount: input.value } }); await refresh(); }
-      if (input.matches('.salary-score-input')) { const score = PerformanceScore.normalize(input.value.trim()); await request('/api/teacher-monthly-performance', { method: 'PUT', body: { teacher_name: input.dataset.teacher, month_key: state.settings.month_key, performance_score: score } }); await refresh(); }
-      if (input.matches('.salary-coefficient-input')) { if (input.validity.badInput) throw new Error('绩效系数必须为 0.00～1.00 的数字'); await request('/api/teacher-monthly-performance', { method: 'PUT', body: { teacher_name: input.dataset.teacher, month_key: state.settings.month_key, coefficient: input.value.trim() === '' ? null : input.value } }); await refresh(); }
+      if (input.matches('.salary-score-input,.salary-coefficient-input')) await savePerformance(input);
      } catch (error) {
       if (input.matches('.salary-score-input,.salary-coefficient-input')) {
-        const saved = state.derived.teacher_summary.find(row => row.teacher_name === input.dataset.teacher);
-        input.value = input.matches('.salary-score-input') ? (saved?.performance_score ?? '') : (saved?.performance_coefficient ?? 1).toFixed(2);
+        if (input.isConnected) input.value = input.defaultValue;
       }
       showToast(error.message, 'error');
     }

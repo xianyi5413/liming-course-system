@@ -1,6 +1,7 @@
 const { matchesSearchQuery, normalizeSearchText } = SearchTools;
 const navGroups = [
   { key: "home", label: "首页", views: [["dashboard", "首页"]] },
+  { key: "tuoguan", label: "托管", views: [["tgAttendance", "每日签到"], ["tgStudents", "托管学生"], ["tgLedger", "充值流水"], ["tgSummary", "托管费用"], ["tgSettings", "托管设置"]] },
   { key: "schedule", label: "排课", views: [["lessons", "课程总表"], ["weekMatrix", "矩阵课表"], ["courseNotice", "家长群课程截图"], ["teacherCourseNotice", "老师课程截图"]] },
   {
     key: "students",
@@ -71,6 +72,7 @@ const DEFAULT_STUDENT_GRADE_COLORS = {
 const DEFAULT_SUBJECT_COLORS = {};
 const DEFAULT_GENERIC_STATUS_COLORS = {
   "在读": { background: "#e7f6ed", color: "#16713a" },
+  "在托": { background: "#e7f6ed", color: "#16713a" },
   "在职": { background: "#e7f6ed", color: "#16713a" },
   "成功": { background: "#e7f6ed", color: "#16713a" },
   "已完成": { background: "#e7f6ed", color: "#16713a" },
@@ -139,6 +141,7 @@ const READONLY_SAFE_MUTATION_PATHS = new Set([
 ]);
 const TEACHER_ALL_VALUE = "__all_teacher_scope__";
 const NAV_ICONS = {
+  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2"></rect><path d="m7.5 8 1.5 1.5 2.5-3M14 8h2.5M8 13h8.5M8 17h8.5"></path></svg>`,
   home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"></path><path d="M6.5 10v9h11v-9"></path><path d="M10 19v-5h4v5"></path></svg>`,
   schedule: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M8 3.5v3M16 3.5v3M4 10h16"></path></svg>`,
   students: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 19c.7-3.4 2.6-5 5.5-5s4.8 1.6 5.5 5"></path><path d="M16 10.5c1.7.2 3 1.5 3.4 3.2M17 19h3.5"></path></svg>`,
@@ -393,6 +396,7 @@ let financeRange = readFinanceRange();
 let monthDeleteDraft = null;
 let profileTab = localStorage.getItem("liming:profile-tab") || "teachers";
 if (view === "profiles") view = profileTab === "students" ? "studentProfiles" : "teacherProfiles";
+if (view === "tgFinance") view = "tgStudents";
 let profileNameFilter = { teachers: "", students: "" };
 let profileKeywordFilter = { teachers: "", students: "" };
 let profileGradeFilter = { students: "" };
@@ -778,7 +782,7 @@ async function downloadBlob(path, fallbackFilename) {
 
 function canView(viewKey) {
   if (!auth.user) return false;
-  if (Array.isArray(auth.user.permissions)) return auth.user.permissions.includes(viewKey);
+  if (Array.isArray(auth.user.permissions)) return TuoguanConfig.permissions(auth.user.permissions).includes(viewKey);
   const allowed = ROLE_VIEWS[auth.user.role];
   return !allowed || allowed.has(viewKey);
 }
@@ -870,6 +874,7 @@ function firstAllowedView() {
 }
 
 function setActiveView(nextView) {
+  if (nextView === "tgFinance") nextView = "tgStudents";
   if (nextView === "studentPricing") nextView = canView("studentQuery") ? "studentQuery" : firstAllowedView();
   if (nextView === "feeDetails") nextView = "summary";
   if ((nextView || "") !== view) {
@@ -998,8 +1003,8 @@ function debounce(fn, delay = 200) {
   };
 }
 
-function closeCustomSelects(except = null) {
-  document.querySelectorAll(".custom-select.open").forEach((selectBox) => {
+function closeCustomSelects(except = null, scope = document) {
+  scope.querySelectorAll(".custom-select.open").forEach((selectBox) => {
     if (selectBox === except) return;
     selectBox.classList.remove("open");
     selectBox.classList.remove("open-up");
@@ -1057,6 +1062,7 @@ function filterCustomSelectOptions(wrapper) {
 }
 
 function renderCustomSelectBadge(select, value) {
+  if (select?._renderOption) return select._renderOption(value);
   const field = select?.dataset?.field || "";
   if (field === "status") return renderCourseStatusBadge(value);
   if (field === "grade") return renderGradeBadge(value);
@@ -1074,7 +1080,7 @@ function selectDisplayText(select) {
 function syncCustomSelect(select, wrapper) {
   const valueNode = wrapper.querySelector(".custom-select-value");
   const field = select.dataset.field || "";
-  if (["status", "grade", "subject"].includes(field)) valueNode.innerHTML = renderCustomSelectBadge(select, selectDisplayText(select));
+  if (select._renderOption || ["status", "grade", "subject"].includes(field)) valueNode.innerHTML = renderCustomSelectBadge(select, selectDisplayText(select));
   else valueNode.textContent = selectDisplayText(select);
   const selectedOption = select.selectedOptions?.[0] || select.options?.[select.selectedIndex];
   wrapper.classList.toggle("candidate-conflict", selectedOption?.dataset?.candidateConflict === "1");
@@ -1091,9 +1097,15 @@ function syncCustomSelect(select, wrapper) {
   });
 }
 
-function cleanupCustomSelectPortals() {
+function cleanupCustomSelectPortals(scope = null) {
   document.querySelectorAll('.custom-select-menu[data-select-portal="1"]').forEach((menu) => {
-    if (!menu._customSelectOwner?.isConnected) menu.remove();
+    const owner = menu._customSelectOwner;
+    if (scope ? scope.contains(owner) : !owner?.isConnected) {
+      menu.classList.remove("open", "open-up");
+      menu.remove();
+      if (owner) { owner._customSelectMenu = null; owner._customSelectNative = null; }
+      menu._customSelectOwner = null;
+    }
   });
 }
 
@@ -1140,6 +1152,7 @@ function scrollCustomSelectOptionIntoView(wrapper) {
 }
 
 function openCustomSelect(wrapper) {
+  if (!wrapper?.isConnected || !customSelectMenu(wrapper)?.isConnected) return;
   closeOpenMultiSelectMenus();
   closeCustomSelects(wrapper);
   wrapper.classList.add("open");
@@ -1151,7 +1164,7 @@ function openCustomSelect(wrapper) {
   positionCustomSelectMenu(wrapper);
   scrollCustomSelectOptionIntoView(wrapper);
   positionCustomSelectMenu(wrapper);
-  requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }));
+  requestAnimationFrame(() => { if (wrapper.isConnected && wrapper.classList.contains("open")) searchInput?.focus({ preventScroll: true }); });
 }
 
 function closeSearchablePicker() {
@@ -1256,7 +1269,7 @@ function enhanceCustomSelects() {
         stateNode.className = "custom-select-candidate-state";
         stateNode.textContent = nativeOption.dataset.candidateConflict === "1" ? "冲突" : "可选";
         option.append(valueNode, stateNode);
-      } else if (["status", "grade", "subject"].includes(field)) {
+      } else if (select._renderOption || ["status", "grade", "subject"].includes(field)) {
         const rawValue = nativeOption.dataset.candidateConflict !== undefined ? nativeOption.value : nativeOption.textContent;
         option.innerHTML = renderCustomSelectBadge(select, rawValue);
       } else option.textContent = nativeOption.textContent;
@@ -2382,6 +2395,7 @@ async function clearDateRangePickerValue(wrapper) {
 }
 
 async function applyDateRangeToScope(scope, start, end) {
+  if (scope === "tuoguan-ledger") { await TuoguanUI.applyRange(start, end); return; }
   if (await SalaryUI.applyRange(scope, start, end)) return;
   if (scope === "lesson") {
     focusedLessonIds = [];
@@ -3663,7 +3677,7 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
 
 function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   if (!table?.isConnected) return [];
-  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
+  const headerCells = [...(table.tHead?.rows[Number(table.dataset.adaptiveHeaderRow || 0)]?.cells || [])];
   const columns = [...table.querySelectorAll(":scope > colgroup > col")];
   if (!headerCells.length || columns.length !== headerCells.length) return [];
 
@@ -3693,6 +3707,17 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
     return Math.ceil(Math.min(definition.maxWidth, Math.max(definition.minWidth, width + 2)));
   });
 
+  if (table.dataset.uniformFrom) {
+    const start = Number(table.dataset.uniformFrom), end = Number(table.dataset.uniformUntil || widths.length),
+      width = Math.max(...widths.slice(start, end));
+    for (let i = start; i < end; i++) widths[i] = width;
+  }
+  if (Number(table.dataset.frozenColumns) >= 2) {
+    table.style.setProperty('--frozen-first-width', `${widths[0]}px`);
+    table.style.setProperty('--frozen-second-edge', `${widths[0]+widths[1]}px`);
+    if (Number(table.dataset.frozenColumns) >= 4)
+      table.style.setProperty('--frozen-third-edge', `${widths[0]+widths[1]+widths[2]}px`);
+  }
   columns.forEach((column, index) => {
     const definition = definitions[index];
     column.style.width = `${Math.ceil(widths[index])}px`;
@@ -5707,7 +5732,7 @@ function renderTopbar(title, meta = "", actions = "") {
     </div>
     <div class="toolbar">
       ${actions}
-      ${monthToolbar()}
+      ${view.startsWith('tg') ? '' : monthToolbar()}
       ${renderUserMenu()}
     </div>
     ${monthDeleteModal()}
@@ -6283,7 +6308,7 @@ async function saveScheduleCourseType(input) {
   if (display?.isConnected) display.innerHTML = lessonInlinePickerDisplay({...row, course_type:type}, 'course_type');
 }
 
-function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
+function openInlineCustomPicker(trigger, { id, field, choices, onChange, renderOption }) {
   if (trigger?.getAttribute("aria-busy") === "true") return;
   if (!trigger || isReadonlyUser()) return;
   closeScheduleInlinePicker();
@@ -6292,6 +6317,7 @@ function openInlineCustomPicker(trigger, { id, field, choices, onChange }) {
   select.className = `schedule-inline-picker-native ${field === "status" ? "status-select" : ""}`;
   select.dataset.id = String(id);
   select.dataset.field = field;
+  select._renderOption = renderOption;
   select.innerHTML = choices;
   trigger.appendChild(select);
   enhanceCustomSelects();
@@ -9255,9 +9281,9 @@ function rechargeAnalysisSplitMarkup(title, rows = []) {
   `;
 }
 
-function rechargeAnalysisMarkup(rows = []) {
-  const summary = rechargeAnalysis(rows);
-  const cards = [
+function rechargeAnalysisMarkup(rows = [], options = {}) {
+  const summary = options.summary || rechargeAnalysis(rows);
+  const cards = options.cards || [
     ["本月实际充值合计", summary.actual, "money"],
     ["本月赠送充值合计", summary.gift, "money"],
     ["本月净充值合计", summary.net, "money"],
@@ -9270,7 +9296,7 @@ function rechargeAnalysisMarkup(rows = []) {
       <div class="section-head">
         <div>
           <div class="section-title">充值数据分析汇总</div>
-          <div class="section-subtitle">随当前来源、学生姓名和年级筛选同步更新。</div>
+          <div class="section-subtitle">${escapeHtml(options.subtitle || "随当前来源、学生姓名和年级筛选同步更新。")}</div>
         </div>
       </div>
       <div class="recharge-analysis-grid">
@@ -9282,8 +9308,8 @@ function rechargeAnalysisMarkup(rows = []) {
         `).join("")}
       </div>
       <div class="recharge-analysis-breakdowns">
-        ${rechargeAnalysisSplitMarkup("按年级", summary.byGrade)}
-        ${rechargeAnalysisSplitMarkup("按来源", summary.bySource)}
+        ${rechargeAnalysisSplitMarkup(options.gradeTitle || "按年级", summary.byGrade)}
+        ${rechargeAnalysisSplitMarkup(options.sourceTitle || "按来源", summary.bySource)}
       </div>
     </section>
   `;
@@ -12518,7 +12544,7 @@ async function renderOperationLogs() {
                 <td class="text-cell">${escapeHtml(log.operator_name)}</td>
                 <td class="text-cell">${escapeHtml(log.operator_account)}</td>
                 <td class="text-cell">${escapeHtml(log.operation_type)}</td>
-                <td class="text-cell operation-log-content">${escapeHtml(log.display_content || log.operation_content)}</td>
+                <td class="text-cell operation-log-content">${escapeHtml(log.display_content || log.operation_content)}${log.target_type === "tuoguan" && /custody_audit_start/.test(log.extra_json || "") ? `<details data-custody-log="${log.id}"><summary>逐格变更详情</summary><div class="custody-log-changes"></div></details>` : ""}</td>
                 <td class="text-cell"><span class="operation-result-badge ${log.result_status === "failure" ? "failure" : "success"}">${log.result_status === "failure" ? "失败" : "成功"}</span></td>
                 <td class="text-cell">${escapeHtml(formatBeijingTime(log.created_at))}</td>
               </tr>
@@ -12547,6 +12573,18 @@ async function renderOperationLogs() {
   `;
 
   bindDateRangePickerControls();
+  document.querySelectorAll('[data-custody-log]').forEach(detail=>detail.addEventListener('toggle',async()=>{
+    if(!detail.open || detail.dataset.loaded) return;
+    const host=detail.querySelector('.custody-log-changes');
+    detail.dataset.loaded='loading'; host.textContent='正在加载…';
+    try {
+      const response=await fetch('/api/operation-logs/'+detail.dataset.custodyLog+'/custody-details');
+      if(!response.ok) throw Error('无法读取日志详情');
+      const result=await response.json();
+      host.replaceChildren(...result.changes.map(c=>{const p=document.createElement('p');p.textContent=c.text;return p;}));
+      detail.dataset.loaded='true';
+    } catch(e) {delete detail.dataset.loaded;host.textContent=e.message;}
+  }));
   bindOperationLogEvents();
 }
 
@@ -12614,7 +12652,7 @@ function renderTeacherSalary() {
   const pending = rows.some(row => row.total_salary == null);
   renderTopbar(`${monthLabel()} 薪资汇总`, pending ? "有待完成核算的教师，请补齐薪资规则" : `薪资合计 ${formatMoney(sum("total_salary"))}`, '<button class="btn export-teacher-salary" type="button">导出本月</button>');
   contentEl.innerHTML = `<div class="band"><div class="table-wrap"><table class="teacher-salary-table uniform-table nowrap-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${rowIndexColumn()}<col data-column-type="name"><col data-column-type="short"><col data-column-type="money"><col data-column-type="money"><col data-column-type="short"><col data-column-type="short"><col data-column-type="money"><col data-column-type="full" data-alignment="right"><col data-column-type="note"></colgroup><thead><tr>${rowIndexHeader()}<th>教师姓名</th><th>上课课时数</th><th>基础课薪</th><th>绩效基数</th><th>绩效分数</th><th>绩效系数</th><th>车票合计</th><th>薪资合计</th><th>备注</th></tr></thead><tbody>
-    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-score-input" aria-label="${escapeHtml(row.teacher_name)}绩效分数" data-teacher="${escapeHtml(row.teacher_name)}" inputmode="numeric" placeholder="-" value="${row.performance_score ?? ""}" title="0—100 整数；清空保留当前系数" ${SalaryUI.writable() ? "" : "disabled"}></td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${row.performance_score == null ? "" : "readonly"} title="${row.performance_score == null ? "历史/手工系数（未评分）" : "按绩效分数自动计算；清空分数后可手工修改"}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
+    ${rows.map((row, index) => `<tr class="teacher-salary-summary-row" data-teacher-name="${escapeHtml(row.teacher_name)}">${renderRowIndex(index)}<td>${escapeHtml(row.teacher_name)}</td><td class="adaptive-center">${row.lesson_count}</td><td class="right">${formatMoney(row.base_salary)}</td><td class="right">${formatMoney(row.performance_base)}</td><td><input class="cell-input salary-score-input" aria-label="${escapeHtml(row.teacher_name)}绩效分数" data-teacher="${escapeHtml(row.teacher_name)}" data-month="${escapeHtml(state.settings.month_key)}" inputmode="numeric" placeholder="-" value="${row.performance_score ?? ""}" title="0—100 整数；清空保留当前系数" ${SalaryUI.writable() ? "" : "disabled"}></td><td><input class="cell-input salary-coefficient-input" aria-label="${escapeHtml(row.teacher_name)}绩效系数" data-teacher="${escapeHtml(row.teacher_name)}" data-month="${escapeHtml(state.settings.month_key)}" type="text" inputmode="decimal" placeholder="-" value="${(row.performance_coefficient ?? 1).toFixed(2)}" ${row.performance_score == null ? "" : "readonly"} title="${row.performance_score == null ? "历史/手工系数（未评分）" : "按绩效分数自动计算；清空分数后可手工修改"}" ${SalaryUI.writable() ? "" : "disabled"}></td><td class="right">${formatMoney(row.transport_total)}</td><td class="right">${row.total_salary == null ? escapeHtml(row.salary_pending_reason) : formatMoney(row.total_salary)}</td><td><input class="cell-input wide teacher-salary-notes-field" data-field="notes" value="${escapeHtml(row.notes || "")}" ${SalaryUI.writable() ? "" : "disabled"}></td></tr>`).join("")}
     <tr><td class="row-index"></td><td>合计</td><td>${sum("lesson_count")}</td><td>${formatMoney(sum("base_salary"))}</td><td>${formatMoney(sum("performance_base"))}</td><td>—</td><td>—</td><td>${formatMoney(sum("transport_total"))}</td><td>${pending ? "待完成核算" : formatMoney(sum("total_salary"))}</td><td></td></tr></tbody></table></div></div>`;
 }
 
@@ -14327,6 +14365,11 @@ function render() {
   lastRenderedView = view;
   renderNav();
   const renderers = {
+    tgAttendance: () => { renderTopbar("每日签到"); window.TuoguanUI.mount(contentEl, "签到"); },
+    tgStudents: () => { renderTopbar("托管学生"); window.TuoguanUI.mount(contentEl, "学生"); },
+    tgLedger: () => { renderTopbar("充值流水"); window.TuoguanUI.mount(contentEl, "流水"); },
+    tgSummary: () => { renderTopbar("托管费用"); window.TuoguanUI.mount(contentEl, "汇总"); },
+    tgSettings: () => { renderTopbar("托管设置"); window.TuoguanUI.mount(contentEl, "设置"); },
     dashboard: renderDashboard,
     lessons: renderLessons,
     weekMatrix: renderWeekMatrix,
@@ -14629,7 +14672,9 @@ function rerenderCurrentView(renderAction) {
 }
 
 async function refreshDerivedForActiveMonth(renderAction) {
+  const month = activeMonth, page = view, account = auth.user?.id, generation = ++loadGeneration;
   const data = await request(`/api/bootstrap${bootstrapQuery(false)}`);
+  if (generation !== loadGeneration || month !== activeMonth || page !== view || account !== auth.user?.id) return;
   state = normalizeBootstrapState(data, state, true);
   syncActiveMonthState(state.active_month_key || state.settings?.month_key || activeMonth);
   state.full_bootstrap_key = fullBootstrapCacheKey(activeMonth);
@@ -14705,6 +14750,7 @@ async function refreshMonthRelatedActiveView() {
 
 async function onActiveMonthChanged(newMonth, oldMonth = activeMonth) {
   if (!newMonth) return;
+  ++loadGeneration;
   syncActiveMonthState(newMonth);
   closeOpenMultiSelectMenus();
   closeDateRangePicker();

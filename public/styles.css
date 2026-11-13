@@ -12326,7 +12326,7 @@ html {
   max-width: 100%;
   padding: 4px 9px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--entity-badge-radius, 999px);
   background: var(--badge-bg, var(--neutral-chip-bg)) !important;
   color: var(--badge-fg, var(--neutral-chip-fg)) !important;
   font-family: inherit;
@@ -12338,6 +12338,8 @@ html {
   text-overflow: clip;
   vertical-align: middle;
 }
+
+.student-badge, .grade-badge { --entity-badge-radius: 6px; }
 
 .student-badge > span:first-child {
   min-width: 0;
@@ -14303,3 +14305,135 @@ table.adaptive-table td.single-line-note,
 .fee-change-totals dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .student-query-results :is(.query-head,.metric,.metric-value,.band,.cell-input,.currency-display),
 .student-fee-editor :is(.cell-input,.currency-display) { animation: none; transition: none; }
+/* Custody uses the shared controls, bands, metrics and modal shell. */
+.tg-panel { min-width: 0; }
+.tg-filters { margin: 0 0 var(--space-4); align-items: end; }
+.tg-filters .filter-controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); flex: 1; }
+.tg-filters .filter-field { min-width: 0; flex: 0 1 auto; }
+.tg-filters .control { width: auto; min-width: 100px; max-width: 210px; }
+.tg-date-nav, .tg-actions, .tg-batch-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.tg-date-nav .control { width: 150px; }
+.tg-actions { justify-content: space-between; margin: var(--space-3) 0; }
+.tg-actions h3, .tg-import-entry h3 { margin: 0; font-size: var(--text-body); }
+.tg-actions p { margin: var(--space-1) 0 0; }
+.tg-batch-actions .filter-field { display: flex; align-items: center; gap: var(--space-2); }
+.tg-batch-actions .control { width: 105px; }
+.tg-panel .tg-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-2); }
+.tg-metrics .metric { min-height: 72px; padding: var(--space-3) var(--space-4); }
+.tg-metrics .metric-value { margin-top: var(--space-2); font-size: var(--text-title); }
+.tg-section-note, .tg-panel .muted { color: var(--muted); font-size: var(--text-table); }
+.tg-scroll { overflow: auto; max-width: 100%; max-height: 65vh; scrollbar-gutter: auto; }
+.tg-table { width: max-content; min-width: 0; table-layout: auto; border-collapse: separate; border-spacing: 0; }
+.tg-table th, .tg-table td { white-space: nowrap; }
+.tg-table td { text-align: left; padding: var(--space-2) var(--space-3); }
+.tg-table .tg-number { text-align: right; font-variant-numeric: tabular-nums; }
+.tg-table .control { width: auto; min-width: 90px; }
+.tg-table td:first-child, .tg-table th:first-child { position: sticky; left: 0; z-index: 1; background: var(--panel); }
+.tg-table th:first-child { z-index: 3; background: var(--table-head); }
+.tg-table.tg-matrix th, .tg-table.tg-matrix td { text-align: center; vertical-align: middle; }
+.tg-table .row-index, .tg-table.tg-matrix :is(th,td):first-child { text-align: center; }
+.tg-matrix :is(th,td):nth-child(2) { position: sticky; left: var(--frozen-first-width, 0px); z-index: 1; background: var(--panel); }
+.tg-matrix :is(th,td):nth-child(3) { position: sticky; left: var(--frozen-second-edge, 0px); z-index: 1; background: var(--panel); }
+.tg-matrix :is(th,td):nth-child(4) { position: sticky; left: var(--frozen-third-edge, 0px); z-index: 1; background: var(--panel); }
+.tg-matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--table-head); }
+.tg-matrix thead :is(th:first-child,th:nth-child(2),th:nth-child(3),th:nth-child(4)) { z-index: 4; background: var(--table-head); }
+/* Keep delegated pointer/focus location consistent across sticky cells and touch. */
+.tg-table.tg-matrix tbody tr:not(.tg-locate-row) > td:not(.tg-locate-col) { background: var(--panel); }
+.tg-table.tg-matrix tr.tg-locate-row > td,
+.tg-table.tg-matrix :is(td,th).tg-locate-col { background: var(--surface-hover); }
+.tg-table.tg-matrix td.tg-locate-cell { background: color-mix(in srgb, var(--surface-hover) 82%, var(--brand-border)); box-shadow: inset 0 0 0 1px var(--brand-border); }
+.tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.tg-fee-row { cursor: pointer; }
+.tg-fee-row:hover td, .tg-fee-row:focus-visible td { background: var(--table-head); }
+.tg-detail-month { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin: var(--space-3) 0; }
+.tg-detail-calendar { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: var(--space-2); }
+.tg-calendar-day { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; min-width: 0; min-height: 65px; text-align: center; border-radius: var(--radius-sm); background: var(--badge-bg,var(--panel)); color: var(--badge-fg,var(--muted)); border: 1px solid color-mix(in srgb,currentColor 18%,transparent); }
+.tg-calendar-status { font-size: var(--text-caption); white-space: normal; overflow-wrap: anywhere; }
+.tg-calendar-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+.tg-date-choice { justify-content: center; align-items: center; font: inherit; cursor: pointer; background: var(--table-head); color: var(--muted); }
+.tg-date-choice[data-enabled="true"] { background: var(--success-bg); color: var(--success); }
+.tg-date-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tg-date-choice:disabled { cursor: wait; opacity: .65; }
+.tg-date-management [role="alert"] { color: var(--danger); }
+.tg-date-management :is([role="alert"],[role="status"]):empty { display: none; }
+.tg-student-detail-panel { width: min(1040px, 100%); }
+.tg-student-detail-panel .tg-detail-calendar { grid-template-rows: repeat(6, 76px); }
+.tg-student-detail-panel .tg-detail-month { position: relative; }
+.tg-detail-loading { position: absolute; right: 0; color: var(--muted); }
+.tg-detail-notes > div { min-height: 1.4em; }
+.tg-detail-error { min-height: 1.4em; margin: 0; color: var(--danger); }
+.tg-detail-content { width: 100%; min-width: 0; box-sizing: border-box; }
+.tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); }
+@media (min-width: 760px) { .tg-student-detail-panel .tg-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); } }
+.tg-manage-students-panel { width: min(760px,100%); }
+.tg-student-groups { display: grid; gap: var(--space-3); }
+.tg-student-group { padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.tg-student-group h3 { margin: 0 0 var(--space-2); }
+.tg-student-choices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.tg-member { display: inline-flex; align-items: center; gap: var(--space-2); border-radius: var(--radius-sm); }
+.tg-member[data-selected="true"] { border-color: var(--accent); background: var(--success-bg); }
+.tg-student-management [role="alert"] { color: var(--danger); }
+.tg-student-management :is([role="alert"],[role="status"]) { min-height: 1.5em; margin: 4px 0; }
+.tg-member-mark { display: inline-block; width: 1.4em; text-align: center; flex: none; }
+.tg-member:disabled { opacity: 1; }
+.tg-member[aria-busy="true"] { cursor: wait; }
+.tg-matrix-actions { justify-content: flex-start; }
+.tg-date-nav { flex-wrap: nowrap; }
+.tg-cell-button { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; min-width: 0; box-sizing: border-box; min-height: 36px; padding: 4px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.tg-cell-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tg-cell-button:disabled { cursor: default; }
+.tg-negative, .tg-form [role=alert] { color: var(--danger); }
+.tg-empty { padding: var(--space-8) var(--space-4); white-space: normal; }
+.tg-empty strong { display: block; color: var(--ink); font-size: var(--text-body); }
+.tg-empty p { margin: var(--space-2) 0 var(--space-4); }
+.tg-form { padding: var(--space-4); }
+.tg-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.tg-form .filter-field { display: flex; flex-direction: column; align-items: stretch; min-width: 0; gap: var(--space-2); }
+.tg-form .control { width: 100%; min-width: 0; }
+.tg-form .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); padding-top: var(--space-4); }
+.tg-form [role=alert]:empty, .tg-panel #tg-msg:empty { display: none; }
+.tg-panel #tg-msg { padding: var(--space-3); background: var(--info-bg); border-radius: var(--radius); color: var(--ink); }
+.tg-settings-section { margin-bottom: var(--space-5); }
+.tg-import-entry, .tg-detail-content { padding: var(--space-4); }
+.tg-detail-content .band { margin-bottom: var(--space-4); }
+.tg-panel details { margin-top: var(--space-4); }
+.tg-panel details > summary { padding: var(--space-3); color: var(--muted); cursor: pointer; }
+@media (max-width: 700px) {
+  .tg-detail-content { padding: var(--space-2); }
+  .tg-detail-calendar { gap: 3px; }
+  .tg-calendar-day { min-height: 58px; padding: 6px 1px; }
+  .tg-calendar-status { font-size: 11px; }
+  .tg-filters .filter-controls { gap: var(--space-2); }
+  .tg-filters .filter-field { flex: 1 1 120px; }
+  .tg-filters .control { width: 100%; max-width: none; min-width: 0; }
+  .tg-filters .tg-date-nav { flex-wrap: nowrap; }
+  .tg-date-nav .control { flex: 1; width: 130px; }
+  .tg-date-nav .date-range-nav { flex: 0 0 28px; }
+  .tg-date-nav .btn { flex: 0 0 auto; }
+  .tg-actions, .tg-batch-actions { align-items: stretch; }
+  .tg-panel .tg-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
+  .tg-metrics .metric { min-height: 58px; padding: var(--space-2); }
+  .tg-metrics .metric-label { font-size: var(--text-caption); white-space: nowrap; }
+  .tg-metrics .metric-value { font-size: 18px; }
+  .tg-batch-actions { width: 100%; }
+  .tg-batch-actions .filter-field { flex: 1 0 100%; flex-direction: row; }
+  .tg-batch-actions .filter-field > span { white-space: nowrap; }
+  .tg-batch-actions .custom-select { flex: 1; min-width: 105px; }
+  .tg-batch-actions > .btn { flex: 1 0 100%; }
+  .tg-form-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.tg-ledger-row[tabindex="0"] { cursor: pointer; }
+.tg-ledger-row[tabindex="0"]:is(:hover,:focus-visible) td { background: var(--table-head); }
+.tg-student-create { justify-content: flex-end; margin-bottom: var(--space-3); }
+
+/* Both header rows share the colgroup and four frozen identity columns. */
+.tg-matrix .tg-selection-head th { height: 30px; padding-top: 0; padding-bottom: 0; box-sizing: border-box; }
+.tg-matrix thead tr:nth-child(2) th { top: 30px; }
+.tg-matrix :is(input[type="checkbox"], .tg-cell-button, .entity-badge) { vertical-align: middle; }
+.tg-matrix input[type="checkbox"] { display: block; margin: 0 auto; }
+
+.tg-history .tg-scroll { max-height: 260px; overflow: auto; }
+.tg-history td:last-child { white-space: normal; min-width: 90px; max-width: 250px; }
+
+.custody-log-changes { max-height: 280px; overflow: auto; white-space: normal; }

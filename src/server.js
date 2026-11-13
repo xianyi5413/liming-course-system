@@ -9,11 +9,15 @@ const { CleanupPreviewJobs } = require("./backup/cleanup_jobs");
 const { rechargeMonth, normalizeHistoricalRecharge, migrateRechargeDates } = require("./domain/recharge_date");
 const { COURSE_TYPE_GRADES, defaultCourseType, courseTypeOptions, migrateCourseTypes } = require("./domain/course_type");
 const http = require("node:http");
+const Tuoguan = require('./domain/tuoguan');
+const TuoguanImport = require('./domain/tuoguan_import');
+const TuoguanTransfer = require('./domain/tuoguan_transfer');
+const custodyTransferPreviews = new Map();
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, execFileSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const { buildFullDataBuffer, fullDataFilename } = require("./excel/full_backup");
 const { TEMPLATE_FILENAME, createTemplateBuffer, previewImport, importFullExcel } = require("./excel/import_service");
@@ -52,8 +56,13 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261024-summary-profile-layout";
-const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || "").slice(0, 40);
+const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-grade-hover-summary";
+function gitInfo(...args) {
+  try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
+  catch { return ''; }
+}
+const APP_GIT_COMMIT = String(process.env.APP_GIT_COMMIT || gitInfo('rev-parse', 'HEAD')).slice(0, 40);
+const APP_SOURCE_DIRTY = Boolean(gitInfo('status', '--porcelain', '--untracked-files=no'));
 const TIME_SLOT_MIGRATION_KEY = "time_slot_normalization_v1";
 const TIME_SLOT_LEGACY_INVALID_SETTING_KEY = "custom_time_slots_unparseable_legacy_v1";
 let lastTimeSlotMigrationReport = null;
@@ -133,6 +142,7 @@ const SYSTEM_ROLE_DEFS = [
 ];
 const SYSTEM_ROLE_CODES = SYSTEM_ROLE_DEFS.map((role) => role.code);
 const PERMISSION_TREE = [
+  { key: 'tuoguan', label: '托管', children: [{key:'tgAttendance',label:'每日签到'}, {key:'tgStudents',label:'托管学生'}, {key:'tgLedger',label:'充值流水'}, {key:'tgSummary',label:'托管费用'}, {key:'tgSettings',label:'托管设置'}] },
   { key: "dashboard", label: "首页" },
   {
     key: "schedule",
@@ -174,10 +184,10 @@ const PERMISSION_TREE = [
     children: [
       { key: "staffPayroll", label: "员工薪资" },
       { key: "staffAttendance", label: "员工考勤" },
-      { key: "expenses", label: "开销管理" },
+      { key: "expenses", label: "日常开销" },
     ],
   },
-  { key: "finance", label: "经营总览" },
+  { key: "financeGroup", label: "经营概览", children: [{key:"finance",label:"期间概览"}] },
   {
     key: "settings",
     label: "设置",
@@ -201,6 +211,7 @@ const PAGE_PERMISSION_KEYS = (() => {
   return keys;
 })();
 const FIRST_ACCESSIBLE_VIEW_ORDER = [
+  "tgAttendance", "tgStudents", "tgLedger", "tgSummary", "tgSettings",
   "dashboard",
   "lessons",
   "weekMatrix",
@@ -278,6 +289,7 @@ const DEFAULT_ROLE_PERMISSIONS = {
   teacher: ["lessons", "teacherDetail", "teacherProfiles", "appearance"],
 };
 const AREA_PERMISSION_KEYS = {
+  tuoguan: require("./domain/tuoguan_permissions").pages,
   dashboard: ["dashboard"],
   schedule: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
   scheduleRead: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
@@ -1067,6 +1079,8 @@ function initDb() {
 }
 
 if (!readOnlyBalanceCli) initDb();
+if (!readOnlyBalanceCli) Tuoguan.migrate(db);
+const tuoguanStore = Tuoguan.createStore(db);
 
 let backupServiceInstance = null;
 let backupCleanupInstance = null;
@@ -1522,7 +1536,7 @@ function permissionKeySet() {
 
 function normalizePermissionKeys(keys) {
   const allowed = permissionKeySet();
-  return [...new Set((Array.isArray(keys) ? keys : [])
+  return [...new Set(require("./domain/tuoguan_permissions").expand(Array.isArray(keys) ? keys : [])
     .map(text)
     .filter((key) => allowed.has(key)))];
 }
@@ -1542,6 +1556,7 @@ function firstAccessibleViewFor(role, permissions) {
 }
 
 function seedDefaultRolesAndPermissions() {
+  require("./domain/tuoguan_permissions").migrate(db);
   const roleStmt = db.prepare(`
     INSERT INTO roles(code, name, description, is_system, readonly)
     VALUES (?, ?, ?, ?, ?)
@@ -3647,235 +3662,14 @@ function compareStudentAccountEvents(a, b) {
   return studentAccountEventSortKey(a).localeCompare(studentAccountEventSortKey(b), "zh-Hans-CN");
 }
 
-function studentAccountBatchBalance(batches) {
-  return batches.reduce((acc, batch) => ({
-    actual: moneyRound(acc.actual + num(batch.actual_balance)),
-    gift: moneyRound(acc.gift + num(batch.gift_balance)),
-  }), { actual: 0, gift: 0 });
-}
-
-function normalizeStudentAccountLedger(batches) {
-  const warnings = [];
-  for (const batch of batches) {
-    const rawActual = Number(batch.actual_balance);
-    const rawGift = Number(batch.gift_balance);
-    if (!Number.isFinite(rawActual)) {
-      const invalidActual = batch.actual_balance;
-      batch.actual_balance = 0;
-      warnings.push({ type: "cash_balance_not_numeric", value: String(invalidActual), source_id: batch.id || 0, event_date: batch.date || "" });
-    }
-    if (!Number.isFinite(rawGift)) {
-      const invalidGift = batch.gift_balance;
-      batch.gift_balance = 0;
-      warnings.push({ type: "gift_balance_not_numeric", value: String(invalidGift), source_id: batch.id || 0, event_date: batch.date || "" });
-      continue;
-    }
-    if (rawGift < 0) {
-      batch.actual_balance = moneyRound(num(batch.actual_balance) + rawGift);
-      batch.gift_balance = 0;
-      warnings.push({
-        type: "negative_gift_balance_converted_to_cash",
-        amount: moneyRound(Math.abs(rawGift)),
-        source_id: batch.id || 0,
-        event_date: batch.date || "",
-      });
-    }
-  }
-  return warnings;
-}
-
-function reduceStudentAccountBalance(batches, field, amount) {
-  let remaining = moneyRound(Math.max(0, num(amount)));
-  for (const batch of batches) {
-    if (remaining <= 0) break;
-    const available = Math.max(num(batch[field]), 0);
-    if (available <= 0) continue;
-    const reduction = moneyRound(Math.min(available, remaining));
-    batch[field] = moneyRound(available - reduction);
-    remaining = moneyRound(remaining - reduction);
-  }
-  return remaining;
-}
-
-function emptyStudentDebtSettlement() {
-  return {
-    cash_offset: 0,
-    gift_offset: 0,
-    gift_lesson_debt_offset: 0,
-  };
-}
-
-function settleStudentCashDebt(batches) {
-  const settlement = emptyStudentDebtSettlement();
-  for (let debtIndex = 0; debtIndex < batches.length; debtIndex += 1) {
-    let debt = Math.max(-num(batches[debtIndex].actual_balance), 0);
-    if (debt <= 0) continue;
-    for (let cashIndex = debtIndex + 1; cashIndex < batches.length && debt > 0; cashIndex += 1) {
-      const available = Math.max(num(batches[cashIndex].actual_balance), 0);
-      if (available <= 0) continue;
-      const offset = moneyRound(Math.min(available, debt));
-      batches[debtIndex].actual_balance = moneyRound(num(batches[debtIndex].actual_balance) + offset);
-      batches[cashIndex].actual_balance = moneyRound(num(batches[cashIndex].actual_balance) - offset);
-      debt = moneyRound(debt - offset);
-      settlement.cash_offset = moneyRound(settlement.cash_offset + offset);
-    }
-    for (let giftIndex = 0; giftIndex < batches.length && debt > 0; giftIndex += 1) {
-      const available = Math.max(num(batches[giftIndex].gift_balance), 0);
-      if (available <= 0) continue;
-      const offset = moneyRound(Math.min(available, debt));
-      const lessonDebtOffset = moneyRound(Math.min(
-        Math.max(num(batches[debtIndex].lesson_debt_balance), 0),
-        offset,
-      ));
-      batches[debtIndex].actual_balance = moneyRound(num(batches[debtIndex].actual_balance) + offset);
-      batches[debtIndex].lesson_debt_balance = moneyRound(
-        Math.max(0, num(batches[debtIndex].lesson_debt_balance) - lessonDebtOffset),
-      );
-      batches[giftIndex].gift_balance = moneyRound(num(batches[giftIndex].gift_balance) - offset);
-      debt = moneyRound(debt - offset);
-      settlement.gift_offset = moneyRound(settlement.gift_offset + offset);
-      settlement.gift_lesson_debt_offset = moneyRound(
-        settlement.gift_lesson_debt_offset + lessonDebtOffset,
-      );
-    }
-  }
-  return settlement;
-}
-
-function addStudentAccountBatch(batches, row = {}, fallbackDate = "") {
-  const actual = moneyRound(row.actual_balance ?? row.cur_recharge);
-  const gift = moneyRound(row.gift_balance ?? row.cur_gift);
-  const warnings = [];
-  warnings.debtSettlement = emptyStudentDebtSettlement();
-  if (actual === 0 && gift === 0) {
-    warnings.debtSettlement = settleStudentCashDebt(batches);
-    return warnings;
-  }
-  let batchActual = 0;
-  let batchGift = 0;
-
-  if (actual > 0) {
-    batchActual = actual;
-  } else if (actual < 0) {
-    const remainingReduction = reduceStudentAccountBalance(batches, "actual_balance", Math.abs(actual));
-    batchActual = remainingReduction > 0 ? moneyRound(-remainingReduction) : 0;
-  }
-
-  if (gift > 0) {
-    batchGift = gift;
-  } else if (gift < 0) {
-    let remainingReduction = reduceStudentAccountBalance(batches, "gift_balance", Math.abs(gift));
-    const giftShortfall = remainingReduction;
-    if (remainingReduction > 0) {
-      remainingReduction = reduceStudentAccountBalance(batches, "actual_balance", remainingReduction);
-      const pendingCash = Math.max(batchActual, 0);
-      const pendingReduction = moneyRound(Math.min(pendingCash, remainingReduction));
-      batchActual = moneyRound(batchActual - pendingReduction);
-      remainingReduction = moneyRound(remainingReduction - pendingReduction);
-    }
-    if (remainingReduction > 0) {
-      batchActual = moneyRound(batchActual - remainingReduction);
-    }
-    if (giftShortfall > 0) {
-      warnings.push({
-        type: "gift_overdraw_converted_to_cash",
-        amount: giftShortfall,
-        source_id: row.id || 0,
-        event_date: studentAccountEventDate(row, fallbackDate),
-      });
-    }
-  }
-  if (batchActual !== 0 || batchGift !== 0) {
-    batches.push({
-      date: studentAccountEventDate(row, fallbackDate),
-      id: row.id || 0,
-      source_type: text(row.source_type) || "account",
-      actual_balance: batchActual,
-      gift_balance: Math.max(0, batchGift),
-      lesson_debt_balance: 0,
-    });
-  }
-  warnings.debtSettlement = settleStudentCashDebt(batches);
-  return warnings;
-}
-
-function consumeStudentBalance(ledger, lessonFee, context = {}) {
-  const batches = Array.isArray(ledger) ? ledger : [];
-  const balanceWarnings = normalizeStudentAccountLedger(batches);
-  const preChargeSettlement = settleStudentCashDebt(batches);
-  let remaining = moneyRound(Math.max(0, num(lessonFee)));
-  let cashUsed = 0;
-  let bonusUsed = 0;
-
-  for (const batch of batches) {
-    if (remaining <= 0) break;
-    const cashUse = moneyRound(Math.min(Math.max(num(batch.actual_balance), 0), remaining));
-    if (cashUse > 0) {
-      batch.actual_balance = moneyRound(num(batch.actual_balance) - cashUse);
-      remaining = moneyRound(remaining - cashUse);
-      cashUsed = moneyRound(cashUsed + cashUse);
-    }
-    if (remaining <= 0) break;
-    const bonusUse = moneyRound(Math.min(Math.max(num(batch.gift_balance), 0), remaining));
-    if (bonusUse > 0) {
-      batch.gift_balance = moneyRound(num(batch.gift_balance) - bonusUse);
-      remaining = moneyRound(remaining - bonusUse);
-      bonusUsed = moneyRound(bonusUsed + bonusUse);
-    }
-  }
-
-  const debt = moneyRound(Math.max(0, remaining));
-  if (remaining > 0) {
-    batches.push({
-      date: studentAccountLessonDate(context, text(context.month_key)),
-      id: context.lesson_id || context.id || 0,
-      source_type: "lesson_debt",
-      actual_balance: moneyRound(-debt),
-      gift_balance: 0,
-      lesson_debt_balance: debt,
-    });
-  }
-  const after = studentAccountBatchBalance(batches);
-  return {
-    cashUsed: moneyRound(cashUsed),
-    giftUsed: moneyRound(bonusUsed),
-    bonusUsed: moneyRound(bonusUsed),
-    cash_used: moneyRound(cashUsed),
-    bonus_used: moneyRound(bonusUsed),
-    debt,
-    afterCashBalance: moneyRound(after.actual),
-    afterGiftBalance: moneyRound(Math.max(0, after.gift)),
-    actual_consumption: moneyRound(cashUsed + debt),
-    gift_consumption: moneyRound(bonusUsed),
-    balanceWarnings,
-    debtSettlement: preChargeSettlement,
-    updatedLedger: batches,
-  };
-}
-
-function applyStudentLessonCharge(batches, feeValue, context = {}) {
-  return consumeStudentBalance(batches, feeValue, context);
-}
-
-function reclassifyStudentGiftDebtConsumption(result, settlement = {}) {
-  const amount = moneyRound(Math.min(
-    Math.max(0, num(result.actual_consumption)),
-    Math.max(0, num(settlement.gift_lesson_debt_offset)),
-  ));
-  if (amount <= 0) return 0;
-  result.actual_consumption = moneyRound(result.actual_consumption - amount);
-  result.gift_consumption = moneyRound(result.gift_consumption + amount);
-  return amount;
-}
-
-function studentAccountInvariantTypes(batches) {
-  const balance = studentAccountBatchBalance(batches);
-  const issues = [];
-  if (balance.gift < 0) issues.push("gift_balance_negative");
-  if (balance.actual < 0 && balance.gift > 0) issues.push("cash_negative_gift_positive");
-  if (balance.actual > 0 && balance.gift < 0) issues.push("cash_positive_gift_negative");
-  return issues;
-}
+const {
+  studentAccountBatchBalance, normalizeStudentAccountLedger,
+  reduceStudentAccountBalance, emptyStudentDebtSettlement, settleStudentCashDebt,
+  addStudentAccountBatch, consumeStudentBalance, applyStudentLessonCharge,
+  reclassifyStudentGiftDebtConsumption, studentAccountInvariantTypes,
+} = require("./domain/account_balance").createBalanceEngine({
+  num, moneyRound, text, studentAccountEventDate, studentAccountLessonDate,
+});
 
 function calculateStudentAccountTimeline(options = {}) {
   const monthKey = text(options.monthKey);
@@ -10087,6 +9881,7 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
+  if (url.pathname.startsWith('/api/tuoguan/')) return userHasAnyPermission(user,require('./domain/tuoguan_permissions').pages);
   if (url.pathname.startsWith("/api/data-center/preflight")) return canViewDataPreflight(user);
   if (url.pathname.startsWith("/api/data-center")) return canManageDataCenter(user);
   const pageKeys = apiPagePermissionKeys(req, url);
@@ -10313,12 +10108,14 @@ function sanitizeBootstrap(data, user) {
   return sanitized;
 }
 
-function readBody(req) {
+function readBody(req, limit = 2_000_000) {
   return new Promise((resolve, reject) => {
     let raw = "";
+    // Preserve Chinese characters split between network chunks in pasted JSON.
+    req.setEncoding('utf8');
     req.on("data", (chunk) => {
       raw += chunk;
-      if (raw.length > 2_000_000) {
+      if (raw.length > limit) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -12310,7 +12107,7 @@ function createLessonsBatch(rows) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/version") {
-    return sendJson(res, { app_version: APP_VERSION });
+    return sendJson(res, { app_version: APP_VERSION, git_commit: APP_GIT_COMMIT, source_dirty: APP_SOURCE_DIRTY });
   }
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
     const user = currentUser(req);
@@ -12427,6 +12224,75 @@ async function handleApi(req, res, url) {
   }
   if (!authorizeApi(user, req, url)) return sendError(res, 403, "当前角色无权访问此功能");
   if (req.method !== "GET") clearDerivedCache(`${req.method} ${url.pathname}`);
+
+  if (url.pathname.startsWith('/api/tuoguan/')) {
+    const action=url.pathname.slice('/api/tuoguan/'.length);
+    const has = key => isSuperRole(user.role) || userHasAnyPermission(user,[key]);
+    const finance=has('tgSummary') || has('tgLedger');
+    const attendanceAction=['attendance','batch-attendance'].includes(action);
+    const required = ({attendance:'tgAttendance','batch-attendance':'tgAttendance','add-dates':'tgAttendance','remove-dates':'tgAttendance',student:'tgStudents',period:'tgStudents','remove-students':'tgStudents',money:'tgLedger','money-edit':'tgLedger','money-delete':'tgLedger',rule:'tgSettings',calendar:'tgSettings'})[action];
+    const transfer=['transfer-export','transfer-preview','transfer-confirm','preview','import'].includes(action);
+    if ((required && !has(required)) || (transfer && !require('../public/tuoguan_config').management.every(has))) return sendError(res,403,'无此托管操作权限');
+    if (!required && !transfer && !['snapshot','student-history'].includes(action)) return sendError(res,404,'不支持的托管操作');
+    try {
+      if(req.method==='GET' && action==='student-history') {
+        if(!finance) return sendError(res,403,'无托管财务查看权限');
+        const id=Number(url.searchParams.get('student_id'));
+        if(!Number.isSafeInteger(id) || !tuoguanStore.get('SELECT id FROM tg_students WHERE id=?',id))return sendError(res,404,'托管学生不存在');
+        return sendJson(res,{records:tuoguanStore.all("SELECT * FROM tg_ledger WHERE student_id=? AND attendance_id IS NULL AND kind IN ('充值','退款') AND voided_at IS NULL ORDER BY date DESC,id DESC",id)});
+      }
+      if(req.method==='GET'&&action==='snapshot') {
+        const view = url.searchParams.get('students_only')==='1' ? 'tgStudents' : url.searchParams.get('ledger_only')==='1' ? 'tgLedger' : url.searchParams.get('calendar_only')==='1' ? 'tgAttendance' : url.searchParams.get('view') || (has('tgSummary') ? 'tgSummary' : require('./domain/tuoguan_permissions').pages.find(has));
+        if(!require('./domain/tuoguan_permissions').pages.includes(view) || !has(view)) return sendError(res,403,'无此托管页面权限');
+        const month=url.searchParams.get('month');
+        if(view==='tgLedger')return sendJson(res,tuoguanStore.ledgerSnapshot(month,url.searchParams.get('start'),url.searchParams.get('end')));
+        if(url.searchParams.get('students_only')==='1')return sendJson(res,tuoguanStore.participationSnapshot(month));
+        if(url.searchParams.get('calendar_only')==='1')return sendJson(res,tuoguanStore.calendarSnapshot(month));
+        if(view==='tgSettings')return sendJson(res,{students:[],periods:[],rules:tuoguanStore.all('SELECT * FROM tg_rules ORDER BY effective_date DESC,id DESC')});
+        const snapshot=tuoguanStore.snapshot(month,view==='tgSummary'||view==='tgStudents');
+        if(view==='tgStudents'){delete snapshot.ledger;delete snapshot.summary;delete snapshot.rules;delete snapshot.billing_rule;snapshot.attendance=snapshot.attendance.map(({fee,reference_fee,rule_json,...r})=>r);}
+        if(view==='tgSummary' && (url.searchParams.has('view') || !isSuperRole(user.role))){delete snapshot.ledger;delete snapshot.rules;}
+        return sendJson(res,snapshot);
+      }
+      if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
+      const body=await readBody(req,action.startsWith('transfer-')?14_000_000:2_000_000), actor=String(user.username||user.id);
+      if(action==='transfer-export') {const bundle=TuoguanTransfer.exportData(db);writeOperationLog(user,{operation_type:'复制托管信息',operation_content:`复制${bundle.records.tg_students.length}名学生、${bundle.records.tg_attendance.length}条考勤和${bundle.records.tg_ledger.length}条流水`,target_type:'tuoguan'},req);return sendJson(res,{text:JSON.stringify(bundle,null,2)});}
+      if(action==='transfer-preview') {
+        for(const [key,p] of custodyTransferPreviews)if(p.expires<Date.now())custodyTransferPreviews.delete(key);
+        if(custodyTransferPreviews.size>=20)return sendError(res,429,'预览过多，请稍后重试');
+        const bundle=TuoguanTransfer.parse(db,body.text),plan=TuoguanTransfer.plan(db,bundle),token=crypto.randomUUID();
+        custodyTransferPreviews.set(token,{text:body.text,signature:TuoguanTransfer.signature(db),user_id:user.id,expires:Date.now()+600000});
+        return sendJson(res,{token,allowed:!plan.conflicts.length,summary:plan.summary,conflicts:plan.conflicts});
+      }
+      if(action==='transfer-confirm') {
+        const p=custodyTransferPreviews.get(body.token);
+        if(!p||p.user_id!==user.id||p.expires<Date.now()||body.confirm!==true)return sendError(res,409,'预览已失效，请重新预览');
+        const result=await TuoguanTransfer.confirm(db,p.text,p.signature,path.join(dataDir,'backups'),actor);
+        custodyTransferPreviews.delete(body.token);
+        const {backup,...summary}=result;
+        if(result.created||result.updated||result.deleted)writeOperationLog(user,{operation_type:'导入托管信息',operation_content:'托管数据合并完成',target_type:'tuoguan',details:summary},req);
+        return sendJson(res,{ok:true,...summary});
+      }
+      if(action==='preview') {
+        if(typeof body.base64!=='string'||body.base64.length>16000000) return sendError(res,400,'文件过大或无效');
+        return sendJson(res,TuoguanImport.stage(tuoguanStore,TuoguanImport.preview(Buffer.from(body.base64,'base64')),actor));
+      }
+      if(action==='import') return sendJson(res,TuoguanImport.commit(tuoguanStore,body,actor));
+      if(['money','money-edit'].includes(action) && body.channel !== undefined) {
+        const channel=normalizeRechargeChannel(body.channel,body.channel_other);
+        if(channel.error) return sendError(res,400,channel.error);
+        body.method=({wechat:'微信',cash:'现金',alipay:'支付宝',other:'其他'})[channel.channel]+(channel.channel==='other'?'：'+channel.channel_other:'');
+      }
+      const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
+      const auditStart=tuoguanStore.get("SELECT COALESCE(MAX(id),0) id FROM tg_audit").id;
+      const result=tuoguanStore.mutate(action,body,actor);
+      if(!replay) {
+        const entry=require('./domain/tuoguan_log').describe(db,action,tuoguanStore.all('SELECT * FROM tg_audit WHERE id>? ORDER BY id',auditStart));
+        if(entry){if(attendanceAction)entry.details={custody_audit_start:auditStart,custody_audit_end:tuoguanStore.get('SELECT MAX(id) id FROM tg_audit').id,count:entry.details.changes.length};writeOperationLog(user,{...entry,target_type:'tuoguan'},req);}
+      }
+      return sendJson(res,!finance&&attendanceAction?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
+    }catch(error){if(req.method==='POST')writeOperationLog(user,{operation_type:'托管操作失败',operation_content:action+'：操作未完成',target_type:'tuoguan',result_status:'failure'},req);return sendError(res,error.status||400,error.message);}
+  }
 
 
   if (req.method === "GET" && url.pathname === "/api/roles") {
@@ -12790,6 +12656,15 @@ async function handleApi(req, res, url) {
     writeOperationLog(user, { operation_type: "删除月份", operation_content: `月份 ${monthKey}${url.searchParams.get("force") === "1" ? " (强制)" : ""}`, target_type: "months", target_id: monthKey });
     return sendJson(res, result);
   }
+  const custodyLogDetails=url.pathname.match(/^\/api\/operation-logs\/(\d+)\/custody-details$/);
+  if(req.method==='GET' && custodyLogDetails) {
+    const row=get('SELECT extra_json FROM operation_logs WHERE id=?',[Number(custodyLogDetails[1])]);
+    if(!row)return sendError(res,404,'日志不存在');
+    const meta=JSON.parse(row.extra_json || '{}');
+    if(!Number.isSafeInteger(meta.custody_audit_start)||!Number.isSafeInteger(meta.custody_audit_end))return sendJson(res,{changes:[]});
+    const entry=require('./domain/tuoguan_log').describe(db,'batch-attendance',tuoguanStore.all("SELECT * FROM tg_audit WHERE id>? AND id<=? AND action='考勤' ORDER BY id",meta.custody_audit_start,meta.custody_audit_end));
+    return sendJson(res,entry?.details || {changes:[]});
+  }
   if (req.method === "GET" && url.pathname === "/api/operation-logs") {
     const conditions = [];
     const params = [];
@@ -12987,17 +12862,19 @@ async function handleApi(req, res, url) {
     const rows = classGroupCourseRows(user).filter(row => SalaryWorkflow.classKey(row) === key);
     const wanted = new Set(ids), selected = rows.filter(row => wanted.has(row.id));
     if (selected.length !== ids.length) return sendError(res, 409, "班级课程已变化或不在权限范围，请刷新后重试");
-    if (!["class", "lesson"].includes(body.mode) || (body.mode === "lesson" && ids.length !== 1) || (body.mode === "class" && rows.length !== ids.length)) return sendError(res, 409, "班级课程数量已变化，请刷新后重新确认");
+    if (!["class", "lesson", "selection"].includes(body.mode) || (body.mode === "lesson" && ids.length !== 1) || (body.mode === "class" && rows.length !== ids.length)) return sendError(res, 409, "班级课程数量已变化，请刷新后重新确认");
+    const expected = new Map((Array.isArray(body.expected) ? body.expected : []).filter(e=>e && Number.isSafeInteger(e.id)).map(e=>[e.id,e]));
+    if (body.mode === 'selection' && (expected.size !== selected.length || body.expected.length !== selected.length || selected.some(row => expected.get(row.id)?.course_type !== row.course_type || expected.get(row.id)?.updated_at !== row.updated_at))) return sendError(res,409,'课程已变化，请重新打开详情');
     const settings = Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]));
     if (!type || selected.some(row => !courseTypeOptions(row.grade, settings).includes(type))) return sendError(res, 400, "课程类型不属于当前年级的候选范围");
     withTransaction(() => {
-      const update = db.prepare("UPDATE lessons SET course_type=?,course_type_source='manual',updated_at=CURRENT_TIMESTAMP WHERE id=?");
-      for (const row of selected) update.run(type, row.id);
+      const update = db.prepare("UPDATE lessons SET course_type=?,course_type_source='manual',updated_at=CURRENT_TIMESTAMP WHERE id=? AND course_type=? AND updated_at=?");
+      for (const row of selected) if (update.run(type, row.id, row.course_type, row.updated_at).changes !== 1) throw Object.assign(new Error('课程已变化，本批未修改'), {status:409});
       const first = selected[0];
-      const description = body.mode === "class"
+      const description = body.mode !== "lesson"
         ? `修改班级类型：${first.grade}${first.subject}班由“${SalaryWorkflow.courseTypes(selected).join("、")}”调整为“${type}”，共更新${selected.length}节课程`
         : `修改课程类型：${first.date} ${first.grade}${first.subject}由“${first.course_type}”调整为“${type}”`;
-      writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(",") });
+      writeOperationLog(user, { operation_type: body.mode === "class" ? "修改班级类型" : "修改课程类型", operation_content: description, target_type: "lessons", target_id: ids.join(","), details:{changes:selected.map(row=>({id:row.id,before:row.course_type,after:type}))} });
     });
     clearDerivedCache("class course type updated");
     return sendJson(res, { ok: true, updated: selected.length, class_groups: classGroupRows(user) });
@@ -15596,10 +15473,14 @@ const server = http.createServer(async (req, res) => {
 const recoveredBackupJobs = backupService().recoverInterruptedJobs();
 if (recoveredBackupJobs.length) console.warn(`Recovered interrupted backup jobs: ${recoveredBackupJobs.join(",")}`);
 
-server.listen(port, () => {
+server.listen(port, process.env.HOST || undefined, () => {
   console.log(`App version: ${APP_VERSION}`);
   console.log(`黎明教育课程管理系统: http://localhost:${port}`);
   console.log(`SQLite: ${dbPath}`);
+  console.log(`Runtime: pid=${process.pid}; cwd=${process.cwd()}; environment=${process.env.NODE_ENV || 'development (default)'}`);
+  console.log(`Git: ${APP_GIT_COMMIT || 'unavailable'}${APP_SOURCE_DIRTY ? ' (working tree modified at startup)' : ''}`);
+  console.log(`Database config: DATA_DIR=${process.env.DATA_DIR ? 'explicit' : 'default'}; DB_PATH=${process.env.DB_PATH ? 'explicit' : 'default'}; custody=initialized`);
+  if (process.env.DATA_DIR || process.env.DB_PATH) console.log('数据库路径已被环境变量覆盖；导入前请核对上方 SQLite 路径。');
 });
 
 const backupScheduler = startBackupScheduler({ dbPath, dataDir });
