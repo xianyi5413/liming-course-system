@@ -72,6 +72,7 @@ const DEFAULT_STUDENT_GRADE_COLORS = {
 const DEFAULT_SUBJECT_COLORS = {};
 const DEFAULT_GENERIC_STATUS_COLORS = {
   "在读": { background: "#e7f6ed", color: "#16713a" },
+  "在托": { background: "#e7f6ed", color: "#16713a" },
   "在职": { background: "#e7f6ed", color: "#16713a" },
   "成功": { background: "#e7f6ed", color: "#16713a" },
   "已完成": { background: "#e7f6ed", color: "#16713a" },
@@ -2388,6 +2389,7 @@ async function clearDateRangePickerValue(wrapper) {
 }
 
 async function applyDateRangeToScope(scope, start, end) {
+  if (scope === "tuoguan-ledger") { await TuoguanUI.applyRange(start, end); return; }
   if (await SalaryUI.applyRange(scope, start, end)) return;
   if (scope === "lesson") {
     focusedLessonIds = [];

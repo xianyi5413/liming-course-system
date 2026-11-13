@@ -2,6 +2,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const Billing = require("./tuoguan_settlement");
+const PROFILE_STATUSES = ["在托", "暂停", "已流出", "已毕业"];
+const PROFILE_STATUS_COLUMN =
+  "TEXT NOT NULL DEFAULT '在托' CHECK(status IN ('在托','暂停','已流出','已毕业'))";
 const CHILDREN = ["tg_periods", "tg_rules", "tg_attendance", "tg_ledger"];
 const TABLES = [
   "tg_students",
@@ -19,7 +22,7 @@ const TABLES = [
   "tg_transfer_keys",
 ];
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,status ${PROFILE_STATUS_COLUMN},name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_legacy_student_map(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL UNIQUE REFERENCES tg_students(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),grade TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS tg_period_dates ON tg_periods(student_id,start_date,end_date);
@@ -78,6 +81,10 @@ function upgradeLegacyBackup(data) {
   return data;
 }
 function simplifyBackup(data) {
+  for (const row of data.tg_students || []) {
+    row.status ??= "在托";
+    if (!PROFILE_STATUSES.includes(row.status)) throw Error("托管档案状态无效");
+  }
   for (const row of data.tg_ledger || []) {
     row.actual_amount ??= null;
     row.gift_amount ??= null;
@@ -132,9 +139,16 @@ function migrate(db, { settle = true } = {}) {
     ["actual_amount", "gift_amount"].some(
       (name) => !ledgerColumns.includes(name),
     );
+  const missingStatus =
+    exists("tg_students") &&
+    !db
+      .prepare("PRAGMA table_info(tg_students)")
+      .all()
+      .some((c) => c.name === "status");
   let backup = null;
   if (
     (settle && Billing.needsMigration(db)) ||
+    missingStatus ||
     oldLedger ||
     legacy.length ||
     classTables.length ||
@@ -226,6 +240,7 @@ function migrate(db, { settle = true } = {}) {
     }
     db.exec(SCHEMA);
     const additions = {
+      tg_students: { status: PROFILE_STATUS_COLUMN },
       tg_ledger: { actual_amount: "INTEGER", gift_amount: "INTEGER" },
       tg_rules: {
         end_date: "TEXT",
@@ -296,4 +311,10 @@ function migrate(db, { settle = true } = {}) {
     db.exec("PRAGMA foreign_keys=" + foreignKeys);
   }
 }
-module.exports = { TABLES, migrate, upgradeLegacyBackup, simplifyBackup };
+module.exports = {
+  TABLES,
+  PROFILE_STATUSES,
+  migrate,
+  upgradeLegacyBackup,
+  simplifyBackup,
+};

@@ -415,7 +415,7 @@ test("legacy SQLite export upgrades custody identities in memory without modifyi
   db.close();
   exportFullData({ dbPath: target, outputPath: file });
   const result = verifyFullData(file);
-  assert.equal(result.version, 11);
+  assert.equal(result.version, 12);
   assert.equal(result.data.tg_students.length, 1);
   assert.equal(result.data.tg_students[0].id, 1);
   const check = new DatabaseSync(target, { readOnly: true });
@@ -614,7 +614,9 @@ test("matrix adds a new identity, rejects duplicate periods and enforces readonl
     await c.send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" });
     await c.login();
     await matrixMonth(c);
-    await c.click("#tg-add-student");
+    await c.evaluate('setActiveView("tgStudents");load({refreshGlobal:false})');
+    await c.waitFor('Boolean(document.querySelector("#tg-new"))');
+    await c.click("#tg-new");
     await c.evaluate(
       `document.querySelector('.tg-form [name=name]').value='合成矩阵新生';document.querySelector('.tg-form [name=start_date]').value='2026-11-16'`,
     );
@@ -632,6 +634,7 @@ test("matrix adds a new identity, rejects duplicate periods and enforces readonl
     );
     await c.click(".tg-form [type=submit]");
     await c.waitFor('!document.querySelector(".tg-form")');
+    await matrixMonth(c);
     assert.match(
       await c.evaluate('document.querySelector(".tg-matrix").textContent'),
       /合成矩阵新生/,
@@ -671,7 +674,7 @@ test("matrix adds a new identity, rejects duplicate periods and enforces readonl
     );
     await matrixMonth(c);
     assert.equal(
-      await c.evaluate('Boolean(document.querySelector("#tg-add-student"))'),
+      await c.evaluate('Boolean(document.querySelector("#tg-manage-students"))'),
       false,
     );
     assert.equal(
@@ -807,12 +810,8 @@ test("matrix keyboard, failed/conflicting writes, returning identity and delayed
     await c.evaluate(
       'window.fetch=normalMatrixFetch;document.querySelector("#tg-query").value="无匹配";document.querySelector("#tg-query").dispatchEvent(new Event("input"))',
     );
-    await c.click("#tg-add-student");
-    await c.evaluate(
-      `const pick=document.querySelector('.tg-form [name=student_id]');pick.value='${returning.id}';pick.dispatchEvent(new Event('change'));document.querySelector('.tg-form [name=start_date]').value='2026-11-12'`,
-    );
-    await c.click(".tg-form [type=submit]");
-    await c.waitFor('!document.querySelector(".tg-form")');
+    await toggleMember(c, returning.id);
+    await c.click("#tg-reset");
     await c.waitFor(
       'document.querySelector(".tg-matrix").textContent.includes("合成返回学生")',
     );
@@ -1160,12 +1159,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       start_date: "2026-12-01",
     });
     await go("tgAttendance");
-    await c.click("#tg-remove-students");
-    await c.evaluate(
-      `document.querySelector('.tg-form [value="${student.data.id}"]').checked=true`,
-    );
-    await c.click(".tg-form [type=submit]");
-    await c.waitFor('!document.querySelector(".tg-form")');
+    await toggleMember(c, student.data.id);
     assert.ok(
       (await api("snapshot?month=2026-12")).data.students.some(
         (s) => s.id === student.data.id,
@@ -1177,12 +1171,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       ),
       false,
     );
-    await c.click("#tg-add-student");
-    await c.evaluate(
-      `const picker=document.querySelector('.tg-form [name=student_id]');picker.value='${student.data.id}';picker.dispatchEvent(new Event('change'));document.querySelector('.tg-form [name=start_date]').value='2026-12-01'`,
-    );
-    await c.click(".tg-form [type=submit]");
-    await c.waitFor('!document.querySelector(".tg-form")');
+    await toggleMember(c, student.data.id);
     assert.equal(
       (await api("snapshot?month=2026-12")).data.periods.find(
         (p) =>
@@ -1235,7 +1224,7 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
       await c.evaluate(
         '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
       ),
-      ["序号", "学生", "年级", "托管首日", "最近托管"],
+      ["序号", "学生", "年级", "状态", "托管首日", "上次在托"],
     );
     assert.equal(
       await c.evaluate(
@@ -1290,3 +1279,11 @@ test("Edge streamlined UI, default dates, persisted removals, automatic filters,
     await browser.close();
   }
 });
+
+async function toggleMember(c,id){
+  await c.click('#tg-manage-students');
+  await c.waitFor(`Boolean(document.querySelector('[data-member="${id}"]:not(:disabled)'))`);
+  await c.click(`[data-member="${id}"]`);
+  await c.waitFor(`!document.querySelector('[data-member="${id}"]').disabled`);
+  await c.click('.shared-course-dialog .dialog-close');
+}

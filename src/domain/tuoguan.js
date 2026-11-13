@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const STATUSES = ["出勤", "请假", "放假", "不适用"];
 const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
 const GRADES = ["初一", "初二", "初三"];
-const { TABLES, migrate } = require("./tuoguan_schema");
+const { TABLES, PROFILE_STATUSES, migrate } = require("./tuoguan_schema");
 const Billing = require("./tuoguan_settlement");
 const { account: custodyAccount } = require("./tuoguan_account");
 function fail(message, status = 400) {
@@ -300,7 +300,9 @@ function createStore(db) {
     }
     return {
       ok: true,
-      ...(action === "remove-students" ? {} : calendarSnapshot(b.month)),
+      ...(action === "remove-students"
+        ? participationSnapshot(b.month)
+        : calendarSnapshot(b.month)),
     };
   }
   function mutate(action, b, actor) {
@@ -314,26 +316,30 @@ function createStore(db) {
         if (!name || name.length > 80 || !GRADES.includes(grade))
           fail("请填写姓名并选择初一、初二或初三");
         const notes = String(b.notes || "").slice(0, 2000);
+        if (b.status !== undefined && !PROFILE_STATUSES.includes(b.status))
+          fail("档案状态无效");
         let id;
         if (b.id) {
           const old = get("SELECT * FROM tg_students WHERE id=?", b.id);
           if (!old || old.version !== b.version)
             fail("托管档案已变更，请刷新", 409);
           run(
-            "UPDATE tg_students SET name=?,grade=?,notes=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE tg_students SET name=?,grade=?,notes=?,status=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             name,
             grade,
             notes,
+            b.status ?? old.status,
             b.id,
           );
           id = b.id;
         } else {
           id = Number(
             run(
-              "INSERT INTO tg_students(name,grade,notes) VALUES (?,?,?)",
+              "INSERT INTO tg_students(name,grade,notes,status) VALUES (?,?,?,?)",
               name,
               grade,
               notes,
+              b.status || "在托",
             ).lastInsertRowid,
           );
           if (b.start_date)
@@ -348,8 +354,37 @@ function createStore(db) {
         result = get("SELECT * FROM tg_students WHERE id=?", id);
       } else if (action === "attendance") result = attendance(b, actor);
       else if (action === "period") {
-        savePeriod(b);
-        result = { ok: true };
+        if (b.month) {
+          const { start, end } = require("./tuoguan_calendar").bounds(b.month);
+          const profile = get(
+            "SELECT * FROM tg_students WHERE id=?",
+            b.student_id,
+          );
+          if (!profile || profile.version !== b.student_version)
+            fail("档案已变化，请刷新", 409);
+          if (profile.status !== "在托")
+            fail("请先在托管学生中将档案状态改为在托");
+          if (
+            get(
+              "SELECT id FROM tg_periods WHERE student_id=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=?",
+              b.student_id,
+              end,
+              start,
+            )
+          )
+            fail("学生已加入本月，请刷新", 409);
+          savePeriod({
+            student_id: b.student_id,
+            grade: profile.grade,
+            start_date: start,
+            end_date: end,
+            status: "在托",
+          });
+          result = { ok: true, ...participationSnapshot(b.month) };
+        } else {
+          savePeriod(b);
+          result = { ok: true };
+        }
       } else if (action === "money") {
         student(b.student_id);
         date(b.date);
@@ -360,8 +395,9 @@ function createStore(db) {
         const amount = cents(actual + gift);
         if (!["充值", "退款", "优惠", "调整", "期初核定"].includes(b.kind))
           fail("资金类型无效");
-        if (!b.notes || (!actual && !gift))
-          fail("请填写非零金额及原因/核对依据");
+        if (!actual && !gift) fail("实际金额或赠送金额至少一项非零");
+        if (!["充值", "退款"].includes(b.kind) && !b.notes)
+          fail("历史资金调整请填写核对依据");
         if (
           b.kind !== "调整" &&
           b.kind !== "期初核定" &&
@@ -400,7 +436,7 @@ function createStore(db) {
           b.kind === "退款" ? -amount : amount,
           b.method || "",
           b.voucher || "",
-          b.notes,
+          String(b.notes || "").slice(0, 2000),
           actor,
           (b.kind === "退款" ? -1 : 1) * actual,
           (b.kind === "退款" ? -1 : 1) * gift,
@@ -455,6 +491,42 @@ function createStore(db) {
       return result;
     });
   }
+  function participationSnapshot(month) {
+    const { start, end } = require("./tuoguan_calendar").bounds(month);
+    return {
+      students: all("SELECT * FROM tg_students ORDER BY id"),
+      periods: all("SELECT * FROM tg_periods ORDER BY start_date DESC,id"),
+      protected_students: all(
+        "SELECT student_id FROM tg_attendance WHERE date BETWEEN ? AND ? UNION SELECT student_id FROM tg_ledger WHERE date BETWEEN ? AND ?",
+        start,
+        end,
+        start,
+        end,
+      ).map((r) => r.student_id),
+    };
+  }
+  function ledgerSnapshot(month, start, end) {
+    const bounds = require("./tuoguan_calendar").bounds(month);
+    start = start || bounds.start;
+    end = end || bounds.end;
+    date(start);
+    date(end);
+    if (start > end) fail("起始日期不能晚于截止日期");
+    return {
+      finance: true,
+      students: all("SELECT * FROM tg_students ORDER BY id"),
+      periods: all("SELECT * FROM tg_periods ORDER BY start_date DESC"),
+      ledger: all(
+        "SELECT * FROM tg_ledger WHERE kind IN ('充值','退款') AND attendance_id IS NULL AND date BETWEEN ? AND ? ORDER BY date DESC,id DESC",
+        start,
+        end,
+      ).map((r) => ({
+        ...r,
+        actual_amount: r.actual_amount ?? r.amount,
+        gift_amount: r.gift_amount ?? 0,
+      })),
+    };
+  }
   function calendarSnapshot(month, attendance = null, protection = true) {
     const { start, end } = require("./tuoguan_calendar").bounds(month);
     const saved =
@@ -501,10 +573,11 @@ function createStore(db) {
     const data = {
       students: finance
         ? students
-        : students.map(({ id, name, grade }) => ({
+        : students.map(({ id, name, grade, status }) => ({
             id,
             name,
             grade,
+            status,
           })),
       periods,
       ...calendarState,
@@ -566,6 +639,8 @@ function createStore(db) {
     mutate,
     snapshot,
     calendarSnapshot,
+    participationSnapshot,
+    ledgerSnapshot,
     atomic,
     audit,
     all,

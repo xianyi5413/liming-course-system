@@ -283,17 +283,17 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
       await c.evaluate(
         '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
       ),
-      ["序号", "学生", "年级", "托管首日", "最近托管"],
+      ["序号", "学生", "年级", "状态", "托管首日", "上次在托"],
     );
     assert.deepEqual(
       await c.evaluate(
-        '[...document.querySelector(".tg-profile-link[data-id=\\"1\\"]").closest("tr").cells].slice(3).map(e=>e.textContent)',
+        '[...document.querySelector(".tg-profile-link[data-id=\\"1\\"]").closest("tr").cells].slice(4).map(e=>e.textContent)',
       ),
       ["2026-09-02", "2026-09-02"],
     );
     assert.deepEqual(
       await c.evaluate(
-        '[...document.querySelector(".tg-profile-link[data-id=\\"2\\"]").closest("tr").cells].slice(3).map(e=>e.textContent)',
+        '[...document.querySelector(".tg-profile-link[data-id=\\"2\\"]").closest("tr").cells].slice(4).map(e=>e.textContent)',
       ),
       ["—", "—"],
     );
@@ -556,13 +556,13 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
     await b.close();
   }
 });
-test("full v11 split balances round trip and v10 ledger converts without changing original amounts", () => {
+test("full v12 split balances round trip and v10 ledger converts without changing original amounts", () => {
   const file = path.join(dir, "v11.xlsx");
   exportFullData({ dbPath: env.DB_PATH, outputPath: file });
   const verified = verifyFullData(file);
-  assert.equal(verified.version, 11);
+  assert.equal(verified.version, 12);
   const data = verified.data;
-  for (const version of [11, 10]) {
+  for (const version of [12, 11, 10]) {
     const target = path.join(dir, `restored-${version}.sqlite`),
       input = path.join(dir, `version-${version}.xlsx`),
       copy = structuredClone(data);
@@ -601,7 +601,7 @@ test("full v11 split balances round trip and v10 ledger converts without changin
       db.prepare("SELECT id,amount FROM tg_ledger ORDER BY id").all(),
       source.prepare("SELECT id,amount FROM tg_ledger ORDER BY id").all(),
     );
-    if (version === 11)
+    if (version >= 11)
       assert.deepEqual(
         TG.createStore(db).snapshot("2026-09", true).summary,
         TG.createStore(source).snapshot("2026-09", true).summary,
@@ -1049,7 +1049,7 @@ test("Edge calendar queue, conflicts, errors, close synchronization, stale respo
 });
 
 test("Edge manual ledger excludes settlement, preserves filters, supports one split recharge and idempotent save", async () => {
-  const kinds = ["充值", "退款", "优惠", "调整", "期初核定"];
+  const kinds = ["充值", "退款"];
   for (const [kind, actual, gift] of [
     ["充值", 100000, 10000],
     ["退款", 2000, 300],
@@ -1104,7 +1104,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
   };
   const rows = () =>
     c.evaluate(
-      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).map(r=>[...r.cells].map(c=>c.textContent))',
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===8).map(r=>[...r.cells].map(c=>c.textContent))',
     );
   const filter = async (id, value) => {
     await c.evaluate(
@@ -1124,10 +1124,10 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
       ["", ...kinds],
     );
     const all = await rows();
-    assert.equal(all.length, 5);
+    assert.equal(all.length, 2);
     assert.deepEqual(
       all.map((r) => Number(r[0])),
-      [1, 2, 3, 4, 5],
+      [1, 2],
     );
     assert.deepEqual(
       [...new Set(all.map((r) => r[3]))].sort(),
@@ -1153,12 +1153,12 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
       /暂无充值记录/,
     );
     await filter("tg-grade", "初二");
-    assert.equal((await rows()).length, 5);
+    assert.equal((await rows()).length, 2);
     await c.evaluate(
       `document.querySelector('#tg-query').value='合成乙';document.querySelector('#tg-query').dispatchEvent(new Event('input'));document.querySelector('#tg-query').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`,
     );
-    assert.equal((await rows()).length, 5);
-    await filter("tg-start", "2027-03-02");
+    assert.equal((await rows()).length, 2);
+    await c.evaluate("TuoguanUI.applyRange('2027-03-02','2027-03-31')");
     assert.equal((await rows()).length, 0);
     await c.click("#tg-reset");
     await month("2027-04");
@@ -1183,7 +1183,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
     await c.waitFor(
       'document.querySelector(".tg-table tbody").textContent.includes("合成一次双资金")',
     );
-    const recharge = (await rows()).filter((r) => r[9] === "合成一次双资金");
+    const recharge = (await rows()).filter((r) => r[7] === "合成一次双资金");
     assert.equal(recharge.length, 1);
     assert.ok(recharge[0][4].replaceAll(",", "").includes("1000.00"));
     assert.ok(recharge[0][5].includes("100.00"));

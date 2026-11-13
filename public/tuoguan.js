@@ -1,7 +1,11 @@
 /* Integrated native UI; all financial amounts sent as integer cents. */
 window.TuoguanUI = (() => {
   const statuses = ["出勤", "请假", "放假", "不适用"];
-  const manualMoneyKinds = ["充值", "退款", "优惠", "调整", "期初核定"];
+  const manualMoneyKinds = ["充值", "退款"];
+  const profileStatuses = ["在托", "暂停", "已流出", "已毕业"];
+  const compareProfiles = (a, b) =>
+    profileStatuses.indexOf(a.status) - profileStatuses.indexOf(b.status) ||
+    compareStudentGradeName(a, b);
   const isManualMoney = (row) =>
     manualMoneyKinds.includes(row.kind) && row.attendance_id == null;
   let activeDetail = null;
@@ -68,6 +72,7 @@ window.TuoguanUI = (() => {
   let filterTimer,
     cellWrites = 0,
     dateWrites = 0,
+    studentWrites = 0,
     filterQueued = false;
   const metrics = (items) =>
     '<div class="summary-grid tg-metrics">' +
@@ -100,11 +105,6 @@ window.TuoguanUI = (() => {
     "</div>";
   function filtersHtml() {
     if (tab === "设置") return "";
-    const monthEnd = new Date(
-      Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)), 0),
-    )
-      .toISOString()
-      .slice(0, 10);
     const dateControl =
       tab === "学生"
         ? ""
@@ -137,24 +137,12 @@ window.TuoguanUI = (() => {
               "</select>",
           ) +
           field(
-            "起始日（本月）",
-            '<input class="control" id="tg-start" type="date" value="' +
-              rangeStart +
-              '" min="' +
-              day.slice(0, 7) +
-              '-01" max="' +
-              monthEnd +
-              '">',
-          ) +
-          field(
-            "截止日（本月）",
-            '<input class="control" id="tg-end" type="date" value="' +
-              rangeEnd +
-              '" min="' +
-              day.slice(0, 7) +
-              '-01" max="' +
-              monthEnd +
-              '">',
+            "日期范围（优先于月份）",
+            dateRangePickerControl({
+              scope: "tuoguan-ledger",
+              start: rangeStart,
+              end: rangeEnd,
+            }),
           )
         : "") +
       '</div><div class="filter-summary"><button class="btn" id="tg-reset">清空筛选</button></div></div>'
@@ -351,7 +339,13 @@ window.TuoguanUI = (() => {
     const month = day.slice(0, 7);
     let d;
     try {
-      d = await api("snapshot?month=" + month);
+      d = await api(
+        "snapshot?month=" +
+          month +
+          (tab === "流水"
+            ? "&ledger_only=1&start=" + rangeStart + "&end=" + rangeEnd
+            : ""),
+      );
     } catch (error) {
       if (e !== epoch || target !== root) return;
       throw error;
@@ -397,7 +391,7 @@ window.TuoguanUI = (() => {
   const listTable = (headers, rows) => table(headers, rows, true);
   const tr = (values, attrs = "") =>
     `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
-  function form(title, fields, save) {
+  function form(title, fields, save, savedMessage = () => "已保存") {
     const host = root,
       owner = auth.user?.id,
       month = day.slice(0, 7);
@@ -419,13 +413,14 @@ window.TuoguanUI = (() => {
       button.disabled = true;
       button.textContent = "保存中…";
       try {
-        await save(Object.fromEntries(new FormData(e.target)));
+        const values = Object.fromEntries(new FormData(e.target));
+        await save(values);
         modal.close();
         if (host !== root || owner !== auth.user?.id || !day.startsWith(month))
           return;
         await refresh();
         if (host === root && owner === auth.user?.id && day.startsWith(month))
-          message("已保存");
+          message(savedMessage(values));
       } catch (err) {
         dialog.querySelector("[role=alert]").textContent = err.message;
       } finally {
@@ -469,85 +464,15 @@ window.TuoguanUI = (() => {
       s ? "编辑托管档案" : "新建托管学生",
       input("name", "姓名", s?.name || "") +
         select("grade", "年级", grades, s?.grade || "初一") +
+        select("status", "状态", profileStatuses, s?.status || "在托") +
         (s ? "" : input("start_date", "入托日期", day, "date")) +
         input("notes", "备注", s?.notes || ""),
       (v) => post("student", { ...v, id: s?.id, version: s?.version }),
     );
-  function chooseRemoval(title, choices, action, payload) {
-    const host = root,
-      month = day.slice(0, 7),
-      owner = auth.user?.id;
-    const dialog = CourseDetails.dialog(
-      title,
-      '<form class="tg-form"><div class="tg-choice-list">' +
-        choices
-          .map(
-            ([value, label]) =>
-              '<label><input type="checkbox" name="choice" value="' +
-              esc(value) +
-              '"> ' +
-              label +
-              "</label>",
-          )
-          .join("") +
-        '</div><p role="alert"></p><div class="modal-actions"><button class="btn" type="submit">确认移除</button></div></form>',
-      { size: "compact" },
-    );
-    dialog.element.querySelector("form").onsubmit = async (event) => {
-      event.preventDefault();
-      const button = dialog.element.querySelector("[type=submit]");
-      if (button.disabled) return;
-      const values = [
-        ...dialog.element.querySelectorAll("[name=choice]:checked"),
-      ].map((x) => x.value);
-      if (!values.length) {
-        dialog.element.querySelector("[role=alert]").textContent =
-          "请至少选择一项";
-        return;
-      }
-      button.disabled = true;
-      try {
-        if (
-          host !== root ||
-          month !== day.slice(0, 7) ||
-          owner !== auth.user?.id
-        )
-          throw Error("页面已变化，请重新选择");
-        await post(action, { month, ...payload(values) });
-        dialog.close();
-        if (host === root && month === day.slice(0, 7)) {
-          await refresh();
-          message("已移除");
-        }
-      } catch (error) {
-        dialog.element.querySelector("[role=alert]").textContent =
-          error.message;
-      } finally {
-        button.disabled = false;
-      }
-    };
-  }
-  function removeMatrixStudents(students) {
-    chooseRemoval(
-      "移除本月签到行（保留档案）",
-      students.map((s) => [s.id, studentBadge(s.id, s.grade)]),
-      "remove-students",
-      (values) => ({
-        students: values.map((id) => {
-          const s = students.find((s) => s.id === Number(id));
-          return {
-            id: s.id,
-            versions: [...s.periods]
-              .sort((a, b) => a.id - b.id)
-              .map((p) => [p.id, p.version]),
-          };
-        }),
-      }),
-    );
-  }
   function manageMatrixDates() {
     if (!finance || isReadonlyUser()) return;
-    if (cellWrites || dateWrites) return message("请等待保存完成");
+    if (cellWrites || dateWrites || studentWrites)
+      return message("请等待保存完成");
     clearTimeout(filterTimer);
     const nextQuery = root.querySelector("#tg-query").value.trim(),
       nextGrade = root.querySelector("#tg-grade").value;
@@ -846,75 +771,196 @@ window.TuoguanUI = (() => {
       }
     };
   }
-  function addMatrixStudent() {
-    const month = day.slice(0, 7);
+  function manageMatrixStudents() {
+    if (!finance || isReadonlyUser()) return;
+    if (cellWrites || dateWrites || studentWrites)
+      return message("请等待保存完成");
+    clearTimeout(filterTimer);
+    const nextQuery = root.querySelector("#tg-query").value.trim(),
+      nextGrade = root.querySelector("#tg-grade").value;
+    if (nextQuery !== query || nextGrade !== grade) {
+      query = nextQuery;
+      grade = nextGrade;
+      draw();
+    }
     const host = root,
-      owner = auth.user?.id;
-    const modal = form(
-      "添加学生",
-      select(
-        "student_id",
-        "托管档案",
-        [
-          ["new", "新建托管学生"],
-          ...data.students.map((s) => [s.id, studentLabel(s)]),
-        ],
-        "new",
-      ) +
-        input("name", "新学生姓名") +
-        select("grade", "年级", grades, grade || grades[0]) +
-        input("start_date", "入托日期", day, "date"),
-      async (v) => {
-        if (!v.start_date.startsWith(month + "-"))
-          throw Error("请选择当前月份的入托日期");
-        if (v.student_id === "new") {
-          if (data.students.some((s) => s.name.trim() === v.name.trim()))
-            throw Error(
-              "已有同名档案，请先选择已有学生；确为不同学生可在托管学生中单独建档并填写辨认备注",
-            );
-          await post("student", {
-            name: v.name,
-            grade: v.grade,
-            start_date: v.start_date,
-          });
-        } else {
-          const next = data.periods
-            .filter(
-              (p) =>
-                p.student_id === Number(v.student_id) &&
-                p.start_date > v.start_date,
-            )
-            .sort((a, b) => a.start_date.localeCompare(b.start_date))[0];
-          await post("period", {
-            student_id: Number(v.student_id),
-            grade: v.grade,
-            start_date: v.start_date,
-            end_date: next
-              ? new Date(Date.parse(next.start_date + "T00:00:00Z") - 86400000)
-                  .toISOString()
-                  .slice(0, 10)
-              : null,
-            status: "在托",
-          });
-        }
-        if (host === root && owner === auth.user?.id && day.startsWith(month)) {
-          query = "";
-          grade = "";
-        }
+      source = data,
+      owner = auth.user?.id,
+      month = day.slice(0, 7);
+    const samePage = () =>
+      root === host &&
+      data === source &&
+      host.isConnected &&
+      auth.user?.id === owner &&
+      tab === "签到" &&
+      day.startsWith(month);
+    let ready = false,
+      changed = false,
+      queue = Promise.resolve(),
+      protectedIds = new Set(),
+      profileSignature = "";
+    const busy = new Set(),
+      scroll = root.querySelector(".tg-scroll"),
+      left = scroll?.scrollLeft || 0,
+      top = scroll?.scrollTop || 0;
+    const dialog = CourseDetails.dialog(
+      "管理学生 · " + month,
+      '<div class="tg-detail-content tg-student-management"><div class="tg-student-groups"></div><p role="status">正在加载…</p><p role="alert"></p></div>',
+      {
+        onClose: async () => {
+          await queue;
+          if (!changed || !samePage()) return;
+          renderMatrix(root.querySelector("#tg-body"));
+          scheduleAdaptiveTableColumns();
+          const next = root.querySelector(".tg-scroll");
+          if (next) {
+            next.scrollLeft = left;
+            next.scrollTop = top;
+          }
+          root
+            .querySelector("#tg-manage-students")
+            ?.focus({ preventScroll: true });
+        },
       },
     );
-    const pick = modal.element.querySelector("[name=student_id]");
-    pick.addEventListener("change", () => {
-      const isNew = pick.value === "new";
-      modal.element.querySelector("[name=name]").closest("label").hidden =
-        !isNew;
-      if (!isNew) {
-        const student = data.students.find((s) => s.id === Number(pick.value));
-        const gradeInput = modal.element.querySelector("[name=grade]");
-        gradeInput.value = student.grade;
-        syncCustomSelect(gradeInput, gradeInput.nextElementSibling);
+    dialog.element
+      .querySelector(".modal-panel")
+      .classList.add("tg-manage-students-panel");
+    const groups = dialog.element.querySelector(".tg-student-groups"),
+      error = dialog.element.querySelector("[role=alert]"),
+      status = dialog.element.querySelector("[role=status]");
+    const periods = (id) =>
+      source.periods.filter(
+        (p) =>
+          p.student_id === id &&
+          p.start_date <= month + "-31" &&
+          (!p.end_date || p.end_date >= month + "-01"),
+      );
+    function paint() {
+      if (!dialog.element.isConnected || !samePage()) return;
+      status.textContent = busy.size ? "正在保存…" : "";
+      for (const button of groups.querySelectorAll("[data-member]")) {
+        const id = Number(button.dataset.member),
+          selected = periods(id).length > 0;
+        button.dataset.selected = String(selected);
+        button.setAttribute("aria-pressed", String(selected));
+        button.disabled = !ready || busy.has(id);
+        button.querySelector(".tg-member-mark").textContent =
+          protectedIds.has(id) && selected ? "🔒" : selected ? "✓" : "○";
       }
-    });
+    }
+    function accept(next) {
+      if (!samePage()) return;
+      changed ||=
+        JSON.stringify(source.periods) !== JSON.stringify(next.periods);
+      source.students = next.students;
+      source.periods = next.periods;
+      protectedIds = new Set(next.protected_students);
+      ready = true;
+      const signature = JSON.stringify(
+        next.students.map((s) => [s.id, s.name, s.grade, s.status, s.notes]),
+      );
+      if (signature !== profileSignature) {
+        profileSignature = signature;
+        renderGroups();
+      }
+      paint();
+    }
+    function renderGroups() {
+      groups.innerHTML = profileStatuses
+        .map(
+          (state) =>
+            '<section class="tg-student-group"><h3>' +
+            statusBadge(state) +
+            '</h3><div class="tg-student-choices">' +
+            source.students
+              .filter((s) => s.status === state)
+              .sort(compareStudentGradeName)
+              .map(
+                (s) =>
+                  '<button type="button" class="btn tg-member" data-member="' +
+                  s.id +
+                  '" title="' +
+                  esc(s.notes || s.name) +
+                  '"><span class="tg-member-mark" aria-hidden="true"></span>' +
+                  renderStudentBadge(s) +
+                  " " +
+                  renderGradeBadge(s.grade) +
+                  "</button>",
+              )
+              .join("") +
+            "</div></section>",
+        )
+        .join("");
+    }
+    const latest = () => api("snapshot?month=" + month + "&students_only=1");
+    queue = latest()
+      .then((next) => {
+        if (!dialog.element.isConnected || !samePage()) return;
+        accept(next);
+      })
+      .catch((e) => {
+        error.textContent = e.message;
+        status.textContent = "";
+      });
+    groups.onclick = (event) => {
+      const button = event.target.closest("[data-member]");
+      if (!button || !ready || button.disabled || !samePage()) return;
+      const id = Number(button.dataset.member),
+        student = source.students.find((s) => s.id === id),
+        selected = periods(id).length > 0;
+      if (selected && protectedIds.has(id)) {
+        error.textContent = "该学生本月已有考勤或资金记录，无法移除。";
+        return;
+      }
+      if (!selected && student.status !== "在托") {
+        error.textContent = "请先在托管学生中将档案状态改为在托，再加入本月。";
+        return;
+      }
+      busy.add(id);
+      studentWrites++;
+      error.textContent = "";
+      paint();
+      queue = queue.then(async () => {
+        try {
+          if (!samePage() || !ready) return;
+          const current = source.students.find((s) => s.id === id),
+            rows = periods(id);
+          accept(
+            await post(
+              rows.length ? "remove-students" : "period",
+              rows.length
+                ? {
+                    month,
+                    students: [
+                      {
+                        id,
+                        versions: rows
+                          .sort((a, b) => a.id - b.id)
+                          .map((p) => [p.id, p.version]),
+                      },
+                    ],
+                  }
+                : { month, student_id: id, student_version: current.version },
+            ),
+          );
+        } catch (e) {
+          if (samePage()) {
+            error.textContent = e.message;
+            try {
+              accept(await latest());
+            } catch {
+              ready = false;
+              error.textContent += "；请关闭后重试";
+            }
+          }
+        } finally {
+          busy.delete(id);
+          studentWrites--;
+          paint();
+        }
+      });
+    };
   }
   function renderMatrix(body) {
     const month = day.slice(0, 7),
@@ -980,7 +1026,7 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions tg-matrix-actions">' +
       (finance
-        ? '<button class="btn" id="tg-add-student">添加学生</button><button class="btn" id="tg-remove-students">删除学生</button><button class="btn" id="tg-manage-dates">管理日期</button>'
+        ? '<button class="btn" id="tg-manage-students">管理学生</button><button class="btn" id="tg-manage-dates">管理日期</button>'
         : "") +
       "</div>" +
       listTable(
@@ -1029,16 +1075,14 @@ window.TuoguanUI = (() => {
     matrix.dataset.frozenColumns = "3";
     matrix.dataset.uniformFrom = "3";
     body
-      .querySelector("#tg-remove-students")
-      ?.addEventListener("click", () => removeMatrixStudents(monthStudents));
+      .querySelector("#tg-manage-students")
+      ?.addEventListener("click", manageMatrixStudents);
     body
       .querySelector("#tg-manage-dates")
       ?.addEventListener("click", manageMatrixDates);
-    body
-      .querySelector("#tg-add-student")
-      ?.addEventListener("click", addMatrixStudent);
     for (const button of body.querySelectorAll(".tg-cell-button"))
       button.onclick = (event) => {
+        if (studentWrites || dateWrites) return message("请等待保存完成");
         if (button.disabled || event.target.closest(".custom-select")) return;
         const id = Number(button.dataset.student),
           date = button.dataset.date,
@@ -1098,8 +1142,19 @@ window.TuoguanUI = (() => {
                   const record = fresh.attendance.find(
                     (a) => a.student_id === id && a.date === date,
                   );
+                  if (
+                    host !== root ||
+                    source !== data ||
+                    owner !== auth.user?.id ||
+                    !button.isConnected
+                  )
+                    return;
                   if (record) attendance.set(key, record);
                   else attendance.delete(key);
+                  source.attendance = source.attendance.filter(
+                    (a) => a.student_id !== id || a.date !== date,
+                  );
+                  if (record) source.attendance.push(record);
                 } catch {}
               }
               if (
@@ -1138,11 +1193,11 @@ window.TuoguanUI = (() => {
   function renderStudents(body) {
     const students = data.students
       .filter((s) => matches(s, s))
-      .sort(compareStudentGradeName);
+      .sort(compareProfiles);
     body.innerHTML =
       '<div class="tg-actions"><button class="btn primary" id="tg-new">新建托管学生</button></div>' +
       listTable(
-        ["学生", "年级", "托管首日", "最近托管"],
+        ["学生", "年级", "状态", "托管首日", "上次在托"],
         students.map((s) => {
           return tr([
             '<button class="tg-profile-link" data-id="' +
@@ -1155,11 +1210,49 @@ window.TuoguanUI = (() => {
               studentBadge(s.id) +
               "</button>",
             renderGradeBadge(s.grade),
+            `<select class="cell-select inline-status-select tg-profile-status" data-field="status" data-student="${s.id}" aria-label="${esc(s.name)}档案状态" ${isReadonlyUser() ? "disabled" : ""}>${opt(profileStatuses, s.status)}</select>`,
             s.first_attendance_date || "—",
             s.last_attendance_date || "—",
           ]);
         }),
       );
+    const host = root,
+      source = data,
+      owner = auth.user?.id;
+    for (const control of body.querySelectorAll(".tg-profile-status"))
+      control.onchange = async () => {
+        const student = source.students.find(
+          (s) => s.id === Number(control.dataset.student),
+        );
+        if (isReadonlyUser() || control.disabled) return;
+        control.disabled = true;
+        syncCustomSelect(control, control.nextElementSibling);
+        try {
+          const updated = await post("student", {
+            id: student.id,
+            name: student.name,
+            grade: student.grade,
+            notes: student.notes,
+            status: control.value,
+            version: student.version,
+          });
+          if (root === host && data === source && auth.user?.id === owner) {
+            Object.assign(student, updated);
+            draw();
+            message("状态已保存");
+          }
+        } catch (e) {
+          if (root === host && data === source && auth.user?.id === owner) {
+            control.value = student.status;
+            message(e.message);
+          }
+        } finally {
+          if (control.isConnected) {
+            control.disabled = false;
+            syncCustomSelect(control, control.nextElementSibling);
+          }
+        }
+      };
     root.querySelector("#tg-new").onclick = () => profileForm();
     body
       .querySelectorAll(".tg-profile-link")
@@ -1187,17 +1280,7 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions"><button class="btn primary" id="tg-money">新增资金记录</button></div>' +
       listTable(
-        [
-          "日期",
-          "学生",
-          "类型",
-          "实际金额",
-          "赠送金额",
-          "方式",
-          "经办人",
-          "凭证",
-          "备注",
-        ],
+        ["日期", "学生", "类型", "实际金额", "赠送金额", "支付方式", "备注"],
         rows.map((l) =>
           tr([
             l.date,
@@ -1206,25 +1289,23 @@ window.TuoguanUI = (() => {
             money(l.actual_amount),
             money(l.gift_amount),
             esc(l.method),
-            esc(l.actor),
-            esc(l.voucher),
             esc(l.notes) + (l.legacy_unallocated ? "（旧账归属待核对）" : ""),
           ]),
         ),
       );
     for (const index of [4, 5])
       body.querySelectorAll("col")[index].dataset.alignment = "right";
-    root.querySelector("#tg-money").onclick = () =>
-      form(
+    root.querySelector("#tg-money").onclick = () => {
+      const modal = form(
         "托管资金记录",
         studentSelect() +
-          input("date", "业务日期", day, "date") +
+          input("date", "业务日期", today(), "date") +
           select("kind", "类型", manualMoneyKinds) +
           input("actual_amount", "实际金额（元）", "0", "number") +
           input("gift_amount", "赠送金额（元）", "0", "number") +
-          input("method", "支付方式") +
-          input("voucher", "凭证 / 单号") +
-          input("notes", "原因及核对依据（必填）"),
+          select("channel", "支付方式", rechargeChannelOptions, "wechat") +
+          input("channel_other", "其他渠道说明") +
+          input("notes", "备注（选填）"),
         (v) =>
           post("money", {
             ...v,
@@ -1232,7 +1313,26 @@ window.TuoguanUI = (() => {
             actual_amount: toCents(v.actual_amount),
             gift_amount: toCents(v.gift_amount),
           }),
+        (v) =>
+          (rangeStart && v.date < rangeStart) ||
+          (rangeEnd && v.date > rangeEnd) ||
+          (!rangeStart && !rangeEnd && !v.date.startsWith(day.slice(0, 7)))
+            ? "已保存至 " + v.date + "，不在当前筛选范围内"
+            : "已保存",
       );
+      const channel = modal.element.querySelector("[name=channel]"),
+        other = modal.element.querySelector("[name=channel_other]");
+      const sync = () => {
+        other.closest("label").hidden = channel.value !== "other";
+        other.required = channel.value === "other";
+        if (channel.value !== "other") other.value = "";
+      };
+      channel.onchange = sync;
+      other.maxLength = 100;
+      sync();
+      modal.element.querySelector("[name=date]").required = true;
+      modal.element.querySelector("[name=student_id]").required = true;
+    };
   }
   function renderFees(body) {
     const rows = data.summary
@@ -1372,8 +1472,6 @@ window.TuoguanUI = (() => {
       query = root.querySelector("#tg-query").value.trim();
       grade = root.querySelector("#tg-grade").value;
       ledgerKind = root.querySelector("#tg-kind")?.value || "";
-      rangeStart = root.querySelector("#tg-start")?.value || "";
-      rangeEnd = root.querySelector("#tg-end")?.value || "";
       if (rangeStart && rangeEnd && rangeStart > rangeEnd) {
         message("起始日期不能晚于截止日期");
         return;
@@ -1395,7 +1493,7 @@ window.TuoguanUI = (() => {
       filterTimer = setTimeout(autoSearch, 180);
     });
     root.querySelector("#tg-grade")?.addEventListener("change", autoSearch);
-    for (const id of ["tg-kind", "tg-start", "tg-end"])
+    for (const id of ["tg-kind"])
       root.querySelector("#" + id)?.addEventListener("change", autoSearch);
     root
       .querySelectorAll("[data-tg-month-step]")
@@ -1416,8 +1514,10 @@ window.TuoguanUI = (() => {
       }
     });
     root.querySelector("#tg-reset")?.addEventListener("click", () => {
+      const reload = tab === "流水" && (rangeStart || rangeEnd);
       query = grade = ledgerKind = rangeStart = rangeEnd = "";
-      draw();
+      if (reload) refresh().catch((e) => message(e.message));
+      else draw();
     });
     root.querySelectorAll("[data-go]").forEach(
       (b) =>
@@ -1446,7 +1546,7 @@ window.TuoguanUI = (() => {
     if (typeof isReadonlyUser === "function" && isReadonlyUser())
       root
         .querySelectorAll(
-          "#tg-add-student,#tg-remove-students,#tg-manage-dates,#tg-copy,#tg-paste,.tg-cell-button,#tg-new,#tg-money,#tg-rule",
+          "#tg-manage-students,#tg-manage-dates,#tg-copy,#tg-paste,.tg-cell-button,#tg-new,#tg-money,#tg-rule",
         )
         .forEach((e) => {
           e.disabled = true;
@@ -1454,6 +1554,7 @@ window.TuoguanUI = (() => {
         });
     enhanceCustomSelects();
     enhanceCustomDateInputs();
+    bindDateRangePickerControls(root);
     scheduleAdaptiveTableColumns();
     if (focusId) {
       const next = root.querySelector("#" + focusId);
@@ -1502,5 +1603,18 @@ window.TuoguanUI = (() => {
       loadError(host, page, e);
     }
   }
-  return { mount };
+  async function applyRange(start, end) {
+    if (tab !== "流水" || !root?.isConnected) return;
+    rangeStart = start;
+    rangeEnd = end;
+    const host = root,
+      wanted = start + ":" + end;
+    try {
+      await refresh();
+    } catch (e) {
+      if (root === host && wanted === rangeStart + ":" + rangeEnd)
+        message(e.message);
+    }
+  }
+  return { mount, applyRange };
 })();

@@ -14359,8 +14359,16 @@ table.adaptive-table td.single-line-note,
 .tg-detail-content { width: 100%; min-width: 0; box-sizing: border-box; }
 .tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); }
 @media (min-width: 760px) { .tg-student-detail-panel .tg-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); } }
+.tg-manage-students-panel { width: min(760px,100%); }
+.tg-student-groups { display: grid; gap: var(--space-3); }
+.tg-student-group { padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.tg-student-group h3 { margin: 0 0 var(--space-2); }
+.tg-student-choices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.tg-member { display: inline-flex; align-items: center; gap: var(--space-2); border-radius: var(--radius-sm); }
+.tg-member[data-selected="true"] { border-color: var(--accent); background: var(--success-bg); }
+.tg-student-management [role="alert"] { color: var(--danger); }
+.tg-student-management :is([role="alert"],[role="status"]):empty { display: none; }
 .tg-matrix-actions { justify-content: flex-start; }
-.tg-choice-list { display: grid; gap: var(--space-2); max-height: 50vh; overflow: auto; }
 .tg-date-nav { flex-wrap: nowrap; }
 .tg-cell-button { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 76px; min-height: 36px; padding: 4px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .tg-cell-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

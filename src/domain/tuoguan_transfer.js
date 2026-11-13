@@ -30,7 +30,7 @@ const REFS = {
   import_id: "tg_imports",
 };
 const TYPE = "liming_custody";
-const VERSION = 3;
+const VERSION = 4;
 const Billing = require("./tuoguan_settlement");
 const uuid = (value) =>
   typeof value === "string" &&
@@ -136,7 +136,7 @@ function parse(db, text) {
   } catch {
     fail("托管文本不是有效JSON");
   }
-  if (bundle?.type !== TYPE || ![1, 2, VERSION].includes(bundle.version))
+  if (bundle?.type !== TYPE || ![1, 2, 3, VERSION].includes(bundle.version))
     fail("托管文本格式或版本不兼容");
   const { checksum, ...content } = bundle;
   if (typeof checksum !== "string" || hash(content) !== checksum)
@@ -195,6 +195,12 @@ function parse(db, text) {
         r.actual_amount = null;
         r.gift_amount = null;
       }
+      if (
+        bundle.version < 4 &&
+        t === "tg_students" &&
+        !Object.hasOwn(r, "status")
+      )
+        r.status = "在托";
       const expected = [...fields.keys()].filter((k) => k !== "id");
       if (canonical(Object.keys(r).sort()) !== canonical(expected.sort()))
         fail("记录字段与当前版本不一致：" + t);
@@ -236,6 +242,11 @@ function parse(db, text) {
       if (r.version != null && r.version < 1) fail("记录版本无效");
       if (r.pending != null && ![0, 1].includes(r.pending))
         fail("核定标志无效");
+      if (
+        t === "tg_students" &&
+        !require("./tuoguan_schema").PROFILE_STATUSES.includes(r.status)
+      )
+        fail("档案状态无效");
       if (t === "tg_students" && (!r.name.trim() || r.name.length > 80))
         fail("姓名无效");
       if (t === "tg_periods" && !["在托", "暂停", "退托"].includes(r.status))
@@ -344,7 +355,7 @@ function parse(db, text) {
     id: Number(i.source_key) || n + 1,
   }));
   const changes = Billing.plan(attendanceRows, ledgerRows);
-  if (bundle.version === VERSION && changes.length)
+  if (bundle.version >= 3 && changes.length)
     fail("自动计费文本包含未结算考勤，请在来源升级后重新复制");
   let nextLedger = Math.max(0, ...ledgerRows.map((r) => r.id)) + 1;
   let nextAudit =
