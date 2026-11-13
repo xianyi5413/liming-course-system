@@ -1,5 +1,79 @@
 # 托管管理实施与验收记录
 
+## 2026-11-13 托管分学段收费、操作日志与同步
+
+完成时间：2026-11-13 20:06（北京时间）。基线 `962d715da79e365be7cd82cadec636627c33f366`，分支 `feature/tuoguan-primary-pricing-audit-sync`，版本 `20261113-tuoguan-stage-audit-sync`。本节为当前实现，历史记录不删除。
+
+### 收费及历史保护
+
+`public/tuoguan_config.js`由前后端共用，明确“三年级→小学、初一/初二/初三→初中”。四处学生新增/编辑/管理入口、筛选、排序、标签和导入校验共用年级列表。小学30/25元、初中50/25元，放假/不适用0元。设置追加不可变规则，按学段、生效日期、同日记录顺序选择；负数、小数分、无效学段拒绝。已保存考勤以grade及rule_json为准，修改状态仍按同一快照收费；未来或历史未保存日期根据对应参与年级和日期选择规则。修改当前档案年级不会回改过去。
+
+`tuoguan_settlement`沿用一套plan/apply/settle及原账务分配器。有效旧快照不会因JSON格式不同重新结算，旧50/25规则原字节保留。普通签到、批量签到、导入和恢复共用结算路径；保留冲正链、实际/赠送抵扣及跨月结转。默认不适用与未保存出勤仍只显示，不自动生成考勤或消费。旧pending及异常占位的既有迁移规则继续保留。
+
+### 页面权限与接口
+
+五个键分别为tgAttendance/tgStudents/tgLedger/tgSummary/tgSettings。navGroups（本项目实际导航配置）、PERMISSION_TREE、PAGE_PERMISSION_KEYS、AREA_PERMISSION_KEYS及首次访问页面一致；同时校准“托管、日常开销、经营概览/期间概览”名称。studentPricing及teacherSalaryRules仍是实际存在的次级编辑页，保留；feeDetails仅作为历史兼容键，不显示为新页面。
+
+`tuoguan_permissions.migrate`使用可嵌套savepoint，将role_permissions和user_page_permissions中的tgFinance等价展开为四个管理页面，支持重复启动及Excel恢复。仅签到用户、普通教师和原默认角色不扩权。前端兼容旧权限缓存；后端逐动作校验，快照按请求页面裁剪：签到/档案响应不含金额、账本或收费快照。即使省略view参数，非管理员汇总用户也不能读取设置规则。历史充值接口仅对tgLedger/tgSummary开放；批量考勤还需tgAttendance，资金操作需tgLedger，规则需tgSettings。复制/导入要求四个管理权限同时具备，沿用全局只读。原角色权限变更日志继续记录。
+
+### 交互与审计
+
+全选遍历可用行、列并同步集合；额外记录用户选择过的维度，防止“曾选列→最后一列取消”被空集合通配符解释成所有日期。只选行/只选列/交集保持，筛选和切月重新初始化，选择本身不请求保存。
+
+单格成功清空旧提示，仅原位更新格子，保持焦点和行高；批量成功复用showToast。充值删除复用同一Toast，2.6秒消失，连续调用替换提示。学生详情在同一弹窗底部单独请求历史资金，按ID、倒序、有效手工充值/退款过滤；金额沿用原格式，长表内滚动。切月不替换弹窗或历史区，重新打开重新请求。
+
+考勤tg_audit在事务内保存before/after、当时姓名和默认状态；不变更、不成功和幂等重放不产生虚假成功日志。操作主日志只记录摘要及审计起止编号，详情接口按权限读取已提交审计，避免4000字符限制截断大批量明细。80格用例验证完整展开；普通状态、未保存默认状态、备注变更准确区分。档案、日期、参与、充值修改/删除、收费和复制/导入补充对象及金额/状态。系统其他模块日志没有重构。
+
+### 文本同步v6
+
+保留UUID、checksum、预览签名、原生SQLite备份与事务机制。业务包包含学生、参与范围/default_status、学段规则、日历、考勤快照、全量账本及更正/作废、历史导入/来源和审计。财务记录保持原消费链，不调用额外扣费。
+
+新增接收端tg_transfer_baselines，以来源UUID＋表＋行UUID记录来源hash和接收后的本地hash。来源变、目标未变时更新；双方变且不同则整批报冲突；来源未变而目标有独立修改时保留目标，且不错误前移基线。首次相同内容可建立基线；老导入缺基线且内容不同不会猜测覆盖。未知身份的同名学生仍需人工核对。已知版本倒退拒绝。
+
+来源移除空参与周期可安全同步删除；保留UUID墓碑，旧导出不能复活已移除周期。其他业务记录缺失不会自动硬删除。充值删除通过voided状态同步，账本证据始终保留。合并前后核对参与重叠、考勤与消费链、作废替代关系及账户重放；任何失败全事务回滚。教师ID不跨库照搬，v6提供日历教师姓名关联，目标唯一对应后使用目标ID，缺失/歧义阻止。旧文本没有教师信息时明确提示并保留目标已有教师。
+
+审计原payload不改写，origin_json在首次导出时保存来源实例及涉及的原编号→UUID词典；后续经B再次导出仍保留A证据。文本不携带课程、角色、账户或教师业务表，也不复制本地RPC幂等缓存、旧补课学生映射、接收端同步基线。UUID及来源标识由包提供，目标本地同步状态独立保存；完整Excel则保留这些本地恢复表。预览金额是来源包统计，不是覆盖整个目标数据库后的总额。
+
+### 数据库与Excel
+
+新增tg_rules.stage、tg_audit.origin_json、tg_transfer_baselines；原表/记录和外键不破坏。升级前原生备份，迁移可重复运行。旧rules.stage空值是历史证据，新增两条学段默认规则；不把旧统一规则改写为小学。
+
+Excel v14新增四张只读查看Sheet，签到为长表，资金表区分实际/赠送，规则显示学段及生效日期。隐藏恢复映射仍是托管原始数据源，包含完整账本及审计。完整文件先进入自身版本校验，修复导入入口原先误用空白模板版本门槛拒绝v13的问题；实际走previewImport/importFullExcel验收。v13缺新字段时补默认值，恢复后迁移旧权限并种入学段规则，旧费用快照不变。[覆盖清单](TUOGUAN_BACKUP_COVERAGE.md)核对52张实际表：46张核心源表，6张有明确排除原因。操作日志可选；tg_audit始终随托管恢复。密码哈希仅在原有veryHidden认证表，不在可见Sheet；外部密钥、Token及路径配置继续排除。
+
+真实库的完整Excel验证发现reconstructData每个可见行重复扫描全部映射，改为一次构造“表页/行/来源表”索引，保留重复候选检查，减少大文件恢复等待；没有改变恢复优先级和摘要校验。
+
+### 验收与实测命令
+
+按风险分组执行，修改后只补测受影响范围；按不同用例统计54项通过，未解决失败0：auto_consumption 9、batch 16、transfer 8、stage_sync 8、batch_ui 7、stage_ui 6。没有运行整个项目全量测试。
+
+实际执行的主要命令（部分批次包含后来新增的用例，补测不重复计数）：
+
+```powershell
+node --test --test-concurrency=1 tests/tuoguan_batch.test.js tests/tuoguan_transfer.test.js tests/tuoguan_auto_consumption.test.js
+node --test --test-concurrency=1 tests/tuoguan_stage_sync.test.js tests/tuoguan_batch.test.js
+node --test --test-concurrency=1 tests/tuoguan_stage_ui.test.js tests/tuoguan_batch_ui.test.js
+node --test --test-concurrency=1 tests/tuoguan_stage_sync.test.js tests/tuoguan_stage_ui.test.js
+node --test --test-concurrency=1 --test-name-pattern='five permissions|committed attendance|large batch' tests/tuoguan_stage_ui.test.js
+node --test --test-concurrency=1 --test-name-pattern='v14 visible' tests/tuoguan_stage_ui.test.js
+node --check src/server.js
+node --check public/app.js
+node --check public/tuoguan.js
+git diff --check
+```
+
+涵盖小学/初三混合批量、30/50/25元、规则调整与跨月/历史年级、有效快照逐字节保留、重复迁移、v5文本、v13布局、v14恢复、来源更正/作废/空周期移除、双方冲突、教师缺失/歧义、审计跨库来源、无权限/只读、80格日志、Edge矩阵/详情/Toast/规则输入/角色树/旧布局回归。v13合成备份实际去除新增Sheet及字段，并重新计算元数据摘要，不是只改版本号。
+
+额外私有脚本 `.tuoguan-local/pricing-isolation.cjs`及其resume、`pricing-real-sync.cjs`和`pricing-daily.cjs`，分别完成真实库副本迁移与Excel恢复、A→B及重复文本同步、本地5177只读Edge验收。数据库、Excel、浏览器档案和详细记录留在忽略目录，未提交。初始副本649考勤/630流水/40周期迁移、重复启动、完整恢复后逐条一致，9—11月实际/赠送消费与结转余额一致；约2MB文本首次导入及重复导入成功，其他模块hash未变。期间用户正常修改业务，重启前再次备份，以649考勤/631流水/39周期为新基线逐条比对，未覆盖这些更新。
+
+确认5177原进程CWD、DATA_DIR、DB_PATH后才重启。Edge 157使用既有tests/helpers/chrome_cdp；真实库验收拦截所有业务写请求，实测业务写入0，9/10/11月全选330/216/216格，设置默认值正确，详情切月历史区节点保持，控制台无异常。正式服务器未访问、未部署，main未合并。
+
+### 使用边界与后续
+
+- 新版来源与目标均应升级后再使用v6；老包能读，但旧包不含教师关联，缺同步基线的差异需核对。没有后台强制覆盖或自动解决双方资金冲突。
+- 调整收费不追溯重算已保存考勤；确需历史调价应另走明确、可审计的更正流程。
+- 完整Excel不是SQLite镜像：外部备份索引、技术诊断历史、运行缓存及外部凭据不在核心恢复范围。系统当前远端自动备份因百度应用未配置而暂停；本轮没有修改该配置。
+- 值得后续做逐学生同步净变化预览和冲突辅助核对；暂无必要另建收费系统、逐按钮权限、无人值守双向同步或自动覆盖冲突。
+
 ## 2026-11-13 托管图标、左侧选择与居中布局
 
 完成时间：2026-11-13 18:52（北京时间）。基线 `71d49aca5076c66685ed62598250f9aefd552784`；分支 `feature/tuoguan-matrix-layout-icons`；版本 `20261113-tuoguan-matrix-layout`。本轮仅调整UI及运行版本标识，batch-attendance、考勤、收费、数据库和备份格式不改。

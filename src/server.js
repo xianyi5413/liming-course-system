@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-matrix-layout";
+const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-stage-audit-sync";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -142,7 +142,7 @@ const SYSTEM_ROLE_DEFS = [
 ];
 const SYSTEM_ROLE_CODES = SYSTEM_ROLE_DEFS.map((role) => role.code);
 const PERMISSION_TREE = [
-  { key: 'tuoguan', label: '托管管理', children: [{key:'tgAttendance',label:'托管签到'}, {key:'tgFinance',label:'托管学生、财务与设置'}] },
+  { key: 'tuoguan', label: '托管', children: [{key:'tgAttendance',label:'每日签到'}, {key:'tgStudents',label:'托管学生'}, {key:'tgLedger',label:'充值流水'}, {key:'tgSummary',label:'托管费用'}, {key:'tgSettings',label:'托管设置'}] },
   { key: "dashboard", label: "首页" },
   {
     key: "schedule",
@@ -184,10 +184,10 @@ const PERMISSION_TREE = [
     children: [
       { key: "staffPayroll", label: "员工薪资" },
       { key: "staffAttendance", label: "员工考勤" },
-      { key: "expenses", label: "开销管理" },
+      { key: "expenses", label: "日常开销" },
     ],
   },
-  { key: "finance", label: "经营总览" },
+  { key: "financeGroup", label: "经营概览", children: [{key:"finance",label:"期间概览"}] },
   {
     key: "settings",
     label: "设置",
@@ -211,6 +211,7 @@ const PAGE_PERMISSION_KEYS = (() => {
   return keys;
 })();
 const FIRST_ACCESSIBLE_VIEW_ORDER = [
+  "tgAttendance", "tgStudents", "tgLedger", "tgSummary", "tgSettings",
   "dashboard",
   "lessons",
   "weekMatrix",
@@ -288,6 +289,7 @@ const DEFAULT_ROLE_PERMISSIONS = {
   teacher: ["lessons", "teacherDetail", "teacherProfiles", "appearance"],
 };
 const AREA_PERMISSION_KEYS = {
+  tuoguan: require("./domain/tuoguan_permissions").pages,
   dashboard: ["dashboard"],
   schedule: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
   scheduleRead: ["lessons", "weekMatrix", "courseNotice", "teacherCourseNotice"],
@@ -1534,7 +1536,7 @@ function permissionKeySet() {
 
 function normalizePermissionKeys(keys) {
   const allowed = permissionKeySet();
-  return [...new Set((Array.isArray(keys) ? keys : [])
+  return [...new Set(require("./domain/tuoguan_permissions").expand(Array.isArray(keys) ? keys : [])
     .map(text)
     .filter((key) => allowed.has(key)))];
 }
@@ -1554,6 +1556,7 @@ function firstAccessibleViewFor(role, permissions) {
 }
 
 function seedDefaultRolesAndPermissions() {
+  require("./domain/tuoguan_permissions").migrate(db);
   const roleStmt = db.prepare(`
     INSERT INTO roles(code, name, description, is_system, readonly)
     VALUES (?, ?, ?, ?, ?)
@@ -9878,7 +9881,7 @@ function authorizeApi(user, req, url) {
   const role = canonicalRole(user.role);
   if (method === "GET" && ["/api/bootstrap", "/api/months"].includes(url.pathname)) return true;
   if (isSuperRole(role)) return true;
-  if (url.pathname.startsWith('/api/tuoguan/')) return userHasAnyPermission(user,['tgAttendance','tgFinance']);
+  if (url.pathname.startsWith('/api/tuoguan/')) return userHasAnyPermission(user,require('./domain/tuoguan_permissions').pages);
   if (url.pathname.startsWith("/api/data-center/preflight")) return canViewDataPreflight(user);
   if (url.pathname.startsWith("/api/data-center")) return canManageDataCenter(user);
   const pageKeys = apiPagePermissionKeys(req, url);
@@ -12224,29 +12227,36 @@ async function handleApi(req, res, url) {
 
   if (url.pathname.startsWith('/api/tuoguan/')) {
     const action=url.pathname.slice('/api/tuoguan/'.length);
-    const finance=isSuperRole(user.role)||userHasAnyPermission(user,['tgFinance']);
+    const has = key => isSuperRole(user.role) || userHasAnyPermission(user,[key]);
+    const finance=has('tgSummary') || has('tgLedger');
     const attendanceAction=['attendance','batch-attendance'].includes(action);
-    const attendanceAllowed=isSuperRole(user.role)||userHasAnyPermission(user,['tgAttendance']);
-    const allowed=finance||attendanceAllowed;
-    if(attendanceAction&&!attendanceAllowed)return sendError(res,403,'无托管签到权限');
-    if(!allowed || (!finance && !['snapshot','attendance','batch-attendance'].includes(action))) return sendError(res,403,'无托管操作权限');
+    const required = ({attendance:'tgAttendance','batch-attendance':'tgAttendance','add-dates':'tgAttendance','remove-dates':'tgAttendance',student:'tgStudents',period:'tgStudents','remove-students':'tgStudents',money:'tgLedger','money-edit':'tgLedger','money-delete':'tgLedger',rule:'tgSettings',calendar:'tgSettings'})[action];
+    const transfer=['transfer-export','transfer-preview','transfer-confirm','preview','import'].includes(action);
+    if ((required && !has(required)) || (transfer && !require('../public/tuoguan_config').management.every(has))) return sendError(res,403,'无此托管操作权限');
+    if (!required && !transfer && !['snapshot','student-history'].includes(action)) return sendError(res,404,'不支持的托管操作');
     try {
+      if(req.method==='GET' && action==='student-history') {
+        if(!finance) return sendError(res,403,'无托管财务查看权限');
+        const id=Number(url.searchParams.get('student_id'));
+        if(!Number.isSafeInteger(id) || !tuoguanStore.get('SELECT id FROM tg_students WHERE id=?',id))return sendError(res,404,'托管学生不存在');
+        return sendJson(res,{records:tuoguanStore.all("SELECT * FROM tg_ledger WHERE student_id=? AND attendance_id IS NULL AND kind IN ('充值','退款') AND voided_at IS NULL ORDER BY date DESC,id DESC",id)});
+      }
       if(req.method==='GET'&&action==='snapshot') {
-        if(url.searchParams.get('students_only')==='1' || url.searchParams.get('ledger_only')==='1') {
-          if(!finance)return sendError(res,403,'无托管财务管理权限');
-          return sendJson(res,url.searchParams.get('students_only')==='1'
-            ?tuoguanStore.participationSnapshot(url.searchParams.get('month'))
-            :tuoguanStore.ledgerSnapshot(url.searchParams.get('month'),url.searchParams.get('start'),url.searchParams.get('end')));
-        }
-        if(url.searchParams.get('calendar_only')==='1') {
-          if(!finance)return sendError(res,403,'无托管日期管理权限');
-          return sendJson(res,tuoguanStore.calendarSnapshot(url.searchParams.get('month')));
-        }
-        return sendJson(res,tuoguanStore.snapshot(url.searchParams.get('month'),finance));
+        const view = url.searchParams.get('students_only')==='1' ? 'tgStudents' : url.searchParams.get('ledger_only')==='1' ? 'tgLedger' : url.searchParams.get('calendar_only')==='1' ? 'tgAttendance' : url.searchParams.get('view') || (has('tgSummary') ? 'tgSummary' : require('./domain/tuoguan_permissions').pages.find(has));
+        if(!require('./domain/tuoguan_permissions').pages.includes(view) || !has(view)) return sendError(res,403,'无此托管页面权限');
+        const month=url.searchParams.get('month');
+        if(view==='tgLedger')return sendJson(res,tuoguanStore.ledgerSnapshot(month,url.searchParams.get('start'),url.searchParams.get('end')));
+        if(url.searchParams.get('students_only')==='1')return sendJson(res,tuoguanStore.participationSnapshot(month));
+        if(url.searchParams.get('calendar_only')==='1')return sendJson(res,tuoguanStore.calendarSnapshot(month));
+        if(view==='tgSettings')return sendJson(res,{students:[],periods:[],rules:tuoguanStore.all('SELECT * FROM tg_rules ORDER BY effective_date DESC,id DESC')});
+        const snapshot=tuoguanStore.snapshot(month,view==='tgSummary'||view==='tgStudents');
+        if(view==='tgStudents'){delete snapshot.ledger;delete snapshot.summary;delete snapshot.rules;delete snapshot.billing_rule;snapshot.attendance=snapshot.attendance.map(({fee,reference_fee,rule_json,...r})=>r);}
+        if(view==='tgSummary' && (url.searchParams.has('view') || !isSuperRole(user.role))){delete snapshot.ledger;delete snapshot.rules;}
+        return sendJson(res,snapshot);
       }
       if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
       const body=await readBody(req,action.startsWith('transfer-')?14_000_000:2_000_000), actor=String(user.username||user.id);
-      if(action==='transfer-export') return sendJson(res,{text:JSON.stringify(TuoguanTransfer.exportData(db),null,2)});
+      if(action==='transfer-export') {const bundle=TuoguanTransfer.exportData(db);writeOperationLog(user,{operation_type:'复制托管信息',operation_content:`复制${bundle.records.tg_students.length}名学生、${bundle.records.tg_attendance.length}条考勤和${bundle.records.tg_ledger.length}条流水`,target_type:'tuoguan'},req);return sendJson(res,{text:JSON.stringify(bundle,null,2)});}
       if(action==='transfer-preview') {
         for(const [key,p] of custodyTransferPreviews)if(p.expires<Date.now())custodyTransferPreviews.delete(key);
         if(custodyTransferPreviews.size>=20)return sendError(res,429,'预览过多，请稍后重试');
@@ -12260,7 +12270,7 @@ async function handleApi(req, res, url) {
         const result=await TuoguanTransfer.confirm(db,p.text,p.signature,path.join(dataDir,'backups'),actor);
         custodyTransferPreviews.delete(body.token);
         const {backup,...summary}=result;
-        if(result.created)writeOperationLog(user,{operation_type:'导入托管信息',operation_content:'托管数据合并完成',target_type:'tuoguan',details:summary},req);
+        if(result.created||result.updated||result.deleted)writeOperationLog(user,{operation_type:'导入托管信息',operation_content:'托管数据合并完成',target_type:'tuoguan',details:summary},req);
         return sendJson(res,{ok:true,...summary});
       }
       if(action==='preview') {
@@ -12274,8 +12284,12 @@ async function handleApi(req, res, url) {
         body.method=({wechat:'微信',cash:'现金',alipay:'支付宝',other:'其他'})[channel.channel]+(channel.channel==='other'?'：'+channel.channel_other:'');
       }
       const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
+      const auditStart=tuoguanStore.get("SELECT COALESCE(MAX(id),0) id FROM tg_audit").id;
       const result=tuoguanStore.mutate(action,body,actor);
-      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤','batch-attendance':'批量修改托管考勤',money:'托管'+(body.kind||'资金'),'money-edit':'编辑托管资金','money-delete':'删除托管资金',rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.cells?.length||body.records?.length||body.rows?.length||body.students?.length||body.dates?.length||1}},req);
+      if(!replay) {
+        const entry=require('./domain/tuoguan_log').describe(db,action,tuoguanStore.all('SELECT * FROM tg_audit WHERE id>? ORDER BY id',auditStart));
+        if(entry){if(attendanceAction)entry.details={custody_audit_start:auditStart,custody_audit_end:tuoguanStore.get('SELECT MAX(id) id FROM tg_audit').id,count:entry.details.changes.length};writeOperationLog(user,{...entry,target_type:'tuoguan'},req);}
+      }
       return sendJson(res,!finance&&attendanceAction?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
     }catch(error){if(req.method==='POST')writeOperationLog(user,{operation_type:'托管操作失败',operation_content:action+'：操作未完成',target_type:'tuoguan',result_status:'failure'},req);return sendError(res,error.status||400,error.message);}
   }
@@ -12641,6 +12655,15 @@ async function handleApi(req, res, url) {
     if (result.blocked) return sendJson(res, { error: result.reason, counts: result.counts }, 400);
     writeOperationLog(user, { operation_type: "删除月份", operation_content: `月份 ${monthKey}${url.searchParams.get("force") === "1" ? " (强制)" : ""}`, target_type: "months", target_id: monthKey });
     return sendJson(res, result);
+  }
+  const custodyLogDetails=url.pathname.match(/^\/api\/operation-logs\/(\d+)\/custody-details$/);
+  if(req.method==='GET' && custodyLogDetails) {
+    const row=get('SELECT extra_json FROM operation_logs WHERE id=?',[Number(custodyLogDetails[1])]);
+    if(!row)return sendError(res,404,'日志不存在');
+    const meta=JSON.parse(row.extra_json || '{}');
+    if(!Number.isSafeInteger(meta.custody_audit_start)||!Number.isSafeInteger(meta.custody_audit_end))return sendJson(res,{changes:[]});
+    const entry=require('./domain/tuoguan_log').describe(db,'batch-attendance',tuoguanStore.all("SELECT * FROM tg_audit WHERE id>? AND id<=? AND action='考勤' ORDER BY id",meta.custody_audit_start,meta.custody_audit_end));
+    return sendJson(res,entry?.details || {changes:[]});
   }
   if (req.method === "GET" && url.pathname === "/api/operation-logs") {
     const conditions = [];

@@ -31,7 +31,7 @@ const REFS = {
   import_id: "tg_imports",
 };
 const TYPE = "liming_custody";
-const VERSION = 5;
+const VERSION = 6;
 const Billing = require("./tuoguan_settlement");
 const Normalization = require("./tuoguan_normalization");
 const uuid = (value) =>
@@ -60,6 +60,7 @@ function signature(db) {
         "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'tg_%' ORDER BY name",
       )
       .all(),
+    teachers: db.prepare("SELECT id,name FROM teachers ORDER BY id").all(),
     version: db.prepare("PRAGMA user_version").get(),
     data: Object.fromEntries(TABLES.map((t) => [t, rows(db, t)])),
   });
@@ -98,6 +99,28 @@ function exportData(db) {
         t,
         data[t].map((row) => {
           const record = { ...row };
+          if (t === "tg_audit" && !record.origin_json) {
+            // Preserve the original audit payload AND the original ID vocabulary
+            // when an imported audit is later exported from a different database.
+            const values = new Set();
+            function collect(v) {
+              if (v && typeof v === "object") Object.values(v).forEach(collect);
+              else if (v != null) values.add(String(v));
+            }
+            try {
+              collect(JSON.parse(row.payload));
+            } catch {}
+            const references = Object.fromEntries(
+              [...keys].filter(([key]) =>
+                values.has(key.slice(key.indexOf(":") + 1)),
+              ),
+            );
+            record.origin_json = JSON.stringify({ source, references });
+            db.prepare("UPDATE tg_audit SET origin_json=? WHERE id=?").run(
+              record.origin_json,
+              row.id,
+            );
+          }
           if (t !== "tg_calendar") delete record.id;
           for (const [field, parent] of Object.entries(REFS))
             if (record[field] != null) {
@@ -120,6 +143,18 @@ function exportData(db) {
       exported_at: new Date().toISOString(),
       source,
       records,
+      teacher_links: data.tg_calendar
+        .filter((r) => r.teacher_id != null)
+        .map((r) => {
+          const teacher = db
+            .prepare("SELECT name FROM teachers WHERE id=?")
+            .get(r.teacher_id);
+          if (!teacher) fail("托管日期引用的教师不存在");
+          return {
+            calendar_uid: keys.get("tg_calendar:" + r.date),
+            name: teacher.name,
+          };
+        }),
     };
     bundle.checksum = hash(bundle);
     db.exec("COMMIT");
@@ -138,7 +173,10 @@ function parse(db, text) {
   } catch {
     fail("托管文本不是有效JSON");
   }
-  if (bundle?.type !== TYPE || ![1, 2, 3, 4, VERSION].includes(bundle.version))
+  if (
+    bundle?.type !== TYPE ||
+    ![1, 2, 3, 4, 5, VERSION].includes(bundle.version)
+  )
     fail("托管文本格式或版本不兼容");
   const { checksum, ...content } = bundle;
   if (typeof checksum !== "string" || hash(content) !== checksum)
@@ -155,6 +193,7 @@ function parse(db, text) {
         "source",
         "records",
         "checksum",
+        ...(bundle.version >= 6 ? ["teacher_links"] : []),
       ].sort(),
     )
   )
@@ -164,6 +203,22 @@ function parse(db, text) {
     canonical([...TABLE_ORDER].sort())
   )
     fail("托管数据范围不完整或包含其他业务");
+  if (bundle.version >= 6) {
+    if (!Array.isArray(bundle.teacher_links)) fail("教师关联清单缺失");
+    const linked = new Set();
+    for (const link of bundle.teacher_links) {
+      if (
+        !link ||
+        !uuid(link.calendar_uid) ||
+        typeof link.name !== "string" ||
+        !link.name.trim() ||
+        linked.has(link.calendar_uid) ||
+        !bundle.records.tg_calendar.some((r) => r.uid === link.calendar_uid)
+      )
+        fail("教师关联清单无效");
+      linked.add(link.calendar_uid);
+    }
+  }
   const indices = new Map();
   let count = 0;
   for (const t of TABLE_ORDER) {
@@ -203,6 +258,12 @@ function parse(db, text) {
         !Object.hasOwn(r, "status")
       )
         r.status = "在托";
+      if (bundle.version < 6 && t === "tg_audit") r.origin_json ??= "";
+      if (bundle.version < 6 && t === "tg_rules") r.stage ??= "";
+      if (t === "tg_rules" && !["", "小学", "初中"].includes(r.stage))
+        fail("收费学段无效");
+      if (t === "tg_rules" && r.stage && r.absent !== 0)
+        fail("放假与不适用费用必须为零");
       if (bundle.version < 5 && t === "tg_periods") r.default_status ??= "出勤";
       if (bundle.version < 5 && t === "tg_ledger") {
         r.version ??= 1;
@@ -469,6 +530,7 @@ function parse(db, text) {
     item.record.voided_by ??= "";
     item.record.replaces_id ??= null;
   }
+  for (const item of bundle.records.tg_audit) item.record.origin_json ??= "";
   return bundle;
 }
 function plan(db, bundle) {
@@ -484,10 +546,58 @@ function plan(db, bundle) {
   const mappings = new Map(),
     actions = [],
     conflicts = [];
+  const baselines = new Map(
+    rows(db, "tg_transfer_baselines")
+      .filter((b) => b.source === bundle.source)
+      .map((b) => [b.table_name + ":" + b.uid, b]),
+  );
+  // Only participation rows are physically removed by the custody UI. All other
+  // missing source records require review; financial evidence is never deleted.
+  for (const base of baselines.values()) {
+    if (
+      bundle.records[base.table_name]?.some((r) => r.uid === base.uid) ||
+      base.deleted
+    )
+      continue;
+    const t = base.table_name,
+      existing = local[t]?.find((r) => String(r[keyField(t)]) === base.row_key);
+    if (
+      t !== "tg_periods" ||
+      !existing ||
+      hash(existing) !== base.target_hash
+    ) {
+      conflicts.push({
+        table: t,
+        source_key: base.row_key,
+        reason: "来源移除记录，但目标不可安全删除",
+      });
+      continue;
+    }
+    actions.push({
+      table: t,
+      uid: base.uid,
+      id: existing.id,
+      record: existing,
+      status: "delete",
+      source_hash: base.source_hash,
+    });
+    local[t] = local[t].filter((r) => r !== existing);
+  }
   for (const t of TABLE_ORDER) {
     let next = Math.max(0, ...local[t].map((r) => Number(r.id) || 0)) + 1;
-    for (const item of bundle.records[t]) {
+    const incoming = [...bundle.records[t]].sort(
+      (a, b) =>
+        Number(keys.has(t + ":" + b.uid)) - Number(keys.has(t + ":" + a.uid)),
+    );
+    for (const item of incoming) {
       const r = { ...item.record };
+      const source_hash = hash({
+        record: item.record,
+        teacher:
+          (bundle.teacher_links || []).find((l) => l.calendar_uid === item.uid)
+            ?.name || null,
+      });
+      const base = baselines.get(t + ":" + item.uid);
       for (const [f, parent] of Object.entries(REFS))
         if (r[f] != null) r[f] = mappings.get(parent + ":" + r[f]);
       const known = keys.get(t + ":" + item.uid),
@@ -515,12 +625,30 @@ function plan(db, bundle) {
               x.start_date <= (r.end_date || "9999-12-31") &&
               (x.end_date || "9999-12-31") >= r.start_date,
           );
-        if (t === "tg_rules")
-          existing = local[t].find(
+        if (t === "tg_rules") {
+          const peers = local[t].filter(
             (x) =>
               x.student_id === r.student_id &&
-              x.effective_date === r.effective_date,
+              x.effective_date === r.effective_date &&
+              x.stage === r.stage,
           );
+          existing = peers.find(
+            ({ id, ...other }) => canonical(other) === canonical(r),
+          );
+          if (
+            !existing &&
+            peers.some(
+              (x) =>
+                !(
+                  [...baselines.values()].some(
+                    (base) =>
+                      base.table_name === t && base.row_key === String(x.id),
+                  ) || actions.some((a) => a.table === t && a.id === x.id)
+                ),
+            )
+          )
+            conflict = "目标在同一学段生效日有独立规则，请核对";
+        }
         if (
           t === "tg_ledger" &&
           r.kind === "期初核定" &&
@@ -537,10 +665,36 @@ function plan(db, bundle) {
           : ["tg_imports", "tg_import_sources"].includes(t)
             ? item.uid
             : next++);
-      if (t === "tg_calendar" && existing) r.teacher_id = existing.teacher_id;
+      if (t === "tg_calendar") {
+        if (bundle.version < 6) r.teacher_id = existing?.teacher_id ?? null;
+        else {
+          const link = bundle.teacher_links.find(
+            (l) => l.calendar_uid === item.uid,
+          );
+          const matches = link
+            ? db.prepare("SELECT id FROM teachers WHERE name=?").all(link.name)
+            : [];
+          if (link && matches.length !== 1)
+            conflict = "教师姓名缺失或同名不唯一，请先核对：" + link.name;
+          r.teacher_id = matches[0]?.id ?? null;
+        }
+      }
       const target = t === "tg_calendar" ? r : { id, ...r };
-      if (existing && canonical(existing) !== canonical(target))
-        conflict = "同一来源或业务位置内容不同，禁止覆盖";
+      let status = existing ? "skip" : "create",
+        preserveBaseline = false;
+      if (existing && canonical(existing) !== canonical(target)) {
+        if (base && !base.deleted && base.source_hash === source_hash) {
+          preserveBaseline = true; // Source unchanged: preserve independent target edits.
+        } else if (
+          base &&
+          !base.deleted &&
+          hash(existing) === base.target_hash
+        ) {
+          if (r.version != null && r.version < existing.version)
+            conflict = "来源版本较旧，禁止回退";
+          else status = "update";
+        } else conflict = "双方内容不同且无安全同步基线，禁止覆盖";
+      }
       if (conflict)
         conflicts.push({
           table: t,
@@ -553,10 +707,21 @@ function plan(db, bundle) {
         uid: item.uid,
         id,
         record: target,
-        status: conflict ? "conflict" : existing ? "skip" : "create",
+        status: conflict ? "conflict" : status,
+        source_hash,
+        preserveBaseline,
       });
       // Subsequent incoming records also take part in overlap/unique checks.
+      if (!conflict && status === "update")
+        local[t][local[t].indexOf(existing)] = target;
       if (!existing && t !== "tg_students") local[t].push(target);
+    }
+  }
+  if (!conflicts.length) {
+    try {
+      validateMerged(local);
+    } catch (e) {
+      conflicts.push({ table: "tg_ledger", reason: e.message });
     }
   }
   const dates = TABLE_ORDER.flatMap((t) =>
@@ -622,11 +787,46 @@ function plan(db, bundle) {
       months: dates.length
         ? [dates[0].slice(0, 7), dates.at(-1).slice(0, 7)]
         : [],
+      updated: actions.filter((a) => a.status === "update").length,
+      deleted: actions.filter((a) => a.status === "delete").length,
+      warnings:
+        bundle.version < 6
+          ? ["旧文本不包含教师关联，保留目标现有教师；首次存在差异时需人工核对"]
+          : [],
       created: actions.filter((a) => a.status === "create").length,
       skipped: actions.filter((a) => a.status === "skip").length,
       conflicts: conflicts.length,
     },
   };
+}
+function validateMerged(local) {
+  require("./tuoguan_money").validateEvidence(local.tg_ledger);
+  for (const a of local.tg_attendance) {
+    const ledger = local.tg_ledger.filter((r) => r.attendance_id === a.id);
+    if (Billing.chargedAmount(a, ledger) !== a.fee)
+      fail("合并后考勤与流水不一致，整批取消");
+  }
+  for (const p of local.tg_periods)
+    if (
+      local.tg_periods.some(
+        (q) =>
+          q.id !== p.id &&
+          q.student_id === p.student_id &&
+          q.start_date <= (p.end_date || "9999-12-31") &&
+          (q.end_date || "9999-12-31") >= p.start_date,
+      )
+    )
+      fail("合并后参与周期重叠");
+  for (const id of new Set(local.tg_ledger.map((r) => r.student_id))) {
+    const ledger = local.tg_ledger.filter((r) => r.student_id === id);
+    require("./tuoguan_account").account(
+      ledger,
+      ledger
+        .map((r) => r.date.slice(0, 7))
+        .sort()
+        .at(-1),
+    );
+  }
 }
 async function confirm(db, text, expected, backupDir, actor) {
   const bundle = parse(db, text);
@@ -667,13 +867,54 @@ async function confirm(db, text, expected, backupDir, actor) {
             ")",
         ).run(...fields.map((f) => a.record[f]));
       }
+      if (a.status === "update") {
+        const fields = Object.keys(a.record).filter(
+          (f) => f !== keyField(a.table),
+        );
+        db.prepare(
+          "UPDATE " +
+            a.table +
+            " SET " +
+            fields.map((f) => f + "=?").join(",") +
+            " WHERE " +
+            keyField(a.table) +
+            "=?",
+        ).run(...fields.map((f) => a.record[f]), a.id);
+      }
+      if (a.status === "delete") {
+        db.prepare(
+          "DELETE FROM " + a.table + " WHERE " + keyField(a.table) + "=?",
+        ).run(a.id);
+        db.prepare(
+          "UPDATE tg_transfer_keys SET row_key='removed:'||uid WHERE table_name=? AND row_key=?",
+        ).run(a.table, String(a.id));
+      }
+      if (!a.preserveBaseline)
+        db.prepare(
+          "INSERT INTO tg_transfer_baselines(source,table_name,uid,source_hash,target_hash,row_key,deleted) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,table_name,uid) DO UPDATE SET source_hash=excluded.source_hash,target_hash=excluded.target_hash,row_key=excluded.row_key,deleted=excluded.deleted",
+        ).run(
+          bundle.source,
+          a.table,
+          a.uid,
+          a.source_hash,
+          hash(a.record),
+          String(a.id),
+          a.status === "delete" ? 1 : 0,
+        );
       db.prepare(
         "INSERT OR IGNORE INTO tg_transfer_keys(table_name,row_key,uid) VALUES (?,?,?)",
       ).run(a.table, String(a.id), a.uid);
     }
     if (db.prepare("PRAGMA foreign_key_check").all().length)
       fail("导入关联校验失败");
-    if (current.summary.created)
+    validateMerged(
+      Object.fromEntries(TABLE_ORDER.map((t) => [t, rows(db, t)])),
+    );
+    if (
+      current.summary.created ||
+      current.summary.updated ||
+      current.summary.deleted
+    )
       db.prepare(
         "INSERT INTO tg_audit(actor,action,payload) VALUES (?,?,?)",
       ).run(

@@ -119,8 +119,18 @@ function parseTemplate(input) {
   return { workbook, parsed: Object.fromEntries(VISIBLE_SHEET_DEFINITIONS.map((definition) => [definition.key, parseTemplateRows(workbook.sheetMap.get(definition.sheet_name), definition)])) };
 }
 function templateToFullBuffer(input, options = {}) { const { parsed } = parseTemplate(input); const data = templateSourceData(parsed); return { ...buildFullDataBufferFromSourceData(data, { appVersion: options.appVersion || "template-import", createdAt: options.createdAt || new Date(), schemaVersion: 0 }), data }; }
-function normalizeImport(input, options = {}) { const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const workbook = validateWorkbookStructure(buffer).workbook; const info = workbook.sheetMap.get("导出说明"); const values = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, FORMAT_VERSION].includes(Number(values.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4、v5、v6 或 v7 文件"); if (workbook.sheetMap.has("__恢复元数据")) return { kind: "full_data", buffer }; if (values.get("文件类型") === TEMPLATE_FILE_TYPE) return { kind: "template", ...templateToFullBuffer(buffer, options) }; throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件类型不支持"); }
-function previewImport(input, options = {}) { const normalized = normalizeImport(input, options); const verified = verifyFullData(normalized.buffer, options); return { ok: true, kind: normalized.kind, file_type: FILE_TYPE, format_version: FORMAT_VERSION, counts: verified.counts, preview_counts: verified.visible_counts }; }
+function normalizeImport(input, options = {}) {
+  const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input));
+  const workbook = validateWorkbookStructure(buffer).workbook;
+  // Full backups have their own v4-v14 compatibility and integrity validation.
+  // Do not reject v13 here using the unrelated blank-template version gate.
+  if (workbook.sheetMap.has("__恢复元数据")) return { kind: "full_data", buffer };
+  const values = new Map((workbook.sheetMap.get("导出说明")?.rows || []).slice(1).map(row => [row[0],row[1]]));
+  if (![4,5,6,FORMAT_VERSION].includes(Number(values.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "模板版本不兼容，请下载当前模板");
+  if (values.get("文件类型") === TEMPLATE_FILE_TYPE) return {kind:"template",...templateToFullBuffer(buffer,options)};
+  throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件类型不支持");
+}
+function previewImport(input, options = {}) { const normalized = normalizeImport(input, options); const verified = verifyFullData(normalized.buffer, options); return { ok: true, kind: normalized.kind, file_type: FILE_TYPE, format_version: verified.version, counts: verified.counts, preview_counts: verified.visible_counts }; }
 
 const BUSINESS_TABLES = SOURCE_TABLE_DEFINITIONS.filter((definition) => !["settings", "pricing_standards", "roles", "role_permissions", "role_filter_presets", "users", "user_teacher_bindings", "user_page_permissions", "user_filter_presets"].includes(definition.source_table)).map((definition) => definition.source_table);
 function assertBusinessEmpty(dbPath) { const db = new DatabaseSync(path.resolve(dbPath), { readOnly: true }); try { const occupied = [...new Set(BUSINESS_TABLES)].filter((table) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count) > 0); if (occupied.length) throw new FullExcelError("FULL_EXCEL_INITIALIZE_TARGET_NOT_EMPTY", "空系统初始化要求业务表为空", { table_count: occupied.length }); } finally { db.close(); } }

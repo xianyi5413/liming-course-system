@@ -12,7 +12,11 @@ window.TuoguanUI = (() => {
     !row.voided_at;
   let activeDetail = null;
   const selectedLedgerIds = new Set();
-  const grades = ["初一", "初二", "初三"];
+  const grades = TuoguanConfig.grades;
+  const compareStudentGradeName = (a, b) =>
+    grades.indexOf(a.grade) - grades.indexOf(b.grade) ||
+    String(a.name).localeCompare(String(b.name), "zh-CN") ||
+    a.id - b.id;
   const esc = (v) =>
     String(v ?? "").replace(
       /[&<>"']/g,
@@ -212,7 +216,7 @@ window.TuoguanUI = (() => {
       monthCalendar(month, () => "") +
       '<div class="tg-calendar-legend">' +
       statuses.map(badge).join("") +
-      '</div><p class="tg-detail-error" role="alert"></p>';
+      '</div><p class="tg-detail-error" role="alert"></p><section class="tg-history"><h3>历史充值记录</h3><div class="tg-history-body">正在加载…</div></section>';
     const values = [...content.querySelectorAll(".metric-value")],
       notes = content.querySelector(".tg-detail-notes"),
       grid = content.querySelector(".tg-detail-calendar"),
@@ -300,7 +304,7 @@ window.TuoguanUI = (() => {
         error.textContent = "";
         try {
           const next = await api(
-            "snapshot?month=" + wanted,
+            "snapshot?view=tgSummary&month=" + wanted,
             undefined,
             controller.signal,
           );
@@ -319,6 +323,29 @@ window.TuoguanUI = (() => {
           }
         }
       };
+    const history = content.querySelector(".tg-history-body");
+    api("student-history?student_id=" + id)
+      .then(({ records }) => {
+        if (!current()) return;
+        history.innerHTML = records.length
+          ? table(
+              ["日期", "类型", "实际金额", "赠送金额", "支付方式", "备注"],
+              records.map((r) =>
+                tr([
+                  esc(r.date),
+                  esc(r.kind),
+                  money(r.actual_amount ?? r.amount),
+                  money(r.gift_amount),
+                  esc(r.method),
+                  esc(r.notes),
+                ]),
+              ),
+            )
+          : "暂无充值记录";
+      })
+      .catch((e) => {
+        if (current()) history.textContent = e.message;
+      });
     render(data, month);
     content.dataset.loading = "false";
   }
@@ -345,6 +372,14 @@ window.TuoguanUI = (() => {
       d = await api(
         "snapshot?month=" +
           month +
+          "&view=" +
+          {
+            签到: "tgAttendance",
+            学生: "tgStudents",
+            流水: "tgLedger",
+            汇总: "tgSummary",
+            设置: "tgSettings",
+          }[tab] +
           (tab === "流水"
             ? "&ledger_only=1&start=" + rangeStart + "&end=" + rangeEnd
             : ""),
@@ -482,7 +517,7 @@ window.TuoguanUI = (() => {
       (v) => post("student", { ...v, id: s?.id, version: s?.version }),
     );
   function manageMatrixDates() {
-    if (!finance || isReadonlyUser()) return;
+    if (!canView("tgAttendance") || isReadonlyUser()) return;
     if (cellWrites || dateWrites || studentWrites)
       return message("请等待保存完成");
     clearTimeout(filterTimer);
@@ -719,6 +754,10 @@ window.TuoguanUI = (() => {
             r.ledger +
             "条资金流水</p><p>新增 " +
             r.created +
+            " · 更新 " +
+            r.updated +
+            " · 移除空周期 " +
+            r.deleted +
             " · 跳过 " +
             r.skipped +
             " · 冲突 " +
@@ -756,7 +795,10 @@ window.TuoguanUI = (() => {
                   )
                   .join("") +
                 "</ul>"
-              : "<p>仅合并托管数据；确认前备份，已有差异不覆盖。</p>");
+              : "<p>仅同步托管数据；确认前备份。来源更正按同步基线更新，双方冲突整批阻止；目标独立数据保留。</p>" +
+                (r.warnings || [])
+                  .map((w) => "<p>" + esc(w) + "</p>")
+                  .join(""));
           reset.hidden = false;
           if (result.allowed) {
             pending = result;
@@ -772,7 +814,14 @@ window.TuoguanUI = (() => {
           dialog.close();
           await refresh();
           showToast(
-            "导入完成：新增 " + result.created + "，跳过 " + result.skipped,
+            "导入完成：新增 " +
+              result.created +
+              "，更新 " +
+              result.updated +
+              "，移除空周期 " +
+              result.deleted +
+              "，跳过 " +
+              result.skipped,
           );
         }
       } catch (error) {
@@ -1107,7 +1156,10 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions tg-matrix-actions">' +
       (finance
-        ? '<button class="btn" id="tg-manage-students">管理学生</button><button class="btn" id="tg-manage-dates">管理日期</button>'
+        ? '<button class="btn" id="tg-manage-students">管理学生</button>'
+        : "") +
+      (canView("tgAttendance")
+        ? '<button class="btn" id="tg-manage-dates">管理日期</button>'
         : "") +
       (canWrite
         ? '<button class="btn" id="tg-batch-attendance" disabled>批量修改</button>'
@@ -1202,14 +1254,15 @@ window.TuoguanUI = (() => {
         .filter((date) => currentPeriod(s, date))
         .map((date) => ({ student_id: s.id, date })),
     );
+    let rowsSelected = false,
+      datesSelected = false;
     const targets = () =>
       !selectedStudents.size && !selectedDates.size
         ? []
         : validCells.filter(
             (cell) =>
-              (!selectedStudents.size ||
-                selectedStudents.has(cell.student_id)) &&
-              (!selectedDates.size || selectedDates.has(cell.date)),
+              (!rowsSelected || selectedStudents.has(cell.student_id)) &&
+              (!datesSelected || selectedDates.has(cell.date)),
           );
     const batchButton = body.querySelector("#tg-batch-attendance"),
       allBox = matrix.querySelector(".tg-select-all");
@@ -1222,10 +1275,17 @@ window.TuoguanUI = (() => {
           : "批量修改";
       }
       allBox.disabled = !canWrite || !validCells.length || batchSaving;
-      allBox.checked = !!count && count === validCells.length;
-      allBox.indeterminate = !!count && count < validCells.length;
+      const boxes = [
+        ...matrix.querySelectorAll(
+          ".tg-select-student:not(:disabled),.tg-select-date:not(:disabled)",
+        ),
+      ];
+      allBox.checked = boxes.length > 0 && boxes.every((box) => box.checked);
+      allBox.indeterminate =
+        !allBox.checked && boxes.some((box) => box.checked);
     }
     function clearSelection() {
+      rowsSelected = datesSelected = false;
       selectedStudents.clear();
       selectedDates.clear();
       for (const box of matrix.querySelectorAll('input[type="checkbox"]'))
@@ -1241,6 +1301,8 @@ window.TuoguanUI = (() => {
             ? selectedStudents
             : selectedDates,
           key = box.dataset.id ? Number(box.dataset.id) : box.dataset.date;
+        if (box.classList.contains("tg-select-student")) rowsSelected = true;
+        else datesSelected = true;
         if (box.checked) set.add(key);
         else set.delete(key);
         paintSelection();
@@ -1250,10 +1312,12 @@ window.TuoguanUI = (() => {
       clearSelection();
       if (checked)
         for (const box of matrix.querySelectorAll(
-          ".tg-select-student:not(:disabled)",
+          ".tg-select-student:not(:disabled),.tg-select-date:not(:disabled)",
         )) {
           box.checked = true;
-          selectedStudents.add(Number(box.dataset.id));
+          rowsSelected = datesSelected = true;
+          if (box.dataset.id) selectedStudents.add(Number(box.dataset.id));
+          else selectedDates.add(box.dataset.date);
         }
       paintSelection();
     };
@@ -1381,7 +1445,7 @@ window.TuoguanUI = (() => {
             }
             clearSelection();
             dialog.close();
-            message("批量修改已完成");
+            showToast("批量修改已完成");
           } catch (err) {
             if (dialog.element.isConnected) error.textContent = err.message;
           } finally {
@@ -1457,7 +1521,7 @@ window.TuoguanUI = (() => {
               closeScheduleInlinePicker();
               button.innerHTML = cellContent(saved, true);
               button.focus({ preventScroll: true });
-              message("已保存");
+              message("");
             } catch (error) {
               if (
                 host !== root ||
@@ -1858,7 +1922,10 @@ window.TuoguanUI = (() => {
           selectedLedgerIds.clear();
           return result;
         },
-        () => "已删除 " + records.length + " 条记录",
+        () => {
+          showToast("已删除" + records.length + "条记录");
+          return "";
+        },
       );
       modal.element.querySelector("[type=submit]").textContent = "确认删除";
     };
@@ -1960,16 +2027,95 @@ window.TuoguanUI = (() => {
       renderFees(body);
     } else if (tab === "设置") {
       body.innerHTML =
-        '<section class="tg-settings-section"><h3>收费规则</h3>' +
-        table(
-          ["考勤状态", "每日费用"],
-          Object.entries(data.billing_rule).map(([status, fee]) =>
-            tr([badge(status), money(fee)]),
-          ),
-        ) +
-        '</section><div class="tg-actions"><button class="btn" id="tg-copy">复制托管信息</button><button class="btn" id="tg-paste">导入托管信息</button></div>';
-      root.querySelector("#tg-copy").onclick = () => transferDialog(false);
-      root.querySelector("#tg-paste").onclick = () => transferDialog(true);
+        Object.entries(TuoguanConfig.defaults)
+          .map(([stage, defaults]) => {
+            const rules = data.rules.filter(
+              (r) => r.stage === stage && !r.student_id,
+            );
+            const current =
+              rules.find((r) => r.effective_date <= today()) || defaults;
+            return (
+              '<section class="tg-settings-section"><h3>' +
+              stage +
+              "收费规则</h3>" +
+              table(
+                ["出勤", "请假", "放假", "不适用"],
+                [
+                  tr([
+                    money(current.present),
+                    money(current.leave_fee),
+                    money(0),
+                    money(0),
+                  ]),
+                ],
+              ) +
+              '<button class="btn tg-rule" data-stage="' +
+              stage +
+              '" ' +
+              (isReadonlyUser() ? "disabled" : "") +
+              ">调整收费</button><details><summary>历史规则与生效日期</summary>" +
+              table(
+                ["生效日期", "出勤", "请假", "备注"],
+                rules.map((r) =>
+                  tr([
+                    esc(r.effective_date),
+                    money(r.present),
+                    money(r.leave_fee),
+                    esc(r.notes),
+                  ]),
+                ),
+              ) +
+              "</details></section>"
+            );
+          })
+          .join("") +
+        (TuoguanConfig.management.every(canView)
+          ? '<div class="tg-actions"><button class="btn" id="tg-copy">复制托管信息</button><button class="btn" id="tg-paste">导入托管信息</button></div>'
+          : "");
+      root.querySelectorAll(".tg-rule").forEach(
+        (button) =>
+          (button.onclick = () => {
+            const stage = button.dataset.stage,
+              current =
+                data.rules.find(
+                  (r) =>
+                    r.stage === stage &&
+                    !r.student_id &&
+                    r.effective_date <= today(),
+                ) || TuoguanConfig.defaults[stage];
+            form(
+              stage + "收费规则",
+              input("effective_date", "生效日期", today(), "date") +
+                input(
+                  "present",
+                  "出勤（元）",
+                  current.present / 100,
+                  "number",
+                ) +
+                input(
+                  "leave_fee",
+                  "请假（元）",
+                  current.leave_fee / 100,
+                  "number",
+                ) +
+                input("notes", "备注", ""),
+              (v) =>
+                post("rule", {
+                  ...v,
+                  stage,
+                  present: toCents(v.present),
+                  leave_fee: toCents(v.leave_fee),
+                  absent: 0,
+                }),
+            );
+          }),
+      );
+      root
+        .querySelector("#tg-copy")
+        ?.addEventListener("click", () => transferDialog(false));
+      root
+        .querySelector("#tg-paste")
+        ?.addEventListener("click", () => transferDialog(true));
     }
     const changeDay = async (value) => {
       if (
@@ -2126,7 +2272,7 @@ window.TuoguanUI = (() => {
     const host = document.createElement("div");
     el.replaceChildren(host);
     root = host;
-    finance = canView("tgFinance");
+    finance = canView("tgStudents");
     tab = page;
     root.innerHTML =
       '<div class="band"><div class="loading" role="status">正在加载托管数据…</div></div>';

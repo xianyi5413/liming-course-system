@@ -1,7 +1,8 @@
 const crypto = require("node:crypto");
 const STATUSES = ["出勤", "请假", "放假", "不适用"];
 const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
-const GRADES = ["初一", "初二", "初三"];
+const Config = require("../../public/tuoguan_config");
+const GRADES = Config.grades;
 const { TABLES, PROFILE_STATUSES, migrate } = require("./tuoguan_schema");
 const Billing = require("./tuoguan_settlement");
 const Protection = require("./tuoguan_protection");
@@ -130,7 +131,15 @@ function createStore(db) {
       const saved = get("SELECT * FROM tg_attendance WHERE id=?", current.id);
       if (old && current.version === old.version && !settlement.updated)
         return old;
-      audit(actor, "考勤", { before: old || null, after: saved });
+      audit(actor, "考勤", {
+        before: old || null,
+        after: saved,
+        student_name: get(
+          "SELECT name FROM tg_students WHERE id=?",
+          r.student_id,
+        ).name,
+        default_status: p.default_status || "出勤",
+      });
       return saved;
     });
   }
@@ -157,13 +166,11 @@ function createStore(db) {
       if (seen.has(key)) fail("重复考勤单元格");
       seen.add(key);
       if (!grouped.has(cell.date)) grouped.set(cell.date, []);
-      grouped
-        .get(cell.date)
-        .push({
-          student_id: cell.student_id,
-          version: cell.version,
-          status: b.status,
-        });
+      grouped.get(cell.date).push({
+        student_id: cell.student_id,
+        version: cell.version,
+        status: b.status,
+      });
     }
     return [...grouped]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -175,7 +182,7 @@ function createStore(db) {
     if (b.end_date) date(b.end_date);
     if (b.end_date && b.end_date < b.start_date)
       fail("退托日期不能早于入托日期");
-    if (!GRADES.includes(b.grade)) fail("年级仅支持初一、初二、初三");
+    if (!GRADES.includes(b.grade)) fail("年级仅支持三年级、初一、初二、初三");
     if (!["在托", "暂停", "退托"].includes(b.status)) fail("托管状态无效");
     if (b.status !== "在托" && !b.end_date)
       fail("暂停或退托需填写最后在托日期；恢复请新增周期");
@@ -388,6 +395,13 @@ function createStore(db) {
   }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
+      const auditStart = get("SELECT COALESCE(MAX(id),0) id FROM tg_audit").id;
+      const before =
+        action === "student" && b.id
+          ? get("SELECT * FROM tg_students WHERE id=?", b.id)
+          : action === "calendar"
+            ? get("SELECT * FROM tg_calendar WHERE date=?", b.date)
+            : null;
       let result;
       if (["remove-students", "add-dates", "remove-dates"].includes(action))
         result = matrixChange(action, b);
@@ -395,7 +409,7 @@ function createStore(db) {
         const name = String(b.name || "").trim(),
           grade = String(b.grade || "").trim();
         if (!name || name.length > 80 || !GRADES.includes(grade))
-          fail("请填写姓名并选择初一、初二或初三");
+          fail("请填写姓名并选择三年级、初一、初二或初三");
         const notes = String(b.notes || "").slice(0, 2000);
         if (b.status !== undefined && !PROFILE_STATUSES.includes(b.status))
           fail("档案状态无效");
@@ -517,21 +531,18 @@ function createStore(db) {
         );
       } else if (action === "rule") {
         date(b.effective_date);
-        if (
-          b.present !== Billing.RULE.present ||
-          b.leave_fee !== Billing.RULE.leave_fee
-        )
-          fail("当前统一标准为出勤50元、请假25元");
+        if (!Object.values(Config.stages).includes(b.stage))
+          fail("请选择小学或初中");
         for (const k of ["present", "leave_fee", "absent"])
           if (cents(b[k]) < 0) fail("收费标准不能为负");
-        if (b.student_id) student(b.student_id);
+        if (b.absent !== 0 || b.student_id)
+          fail("请按学段设置，放假与不适用费用为零");
         run(
-          "INSERT INTO tg_rules(student_id,effective_date,present,leave_fee,absent,notes,created_by) VALUES (?,?,?,?,?,?,?)",
-          b.student_id || null,
+          "INSERT INTO tg_rules(stage,effective_date,present,leave_fee,absent,notes,created_by) VALUES (?,?,?,?,0,?,?)",
+          b.stage,
           b.effective_date,
           b.present,
           b.leave_fee,
-          b.absent,
           b.notes || "",
           actor,
         );
@@ -557,8 +568,32 @@ function createStore(db) {
         );
         result = { ok: true };
       } else fail("不支持的操作", 404);
-      if (!["money-edit", "money-delete"].includes(action))
-        audit(actor, action, b);
+      if (
+        ![
+          "attendance",
+          "batch-attendance",
+          "money-edit",
+          "money-delete",
+        ].includes(action)
+      )
+        audit(actor, action, {
+          input: b,
+          before,
+          after: action === "student" ? result.student || result : result,
+        });
+      if (action === "batch-attendance") {
+        const changed = all(
+          "SELECT id FROM tg_audit WHERE id>? AND action='考勤'",
+          auditStart,
+        );
+        if (changed.length)
+          audit(actor, action, {
+            month: b.month,
+            count: changed.length,
+            audit_start: auditStart,
+            audit_end: changed.at(-1).id,
+          });
+      }
       return result;
     });
   }

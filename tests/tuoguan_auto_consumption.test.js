@@ -61,7 +61,7 @@ test("saved four states charge fixed cents; defaults and archived rates never ch
         leave_fee: 1500,
         absent: 0,
       }),
-    /统一标准/,
+    /小学或初中/,
   );
   assert.throws(() => f.write("resolve", { id: 1 }), /不支持/);
 });
@@ -247,6 +247,7 @@ test("v1/v2 pending imports settle in preview and once in transaction; v3 transf
     );
     const bundle = structuredClone(exported);
     bundle.version = version;
+    delete bundle.teacher_links;
     if (version === 1)
       for (const i of bundle.records.tg_ledger) {
         delete i.record.actual_amount;

@@ -29,6 +29,7 @@ const TABLES = [
   "tg_import_sources",
   "tg_transfer_meta",
   "tg_transfer_keys",
+  "tg_transfer_baselines",
 ];
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,status ${PROFILE_STATUS_COLUMN},name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tg_imports(id TEXT PRIMARY KEY,payload TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS tg_import_sources(id TEXT PRIMARY KEY,import_id TEXT NOT NULL REFERENCES tg_imports(id),source_key TEXT NOT NULL,student_id INTEGER REFERENCES tg_students(id),status TEXT NOT NULL DEFAULT '待确认',basis TEXT NOT NULL DEFAULT '',UNIQUE(import_id,source_key));
 CREATE TABLE IF NOT EXISTS tg_transfer_meta(id TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_transfer_keys(id INTEGER PRIMARY KEY,table_name TEXT NOT NULL,row_key TEXT NOT NULL,uid TEXT NOT NULL,UNIQUE(table_name,uid));
+CREATE TABLE IF NOT EXISTS tg_transfer_baselines(id INTEGER PRIMARY KEY,source TEXT NOT NULL,table_name TEXT NOT NULL,uid TEXT NOT NULL,source_hash TEXT NOT NULL,target_hash TEXT NOT NULL,row_key TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,UNIQUE(source,table_name,uid));
 CREATE INDEX IF NOT EXISTS tg_transfer_row ON tg_transfer_keys(table_name,row_key);
 `;
 function digest(rows) {
@@ -90,6 +92,27 @@ function upgradeLegacyBackup(data) {
   return data;
 }
 function simplifyBackup(data) {
+  data.tg_transfer_baselines ||= [];
+  for (const row of data.tg_rules || []) {
+    row.stage ??= "";
+    if (!["", "小学", "初中"].includes(row.stage))
+      throw Error("托管收费学段无效");
+    if (
+      [row.present, row.leave_fee, row.absent].some(
+        (n) => !Number.isSafeInteger(n) || n < 0,
+      ) ||
+      (row.stage && row.absent !== 0)
+    )
+      throw Error("托管收费金额无效");
+  }
+  for (const table of ["tg_students", "tg_periods", "tg_attendance"])
+    for (const row of data[table] || [])
+      if (
+        row.grade &&
+        !require("../../public/tuoguan_config").grades.includes(row.grade)
+      )
+        throw Error("托管年级无效");
+  for (const row of data.tg_audit || []) row.origin_json ??= "";
   for (const row of data.tg_students || []) {
     row.status ??= "在托";
     if (!PROFILE_STATUSES.includes(row.status)) throw Error("托管档案状态无效");
@@ -179,6 +202,17 @@ function migrate(db, { settle = true } = {}) {
       (Billing.needsMigration(db) ||
         (exists("tg_attendance") &&
           Normalization.preview(db).changes.length))) ||
+    (exists("tg_rules") &&
+      !db
+        .prepare("PRAGMA table_info(tg_rules)")
+        .all()
+        .some((c) => c.name === "stage")) ||
+    (exists("tg_audit") &&
+      !db
+        .prepare("PRAGMA table_info(tg_audit)")
+        .all()
+        .some((c) => c.name === "origin_json")) ||
+    (exists("tg_students") && !exists("tg_transfer_baselines")) ||
     missingStatus ||
     missingMoney ||
     missingDefault ||
@@ -274,6 +308,7 @@ function migrate(db, { settle = true } = {}) {
     db.exec(SCHEMA);
     const additions = {
       tg_students: { status: PROFILE_STATUS_COLUMN },
+      tg_audit: { origin_json: "TEXT NOT NULL DEFAULT ''" },
       tg_ledger: {
         actual_amount: "INTEGER",
         gift_amount: "INTEGER",
@@ -281,6 +316,7 @@ function migrate(db, { settle = true } = {}) {
       },
       tg_periods: { default_status: PERIOD_DEFAULT_COLUMN },
       tg_rules: {
+        stage: "TEXT NOT NULL DEFAULT ''",
         end_date: "TEXT",
         pending: "INTEGER NOT NULL DEFAULT 0",
         source_import_id: "TEXT",

@@ -34,7 +34,42 @@ function chargedAmount(row, entries) {
   }
   return charged;
 }
-function plan(attendance, ledger) {
+const Config = require("../../public/tuoguan_config");
+function savedRule(row) {
+  try {
+    const rule = JSON.parse(row.rule_json);
+    if (
+      !row.pending &&
+      [rule.present, rule.leave_fee, rule.absent].every(
+        (n) => Number.isSafeInteger(n) && n >= 0,
+      ) &&
+      rule.absent === 0
+    )
+      return rule;
+  } catch {}
+  return null;
+}
+function effectiveRule(db, row) {
+  const stage = Config.stages[row.grade];
+  if (!stage) throw Error("托管年级没有对应收费学段");
+  const rule = db
+    .prepare(
+      "SELECT * FROM tg_rules WHERE stage=? AND pending=0 AND (student_id IS NULL OR student_id=?) AND effective_date<=? AND (end_date IS NULL OR end_date>=?) ORDER BY (student_id IS NOT NULL) DESC,effective_date DESC,id DESC LIMIT 1",
+    )
+    .get(stage, row.student_id, row.date, row.date);
+  return {
+    stage,
+    effective_date: rule?.effective_date || "0001-01-01",
+    present: rule?.present ?? Config.defaults[stage].present,
+    leave_fee: rule?.leave_fee ?? Config.defaults[stage].leave_fee,
+    absent: 0,
+  };
+}
+function plan(
+  attendance,
+  ledger,
+  resolve = (row) => Config.defaults[Config.stages[row.grade]] || RULE,
+) {
   const linked = new Map();
   for (const row of ledger) {
     if (row.attendance_id == null) continue;
@@ -45,13 +80,16 @@ function plan(attendance, ledger) {
   for (const row of attendance) {
     if (!Object.hasOwn(FEES, row.status)) continue;
     const charged = chargedAmount(row, linked.get(row.id) || []);
-    const fee = FEES[row.status];
-    if (
-      charged === fee &&
-      row.fee === fee &&
-      !row.pending &&
-      row.rule_json === RULE_JSON
-    )
+    const snapshot = savedRule(row),
+      rule = snapshot || resolve(row);
+    const ruleJson = snapshot ? row.rule_json : JSON.stringify(rule);
+    const fee =
+      row.status === "出勤"
+        ? rule.present
+        : row.status === "请假"
+          ? rule.leave_fee
+          : 0;
+    if (charged === fee && row.fee === fee && !row.pending && !!snapshot)
       continue;
     const entries = [];
     if (charged !== fee) {
@@ -64,7 +102,7 @@ function plan(attendance, ledger) {
         ...row,
         fee,
         pending: 0,
-        rule_json: RULE_JSON,
+        rule_json: ruleJson,
         version: row.version + 1,
       },
       charged,
@@ -75,10 +113,16 @@ function plan(attendance, ledger) {
   return changes;
 }
 function ensureRule(db) {
-  if (!db.prepare("SELECT id FROM tg_rules WHERE created_by=?").get(RULE_ACTOR))
-    db.prepare(
-      "INSERT INTO tg_rules(effective_date,present,leave_fee,absent,notes,created_by) VALUES('0001-01-01',?,?,?,'统一自动计费',?)",
-    ).run(RULE.present, RULE.leave_fee, RULE.absent, RULE_ACTOR);
+  for (const [stage, rule] of Object.entries(Config.defaults)) {
+    if (
+      !db
+        .prepare("SELECT id FROM tg_rules WHERE stage=? AND student_id IS NULL")
+        .get(stage)
+    )
+      db.prepare(
+        "INSERT INTO tg_rules(stage,effective_date,present,leave_fee,absent,notes,created_by) VALUES(?,'0001-01-01',?,?,0,'学段初始标准',?)",
+      ).run(stage, rule.present, rule.leave_fee, RULE_ACTOR);
+  }
 }
 function apply(
   db,
@@ -100,7 +144,7 @@ function apply(
     if (
       update.run(
         c.after.fee,
-        RULE_JSON,
+        c.after.rule_json,
         c.after.version,
         c.before.id,
         c.before.version,
@@ -162,7 +206,12 @@ function settle(db, actor = "system", options = {}) {
           "SELECT * FROM tg_ledger WHERE attendance_id IS NOT NULL ORDER BY id",
         )
         .all();
-  return apply(db, plan(rows, ledger), actor, options);
+  return apply(
+    db,
+    plan(rows, ledger, (row) => effectiveRule(db, row)),
+    actor,
+    options,
+  );
 }
 function needsMigration(db) {
   if (
@@ -177,6 +226,8 @@ function needsMigration(db) {
   );
 }
 module.exports = {
+  savedRule,
+  effectiveRule,
   RULE,
   RULE_ACTOR,
   RULE_JSON,

@@ -51,6 +51,11 @@ function sheet(key, sheetName, sourceTable, specs, options = {}) {
 // The order is a user-facing contract. Technical restore data is deliberately not
 // mixed into these definitions; it is written to veryHidden worksheets instead.
 const VISIBLE_SHEET_DEFINITIONS = Object.freeze([
+  sheet("tg_students", "托管学生", "tg_students", [["id","档案ID",I],["name","学生",T],["grade","年级",T],["status","档案状态",T],["notes","备注",T]], {restore_source:false,sort_fields:["id"]}),
+  sheet("tg_attendance", "托管每日签到", "tg_attendance", [["student_id","档案ID",I],["student_name","学生",T],["grade","历史年级",T],["date","日期",D],["status","考勤状态",T],["fee_yuan","费用（元）",N],["notes","备注",T]], {restore_source:false,sort_fields:["date","student_id"]}),
+  sheet("tg_ledger", "托管充值流水", "tg_ledger", [["student_id","档案ID",I],["student_name","学生",T],["date","日期",D],["kind","类型",T],["actual_yuan","实际金额（元）",N],["gift_yuan","赠送金额（元）",N],["method","支付方式",T],["notes","备注",T]], {restore_source:false,sort_fields:["date","id"]}),
+  sheet("tg_rules", "托管收费规则", "tg_rules", [["stage_label","学段",T],["student_id","档案ID",I],["effective_date","生效日期",D],["end_date","截止日期",D],["present_yuan","出勤（元）",N],["leave_yuan","请假（元）",N],["notes","备注",T]], {restore_source:false,sort_fields:["stage","effective_date","id"]}),
+
   sheet("lessons", "所有课程数据", "lessons", [
     ["teacher_name", "授课老师", T], ["date", "日期", D], ["weekday", "星期", { ...T, source_field: null }],
     ["time_slot", "时间", T], ["classroom", "教室", T], ["display_status", "状态", { ...T, source_field: null, enum_values: DEFAULT_COURSE_STATUSES }],

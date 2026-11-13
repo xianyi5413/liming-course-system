@@ -35,10 +35,11 @@ function seed(f, name = "合成托管") {
     start_date: "2026-09-01",
   });
   f.write("rule", {
+    stage: "初中",
     effective_date: "2026-09-01",
     present: 5000,
     leave_fee: 2500,
-    absent: 5000,
+    absent: 0,
   });
   f.write("money", {
     student_id: student.id,
@@ -260,7 +261,7 @@ test("portable merge remaps IDs, preserves funds and exclusions, skips repeated 
   assert.equal(reverse.conflicts.length, 0);
   assert.deepEqual(b.db.prepare("PRAGMA foreign_key_check").all(), []);
 });
-test("different identities with same names and changed source records are conflicts, never overwrite funds", async (t) => {
+test("different identities conflict; baseline permits source corrections without duplicate charges", async (t) => {
   const a = fixture(t),
     b = fixture(t);
   seed(a);
@@ -277,8 +278,9 @@ test("different identities with same names and changed source records are confli
     rows: [{ student_id: 1, status: "出勤", version: 2 }],
   });
   input = text(a.db);
-  assert.ok(T.plan(c.db, T.parse(c.db, input)).conflicts.length);
-  await assert.rejects(apply(c, input), /冲突/);
+  assert.equal(T.plan(c.db, T.parse(c.db, input)).conflicts.length, 0);
+  assert.ok((await apply(c, input)).updated > 0);
+  assert.equal(c.store.snapshot("2026-09",true).summary[0].fee,5000);
 });
 test("tampered format, unknown fields, missing references and inconsistent financial ledger are rejected", (t) => {
   const f = fixture(t);

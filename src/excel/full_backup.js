@@ -19,7 +19,7 @@ const {
 } = require("./field_definitions");
 
 const FILE_TYPE = "liming_full_data_excel";
-const FORMAT_VERSION = 13;
+const FORMAT_VERSION = 14;
 const NULL_MARKER = "__LIMING_NULL_V3__";
 const LONG_TEXT_MARKER = "__LIMING_LONG_TEXT_V3__";
 const LONG_TEXT_CHUNK_SIZE = 30000;
@@ -167,6 +167,10 @@ function excelBaseSalary(lesson, context) {
 }
 function visibleRecords(definition, sourceData, context) {
   const rows = sourceData[definition.source_table] || [];
+  if (definition.key.startsWith("tg_")) {
+    const names=new Map((sourceData.tg_students || []).map(r=>[r.id,r.name]));
+    return rows.filter(r=>definition.key!=="tg_ledger" || (["充值","退款"].includes(r.kind) && r.attendance_id==null && !r.voided_at)).sort(compareRows(definition.sort_fields)).map(r=>({visible:{...r,student_name:names.get(r.student_id)||"",fee_yuan:(r.fee||0)/100,actual_yuan:(r.actual_amount??r.amount??0)/100,gift_yuan:(r.gift_amount||0)/100,stage_label:r.stage||"历史规则",present_yuan:(r.present||0)/100,leave_yuan:(r.leave_fee||0)/100}}));
+  }
   if (definition.key === "student_fee_details") return context.lessons.flatMap((lesson) => splitList(lesson.student_names).map((studentName) => ({ visible: { student_name: studentName, teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, notes: lesson.notes, ...studentFeeValues(lesson, studentName, context) } }))).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
   if (definition.key === "lesson_hour_details") return context.lessons.map((lesson) => ({ visible: { teacher_name: lesson.teacher_name, date: lesson.date, weekday: weekdayCn(lesson.date), time_slot: lesson.time_slot, classroom: lesson.classroom, display_status: deriveStatus(lesson, context.allowedStatuses), grade: lesson.grade, subject: lesson.subject, student_names: lesson.student_names, notes: lesson.notes, teacher_salary: excelBaseSalary(lesson, context) } })).sort((a, b) => compareRows(definition.sort_fields)(a.visible, b.visible));
   if (definition.key === "base_data") {
@@ -414,7 +418,7 @@ function verifyMetadata(workbook) {
   const sheet = workbook.sheetMap.get("__恢复元数据"); const expected = ["类型", "名称", "值", "SHA-256"];
   if (!sheet || JSON.stringify(sheet.rows[0] || []) !== JSON.stringify(expected)) throw new FullExcelError("FULL_EXCEL_METADATA_INVALID", "恢复元数据结构无效");
   const meta = new Map(sheet.rows.slice(1).filter((row) => row[0] === "元数据").map((row) => [row[1], row[2]]));
-  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, 6, 7, 8, 9, 10, 11, 12, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v13 完整数据文件");
+  if (meta.get("file_type") !== FILE_TYPE || ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, FORMAT_VERSION].includes(Number(meta.get("format_version")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v14 完整数据文件");
   for (const row of sheet.rows.slice(1).filter((item) => item[0] === "工作表")) { const target = workbook.sheetMap.get(row[1]); if (!target || Number(row[2]) !== target.rows.length - 1 || row[3] !== sha256(canonical(target.rows))) throw new FullExcelError("FULL_EXCEL_SHEET_DIGEST_INVALID", `工作表摘要不匹配：${row[1]}`); }
   return meta;
 }
@@ -423,10 +427,19 @@ function reconstructData(workbook, parsedVisible, mappings) {
   const data = Object.fromEntries(SOURCE_TABLE_DEFINITIONS.map((item) => [item.source_table, []]));
   const grouped = new Map();
   for (const item of mappings) { const groupKey = `${item.sourceSheet}\u0000${item.sourceRow}\u0000${item.table}\u0000${item.key}`; if (!grouped.has(groupKey)) grouped.set(groupKey, {}); grouped.get(groupKey)[item.field] = item.value; }
+  // Index once by sheet/row/table instead of rescanning every hidden mapping for
+  // each visible row. Keep duplicate candidates detectable as before.
+  const byVisibleRow = new Map();
+  for (const [key, value] of grouped) {
+    const [sheet, row, table] = key.split("\u0000");
+    const prefix = `${sheet}\u0000${row}\u0000${table}`;
+    if (!byVisibleRow.has(prefix)) byVisibleRow.set(prefix, []);
+    byVisibleRow.get(prefix).push(value);
+  }
   for (const definition of VISIBLE_SHEET_DEFINITIONS.filter((item) => item.restore_source)) {
     for (const item of parsedVisible[definition.key]) {
-      const candidates = [...grouped.entries()].filter(([key]) => key.startsWith(`${definition.sheet_name}\u0000${item.rowNumber}\u0000${definition.source_table}\u0000`));
-      const technical = candidates.length === 1 ? candidates[0][1] : {};
+      const candidates = byVisibleRow.get(`${definition.sheet_name}\u0000${item.rowNumber}\u0000${definition.source_table}`) || [];
+      const technical = candidates.length === 1 ? candidates[0] : {};
       const row = {};
       for (const column of definition.columns) {
         if (column.source_field) row[column.source_field] = item.value[column.field_key];
@@ -521,10 +534,10 @@ function verifyFullData(input, { onProgress = () => {} } = {}) {
   onProgress('read_workbook', 20, '正在读取工作簿');
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(path.resolve(input)); const structure = validateWorkbookStructure(buffer); const workbook = structure.workbook;
   onProgress('structure', 35, '正在校验结构');
-  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, 7, 8, 9, 10, 11, 12, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v13 完整数据文件");
-  if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames())) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
+  const info = workbook.sheetMap.get("导出说明"); const infoMap = new Map((info?.rows || []).slice(1).map((row) => [row[0], row[1]])); if (![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, FORMAT_VERSION].includes(Number(infoMap.get("格式版本")))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "文件版本不兼容，请使用 v4 至 v14 完整数据文件");
+  if (JSON.stringify(workbook.sheets.map((sheet) => sheet.name)) !== JSON.stringify(expectedSheetNames().filter(name=>Number(infoMap.get("格式版本"))>=14 || !["托管学生","托管每日签到","托管充值流水","托管收费规则"].includes(name)))) throw new FullExcelError("FULL_EXCEL_SHEET_ORDER_INVALID", "工作表名称或顺序不符合格式版本");
   for (const name of HIDDEN_SHEET_NAMES) if (workbook.sheetMap.get(name)?.state !== "veryHidden") throw new FullExcelError("FULL_EXCEL_HIDDEN_SHEET_STATE_INVALID", `内部工作表必须为veryHidden：${name}`);
-  const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
+  const parsedVisible = {}; for (const definition of VISIBLE_SHEET_DEFINITIONS) parsedVisible[definition.key] = Number(infoMap.get("格式版本"))<14 && definition.key.startsWith("tg_") ? [] : parseVisibleRows(workbook.sheetMap.get(definition.sheet_name), definition);
   onProgress('parse', 55, '正在解析数据');
   const metadata = verifyMetadata(workbook);
   if (Number(metadata.get("format_version")) !== Number(infoMap.get("格式版本"))) throw new FullExcelError("FULL_EXCEL_FORMAT_INVALID", "说明与恢复元数据的版本不一致");
@@ -561,6 +574,7 @@ function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
         onProgress('write', 75 + Math.round(written / Math.max(1, total) * 15), '正在写入数据');
       }
       onProgress('integrity', 95, '正在进行一致性检查');
+      require("../domain/tuoguan_permissions").migrate(db);
       const rechargeMigration = migrateRechargeDates(db);
       const custodyNormalization = require('../domain/tuoguan_normalization').apply(db, 'restore');
       const custodySettlement = require('../domain/tuoguan_settlement').settle(db, 'restore', {reason:'旧备份自动结算'});

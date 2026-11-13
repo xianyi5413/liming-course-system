@@ -404,7 +404,7 @@ test("Edge role tree saves tgAttendance; permissions apply immediately to ordina
       await c.evaluate(
         'document.querySelector(".role-permission-modal").textContent',
       ),
-      /托管管理[\s\S]*托管签到[\s\S]*托管学生、财务与设置/,
+      /托管[\s\S]*每日签到[\s\S]*托管学生[\s\S]*充值流水[\s\S]*托管费用[\s\S]*托管设置/,
     );
     await c.evaluate(
       `for(const input of document.querySelectorAll('.role-permission-modal .permission-child'))input.checked=input.value==='tgAttendance';document.querySelector('.role-readonly-field').checked=false`,
@@ -568,7 +568,7 @@ test("Edge ledger uses period grade then profile ID fallback consistently for ba
     await b.close();
   }
 });
-test("v13 Excel restores batch attendance, money reversal chains, v5 identities and exact restricted permissions without charging again", async () => {
+test("v14 Excel restores batch attendance, money reversal chains, v6 identities and exact restricted permissions without charging again", async () => {
   const X = require("../src/excel/full_backup"),
     T = require("../src/domain/tuoguan_transfer"),
     source = path.join(dir, "backup-source.sqlite"),
@@ -632,7 +632,7 @@ test("v13 Excel restores batch attendance, money reversal chains, v5 identities 
     "UPDATE roles SET readonly=1 WHERE code='helper';DELETE FROM role_permissions WHERE role_code='helper';INSERT INTO role_permissions(role_code,permission_key,enabled) VALUES('helper','tgAttendance',1)",
   );
   const transfer = T.exportData(d);
-  assert.equal(transfer.version, 5);
+  assert.equal(transfer.version, 6);
   const tables = [
     ...TG.TABLES,
     "roles",
@@ -647,7 +647,7 @@ test("v13 Excel restores batch attendance, money reversal chains, v5 identities 
     ["2026-09", "2026-10"].map((m) => [m, store.snapshot(m, true).summary]),
   );
   d.close();
-  assert.equal(X.FORMAT_VERSION, 13);
+  assert.equal(X.FORMAT_VERSION, 14);
   X.exportFullData({ dbPath: source, outputPath: xlsx });
   const result = X.restoreFullData({ dbPath: target, inputPath: xlsx });
   assert.equal(result.custody_settlement.updated, 0);

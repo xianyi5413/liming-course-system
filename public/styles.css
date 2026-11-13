@@ -14428,3 +14428,8 @@ table.adaptive-table td.single-line-note,
 .tg-matrix thead tr:nth-child(2) th { top: 30px; }
 .tg-matrix :is(input[type="checkbox"], .tg-cell-button, .entity-badge) { vertical-align: middle; }
 .tg-matrix input[type="checkbox"] { display: block; margin: 0 auto; }
+
+.tg-history .tg-scroll { max-height: 260px; overflow: auto; }
+.tg-history td:last-child { white-space: normal; min-width: 90px; max-width: 250px; }
+
+.custody-log-changes { max-height: 280px; overflow: auto; white-space: normal; }

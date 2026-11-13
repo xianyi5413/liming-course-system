@@ -781,9 +781,8 @@ async function downloadBlob(path, fallbackFilename) {
 }
 
 function canView(viewKey) {
-  if (["tgStudents", "tgLedger", "tgSummary", "tgSettings"].includes(viewKey)) viewKey = "tgFinance";
   if (!auth.user) return false;
-  if (Array.isArray(auth.user.permissions)) return auth.user.permissions.includes(viewKey);
+  if (Array.isArray(auth.user.permissions)) return TuoguanConfig.permissions(auth.user.permissions).includes(viewKey);
   const allowed = ROLE_VIEWS[auth.user.role];
   return !allowed || allowed.has(viewKey);
 }
@@ -12545,7 +12544,7 @@ async function renderOperationLogs() {
                 <td class="text-cell">${escapeHtml(log.operator_name)}</td>
                 <td class="text-cell">${escapeHtml(log.operator_account)}</td>
                 <td class="text-cell">${escapeHtml(log.operation_type)}</td>
-                <td class="text-cell operation-log-content">${escapeHtml(log.display_content || log.operation_content)}</td>
+                <td class="text-cell operation-log-content">${escapeHtml(log.display_content || log.operation_content)}${log.target_type === "tuoguan" && /custody_audit_start/.test(log.extra_json || "") ? `<details data-custody-log="${log.id}"><summary>逐格变更详情</summary><div class="custody-log-changes"></div></details>` : ""}</td>
                 <td class="text-cell"><span class="operation-result-badge ${log.result_status === "failure" ? "failure" : "success"}">${log.result_status === "failure" ? "失败" : "成功"}</span></td>
                 <td class="text-cell">${escapeHtml(formatBeijingTime(log.created_at))}</td>
               </tr>
@@ -12574,6 +12573,18 @@ async function renderOperationLogs() {
   `;
 
   bindDateRangePickerControls();
+  document.querySelectorAll('[data-custody-log]').forEach(detail=>detail.addEventListener('toggle',async()=>{
+    if(!detail.open || detail.dataset.loaded) return;
+    const host=detail.querySelector('.custody-log-changes');
+    detail.dataset.loaded='loading'; host.textContent='正在加载…';
+    try {
+      const response=await fetch('/api/operation-logs/'+detail.dataset.custodyLog+'/custody-details');
+      if(!response.ok) throw Error('无法读取日志详情');
+      const result=await response.json();
+      host.replaceChildren(...result.changes.map(c=>{const p=document.createElement('p');p.textContent=c.text;return p;}));
+      detail.dataset.loaded='true';
+    } catch(e) {delete detail.dataset.loaded;host.textContent=e.message;}
+  }));
   bindOperationLogEvents();
 }
 

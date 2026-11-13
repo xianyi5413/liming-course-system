@@ -285,7 +285,7 @@ function commit(store, b, actor) {
       }
       store.run("SAVEPOINT tg_import_student");
       try {
-        if (!GRADES.includes(s.grade)) fail("托管年级仅支持初一、初二、初三");
+        if (!GRADES.includes(s.grade)) fail("托管年级仅支持三年级、初一、初二、初三");
         const id = selected.create
           ? Number(
               store.run(
@@ -427,7 +427,7 @@ function commit(store, b, actor) {
           ? "来源历史规则与已有规则重叠，待核对"
           : p.rules_pending
             ? "来源参数与制度说明冲突，待核对"
-            : "来源历史参数（归档），有效考勤按现行统一标准自动计费",
+            : "来源历史参数（归档），有效考勤按参与年级及生效规则自动计费",
         actor,
         p.rules_pending || conflict ? 1 : 0,
         p.id,
