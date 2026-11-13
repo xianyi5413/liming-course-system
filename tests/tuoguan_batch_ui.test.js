@@ -217,7 +217,7 @@ test("Edge matrix row/column intersection, preview, atomic save, unchanged DOM/s
         "scheduleAdaptiveTableColumns();new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))",
       );
       const layout = await c.evaluate(
-        `(()=>{const t=document.querySelector('.tg-matrix'),a=t.tHead.rows[0].cells,b=t.tHead.rows[1].cells;return {height:a[3].getBoundingClientRect().height,align:[...a].every((h,i)=>Math.abs(h.getBoundingClientRect().left-b[i].getBoundingClientRect().left)<1),frozen:[...t.tBodies[0].rows[0].cells].slice(0,3).every(c=>getComputedStyle(c).position==='sticky'),last:getComputedStyle(t.tBodies[0].rows[0].lastElementChild).position}})()`,
+        `(()=>{const t=document.querySelector('.tg-matrix'),a=t.tHead.rows[0].cells,b=t.tHead.rows[1].cells;return {height:a[3].getBoundingClientRect().height,align:[...a].every((h,i)=>Math.abs(h.getBoundingClientRect().left-b[i].getBoundingClientRect().left)<1),frozen:[...t.tBodies[0].rows[0].cells].slice(0,4).every(c=>getComputedStyle(c).position==='sticky'),last:getComputedStyle(t.tBodies[0].rows[0].lastElementChild).position}})()`,
       );
       assert.equal(layout.align, true);
       assert.equal(layout.height, 30);
@@ -248,7 +248,7 @@ test("Edge matrix row/column intersection, preview, atomic save, unchanged DOM/s
     );
     assert.equal(
       await c.evaluate(
-        'document.querySelector(".tg-matrix thead tr:last-child th:last-child").textContent',
+        'document.querySelector(".tg-matrix thead tr:last-child th:first-child").textContent',
       ),
       "选择",
     );
@@ -324,6 +324,12 @@ test("Edge matrix row/column intersection, preview, atomic save, unchanged DOM/s
         await c.evaluate("savedScroll"),
       );
       assert.equal(await n(), 0);
+      assert.equal(
+        await c.evaluate(
+          `(()=>{const el=document.querySelector('.tg-cell-button[data-student="1"][data-date="2026-09-03"]'),a=el.closest('td').getBoundingClientRect(),b=el.querySelector('.status-badge').getBoundingClientRect();return Math.abs(a.x+a.width/2-b.x-b.width/2)<1.1&&Math.abs(a.y+a.height/2-b.y-b.height/2)<1.1})()`,
+        ),
+        true,
+      );
     }
     assert.equal(await c.evaluate("posts.length"), 4);
     assert.equal(
@@ -674,4 +680,242 @@ test("v13 Excel restores batch attendance, money reversal chains, v5 identities 
     1,
   );
   restored.close();
+});
+test("Edge custody checklist icon is distinct, bounded and consistent in themes and collapsed navigation", async () => {
+  const b = await launchBrowser(path.join(dir, "edge-layout-icons"), {
+      browser: "edge",
+    }),
+    c = b.session;
+  try {
+    await open(c);
+    assert.equal(
+      await c.evaluate(
+        "new Set([NAV_ICONS.home,NAV_ICONS.tuoguan,NAV_ICONS.schedule,NAV_ICONS.students]).size",
+      ),
+      4,
+    );
+    assert.equal(
+      await c.evaluate('NAV_ICONS.home.includes("M4 10.5 12 4l8 6.5")'),
+      true,
+    );
+    for (const theme of ["light", "dark"])
+      for (const collapsed of [false, true]) {
+        await c.evaluate(
+          `document.documentElement.dataset.theme='${theme}';if(sidebarCollapsed!==${collapsed})document.querySelector('.sidebar-toggle').click()`,
+        );
+        await c.evaluate(
+          "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))",
+        );
+        const icons = await c.evaluate(
+          `['home','tuoguan','schedule','students'].map(key=>{const svg=document.querySelector('.nav-btn[data-nav-group="'+key+'"] svg'),s=getComputedStyle(svg),box=svg.getBBox();return {key,viewBox:svg.getAttribute('viewBox'),width:s.width,height:s.height,stroke:s.stroke,fill:s.fill,line:s.strokeWidth,color:s.color,bounded:box.x>=1&&box.y>=1&&box.x+box.width<=23&&box.y+box.height<=23}})`,
+        );
+        for (const icon of icons) {
+          assert.equal(icon.viewBox, "0 0 24 24");
+          assert.equal(icon.width, "18px");
+          assert.equal(icon.height, "18px");
+          assert.equal(icon.line, "1.8px");
+          assert.equal(icon.fill, "none");
+          assert.equal(icon.stroke, icon.color);
+          assert.equal(icon.bounded, true);
+        }
+        fs.writeFileSync(
+          path.join(dir, `icons-${theme}-${collapsed}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+      }
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await b.close();
+  }
+});
+test("Edge matrix four frozen columns and actual content centers survive resize, scroll, picker success/failure and empty data", async () => {
+  const b = await launchBrowser(path.join(dir, "edge-layout-centers"), {
+      browser: "edge",
+    }),
+    c = b.session;
+  try {
+    const admin = await loginApi("boss");
+    for (const [i, status] of ["出勤", "请假", "放假", "不适用"].entries()) {
+      const date = ["2026-09-10", "2026-09-11", "2026-09-14", "2026-09-15"][i];
+      assert.equal(
+        (
+          await call(admin, "tuoguan/attendance", {
+            date,
+            rows: [{ student_id: 1, status, version: 0 }],
+            request_id: crypto.randomUUID(),
+          })
+        ).status,
+        200,
+      );
+    }
+    await open(c);
+    const measure = () =>
+      c.evaluate(
+        `(()=>{const t=document.querySelector('.tg-matrix'),rows=[...t.rows],rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height}},center=(a,b)=>Math.max(Math.abs(a.left+a.width/2-b.left-b.width/2),Math.abs(a.top+a.height/2-b.top-b.height/2));return {columns:rows.map(r=>r.cells.length),headers:[...t.tHead.rows[1].cells].slice(0,4).map(c=>c.textContent.trim()),centers:rows.flatMap(r=>[...r.cells].map(cell=>{const child=cell.querySelector('input[type=checkbox],.entity-badge');const style=getComputedStyle(cell);return {text:cell.textContent,align:style.textAlign,vertical:style.verticalAlign,error:child?center(rect(child),rect(cell)):0}})),positions:rows.map(r=>[...r.cells].slice(0,4).map(rect)),dates:[...t.tHead.rows[1].cells].slice(4).map(rect),width:rect(t.tHead.rows[1].cells[0]).width,leftSelect:[...t.tBodies[0].rows].every(r=>r.cells[0].querySelectorAll('.tg-select-student').length===1&&!r.lastElementChild.querySelector('input')),indexes:[...t.tBodies[0].rows].map(r=>r.cells[1].textContent.trim())}})()`,
+      );
+    for (const width of [1440, 390, 1024])
+      for (const theme of ["light", "dark"]) {
+        await c.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: width === 390,
+        });
+        await c.evaluate(
+          `document.documentElement.dataset.theme='${theme}';if(sidebarCollapsed!==${width===390})document.querySelector('.sidebar-toggle').click();document.querySelector('.tg-scroll').scrollLeft=0;scheduleAdaptiveTableColumns();new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`,
+        );
+        const before = await measure();
+        assert.deepEqual(before.headers, ["选择", "序号", "学生", "年级"]);
+        assert.equal(new Set(before.columns).size, 1);
+        assert.equal(before.leftSelect, true);
+        assert.ok(before.width <= 46);
+        assert.deepEqual(before.indexes, ["1", "2"]);
+        assert.ok(
+          before.centers.every(
+            (x) =>
+              x.align === "center" && x.vertical === "middle" && x.error <= 1.1,
+          ),
+          JSON.stringify(before.centers.filter((x) => x.error > 1.1)),
+        );
+        await c.evaluate("document.querySelector('.tg-scroll').scrollLeft=320");
+        const after = await measure();
+        for (let r = 0; r < before.positions.length; r++)
+          for (let i = 0; i < 4; i++) {
+            assert.equal(
+              after.positions[r][i].left,
+              before.positions[r][i].left,
+            );
+            if (i)
+              assert.ok(
+                Math.abs(
+                  after.positions[r][i].left -
+                    after.positions[r][i - 1].left -
+                    after.positions[r][i - 1].width,
+                ) < 1,
+              );
+            assert.ok(
+              Math.abs(
+                after.positions[r][i].left - after.positions[0][i].left,
+              ) < 1,
+            );
+          }
+        assert.ok(after.dates[0].left < before.dates[0].left);
+        await c.evaluate("document.querySelector('.tg-scroll').scrollLeft=0");
+        fs.writeFileSync(
+          path.join(dir, `matrix-centered-${width}-${theme}.png`),
+          Buffer.from(
+            (await c.send("Page.captureScreenshot", { format: "png" })).data,
+            "base64",
+          ),
+        );
+      }
+    await c.send("Emulation.clearDeviceMetricsOverride");
+    await c.evaluate(
+      "document.querySelector('.tg-scroll').style.maxHeight='150px';document.querySelector('.tg-scroll').style.overflowY='auto';document.querySelector('.tg-scroll').scrollTop=20",
+    );
+    const pinned = await c.evaluate(
+      `(()=>{const t=document.querySelector('.tg-matrix'),wrap=document.querySelector('.tg-scroll');return {scrolled:wrap.scrollTop,top:t.tHead.rows[0].getBoundingClientRect().top,cellTop:t.tHead.rows[0].cells[0].getBoundingClientRect().top,wrapTop:wrap.getBoundingClientRect().top,second:t.tHead.rows[1].cells[0].getBoundingClientRect().top}})()`,
+    );
+    assert.ok(pinned.scrolled > 0);
+    assert.ok(Math.abs(pinned.cellTop - pinned.wrapTop) < 2);
+    assert.equal(pinned.second - pinned.cellTop, 30);
+    await c.evaluate(
+      "document.querySelector('.tg-scroll').style.maxHeight='';document.querySelector('.tg-scroll').scrollTop=0",
+    );
+    const target = '.tg-cell-button[data-student="1"][data-date="2026-09-10"]';
+    const cell = () =>
+      c.evaluate(
+        `(()=>{const el=document.querySelector('${target}'),r=el.closest('td').getBoundingClientRect(),b=el.querySelector('.status-badge').getBoundingClientRect();return {height:r.height,cx:r.x+r.width/2,cy:r.y+r.height/2,bx:b.x+b.width/2,by:b.y+b.height/2}})()`,
+      );
+    const original = await cell();
+    await c.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: original.cx,
+      y: original.cy,
+    });
+    assert.deepEqual(await cell(), original);
+    await c.click(target);
+    assert.deepEqual(await cell(), original);
+    await c.click('.custom-select-menu.open [data-value="请假"]');
+    await c.waitFor(
+      `document.querySelector('${target}').textContent==='请假'&&!document.querySelector('.custom-select-menu.open')`,
+    );
+    const saved = await cell();
+    // The existing success message may move the whole table; the cell itself must stay stable.
+    assert.equal(saved.height, original.height);
+    assert.ok(
+      Math.abs(saved.cx - saved.bx) < 1.1 &&
+        Math.abs(saved.cy - saved.by) < 1.1,
+    );
+    await c.evaluate(
+      `window.savedFetch=fetch;window.fetch=(url,...a)=>String(url).endsWith('/attendance')?Promise.reject(Error('合成保存失败')):savedFetch(url,...a)`,
+    );
+    await c.click(target);
+    await c.click('.custom-select-menu.open [data-value="放假"]');
+    await c.waitFor(
+      `!document.querySelector('.custom-select-menu.open')&&document.querySelector('#tg-msg').textContent.includes('合成保存失败')`,
+    );
+    const failed = await cell();
+    assert.equal(failed.height, original.height);
+    assert.ok(
+      Math.abs(failed.cx - failed.bx) < 1.1 &&
+        Math.abs(failed.cy - failed.by) < 1.1,
+    );
+    await c.evaluate("window.fetch=savedFetch");
+    await c.evaluate(
+      `document.querySelector('#tg-query').value='无匹配合成学生';document.querySelector('#tg-query').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`,
+    );
+    assert.equal(
+      await c.evaluate(
+        'document.querySelector(".tg-matrix tbody .empty").colSpan===document.querySelector(".tg-matrix").tHead.rows[1].cells.length',
+      ),
+      true,
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector(".tg-select-all").disabled'),
+      true,
+    );
+    const snap = await call(admin, "tuoguan/snapshot?month=2033-02");
+    assert.equal(
+      (
+        await call(admin, "tuoguan/remove-dates", {
+          month: "2033-02",
+          dates: snap.data.calendar
+            .filter((d) => d.enabled)
+            .map(({ date, version }) => ({ date, version })),
+          request_id: crypto.randomUUID(),
+        })
+      ).status,
+      200,
+    );
+    await c.click("#tg-reset");
+    await c.evaluate(
+      `document.querySelector('#tg-month').value='2033-02';document.querySelector('#tg-month').dispatchEvent(new Event('change'))`,
+    );
+    await c.waitFor(
+      `document.querySelector('[data-loaded-month]')?.dataset.loadedMonth==='2033-02'`,
+    );
+    assert.equal(
+      await c.evaluate(
+        '[...document.querySelectorAll(".tg-matrix tr")].every(r=>r.cells.length===4)',
+      ),
+      true,
+    );
+    assert.equal(
+      await c.evaluate(
+        'document.querySelectorAll(".tg-select-date,.tg-select-student:not(:disabled)").length',
+      ),
+      0,
+    );
+    assert.equal(
+      await c.evaluate('document.querySelector(".tg-select-all").disabled'),
+      true,
+    );
+    assert.deepEqual(c.exceptions, []);
+  } finally {
+    await b.close();
+  }
 });

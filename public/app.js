@@ -141,7 +141,7 @@ const READONLY_SAFE_MUTATION_PATHS = new Set([
 ]);
 const TEACHER_ALL_VALUE = "__all_teacher_scope__";
 const NAV_ICONS = {
-  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-7h6v7"></path></svg>`,
+  tuoguan: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2"></rect><path d="m7.5 8 1.5 1.5 2.5-3M14 8h2.5M8 13h8.5M8 17h8.5"></path></svg>`,
   home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"></path><path d="M6.5 10v9h11v-9"></path><path d="M10 19v-5h4v5"></path></svg>`,
   schedule: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M8 3.5v3M16 3.5v3M4 10h16"></path></svg>`,
   students: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 19c.7-3.4 2.6-5 5.5-5s4.8 1.6 5.5 5"></path><path d="M16 10.5c1.7.2 3 1.5 3.4 3.2M17 19h3.5"></path></svg>`,
@@ -3716,6 +3716,8 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   if (Number(table.dataset.frozenColumns) >= 2) {
     table.style.setProperty('--frozen-first-width', `${widths[0]}px`);
     table.style.setProperty('--frozen-second-edge', `${widths[0]+widths[1]}px`);
+    if (Number(table.dataset.frozenColumns) >= 4)
+      table.style.setProperty('--frozen-third-edge', `${widths[0]+widths[1]+widths[2]}px`);
   }
   columns.forEach((column, index) => {
     const definition = definitions[index];

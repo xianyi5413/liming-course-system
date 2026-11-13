@@ -390,7 +390,7 @@ window.TuoguanUI = (() => {
     return (!query || s.name.includes(query)) && (!grade || p?.grade === grade);
   }
   const table = (headers, rows, indexed = false, selectable = false) =>
-    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${selectable ? '<col data-column-type="select">' : ""}${indexed ? rowIndexColumn() : ""}${headers.map((h) => `<col data-column-type="full" data-min-width="0" data-alignment="${h.alignment || "center"}">`).join("")}</colgroup><thead><tr>${selectable ? '<th class="select-col"><input type="checkbox" class="tg-ledger-all" aria-label="全选当前托管资金记录"></th>' : ""}${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h.label || h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(selectable ? /^(<tr[^>]*><td class="select-col[^"]*"[^>]*>.*?<\/td>)/ : /^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed) + Number(selectable)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
+    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${selectable ? '<col data-column-type="select">' : ""}${indexed ? rowIndexColumn() : ""}${headers.map((h) => `<col data-column-type="full" data-min-width="0" data-alignment="${h.alignment || "center"}">`).join("")}</colgroup><thead><tr>${selectable ? '<th class="select-col">' + (selectable === true ? '<input type="checkbox" class="tg-ledger-all" aria-label="全选当前托管资金记录">' : esc(selectable)) + "</th>" : ""}${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h.label || h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(selectable ? /^(<tr[^>]*><td class="select-col[^"]*"[^>]*>.*?<\/td>)/ : /^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed) + Number(Boolean(selectable))}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
   const listTable = (headers, rows) => table(headers, rows, true);
   const tr = (values, attrs = "") =>
     `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
@@ -1113,13 +1113,23 @@ window.TuoguanUI = (() => {
         ? '<button class="btn" id="tg-batch-attendance" disabled>批量修改</button>'
         : "") +
       "</div>" +
-      listTable(
-        ["学生", "年级", ...dates.map((d) => d.slice(5)), "选择"],
+      table(
+        ["学生", "年级", ...dates.map((d) => d.slice(5))],
         monthStudents.map(
           (s) =>
             '<tr data-student="' +
             s.id +
-            '"><td>' +
+            '">' +
+            '<td class="select-col"><input type="checkbox" class="tg-select-student" data-id="' +
+            s.id +
+            '" aria-label="选择' +
+            esc(s.name) +
+            '本月考勤" ' +
+            (!canWrite || !dates.some((date) => currentPeriod(s, date))
+              ? "disabled"
+              : "") +
+            "></td>" +
+            "<td>" +
             renderStudentBadge(s, { grade: s.grade }) +
             "</td><td>" +
             renderGradeBadge(s.grade) +
@@ -1155,27 +1165,22 @@ window.TuoguanUI = (() => {
                 );
               })
               .join("") +
-            '<td class="select-col"><input type="checkbox" class="tg-select-student" data-id="' +
-            s.id +
-            '" aria-label="选择' +
-            esc(s.name) +
-            '本月考勤" ' +
-            (!canWrite || !dates.some((date) => currentPeriod(s, date))
-              ? "disabled"
-              : "") +
-            "></td></tr>",
+            "</tr>",
         ),
+        true,
+        "选择",
       );
     const matrix = body.querySelector(".tg-table");
     matrix.classList.add("tg-matrix");
-    matrix.dataset.frozenColumns = "3";
-    matrix.dataset.uniformFrom = "3";
-    matrix.dataset.uniformUntil = String(3 + dates.length);
+    matrix.dataset.frozenColumns = "4";
+    matrix.dataset.uniformFrom = "4";
+    matrix.dataset.uniformUntil = String(4 + dates.length);
     matrix.dataset.adaptiveHeaderRow = "1";
-    matrix.querySelector("col:last-child").dataset.columnType = "select";
     matrix.tHead.insertAdjacentHTML(
       "afterbegin",
-      '<tr class="tg-selection-head"><th></th><th></th><th></th>' +
+      '<tr class="tg-selection-head"><th class="select-col"><input type="checkbox" class="tg-select-all" aria-label="全选当前可编辑考勤" ' +
+        (!canWrite ? "disabled" : "") +
+        "></th><th></th><th></th><th></th>" +
         dates
           .map(
             (date) =>
@@ -1190,9 +1195,7 @@ window.TuoguanUI = (() => {
               "></th>",
           )
           .join("") +
-        '<th class="select-col"><input type="checkbox" class="tg-select-all" aria-label="全选当前可编辑考勤" ' +
-        (!canWrite ? "disabled" : "") +
-        "></th></tr>",
+        "</tr>",
     );
     const validCells = monthStudents.flatMap((s) =>
       dates

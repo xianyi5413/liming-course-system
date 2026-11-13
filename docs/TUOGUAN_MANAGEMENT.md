@@ -1,8 +1,66 @@
 # 托管管理实施与验收记录
 
-## 2026-11-13 托管批量签到与权限备份优化
+## 2026-11-13 托管图标、左侧选择与居中布局
 
-完成时间：2026-11-13 18:37（北京时间）。基线 `6e52e0ea975d5e0a685e01e03a8414b0bf2de075`；分支 `feature/tuoguan-batch-attendance-ui`；版本 `20261113-tuoguan-batch-attendance`。当前交互与年级规则以本节为准，历史记录不删除。
+完成时间：2026-11-13 18:52（北京时间）。基线 `71d49aca5076c66685ed62598250f9aefd552784`；分支 `feature/tuoguan-matrix-layout-icons`；版本 `20261113-tuoguan-matrix-layout`。本轮仅调整UI及运行版本标识，batch-attendance、考勤、收费、数据库和备份格式不改。
+
+### 实现
+
+- NAV_ICONS仅替换tuoguan为签到表：圆角矩形内一枚勾选、三条记录线。保留24×24 viewBox，复用.nav-icon的18px尺寸、currentColor、1.8px描边及圆角线端，不新增依赖；首页、排课、学生等图标保留。检查public/index.html现有主题初始化，无须改动。
+- renderMatrix复用table已有selectable列及序号插入机制，允许选择列表头传入文字“选择”；充值表原true参数仍显示资金全选。学生复选框整体移到行首，序号插在其后，末列为日期。空列表colspan按Boolean(selectable)计数，避免文字表头转Number得到NaN。第一表头行是全选、三个空格、各日期复选框；第二行是选择、序号、学生、年级、日期。
+- frozenColumns改为4，uniformFrom／uniformUntil从第5列开始；原adaptiveHeaderRow仍为1。通用列宽函数在四列冻结时追加前三列实际宽度之和作为--frozen-third-edge，沿用原两个偏移；CSS同步第4列sticky、背景及表头层级。未另建宽度测量或状态管理。
+- 删除学生列左对齐例外，矩阵th／td统一text-align:center与vertical-align:middle。Edge实测原状态按钮76px最小宽度超出格内可用空间，标签中心偏移约8.5px；改为100%格内宽度、border-box及flex居中，保留36px最小高度。复选框block＋自动水平外边距，标签vertical-align:middle；消除日期复选框约1.22px的行内基线偏移。未新增!important或空格／固定margin补偿。
+- selectedStudents／selectedDates、paintSelection／clearSelection、批量预览与请求、版本／幂等／事务、局部更新、备注和结算全部沿用。选择框仍只作为前端临时状态；没有重复事件监听或新增业务字段。
+
+### 定向验证
+
+本轮8项独立用例最终通过，未解决失败0，没有重跑上一轮全部25项或全量财务回归。
+
+1. `node --test --test-name-pattern='checklist icon|four frozen|matrix row|role tree|v13 Excel' tests/tuoguan_batch_ui.test.js`：涉及5项，初跑4通过、居中项失败。通过项为图标、批量主路径、权限及Excel恢复。居中检查定位到状态按钮实际偏移与复选框基线问题，修复后定向复测。
+2. `node --test --test-name-pattern='four frozen' tests/tuoguan_batch_ui.test.js`：最终1项通过；中间将“保存提示推动整张表”的原行为与单元格行高／居中区分，修正测试比较口径，没有为通过测试删除原提示。悬停、打开选择器前后的绝对边界仍严格相等。
+3. `node --test --test-name-pattern='matrix row|four frozen' tests/tuoguan_batch_ui.test.js`：最终2项通过，补查批量更新后的标签中心及手机收起侧栏布局。含行／列／交叉选择、全选清空、预览数量、四状态局部保存、未选格不变、滚动和筛选保持、切月清空；四列冻结偏移、两行表头对齐、序号、44px选择列、无右侧复选框、空学生、无日期、纵向表头冻结及横向滚动均通过。
+4. PowerShell `$env:TEST_BROWSER='edge'; node --test tests/adaptive_table_columns.test.js`：2项通过，既有录入、教师、账号表及1100行测量无回归。
+5. `node --test --test-name-pattern='Edge recharge has' tests/tuoguan_protection_ui.test.js`：1项通过，通用table的原充值全选、表头顺序、标签、金额对齐和刷新保持。
+6. public/tuoguan.js、public/app.js、src/server.js的`node --check`及`git diff --check`通过。
+
+边界框测试覆盖1440／1024／390宽度、浅色／深色、侧栏展开／收起；检查全部单元格计算样式、姓名／年级／四状态／复选框真实中心，偏差在1.1px内（含边框像素）。横向滚动后前四列位置不变且边缘相接，表头／正文对应；纵向两层表头间距30px。悬停、打开／关闭选择器不改变单元格行高，普通保存成功／失败及批量保存后仍居中。SVG实际getBBox在viewBox内，颜色／线宽／尺寸与其他导航一致，并检查了明暗主题截图。
+
+### 权限、备份与真实数据
+
+PERMISSION_TREE、authorizeApi、userHasAnyPermission及托管路由已检查，仍是tgAttendance与tgFinance两项；本轮没有修改授权。复用角色管理Edge用例验证勾选保存、会话即时生效、只读界面禁用；签到写权限可调用普通及批量接口，缺少签到权限、只读、仅财务权限均被拒绝，默认角色权限不扩大。
+
+full_backup.js的FORMAT_VERSION仍为13，field_definitions继续包含13张托管表、角色及角色权限、账号及账号权限。复用上轮隔离恢复用例，批量出勤／请假／不适用、备注、停用日期、充值更正链和扣费／冲正证据、档案状态／参与周期、便携标识、审计及权限逐字段一致；9／10月汇总和账户余额一致，恢复settlement.updated=0，外键0错误、完整性ok，v5文本记录一致。复选框状态未入库，也未加入Excel字段。
+
+本地5177更新前读取原PID72820的真实工作目录与环境，确认本仓库及data/liming-local.sqlite。私有备份位于`.tuoguan-local/matrix-layout-20261113/before.sqlite`。更新后Edge157只读打开9／10／11月、选择预览后取消，验证左侧顺序、前四列冻结、列数及居中；可编辑范围仍为330／234／312格，业务写入0。51张表指纹仅roles启动时间戳及operation_logs登录记录变化，角色其他字段一致；18档案、40周期、565格考勤、499条账本及各月金额不变，补课与教师薪资等业务表未修改。临时凭据已删除，数据库、截图和学生信息不提交。
+
+### 文件、价值与后续
+
+主要修改：public/app.js（托管图标、第四列偏移）、public/tuoguan.js（复用左侧选择列、表头和空态列数）、public/styles.css（冻结层级、居中与按钮宽度）、src/server.js（仅版本标识）、tests/tuoguan_batch_ui.test.js（更新列序及新增图标／布局验证），以及README和本实施文档。无新增依赖，无本轮未完成项或未解决失败。
+
+1. 改动值得做，主要改善识别、选择位置与对齐，价值在日常操作一致性，不改变业务能力。
+2. 签到表图标与房屋、日历、人物明显不同，小尺寸及主题验证通过；辨识手感仍有个人偏好。
+3. 左侧选择更符合现有充值等表格习惯，并可与固定学生信息一起保持可见。
+4. 实际列宽驱动偏移，窗口变化和横向滚动已验证；窄屏四列占用较多空间，日期仍需横向滚动，不宜再增加冻结列。
+5. 状态居中由真实边界框验证，已消除按钮宽度导致的偏移，没有用文字空格伪造。
+6. 复用table和列宽机制，只有最小补充，没有新增测量循环、框架或选择状态副本。
+7. 原批量规则保持，主路径和局部更新回归通过。
+8. 权限结构无需调整，沿用原签到写权限和后端校验。
+9. Excel无需升级，现有v13已覆盖业务数据；临时选择不应备份。
+10. 后续可根据手机实际使用反馈调整紧凑程度，优先维持统一表格组件。
+11. 暂不建议新增图标库、更多冻结列、逐格复选框、独立权限键或重写批量收费。
+
+### Obsidian总结（200字以内）
+
+```text
+教务系统｜托管图标与签到矩阵布局优化
+1. 托管改用签到表SVG，与首页、排课和学生图标区分。
+2. 学生复选框移至最左侧，顶部日期选择保留，前四列冻结，表头与标签统一居中。
+3. 批量规则、收费和权限保持；Excel v13隔离恢复通过，8项定向测试通过，历史业务数据未变。
+```
+
+## 2026-11-13 托管批量签到与权限备份优化（历史记录）
+
+完成时间：2026-11-13 18:37（北京时间）。基线 `6e52e0ea975d5e0a685e01e03a8414b0bf2de075`；分支 `feature/tuoguan-batch-attendance-ui`；版本 `20261113-tuoguan-batch-attendance`。本节保留当轮记录；当前交互以文首最新章节为准，年级与结算规则继续沿用。
 
 ### 实现与复用
 
