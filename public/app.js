@@ -3678,7 +3678,7 @@ function applyDataDrivenAdaptiveColumns(table, columns, headerCells, definitions
 
 function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   if (!table?.isConnected) return [];
-  const headerCells = [...table.querySelectorAll(":scope > thead > tr:first-child > th")];
+  const headerCells = [...(table.tHead?.rows[Number(table.dataset.adaptiveHeaderRow || 0)]?.cells || [])];
   const columns = [...table.querySelectorAll(":scope > colgroup > col")];
   if (!headerCells.length || columns.length !== headerCells.length) return [];
 
@@ -3709,8 +3709,9 @@ function applyAdaptiveTableColumns({ table, flexibleColumn = null } = {}) {
   });
 
   if (table.dataset.uniformFrom) {
-    const start = Number(table.dataset.uniformFrom), width = Math.max(...widths.slice(start));
-    for (let i = start; i < widths.length; i++) widths[i] = width;
+    const start = Number(table.dataset.uniformFrom), end = Number(table.dataset.uniformUntil || widths.length),
+      width = Math.max(...widths.slice(start, end));
+    for (let i = start; i < end; i++) widths[i] = width;
   }
   if (Number(table.dataset.frozenColumns) >= 2) {
     table.style.setProperty('--frozen-first-width', `${widths[0]}px`);

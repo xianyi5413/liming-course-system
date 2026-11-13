@@ -134,6 +134,41 @@ function createStore(db) {
       return saved;
     });
   }
+  // mutate() owns the single transaction, including every date and settlement.
+  function batchAttendance(b, actor) {
+    const { start, end } = require("./tuoguan_calendar").bounds(b.month);
+    if (!STATUSES.includes(b.status)) fail("考勤状态无效");
+    if (!Array.isArray(b.cells) || !b.cells.length || b.cells.length > 15500)
+      fail("请选择1至15500个考勤单元格");
+    const seen = new Set(),
+      grouped = new Map();
+    for (const cell of b.cells) {
+      if (
+        !cell ||
+        !Number.isSafeInteger(cell.student_id) ||
+        cell.student_id <= 0 ||
+        !Number.isSafeInteger(cell.version) ||
+        cell.version < 0
+      )
+        fail("考勤目标或版本无效");
+      date(cell.date);
+      if (cell.date < start || cell.date > end) fail("批量修改不能跨月份");
+      const key = cell.student_id + ":" + cell.date;
+      if (seen.has(key)) fail("重复考勤单元格");
+      seen.add(key);
+      if (!grouped.has(cell.date)) grouped.set(cell.date, []);
+      grouped
+        .get(cell.date)
+        .push({
+          student_id: cell.student_id,
+          version: cell.version,
+          status: b.status,
+        });
+    }
+    return [...grouped]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([date, rows]) => attendance({ date, rows }, actor));
+  }
   function savePeriod(b) {
     student(b.student_id);
     date(b.start_date);
@@ -434,6 +469,8 @@ function createStore(db) {
             }
           : get("SELECT * FROM tg_students WHERE id=?", id);
       } else if (action === "attendance") result = attendance(b, actor);
+      else if (action === "batch-attendance")
+        result = batchAttendance(b, actor);
       else if (action === "period") {
         if (b.month) {
           const { start, end } = require("./tuoguan_calendar").bounds(b.month);

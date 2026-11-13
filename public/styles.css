@@ -14369,13 +14369,15 @@ table.adaptive-table td.single-line-note,
 .tg-member { display: inline-flex; align-items: center; gap: var(--space-2); border-radius: var(--radius-sm); }
 .tg-member[data-selected="true"] { border-color: var(--accent); background: var(--success-bg); }
 .tg-student-management [role="alert"] { color: var(--danger); }
-.tg-student-management :is([role="alert"],[role="status"]):empty { display: none; }
+.tg-student-management :is([role="alert"],[role="status"]) { min-height: 1.5em; margin: 4px 0; }
+.tg-member-mark { display: inline-block; width: 1.4em; text-align: center; flex: none; }
+.tg-member:disabled { opacity: 1; }
+.tg-member[aria-busy="true"] { cursor: wait; }
 .tg-matrix-actions { justify-content: flex-start; }
 .tg-date-nav { flex-wrap: nowrap; }
 .tg-cell-button { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 76px; min-height: 36px; padding: 4px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .tg-cell-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tg-cell-button:disabled { cursor: default; }
-.tg-unsaved-dot { color: var(--warning); margin-left: 3px; font-size: 20px; }
 .tg-negative, .tg-form [role=alert] { color: var(--danger); }
 .tg-empty { padding: var(--space-8) var(--space-4); white-space: normal; }
 .tg-empty strong { display: block; color: var(--ink); font-size: var(--text-body); }
@@ -14420,3 +14422,8 @@ table.adaptive-table td.single-line-note,
 .tg-ledger-row[tabindex="0"] { cursor: pointer; }
 .tg-ledger-row[tabindex="0"]:is(:hover,:focus-visible) td { background: var(--table-head); }
 .tg-student-create { justify-content: flex-end; margin-bottom: var(--space-3); }
+
+/* The selection row shares the date colgroup and the original three frozen columns. */
+.tg-matrix .tg-selection-head th { height: 30px; padding-top: 0; padding-bottom: 0; box-sizing: border-box; }
+.tg-matrix thead tr:nth-child(2) th { top: 30px; }
+.tg-matrix input[type="checkbox"] { vertical-align: middle; margin: 0; }

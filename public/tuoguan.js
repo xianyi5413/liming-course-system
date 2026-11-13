@@ -861,11 +861,19 @@ window.TuoguanUI = (() => {
       for (const button of groups.querySelectorAll("[data-member]")) {
         const id = Number(button.dataset.member),
           selected = periods(id).length > 0;
-        button.dataset.selected = String(selected);
-        button.setAttribute("aria-pressed", String(selected));
-        button.disabled = !ready || busy.has(id);
-        button.querySelector(".tg-member-mark").textContent =
-          protectedIds.has(id) && selected ? "🔒" : selected ? "✓" : "○";
+        // Keep unchanged cards untouched, including their text nodes.
+        if (button.dataset.selected !== String(selected)) {
+          button.dataset.selected = String(selected);
+          button.setAttribute("aria-pressed", String(selected));
+        }
+        const waiting = !ready || busy.has(id);
+        if (button.disabled !== waiting) button.disabled = waiting;
+        if (button.getAttribute("aria-busy") !== String(busy.has(id)))
+          button.setAttribute("aria-busy", String(busy.has(id)));
+        const mark =
+            protectedIds.has(id) && selected ? "🔒" : selected ? "✓" : "○",
+          icon = button.querySelector(".tg-member-mark");
+        if (icon.textContent !== mark) icon.textContent = mark;
       }
     }
     function accept(next) {
@@ -1042,6 +1050,10 @@ window.TuoguanUI = (() => {
     const month = day.slice(0, 7),
       start = month + "-01",
       end = month + "-31";
+    const canWrite = canView("tgAttendance") && !isReadonlyUser();
+    const selectedStudents = new Set(),
+      selectedDates = new Set();
+    let batchSaving = false;
     const source = data,
       host = root,
       owner = auth.user?.id;
@@ -1090,21 +1102,19 @@ window.TuoguanUI = (() => {
         : editable
           ? defaultStatus
           : "—";
-      return (
-        badge(label) +
-        (!record && editable
-          ? '<span class="tg-unsaved-dot" title="尚未保存" aria-label="尚未保存">·</span>'
-          : "")
-      );
+      return badge(label);
     };
     body.innerHTML =
       '<div class="tg-actions tg-matrix-actions">' +
       (finance
         ? '<button class="btn" id="tg-manage-students">管理学生</button><button class="btn" id="tg-manage-dates">管理日期</button>'
         : "") +
+      (canWrite
+        ? '<button class="btn" id="tg-batch-attendance" disabled>批量修改</button>'
+        : "") +
       "</div>" +
       listTable(
-        ["学生", "年级", ...dates.map((d) => d.slice(5))],
+        ["学生", "年级", ...dates.map((d) => d.slice(5)), "选择"],
         monthStudents.map(
           (s) =>
             '<tr data-student="' +
@@ -1132,7 +1142,7 @@ window.TuoguanUI = (() => {
                       '" aria-label="' +
                       esc(s.name + " " + date + " 考勤") +
                       '" ' +
-                      (isReadonlyUser() ? "disabled" : "") +
+                      (!canWrite ? "disabled" : "") +
                       ">" +
                       cellContent(
                         record,
@@ -1145,13 +1155,248 @@ window.TuoguanUI = (() => {
                 );
               })
               .join("") +
-            "</tr>",
+            '<td class="select-col"><input type="checkbox" class="tg-select-student" data-id="' +
+            s.id +
+            '" aria-label="选择' +
+            esc(s.name) +
+            '本月考勤" ' +
+            (!canWrite || !dates.some((date) => currentPeriod(s, date))
+              ? "disabled"
+              : "") +
+            "></td></tr>",
         ),
       );
     const matrix = body.querySelector(".tg-table");
     matrix.classList.add("tg-matrix");
     matrix.dataset.frozenColumns = "3";
     matrix.dataset.uniformFrom = "3";
+    matrix.dataset.uniformUntil = String(3 + dates.length);
+    matrix.dataset.adaptiveHeaderRow = "1";
+    matrix.querySelector("col:last-child").dataset.columnType = "select";
+    matrix.tHead.insertAdjacentHTML(
+      "afterbegin",
+      '<tr class="tg-selection-head"><th></th><th></th><th></th>' +
+        dates
+          .map(
+            (date) =>
+              '<th><input type="checkbox" class="tg-select-date" data-date="' +
+              date +
+              '" aria-label="选择' +
+              date +
+              '考勤" ' +
+              (!canWrite || !monthStudents.some((s) => currentPeriod(s, date))
+                ? "disabled"
+                : "") +
+              "></th>",
+          )
+          .join("") +
+        '<th class="select-col"><input type="checkbox" class="tg-select-all" aria-label="全选当前可编辑考勤" ' +
+        (!canWrite ? "disabled" : "") +
+        "></th></tr>",
+    );
+    const validCells = monthStudents.flatMap((s) =>
+      dates
+        .filter((date) => currentPeriod(s, date))
+        .map((date) => ({ student_id: s.id, date })),
+    );
+    const targets = () =>
+      !selectedStudents.size && !selectedDates.size
+        ? []
+        : validCells.filter(
+            (cell) =>
+              (!selectedStudents.size ||
+                selectedStudents.has(cell.student_id)) &&
+              (!selectedDates.size || selectedDates.has(cell.date)),
+          );
+    const batchButton = body.querySelector("#tg-batch-attendance"),
+      allBox = matrix.querySelector(".tg-select-all");
+    function paintSelection() {
+      const count = targets().length;
+      if (batchButton) {
+        batchButton.disabled = !count || batchSaving;
+        batchButton.textContent = count
+          ? "批量修改（" + count + "格）"
+          : "批量修改";
+      }
+      allBox.disabled = !canWrite || !validCells.length || batchSaving;
+      allBox.checked = !!count && count === validCells.length;
+      allBox.indeterminate = !!count && count < validCells.length;
+    }
+    function clearSelection() {
+      selectedStudents.clear();
+      selectedDates.clear();
+      for (const box of matrix.querySelectorAll('input[type="checkbox"]'))
+        box.checked = false;
+      paintSelection();
+    }
+    for (const box of matrix.querySelectorAll(
+      ".tg-select-student,.tg-select-date",
+    ))
+      box.onchange = () => {
+        if (batchSaving) return;
+        const set = box.classList.contains("tg-select-student")
+            ? selectedStudents
+            : selectedDates,
+          key = box.dataset.id ? Number(box.dataset.id) : box.dataset.date;
+        if (box.checked) set.add(key);
+        else set.delete(key);
+        paintSelection();
+      };
+    allBox.onchange = () => {
+      const checked = allBox.checked;
+      clearSelection();
+      if (checked)
+        for (const box of matrix.querySelectorAll(
+          ".tg-select-student:not(:disabled)",
+        )) {
+          box.checked = true;
+          selectedStudents.add(Number(box.dataset.id));
+        }
+      paintSelection();
+    };
+    paintSelection();
+    const sameMatrix = () =>
+      host === root &&
+      source === data &&
+      owner === auth.user?.id &&
+      matrix.isConnected &&
+      day.slice(0, 7) === month &&
+      host.dataset.loadedMonth === month;
+    if (batchButton)
+      batchButton.onclick = () => {
+        if (!sameMatrix() || cellWrites || dateWrites || studentWrites)
+          return message("请等待保存或加载完成");
+        if (
+          root.querySelector("#tg-query").value.trim() !== query ||
+          root.querySelector("#tg-grade").value !== grade
+        )
+          return message("筛选正在更新，请重新选择");
+        closeScheduleInlinePicker();
+        const cells = targets().map((cell) => ({
+          ...cell,
+          version:
+            attendance.get(cell.student_id + ":" + cell.date)?.version || 0,
+        }));
+        if (!cells.length) return;
+        const saved = cells.map((cell) =>
+          attendance.get(cell.student_id + ":" + cell.date),
+        );
+        const excluded =
+          (selectedStudents.size || monthStudents.length) *
+            (selectedDates.size || dates.length) -
+          cells.length;
+        const dialog = CourseDetails.dialog(
+          "批量修改考勤",
+          '<form class="tg-form"><p>已选：' +
+            new Set(cells.map((c) => c.student_id)).size +
+            "名学生、" +
+            new Set(cells.map((c) => c.date)).size +
+            "个日期、" +
+            cells.length +
+            "个考勤单元格</p>" +
+            select("status", "修改为", statuses, "出勤") +
+            '<p data-batch-preview></p><p role="alert"></p>' +
+            '<div class="modal-actions"><button type="button" class="btn" data-cancel>取消</button>' +
+            '<button type="submit" class="btn primary">确认修改</button></div></form>',
+          { size: "compact" },
+        );
+        const control = dialog.element.querySelector("[name=status]"),
+          submit = dialog.element.querySelector("[type=submit]");
+        control._renderOption = badge;
+        const preview = () => {
+          const changed = saved.filter(
+              (r) => r && r.status !== control.value,
+            ).length,
+            first = saved.filter((r) => !r).length;
+          dialog.element.querySelector("[data-batch-preview]").textContent =
+            "实际修改 " +
+            (changed + first) +
+            " 格：已保存状态变更 " +
+            changed +
+            " 格，首次保存 " +
+            first +
+            " 格；状态相同 " +
+            (cells.length - changed - first) +
+            " 格不重复扣费；已排除不可编辑 " +
+            excluded +
+            " 格。";
+        };
+        control.onchange = preview;
+        preview();
+        enhanceCustomSelects();
+        dialog.element.querySelector("[data-cancel]").onclick = dialog.close;
+        dialog.element.querySelector("form").onsubmit = async (event) => {
+          event.preventDefault();
+          if (submit.disabled) return;
+          const error = dialog.element.querySelector("[role=alert]");
+          if (!sameMatrix() || !canView("tgAttendance") || isReadonlyUser()) {
+            error.textContent = "当前页面或权限已变化，请关闭后重新选择";
+            return;
+          }
+          if (cellWrites || dateWrites || studentWrites) {
+            error.textContent = "请等待其他保存完成";
+            return;
+          }
+          submit.disabled = true;
+          submit.textContent = "正在修改…";
+          control.disabled = true;
+          syncCustomSelect(control, control.nextElementSibling);
+          batchSaving = true;
+          cellWrites++;
+          paintSelection();
+          try {
+            const result = await post("batch-attendance", {
+              month,
+              status: control.value,
+              cells,
+            });
+            if (!sameMatrix()) {
+              dialog.close();
+              return;
+            }
+            const rows = Array.isArray(result) ? result : result.rows;
+            const changed = new Map(
+              rows.map((row) => [row.student_id + ":" + row.date, row]),
+            );
+            source.attendance = source.attendance.map((row) => {
+              const key = row.student_id + ":" + row.date,
+                next = changed.get(key);
+              changed.delete(key);
+              return next || row;
+            });
+            source.attendance.push(...changed.values());
+            for (const row of rows) {
+              attendance.set(row.student_id + ":" + row.date, row);
+              const button = matrix.querySelector(
+                '.tg-cell-button[data-student="' +
+                  row.student_id +
+                  '"][data-date="' +
+                  row.date +
+                  '"]',
+              );
+              if (button) button.innerHTML = cellContent(row, true);
+            }
+            clearSelection();
+            dialog.close();
+            message("批量修改已完成");
+          } catch (err) {
+            if (dialog.element.isConnected) error.textContent = err.message;
+          } finally {
+            batchSaving = false;
+            cellWrites--;
+            submit.disabled = false;
+            submit.textContent = "确认修改";
+            control.disabled = false;
+            if (control.isConnected)
+              syncCustomSelect(control, control.nextElementSibling);
+            paintSelection();
+            if (!cellWrites && filterQueued && sameMatrix()) {
+              filterQueued = false;
+              draw();
+            }
+          }
+        };
+      };
     body
       .querySelector("#tg-manage-students")
       ?.addEventListener("click", manageMatrixStudents);
@@ -1160,7 +1405,8 @@ window.TuoguanUI = (() => {
       ?.addEventListener("click", manageMatrixDates);
     for (const button of body.querySelectorAll(".tg-cell-button"))
       button.onclick = (event) => {
-        if (studentWrites || dateWrites) return message("请等待保存完成");
+        if (batchSaving || studentWrites || dateWrites)
+          return message("请等待保存完成");
         if (button.disabled || event.target.closest(".custom-select")) return;
         const id = Number(button.dataset.student),
           date = button.dataset.date,
@@ -1483,7 +1729,10 @@ window.TuoguanUI = (() => {
       if (!gradesByRecord.has(row.id))
         gradesByRecord.set(
           row.id,
-          period(row.student_id, row.date)?.grade || "未记录",
+          [
+            period(row.student_id, row.date)?.grade,
+            studentById.get(row.student_id)?.grade,
+          ].find((value) => grades.includes(value)) || "未记录",
         );
       return gradesByRecord.get(row.id);
     };

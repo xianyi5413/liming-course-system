@@ -372,8 +372,7 @@ test("Edge statistics share filtered rows, historical grades, real IDs and effec
     assert.deepEqual(
       groups[0].rows.map((r) => r.slice(0, 2)),
       [
-        ["初一", 133],
-        ["未记录", 10],
+        ["初一", 143],
       ],
     );
     assert.deepEqual(
@@ -394,7 +393,7 @@ test("Edge statistics share filtered rows, historical grades, real IDs and effec
     await c.evaluate(
       "document.querySelector('#tg-grade').value='初一';document.querySelector('#tg-grade').dispatchEvent(new Event('change'))",
     );
-    assert.deepEqual(await cardValues(c), [150, 15, 133, 3, 2, 32]);
+    assert.deepEqual(await cardValues(c), [160, 15, 143, 4, 3, 32]);
     await c.click("#tg-reset");
     await c.evaluate(
       "document.querySelector('#tg-query').value='合成新生';document.querySelector('#tg-query').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))",
@@ -408,9 +407,8 @@ test("Edge statistics share filtered rows, historical grades, real IDs and effec
     assert.deepEqual(
       groups[0].rows.map((r) => r.slice(0, 2)),
       [
-        ["初一", 133],
+        ["初一", 143],
         ["初二", 60],
-        ["未记录", 10],
       ],
     );
     // Edit the October transaction: changing amount/channel uses the same refresh for cards and table.

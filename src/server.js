@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-protection-badges";
+const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-batch-attendance";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -12225,8 +12225,11 @@ async function handleApi(req, res, url) {
   if (url.pathname.startsWith('/api/tuoguan/')) {
     const action=url.pathname.slice('/api/tuoguan/'.length);
     const finance=isSuperRole(user.role)||userHasAnyPermission(user,['tgFinance']);
-    const allowed=finance||userHasAnyPermission(user,['tgAttendance']);
-    if(!allowed || (!finance && !['snapshot','attendance'].includes(action))) return sendError(res,403,'无托管操作权限');
+    const attendanceAction=['attendance','batch-attendance'].includes(action);
+    const attendanceAllowed=isSuperRole(user.role)||userHasAnyPermission(user,['tgAttendance']);
+    const allowed=finance||attendanceAllowed;
+    if(attendanceAction&&!attendanceAllowed)return sendError(res,403,'无托管签到权限');
+    if(!allowed || (!finance && !['snapshot','attendance','batch-attendance'].includes(action))) return sendError(res,403,'无托管操作权限');
     try {
       if(req.method==='GET'&&action==='snapshot') {
         if(url.searchParams.get('students_only')==='1' || url.searchParams.get('ledger_only')==='1') {
@@ -12272,8 +12275,8 @@ async function handleApi(req, res, url) {
       }
       const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
       const result=tuoguanStore.mutate(action,body,actor);
-      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤',money:'托管'+(body.kind||'资金'),'money-edit':'编辑托管资金','money-delete':'删除托管资金',rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.records?.length||body.rows?.length||body.students?.length||body.dates?.length||1}},req);
-      return sendJson(res,!finance&&action==='attendance'?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
+      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤','batch-attendance':'批量修改托管考勤',money:'托管'+(body.kind||'资金'),'money-edit':'编辑托管资金','money-delete':'删除托管资金',rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.cells?.length||body.records?.length||body.rows?.length||body.students?.length||body.dates?.length||1}},req);
+      return sendJson(res,!finance&&attendanceAction?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
     }catch(error){if(req.method==='POST')writeOperationLog(user,{operation_type:'托管操作失败',operation_content:action+'：操作未完成',target_type:'tuoguan',result_status:'failure'},req);return sendError(res,error.status||400,error.message);}
   }
 

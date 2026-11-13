@@ -232,7 +232,7 @@ test("Edge recharge has separate shared rectangular badges, typed amount alignme
       await c.evaluate(
         'document.querySelector(".tg-ledger-row td:nth-child(5) .grade-badge").textContent',
       ),
-      "未记录",
+      "初一",
     );
     const appearance = () =>
       c.evaluate(
@@ -266,7 +266,7 @@ test("Edge recharge has separate shared rectangular badges, typed amount alignme
     );
     assert.equal(
       await c.evaluate('document.querySelectorAll(".tg-ledger-row").length'),
-      1,
+      2,
     );
     assert.equal(
       await c.evaluate(
@@ -274,7 +274,7 @@ test("Edge recharge has separate shared rectangular badges, typed amount alignme
       ),
       "初一",
     );
-    assert.equal((await cards(c))[3], 1);
+    assert.equal((await cards(c))[3], 2);
     await c.click("#tg-reset");
     await c.click("#tg-money");
     await c.evaluate(
