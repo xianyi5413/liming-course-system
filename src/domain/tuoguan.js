@@ -194,6 +194,23 @@ function createStore(db) {
       fail("周期已变更，请刷新", 409);
     if (
       old &&
+      old.grade !== b.grade &&
+      (get(
+        "SELECT id FROM tg_attendance WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
+        b.student_id,
+        old.start_date,
+        old.end_date || "9999-12-31",
+      ) ||
+        get(
+          "SELECT id FROM tg_ledger WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
+          b.student_id,
+          old.start_date,
+          old.end_date || "9999-12-31",
+        ))
+    )
+      fail("该参与周期已有考勤或资金，请通过学生档案按生效日期修改年级", 409);
+    if (
+      old &&
       all(
         "SELECT date FROM tg_attendance WHERE student_id=? AND date>=? AND date<=?",
         b.student_id,
@@ -393,6 +410,73 @@ function createStore(db) {
       Number(inserted.lastInsertRowid),
     );
   }
+  function changeGrade(profile, grade, effectiveDate, actor) {
+    date(effectiveDate);
+    const before = all(
+      "SELECT * FROM tg_periods WHERE student_id=? AND COALESCE(end_date,'9999-12-31')>=? ORDER BY start_date,id",
+      profile.id,
+      effectiveDate,
+    ).filter((p) => p.grade !== grade);
+    for (const p of before) {
+      const start = p.start_date > effectiveDate ? p.start_date : effectiveDate,
+        end = p.end_date || "9999-12-31";
+      const saved = get(
+        "SELECT date FROM tg_attendance WHERE student_id=? AND date BETWEEN ? AND ? ORDER BY date LIMIT 1",
+        profile.id,
+        start,
+        end,
+      );
+      const money = get(
+        "SELECT date FROM tg_ledger WHERE student_id=? AND date BETWEEN ? AND ? ORDER BY date LIMIT 1",
+        profile.id,
+        start,
+        end,
+      );
+      if (saved || money)
+        fail(
+          "年级变更范围内的" +
+            (saved?.date || money.date) +
+            "已有考勤或资金记录，请选择这些记录之后的生效日期；历史记录不会重算",
+          409,
+        );
+    }
+    for (const p of before) {
+      if (p.start_date < effectiveDate) {
+        const prior = new Date(effectiveDate + "T00:00:00Z");
+        prior.setUTCDate(prior.getUTCDate() - 1);
+        run(
+          "UPDATE tg_periods SET end_date=?,version=version+1 WHERE id=?",
+          prior.toISOString().slice(0, 10),
+          p.id,
+        );
+        run(
+          "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,default_status,notes) VALUES(?,?,?,?,?,?,?)",
+          profile.id,
+          grade,
+          effectiveDate,
+          p.end_date,
+          p.status,
+          p.default_status,
+          p.notes,
+        );
+      } else
+        run(
+          "UPDATE tg_periods SET grade=?,version=version+1 WHERE id=?",
+          grade,
+          p.id,
+        );
+    }
+    audit(actor, "年级生效", {
+      student_id: profile.id,
+      student_name: profile.name,
+      effective_date: effectiveDate,
+      before,
+      after: all(
+        "SELECT * FROM tg_periods WHERE student_id=? ORDER BY start_date,id",
+        profile.id,
+      ),
+    });
+  }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
       const auditStart = get("SELECT COALESCE(MAX(id),0) id FROM tg_audit").id;
@@ -418,6 +502,10 @@ function createStore(db) {
           const old = get("SELECT * FROM tg_students WHERE id=?", b.id);
           if (!old || old.version !== b.version)
             fail("托管档案已变更，请刷新", 409);
+          if (old.grade !== grade) {
+            if (!b.grade_effective_date) fail("修改年级请选择生效日期");
+            changeGrade(old, grade, b.grade_effective_date, actor);
+          }
           run(
             "UPDATE tg_students SET name=?,grade=?,notes=?,status=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             name,
@@ -735,6 +823,17 @@ function createStore(db) {
           ...sums,
           grade: historicalGrade,
           has_attendance: saved.some((a) => a.status !== "未登记"),
+          has_month_business:
+            saved.length > 0 ||
+            periods.some(
+              (p) =>
+                p.student_id === s.id &&
+                p.start_date <= end &&
+                (!p.end_date || p.end_date >= start),
+            ) ||
+            (ledgerByStudent.get(s.id) || []).some(
+              (r) => !r.voided_at && r.date >= start,
+            ),
         };
       });
     }

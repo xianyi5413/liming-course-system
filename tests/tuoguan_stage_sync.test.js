@@ -98,23 +98,13 @@ test("stage pricing, mixed batch, effective dates, historical grade and pinned s
     version: primary.version,
     name: primary.name,
     grade: "初一",
+    grade_effective_date: "2026-10-01",
   });
   assert.equal(
     attend(f, primary.id, "2026-09-07").fee,
     3200,
     "historical period grade wins over profile",
   );
-  const period = f.store.get(
-    "SELECT * FROM tg_periods WHERE student_id=?",
-    primary.id,
-  );
-  f.write("period", { ...period, end_date: "2026-09-30" });
-  f.write("period", {
-    student_id: primary.id,
-    grade: "初一",
-    start_date: "2026-10-01",
-    status: "在托",
-  });
   assert.equal(attend(f, primary.id, "2026-10-01").fee, 5000);
   const before = T.signature(f.db);
   TG.migrate(f.db);
@@ -374,5 +364,314 @@ test("backup compatibility rejects invalid stages and fractional/negative rates 
     normalize({ tg_rules: [{ present: 5000, leave_fee: 2500, absent: 5000 }] })
       .tg_rules[0].stage,
     "",
+  );
+});
+
+test("grade boundary preserves historical evidence, rejects occupied ranges atomically and never enrolls or charges", (t) => {
+  const f = fixture(t),
+    s = f.write("student", {
+      name: "合成年级",
+      grade: "三年级",
+      start_date: "2026-09-01",
+      notes: "保留备注",
+      status: "暂停",
+    });
+  attend(f, s.id, "2026-09-01");
+  f.write("money", {
+    student_id: s.id,
+    date: "2026-09-02",
+    kind: "充值",
+    actual_amount: 10000,
+    gift_amount: 2000,
+  });
+  const evidence = () =>
+    JSON.stringify([
+      f.store.all("SELECT * FROM tg_attendance"),
+      f.store.all("SELECT * FROM tg_ledger"),
+    ]);
+  const before = evidence(),
+    signature = T.signature(f.db);
+  for (const effective of ["2026-09-01", "2026-09-02", "invalid"]) {
+    assert.throws(() =>
+      f.write("student", {
+        ...s,
+        grade: "初一",
+        grade_effective_date: effective,
+      }),
+    );
+    assert.equal(T.signature(f.db), signature);
+  }
+  const oldPeriod = f.store.get("SELECT * FROM tg_periods");
+  assert.throws(
+    () => f.write("period", { ...oldPeriod, grade: "初一" }),
+    /已有考勤或资金/,
+  );
+  const payload = {
+    ...s,
+    grade: "初一",
+    grade_effective_date: "2026-10-01",
+    request_id: crypto.randomUUID(),
+  };
+  const changed = f.write("student", payload);
+  f.write("student", payload);
+  assert.equal(changed.notes, s.notes);
+  assert.equal(changed.status, s.status);
+  assert.equal(evidence(), before);
+  assert.deepEqual(
+    f.store
+      .all(
+        "SELECT grade,start_date,end_date FROM tg_periods ORDER BY start_date",
+      )
+      .map((r) => ({ ...r })),
+    [
+      { grade: "三年级", start_date: "2026-09-01", end_date: "2026-09-30" },
+      { grade: "初一", start_date: "2026-10-01", end_date: null },
+    ],
+  );
+  assert.equal(attend(f, s.id, "2026-09-03").fee, 3000);
+  assert.equal(attend(f, s.id, "2026-10-01").fee, 5000);
+  assert.equal(
+    f.store.get("SELECT grade FROM tg_attendance WHERE date='2026-09-01'")
+      .grade,
+    "三年级",
+  );
+  const logs = f.store.all("SELECT * FROM tg_audit WHERE action='student'");
+  assert.match(
+    require("../src/domain/tuoguan_log").describe(f.db, "student", logs)
+      .operation_content,
+    /2026-10-01/,
+  );
+  const noPeriod = f.write("student", { name: "合成未入托", grade: "初一" });
+  f.write("student", {
+    ...noPeriod,
+    grade: "初二",
+    grade_effective_date: "2026-11-01",
+  });
+  assert.equal(
+    f.store.get(
+      "SELECT count(*) n FROM tg_periods WHERE student_id=?",
+      noPeriod.id,
+    ).n,
+    0,
+  );
+  assert.equal(
+    f.store.get(
+      "SELECT count(*) n FROM tg_attendance WHERE student_id=?",
+      noPeriod.id,
+    ).n,
+    0,
+  );
+  assert.deepEqual(f.db.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("month business and separate opening balances include idle, gift, debt and cross-year accounts", (t) => {
+  const f = fixture(t),
+    create = (name, extra = {}) =>
+      f.write("student", { name, grade: "初一", ...extra }),
+    money = (s, date, actual, gift = 0, kind = "充值") =>
+      f.write("money", {
+        student_id: s.id,
+        date,
+        kind,
+        actual_amount: actual,
+        gift_amount: gift,
+        notes: "合成核对依据",
+      });
+  const pending = create("合成未签到", { month: "2027-01" }).student,
+    saved = create("合成已签到", { start_date: "2027-01-01" }),
+    current = create("合成本月充值"),
+    actual = create("合成实际结转", { status: "已毕业" }),
+    gift = create("合成赠送结转", { status: "已流出" }),
+    debt = create("合成负余额"),
+    zero = create("合成零业务"),
+    voided = create("合成已作废");
+  attend(f, saved.id, "2027-01-01");
+  money(current, "2027-01-04", 1000);
+  money(actual, "2026-12-01", 10000);
+  money(gift, "2026-12-01", 0, 5000);
+  money(debt, "2026-12-01", -10000, 0, "调整");
+  money(voided, "2027-01-04", 1000);
+  const row = f.store.get(
+    "SELECT * FROM tg_ledger WHERE student_id=?",
+    voided.id,
+  );
+  f.write("money-delete", { records: [{ id: row.id, version: row.version }] });
+  const rows = f.store.snapshot("2027-01", true).summary,
+    byId = (id) => rows.find((s) => s.id === id);
+  for (const s of [pending, saved, current])
+    assert.equal(byId(s.id).has_month_business, true);
+  for (const s of [actual, gift, debt, zero, voided])
+    assert.equal(byId(s.id).has_month_business, false);
+  assert.equal(byId(actual.id).opening_actual, 10000);
+  assert.equal(byId(gift.id).opening_gift, 5000);
+  assert.equal(byId(debt.id).opening_actual, -10000);
+  assert.equal(
+    rows.filter(
+      (s) =>
+        s.has_month_business || s.opening_actual !== 0 || s.opening_gift !== 0,
+    ).length,
+    6,
+  );
+  assert.equal(
+    f.store.snapshot("2027-02", true).summary.find((s) => s.id === gift.id)
+      .opening_gift,
+    5000,
+  );
+});
+
+test("v6 grade boundary sync updates periods, rules and corrections, preserves independent rows, blocks conflicts and rolls back", async (t) => {
+  const a = fixture(t),
+    b = fixture(t),
+    s = a.write("student", {
+      name: "合成升学同步",
+      grade: "三年级",
+      start_date: "2026-09-01",
+    });
+  const money = a.write("money", {
+    student_id: s.id,
+    date: "2026-09-01",
+    kind: "充值",
+    actual_amount: 100000,
+    gift_amount: 10000,
+  });
+  attend(a, s.id, "2026-09-01");
+  const first = exportText(a);
+  assert.equal(JSON.parse(first).version, 6);
+  await apply(b, first);
+  const stable = T.signature(b.db);
+  await apply(b, first);
+  assert.equal(T.signature(b.db), stable);
+  a.write("student", {
+    ...s,
+    grade: "初一",
+    grade_effective_date: "2026-10-01",
+  });
+  attend(a, s.id, "2026-10-01");
+  attend(a, s.id, "2026-09-01", "请假");
+  a.write("money-edit", {
+    ...a.store.get("SELECT * FROM tg_ledger WHERE kind='充值'"),
+    actual_amount: 120000,
+    gift_amount: 12000,
+  });
+  const extra = a.write("money", {
+    student_id: s.id,
+    date: "2026-10-02",
+    kind: "充值",
+    actual_amount: 1000,
+    gift_amount: 0,
+  });
+  const last = a.store.get("SELECT * FROM tg_ledger ORDER BY id DESC LIMIT 1");
+  a.write("money-delete", {
+    records: [{ id: last.id, version: last.version }],
+  });
+  a.write("rule", {
+    stage: "初中",
+    effective_date: "2026-11-01",
+    present: 5200,
+    leave_fee: 2700,
+    absent: 0,
+  });
+  b.write("student", { name: "合成独立档案", grade: "初三" });
+  const next = exportText(a),
+    preview = T.plan(b.db, T.parse(b.db, next));
+  assert.equal(preview.conflicts.length, 0, JSON.stringify(preview.conflicts));
+  assert.ok(preview.summary.updated >= 2);
+  await apply(b, next);
+  for (const month of ["2026-09", "2026-10", "2026-11"])
+    assert.deepEqual(
+      b.store.snapshot(month, true).summary.find((r) => r.id === s.id),
+      a.store.snapshot(month, true).summary[0],
+    );
+  assert.equal(b.store.get("SELECT count(*) n FROM tg_students").n, 2);
+  assert.deepEqual(
+    b.store.all("SELECT grade,start_date,end_date FROM tg_periods"),
+    a.store.all("SELECT grade,start_date,end_date FROM tg_periods"),
+  );
+  const after = T.signature(b.db);
+  await apply(b, next);
+  assert.equal(T.signature(b.db), after);
+  assert.ok(
+    fs
+      .readdirSync(b.dir)
+      .some((name) => name !== "test.sqlite" && /sqlite|backup/.test(name)),
+  );
+  const row = b.store.get("SELECT * FROM tg_students WHERE id=?", s.id);
+  b.write("student", {
+    ...row,
+    grade: "初二",
+    grade_effective_date: "2026-11-01",
+  });
+  const source = a.store.get("SELECT * FROM tg_students WHERE id=?", s.id);
+  a.write("student", {
+    ...source,
+    grade: "初三",
+    grade_effective_date: "2026-11-01",
+  });
+  const conflict = exportText(a),
+    unchanged = T.signature(b.db);
+  assert.ok(T.plan(b.db, T.parse(b.db, conflict)).conflicts.length);
+  await assert.rejects(apply(b, conflict));
+  assert.equal(T.signature(b.db), unchanged);
+  assert.deepEqual(b.db.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("v6 40 students and 400 saved cells import and repeat with validated pre-import backup", async (t) => {
+  const a = fixture(t),
+    b = fixture(t);
+  for (let n = 0; n < 40; n++)
+    a.write("student", {
+      name: "合成规模" + n,
+      grade: n % 2 ? "三年级" : "初一",
+      start_date: "2026-09-01",
+    });
+  for (const day of [
+    "01",
+    "02",
+    "03",
+    "04",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+  ])
+    a.write("attendance", {
+      date: "2026-09-" + day,
+      rows: Array.from({ length: 40 }, (_, i) => ({
+        student_id: i + 1,
+        status: "出勤",
+        version: 0,
+        notes: "合成备注",
+      })),
+    });
+  const input = exportText(a),
+    before = T.signature(b.db),
+    started = performance.now(),
+    plan = T.plan(b.db, T.parse(b.db, input));
+  assert.equal(plan.conflicts.length, 0);
+  const result = await apply(b, input),
+    ms = Math.round(performance.now() - started);
+  const saved = new DatabaseSync(result.backup, { readOnly: true });
+  assert.equal(T.signature(saved), before);
+  assert.equal(
+    saved.prepare("PRAGMA integrity_check").get().integrity_check,
+    "ok",
+  );
+  saved.close();
+  assert.equal(b.store.get("SELECT count(*) n FROM tg_attendance").n, 400);
+  assert.deepEqual(
+    b.store.snapshot("2026-09", true).summary,
+    a.store.snapshot("2026-09", true).summary,
+  );
+  const imported = T.signature(b.db);
+  await apply(b, input);
+  assert.equal(T.signature(b.db), imported);
+  t.diagnostic(
+    "40 students / 400 attendance + 400 charges / " +
+      Buffer.byteLength(input) +
+      " bytes: preview + backup + import " +
+      ms +
+      " ms",
   );
 });

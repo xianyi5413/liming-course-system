@@ -14,8 +14,9 @@ window.TuoguanUI = (() => {
   const selectedLedgerIds = new Set();
   const grades = TuoguanConfig.grades;
   const compareStudentGradeName = (a, b) =>
-    grades.indexOf(a.grade) - grades.indexOf(b.grade) ||
-    String(a.name).localeCompare(String(b.name), "zh-CN") ||
+    (grades.includes(a.grade) ? grades.indexOf(a.grade) : grades.length) -
+      (grades.includes(b.grade) ? grades.indexOf(b.grade) : grades.length) ||
+    String(a.name).localeCompare(String(b.name), "zh-CN", { numeric: true }) ||
     a.id - b.id;
   const esc = (v) =>
     String(v ?? "").replace(
@@ -506,16 +507,45 @@ window.TuoguanUI = (() => {
     if (!/^-?\d+(\.\d{1,2})?$/.test(v)) throw Error("金额最多两位小数");
     return Math.round(Number(v) * 100);
   };
-  const profileForm = (s) =>
-    form(
-      s ? "编辑托管档案" : "新建托管学生",
-      input("name", "姓名", s?.name || "") +
+  const saveProfile = (student, values) =>
+    post("student", {
+      name: student?.name,
+      grade: student?.grade,
+      notes: student?.notes,
+      status: student?.status,
+      ...values,
+      id: student?.id,
+      version: student?.version,
+    });
+  function profileForm(s, gradeOnly = false) {
+    if (!canView("tgStudents") || isReadonlyUser()) return;
+    const modal = form(
+      gradeOnly ? s.name + " · 修改年级" : s ? "编辑托管档案" : "新建托管学生",
+      (gradeOnly ? "" : input("name", "姓名", s?.name || "")) +
         select("grade", "年级", grades, s?.grade || "初一") +
-        select("status", "状态", profileStatuses, s?.status || "在托") +
-        (s ? "" : input("start_date", "入托日期", day, "date")) +
-        input("notes", "备注", s?.notes || ""),
-      (v) => post("student", { ...v, id: s?.id, version: s?.version }),
+        (s
+          ? input("grade_effective_date", "新年级生效日期", today(), "date")
+          : input("start_date", "入托日期", day, "date")) +
+        (gradeOnly
+          ? ""
+          : select("status", "状态", profileStatuses, s?.status || "在托") +
+            input("notes", "备注", s?.notes || "")) +
+        (s
+          ? '<p class="muted-tip tg-grade-note">档案显示所选年级，签到从生效日期使用新年级。已有考勤或资金的日期不能改变；不会自动加入托管或补记出勤。</p>'
+          : ""),
+      (values) => saveProfile(s, values),
     );
+    if (s) {
+      const grade = modal.element.querySelector("[name=grade]"),
+        date = modal.element.querySelector("[name=grade_effective_date]");
+      const update = () => {
+        date.closest("label").hidden = grade.value === s.grade;
+        date.required = grade.value !== s.grade;
+      };
+      grade.onchange = update;
+      update();
+    }
+  }
   function manageMatrixDates() {
     if (!canView("tgAttendance") || isReadonlyUser()) return;
     if (cellWrites || dateWrites || studentWrites)
@@ -1095,6 +1125,60 @@ window.TuoguanUI = (() => {
       });
     };
   }
+  function locateMatrix(matrix) {
+    // One index per render. Pointer movement touches only the old/new column and
+    // row classes, never scans or rebuilds the complete grid.
+    const columns = [];
+    for (const row of matrix.rows)
+      for (const cell of row.cells) {
+        (columns[cell.cellIndex] ||= []).push(cell);
+      }
+    let activeRow = null,
+      activeColumn = -1,
+      activeCell = null,
+      touch = false;
+    const locate = (cell) => {
+      if (cell && cell.closest("table") !== matrix) cell = null;
+      const row = cell?.closest("tbody") ? cell.parentElement : null;
+      const column = cell && cell.cellIndex >= 4 ? cell.cellIndex : -1;
+      const cross = row && column >= 4 ? cell : null;
+      if (row !== activeRow) {
+        activeRow?.classList.remove("tg-locate-row");
+        row?.classList.add("tg-locate-row");
+        activeRow = row;
+      }
+      if (column !== activeColumn) {
+        for (const c of columns[activeColumn] || [])
+          c.classList.remove("tg-locate-col");
+        for (const c of columns[column] || []) c.classList.add("tg-locate-col");
+        activeColumn = column;
+      }
+      if (cross !== activeCell) {
+        activeCell?.classList.remove("tg-locate-cell");
+        cross?.classList.add("tg-locate-cell");
+        activeCell = cross;
+      }
+    };
+    matrix.onpointerover = (e) => {
+      touch = e.pointerType === "touch";
+      locate(touch ? null : e.target.closest("td,th"));
+    };
+    matrix.onpointerdown = (e) => {
+      touch = e.pointerType === "touch";
+      if (touch) locate(null);
+    };
+    matrix.onpointerleave = matrix.onpointercancel = () => locate(null);
+    matrix.onfocusin = (e) => {
+      if (!touch) locate(e.target.closest("td,th"));
+    };
+    matrix.onfocusout = (e) => {
+      if (!matrix.contains(e.relatedTarget)) locate(null);
+    };
+    matrix.addEventListener("keydown", () => {
+      touch = false;
+      locate(document.activeElement.closest("td,th"));
+    });
+  }
   function renderMatrix(body) {
     const month = day.slice(0, 7),
       start = month + "-01",
@@ -1249,6 +1333,7 @@ window.TuoguanUI = (() => {
           .join("") +
         "</tr>",
     );
+    locateMatrix(matrix);
     const validCells = monthStudents.flatMap((s) =>
       dates
         .filter((date) => currentPeriod(s, date))
@@ -1607,7 +1692,15 @@ window.TuoguanUI = (() => {
               ">" +
               studentBadge(s.id) +
               "</button>",
-            renderGradeBadge(s.grade),
+            '<button class="tg-profile-link tg-profile-grade" data-id="' +
+              s.id +
+              '" aria-label="修改' +
+              esc(s.name) +
+              '的年级" ' +
+              (isReadonlyUser() ? "disabled" : "") +
+              ">" +
+              renderGradeBadge(s.grade) +
+              "</button>",
             `<select class="cell-select inline-status-select tg-profile-status" data-field="status" data-student="${s.id}" aria-label="${esc(s.name)}档案状态" ${isReadonlyUser() ? "disabled" : ""}>${opt(profileStatuses, s.status)}</select>`,
             s.first_attendance_date || "—",
             s.last_attendance_date || "—",
@@ -1626,14 +1719,7 @@ window.TuoguanUI = (() => {
         control.disabled = true;
         syncCustomSelect(control, control.nextElementSibling);
         try {
-          const updated = await post("student", {
-            id: student.id,
-            name: student.name,
-            grade: student.grade,
-            notes: student.notes,
-            status: control.value,
-            version: student.version,
-          });
+          const updated = await saveProfile(student, { status: control.value });
           if (root === host && data === source && auth.user?.id === owner) {
             Object.assign(student, updated);
             draw();
@@ -1652,15 +1738,14 @@ window.TuoguanUI = (() => {
         }
       };
     root.querySelector("#tg-new").onclick = () => profileForm();
-    body
-      .querySelectorAll(".tg-profile-link")
-      .forEach(
-        (b) =>
-          (b.onclick = () =>
-            profileForm(
-              data.students.find((s) => s.id === Number(b.dataset.id)),
-            )),
-      );
+    body.querySelectorAll(".tg-profile-link").forEach(
+      (b) =>
+        (b.onclick = () =>
+          profileForm(
+            data.students.find((s) => s.id === Number(b.dataset.id)),
+            b.classList.contains("tg-profile-grade"),
+          )),
+    );
   }
   function moneyForm(record = null) {
     if (isReadonlyUser()) return;
@@ -1813,6 +1898,23 @@ window.TuoguanUI = (() => {
           grade: gradeFor(l),
         }),
     );
+    rows.sort(
+      (a, b) =>
+        compareStudentGradeName(
+          {
+            ...studentById.get(a.student_id),
+            id: a.student_id,
+            grade: gradeFor(a),
+          },
+          {
+            ...studentById.get(b.student_id),
+            id: b.student_id,
+            grade: gradeFor(b),
+          },
+        ) ||
+        a.date.localeCompare(b.date) ||
+        a.id - b.id,
+    );
     root.querySelector("#tg-recharge-analysis").innerHTML = ledgerAnalysis(
       rows,
       gradeFor,
@@ -1932,7 +2034,13 @@ window.TuoguanUI = (() => {
   }
   function renderFees(body) {
     const rows = data.summary
-        .filter((s) => s.has_attendance && matches(s, s))
+        .filter(
+          (s) =>
+            (s.has_month_business ||
+              s.opening_actual !== 0 ||
+              s.opening_gift !== 0) &&
+            matches(s, s),
+        )
         .sort(compareStudentGradeName),
       keys = [
         "fee",

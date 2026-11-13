@@ -14337,7 +14337,11 @@ table.adaptive-table td.single-line-note,
 .tg-matrix :is(th,td):nth-child(4) { position: sticky; left: var(--frozen-third-edge, 0px); z-index: 1; background: var(--panel); }
 .tg-matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--table-head); }
 .tg-matrix thead :is(th:first-child,th:nth-child(2),th:nth-child(3),th:nth-child(4)) { z-index: 4; background: var(--table-head); }
-.tg-matrix tbody tr:hover :is(td:first-child,td:nth-child(2),td:nth-child(3),td:nth-child(4)) { background: var(--panel); }
+/* Keep delegated pointer/focus location consistent across sticky cells and touch. */
+.tg-table.tg-matrix tbody tr:not(.tg-locate-row) > td:not(.tg-locate-col) { background: var(--panel); }
+.tg-table.tg-matrix tr.tg-locate-row > td,
+.tg-table.tg-matrix :is(td,th).tg-locate-col { background: var(--surface-hover); }
+.tg-table.tg-matrix td.tg-locate-cell { background: color-mix(in srgb, var(--surface-hover) 82%, var(--brand-border)); box-shadow: inset 0 0 0 1px var(--brand-border); }
 .tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .tg-fee-row { cursor: pointer; }
 .tg-fee-row:hover td, .tg-fee-row:focus-visible td { background: var(--table-head); }

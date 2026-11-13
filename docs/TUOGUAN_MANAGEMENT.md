@@ -1,8 +1,62 @@
 # 托管管理实施与验收记录
 
+## 2026-11-13 托管排序、年级分界、费用范围与矩阵定位
+
+完成时间：2026-11-13 20:45（北京时间）。基线 `edab4992ad17bc1422bd44dd5cd6bcb18d0997e4`，分支 `feature/tuoguan-sorting-grade-hover-summary`，版本 `20261113-tuoguan-grade-hover-summary`。本节覆盖本轮变化，保留既有收费、同步和备份实现及下方历史记录。
+
+### 展示与历史保护
+
+- `renderLedger`先使用原筛选，后用共享年级/姓名比较器排序，再按业务日期、账本ID排序；同名按student_id分组，不合并档案。gradeFor缓存每条记录的“业务日参与年级→档案年级→未记录”，同时供列、筛选、统计和排序使用。排序不改账本ID、日期或财务重放顺序，复选框仍按真实ID。
+- 年级标签打开现有紧凑表单及自定义下拉框，和档案编辑、状态保存共用saveProfile。grade改变必须传grade_effective_date；前端默认北京时间今天，保存时禁用提交，失败保留旧列表并显示原因。需要tgStudents且账号可写，后端同样校验。
+- student事务中检查所有受影响参与周期。如果生效日及之后的待改年级区间内存在任何已保存考勤或资金证据（含零费用/作废证据），返回409，整批不变。没有业务时，将跨界周期截到前一天，新建后半段并复制状态、默认值和备注；尚未开始的不同年级周期按分界更新，既有同年级周期不重复创建。没有参与周期只改档案，不自动入托。已有业务的周期也不能通过旧period接口直接改年级。版本校验、request_id幂等与事务沿用原实现。
+- 档案显示所选年级；如选择未来生效日期，参与年级在生效前仍旧、生效后才新。月内跨年级时矩阵/费用行继续采用现有月度历史标签口径，每格收费仍以当天周期及已存grade/rule_json为准。历史参与信息确实缺失的资金按用户要求回退当前档案，不凭空补历史周期；金额和资金证据不改变。
+- 年级变更同时保留档案before/after、周期分界审计及生效日期，操作日志显示旧/新年级与日期。历史考勤、规则快照、充值和已结算扣费均不改写，也不自动产生考勤、消费。
+- 费用snapshot复用既有月末以前账本分组与account，新增has_month_business（当月重叠周期、保存考勤、有效账本三者任一）。前端使用该标记或opening_actual非零或opening_gift非零；不按档案状态剔除。统计与表格共用最终rows，未增加财务接口或重写结算算法。
+
+### 矩阵定位与性能
+
+每次render预建列索引；矩阵上委托pointerover/leave/cancel/down及focus/keydown。只切换旧/新行、列与交叉格的CSS类；同格内部移动不写DOM，不监听mousemove重建表格。前四冻结列及两层日期表头使用同一类和系统surface-hover，交叉格加细内边框，业务标签颜色和尺寸不变。触摸清除临时高亮，切月/筛选生成新表后不继承旧定位。
+
+Edge实际指针验证了行名、日期名、状态格、横纵滚动、明暗主题、离开清除、触摸清除及键盘定位；单格保存、行列批量、筛选清空选择仍有效。40余学生矩阵同格20次真实指针移动耗时331毫秒（包含CDP往返），DOM修改0次；不是纯渲染基准，也不声称任意规模零耗时。截图仅留本地忽略目录。
+
+### v6同步、权限、Excel v14
+
+不改协议、表结构或权限树。两隔离库完成首次导入、重复跳过，随后档案升年级/拆周期、新考勤/改状态、充值新增/编辑/作废和新规则同步；汇总与分账一致。B的独立学生保留，双方年级及周期独立修改产生冲突，整批阻止。旧预览失效、非法关联/资金及强制SQL中途失败均被拒绝，业务、来源键和基线完整回滚。
+
+规模样本40档案、400格考勤及400条扣费，v6文本1,902,622字节，预览+原生备份+导入401毫秒；备份独立打开、签名一致、integrity_check通过。重复导入签名不变。没有正式线上操作；兼容性/权限/关联错误须在目标预览阶段处理，不允许整库覆盖或强制跳过冲突。
+
+五页API逐项允许/拒绝及只读限制通过，普通教师未获得托管权限；Edge角色树保存后即时生效，个人权限裁剪、财务信息隔离及年级修改的权限限制通过。收费范围读取遵循tgSummary，高亮无需新权限。
+
+完整Excel v14导出并恢复隔离库，比对全部14张托管表、roles、role_permissions、user_page_permissions，包含周期分界、当前/历史年级、规则快照、有效与作废资金、审计、来源UUID、基线及映射；恢复后月度消费/分账相同，无外键或完整性错误。四张可见表继续正确显示，没有费用汇总Sheet，本轮不新增冗余Sheet。权限/备份代码经验证完整，故不做无意义修改。
+
+### 文件与实际定向验收
+
+修改文件：public/tuoguan.js、public/styles.css、src/domain/tuoguan.js、src/domain/tuoguan_log.js；public/index.html与src/server.js更新缓存/版本标识；tests/tuoguan_stage_sync.test.js、tests/tuoguan_stage_ui.test.js新增覆盖；tests/tuoguan_batch_ui.test.js适配年级生效日期；README、本实施文档及备份清单补充记录。无数据库迁移、收费引擎或第三方依赖变更。
+
+以下为实际执行命令（名称筛选分次运行，同一用例重跑不重复计数）：
+
+```powershell
+node --test --test-name-pattern='stage pricing|grade boundary|month business' tests/tuoguan_stage_sync.test.js
+node --test --test-name-pattern='grade boundary|month business' tests/tuoguan_stage_sync.test.js
+node --test --test-name-pattern='40 students' tests/tuoguan_stage_sync.test.js
+node --test --test-name-pattern='five permissions|Edge grade|Edge sorted|Edge fee scope|Edge matrix locator|v14 grade' tests/tuoguan_stage_ui.test.js
+node --test --test-name-pattern='Edge grade' tests/tuoguan_stage_ui.test.js
+node --test --test-name-pattern='Edge sorted|Edge matrix locator' tests/tuoguan_stage_ui.test.js
+node --test --test-name-pattern='stale previews|tampered format' tests/tuoguan_transfer.test.js
+node --test --test-name-pattern='row/column intersection|role tree|ledger uses' tests/tuoguan_batch_ui.test.js
+```
+
+去重后：领域5、API/Edge/新Excel6、同步保护2、既有矩阵/角色/历史年级回归3，共16项通过，未解决失败0。首次新增用例发现测试夹具取错money返回值、漏填调整依据、日志范围过宽，以及档案页没有月份控件、受限账号无设置导航等测试假设，均已修正并仅重跑受影响用例；没有掩盖未解决失败。另执行node --check（相关JS）、git diff --check及离线Prettier。零合计但实际/赠送分别非零的前端显示用合成响应验证；真实结算器可能先抵债，未为测试改变账务算法。
+
+### 本地数据与边界
+
+更新5177前核对监听PID、工作目录及DB_PATH=data/liming-local.sqlite，使用原生SQLite备份；最终切换另建停止写入后的最新备份，以保护工作期间正常业务变更。真实页面验收只读，测试签到/充值均在隔离库。备份、截图、验收JSON与凭据临时文件留在忽略目录，凭据使用后删除，不进入Git。
+
+本轮无未完成开发项。管理员需根据真实升学日期选择生效日；若提示已有业务，不能用改年级回写旧账。正式环境部署与导入由管理员另行安排，先升级相同兼容版本并核对冲突预览；本轮只模拟线上。
+
 ## 2026-11-13 托管分学段收费、操作日志与同步
 
-完成时间：2026-11-13 20:06（北京时间）。基线 `962d715da79e365be7cd82cadec636627c33f366`，分支 `feature/tuoguan-primary-pricing-audit-sync`，版本 `20261113-tuoguan-stage-audit-sync`。本节为当前实现，历史记录不删除。
+完成时间：2026-11-13 20:06（北京时间）。基线 `962d715da79e365be7cd82cadec636627c33f366`，分支 `feature/tuoguan-primary-pricing-audit-sync`，版本 `20261113-tuoguan-stage-audit-sync`。本节保留当轮实现，当前变化以文首最新章节为准。
 
 ### 收费及历史保护
 

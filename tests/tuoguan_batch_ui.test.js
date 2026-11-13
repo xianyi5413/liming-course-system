@@ -63,7 +63,13 @@ before(async () => {
     actual_amount: 1000,
     gift_amount: 0,
   });
-  write("student", { id: 1, name: "合成甲", grade: "初三", version: 1 });
+  write("student", {
+    id: 1,
+    name: "合成甲",
+    grade: "初三",
+    grade_effective_date: "2026-11-13",
+    version: 1,
+  });
   for (const [username, readonly, override, permission] of [
     ["batch-role", null, 0, null],
     ["batch-readonly", 1, 1, "tgAttendance"],
@@ -765,7 +771,7 @@ test("Edge matrix four frozen columns and actual content centers survive resize,
           mobile: width === 390,
         });
         await c.evaluate(
-          `document.documentElement.dataset.theme='${theme}';if(sidebarCollapsed!==${width===390})document.querySelector('.sidebar-toggle').click();document.querySelector('.tg-scroll').scrollLeft=0;scheduleAdaptiveTableColumns();new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`,
+          `document.documentElement.dataset.theme='${theme}';if(sidebarCollapsed!==${width === 390})document.querySelector('.sidebar-toggle').click();document.querySelector('.tg-scroll').scrollLeft=0;scheduleAdaptiveTableColumns();new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`,
         );
         const before = await measure();
         assert.deepEqual(before.headers, ["选择", "序号", "学生", "年级"]);

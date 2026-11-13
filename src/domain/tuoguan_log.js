@@ -65,6 +65,8 @@ function describe(db, action, audits) {
             (p.after?.status || "在托"),
         ];
     content = `托管学生${p.after?.name || b.name}：${changes.join("；") || "资料已保存"}`;
+    if (p.before?.grade !== p.after?.grade && b.grade_effective_date)
+      content += `；新年级从${b.grade_effective_date}生效，历史业务保留`;
   } else if (["money-edit", "money-delete"].includes(action)) {
     const rows = p.before || [],
       old = rows[0],
