@@ -1,10 +1,40 @@
 // Replay independent custody accounts with the exact tutoring batch/debt rules.
 // Ledger evidence stays immutable; allocations are derived as of the queried month.
 const engine = require("./account_balance").createBalanceEngine();
-function account(ledger, month, cutoff = month + "-31") {
+function account(
+  ledger,
+  month,
+  cutoff = month + "-31",
+  { validateRefunds = false } = {},
+) {
+  // An amount correction keeps the original same-day FIFO position. Changing
+  // student/date starts a new position; IDs still identify the actual evidence.
+  const byId = new Map(ledger.map((r) => [r.id, r])),
+    orders = new Map();
+  const eventOrder = (row) => {
+    if (orders.has(row.id)) return orders.get(row.id);
+    let prior = row;
+    const seen = new Set();
+    while (prior.replaces_id != null) {
+      if (seen.has(prior.id)) throw Error("资金替代关联循环");
+      seen.add(prior.id);
+      const parent = byId.get(prior.replaces_id);
+      if (
+        !parent ||
+        parent.student_id !== row.student_id ||
+        parent.date !== row.date
+      )
+        break;
+      prior = parent;
+    }
+    orders.set(row.id, prior.id);
+    return prior.id;
+  };
   const rows = ledger
-    .filter((r) => r.date <= cutoff)
-    .sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+    .filter((r) => !r.voided_at && r.date <= cutoff)
+    .sort(
+      (a, b) => a.date.localeCompare(b.date) || eventOrder(a) - eventOrder(b),
+    );
   const months = [
     ...new Set([...rows.map((r) => r.date.slice(0, 7)), month]),
   ].sort();
@@ -40,7 +70,8 @@ function account(ledger, month, cutoff = month + "-31") {
       if (row.attendance_id != null) {
         if (!groups.has(row.attendance_id)) groups.set(row.attendance_id, []);
         groups.get(row.attendance_id).push(row);
-      } else events.push({ date: row.date, order: 0, id: row.id, row });
+      } else
+        events.push({ date: row.date, order: 0, id: eventOrder(row), row });
     }
     for (const list of groups.values())
       events.push({
@@ -65,6 +96,21 @@ function account(ledger, month, cutoff = month + "-31") {
           actual + gift !== row.amount
         )
           throw Error("托管资金分账不完整");
+        if (validateRefunds && row.kind === "退款") {
+          const balance = engine.studentAccountBatchBalance(batches);
+          if (
+            -actual > Math.max(0, balance.actual) ||
+            -gift > Math.max(0, balance.gift)
+          )
+            throw Object.assign(
+              Error(
+                "资金更正会使 " +
+                  row.date +
+                  " 的退款超过可退余额，请先核对该退款",
+              ),
+              { status: 400 },
+            );
+        }
         const debts = new Map(
           batches
             .filter((b) => b.source_type === "lesson_debt")

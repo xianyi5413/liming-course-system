@@ -14414,3 +14414,7 @@ table.adaptive-table td.single-line-note,
   .tg-batch-actions > .btn { flex: 1 0 100%; }
   .tg-form-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+.tg-ledger-row[tabindex="0"] { cursor: pointer; }
+.tg-ledger-row[tabindex="0"]:is(:hover,:focus-visible) td { background: var(--table-head); }
+.tg-student-create { justify-content: flex-end; margin-bottom: var(--space-3); }

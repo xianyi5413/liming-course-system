@@ -415,7 +415,7 @@ test("legacy SQLite export upgrades custody identities in memory without modifyi
   db.close();
   exportFullData({ dbPath: target, outputPath: file });
   const result = verifyFullData(file);
-  assert.equal(result.version, 12);
+  assert.equal(result.version, 13);
   assert.equal(result.data.tg_students.length, 1);
   assert.equal(result.data.tg_students[0].id, 1);
   const check = new DatabaseSync(target, { readOnly: true });

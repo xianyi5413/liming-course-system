@@ -26,11 +26,12 @@ const TABLE_ORDER = [
 const REFS = {
   student_id: "tg_students",
   attendance_id: "tg_attendance",
+  replaces_id: "tg_ledger",
   source_import_id: "tg_imports",
   import_id: "tg_imports",
 };
 const TYPE = "liming_custody";
-const VERSION = 4;
+const VERSION = 5;
 const Billing = require("./tuoguan_settlement");
 const uuid = (value) =>
   typeof value === "string" &&
@@ -136,7 +137,7 @@ function parse(db, text) {
   } catch {
     fail("托管文本不是有效JSON");
   }
-  if (bundle?.type !== TYPE || ![1, 2, 3, VERSION].includes(bundle.version))
+  if (bundle?.type !== TYPE || ![1, 2, 3, 4, VERSION].includes(bundle.version))
     fail("托管文本格式或版本不兼容");
   const { checksum, ...content } = bundle;
   if (typeof checksum !== "string" || hash(content) !== checksum)
@@ -201,6 +202,15 @@ function parse(db, text) {
         !Object.hasOwn(r, "status")
       )
         r.status = "在托";
+      if (bundle.version < 5 && t === "tg_periods") r.default_status ??= "出勤";
+      if (bundle.version < 5 && t === "tg_ledger") {
+        r.version ??= 1;
+        r.voided_at ??= null;
+        r.voided_by ??= "";
+        r.replaces_id ??= null;
+      }
+      if (t === "tg_periods" && !["出勤", "不适用"].includes(r.default_status))
+        fail("参与默认状态无效");
       const expected = [...fields.keys()].filter((k) => k !== "id");
       if (canonical(Object.keys(r).sort()) !== canonical(expected.sort()))
         fail("记录字段与当前版本不一致：" + t);
@@ -317,6 +327,9 @@ function parse(db, text) {
       for (const [f, parent] of Object.entries(REFS))
         if (r[f] != null && !indices.get(parent).has(r[f]))
           fail("关联记录缺失：" + t);
+  require("./tuoguan_money").validateEvidence(
+    bundle.records.tg_ledger.map((i) => ({ id: i.uid, ...i.record })),
+  );
   const fees = new Map(),
     attendance = new Map(
       bundle.records.tg_attendance.map((i) => [i.uid, i.record]),
@@ -330,9 +343,22 @@ function parse(db, text) {
     }
   for (const [uid, a] of attendance)
     if ((fees.get(uid) || 0) !== -a.fee) fail("考勤金额与资金流水不一致");
+  const ledgerIds = new Map(
+    bundle.records.tg_ledger.map((item, i) => [
+      item.uid,
+      Number(item.source_key) || i + 1,
+    ]),
+  );
   const ledgers = new Map();
   for (const [i, item] of bundle.records.tg_ledger.entries()) {
-    const r = { ...item.record, id: Number(item.source_key) || i + 1 };
+    const r = {
+      ...item.record,
+      id: Number(item.source_key) || i + 1,
+      replaces_id:
+        item.record.replaces_id == null
+          ? null
+          : ledgerIds.get(item.record.replaces_id),
+    };
     if (!ledgers.has(r.student_id)) ledgers.set(r.student_id, []);
     ledgers.get(r.student_id).push(r);
   }
@@ -409,6 +435,12 @@ function parse(db, text) {
       ),
     ),
   };
+  for (const item of bundle.records.tg_ledger) {
+    item.record.version ??= 1;
+    item.record.voided_at ??= null;
+    item.record.voided_by ??= "";
+    item.record.replaces_id ??= null;
+  }
   return bundle;
 }
 function plan(db, bundle) {
@@ -528,17 +560,18 @@ function plan(db, bundle) {
             .reduce((n, a) => n + a.record.amount, 0) || 0,
       },
       actual_recharge: bundle.records.tg_ledger
-        .filter((i) => i.record.kind === "充值")
+        .filter((i) => i.record.kind === "充值" && !i.record.voided_at)
         .reduce((n, i) => n + (i.record.actual_amount ?? i.record.amount), 0),
       gift_recharge: bundle.records.tg_ledger
-        .filter((i) => i.record.kind === "充值")
+        .filter((i) => i.record.kind === "充值" && !i.record.voided_at)
         .reduce((n, i) => n + (i.record.gift_amount || 0), 0),
       new_actual_recharge: actions
         .filter(
           (a) =>
             a.table === "tg_ledger" &&
             a.status === "create" &&
-            a.record.kind === "充值",
+            a.record.kind === "充值" &&
+            !a.record.voided_at,
         )
         .reduce((n, a) => n + (a.record.actual_amount ?? a.record.amount), 0),
       new_gift_recharge: actions
@@ -546,7 +579,8 @@ function plan(db, bundle) {
           (a) =>
             a.table === "tg_ledger" &&
             a.status === "create" &&
-            a.record.kind === "充值",
+            a.record.kind === "充值" &&
+            !a.record.voided_at,
         )
         .reduce((n, a) => n + (a.record.gift_amount || 0), 0),
       legacy_unallocated: bundle.records.tg_ledger.filter(

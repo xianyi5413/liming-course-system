@@ -5,6 +5,14 @@ const Billing = require("./tuoguan_settlement");
 const PROFILE_STATUSES = ["在托", "暂停", "已流出", "已毕业"];
 const PROFILE_STATUS_COLUMN =
   "TEXT NOT NULL DEFAULT '在托' CHECK(status IN ('在托','暂停','已流出','已毕业'))";
+const PERIOD_DEFAULT_COLUMN =
+  "TEXT NOT NULL DEFAULT '出勤' CHECK(default_status IN ('出勤','不适用'))";
+const MONEY_COLUMNS = {
+  version: "INTEGER NOT NULL DEFAULT 1",
+  voided_at: "TEXT",
+  voided_by: "TEXT NOT NULL DEFAULT ''",
+  replaces_id: "INTEGER REFERENCES tg_ledger(id)",
+};
 const CHILDREN = ["tg_periods", "tg_rules", "tg_attendance", "tg_ledger"];
 const TABLES = [
   "tg_students",
@@ -24,7 +32,7 @@ const TABLES = [
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tg_students(id INTEGER PRIMARY KEY,status ${PROFILE_STATUS_COLUMN},name TEXT NOT NULL,grade TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS tg_legacy_student_map(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL UNIQUE REFERENCES tg_students(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),grade TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS tg_periods(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES tg_students(id),grade TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT '在托',default_status ${PERIOD_DEFAULT_COLUMN},notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS tg_period_dates ON tg_periods(student_id,start_date,end_date);
 CREATE TABLE IF NOT EXISTS tg_rules(id INTEGER PRIMARY KEY,student_id INTEGER REFERENCES tg_students(id),effective_date TEXT NOT NULL,present INTEGER NOT NULL,leave_fee INTEGER NOT NULL,absent INTEGER NOT NULL,notes TEXT NOT NULL DEFAULT '',created_by TEXT NOT NULL,end_date TEXT,pending INTEGER NOT NULL DEFAULT 0,source_import_id TEXT);
 CREATE TABLE IF NOT EXISTS tg_calendar(date TEXT PRIMARY KEY,enabled INTEGER NOT NULL,teacher_id INTEGER REFERENCES teachers(id),time_slot TEXT NOT NULL DEFAULT '18:30—21:30',leave_deadline TEXT NOT NULL DEFAULT '17:30',notes TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1);
@@ -86,9 +94,19 @@ function simplifyBackup(data) {
     if (!PROFILE_STATUSES.includes(row.status)) throw Error("托管档案状态无效");
   }
   for (const row of data.tg_ledger || []) {
+    row.version ??= 1;
+    row.voided_at ??= null;
+    row.voided_by ??= "";
+    row.replaces_id ??= null;
     row.actual_amount ??= null;
     row.gift_amount ??= null;
   }
+  for (const row of data.tg_periods || []) {
+    row.default_status ??= "出勤";
+    if (!["出勤", "不适用"].includes(row.default_status))
+      throw Error("参与默认状态无效");
+  }
+  require("./tuoguan_money").validateEvidence(data.tg_ledger || []);
   for (const table of ["tg_students", "tg_periods", "tg_attendance"])
     for (const row of data[table] || []) delete row.class_name;
   return data;
@@ -145,10 +163,21 @@ function migrate(db, { settle = true } = {}) {
       .prepare("PRAGMA table_info(tg_students)")
       .all()
       .some((c) => c.name === "status");
+  const missingMoney =
+    exists("tg_ledger") &&
+    Object.keys(MONEY_COLUMNS).some((k) => !ledgerColumns.includes(k));
+  const missingDefault =
+    exists("tg_periods") &&
+    !db
+      .prepare("PRAGMA table_info(tg_periods)")
+      .all()
+      .some((c) => c.name === "default_status");
   let backup = null;
   if (
     (settle && Billing.needsMigration(db)) ||
     missingStatus ||
+    missingMoney ||
+    missingDefault ||
     oldLedger ||
     legacy.length ||
     classTables.length ||
@@ -241,7 +270,12 @@ function migrate(db, { settle = true } = {}) {
     db.exec(SCHEMA);
     const additions = {
       tg_students: { status: PROFILE_STATUS_COLUMN },
-      tg_ledger: { actual_amount: "INTEGER", gift_amount: "INTEGER" },
+      tg_ledger: {
+        actual_amount: "INTEGER",
+        gift_amount: "INTEGER",
+        ...MONEY_COLUMNS,
+      },
+      tg_periods: { default_status: PERIOD_DEFAULT_COLUMN },
       tg_rules: {
         end_date: "TEXT",
         pending: "INTEGER NOT NULL DEFAULT 0",

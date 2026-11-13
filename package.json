@@ -4,7 +4,7 @@
   "private": true,
   "description": "黎明教育课程管理系统本地 MVP",
   "scripts": {
-    "test:tuoguan": "node --test --test-concurrency=1 tests/tuoguan.test.js tests/tuoguan_independent.test.js tests/tuoguan_matrix.test.js tests/tuoguan_transfer.test.js tests/tuoguan_finance.test.js tests/tuoguan_finance_ui.test.js tests/tuoguan_auto_consumption.test.js tests/tuoguan_integration.test.js tests/tuoguan_student_management.test.js",
+    "test:tuoguan": "node --test --test-concurrency=1 tests/tuoguan.test.js tests/tuoguan_independent.test.js tests/tuoguan_matrix.test.js tests/tuoguan_transfer.test.js tests/tuoguan_finance.test.js tests/tuoguan_finance_ui.test.js tests/tuoguan_auto_consumption.test.js tests/tuoguan_integration.test.js tests/tuoguan_student_management.test.js tests/tuoguan_ledger_edit.test.js",
     "test:student-fee-local": "node --test --test-concurrency=1 tests/student_fee_local_updates.test.js",
     "test:class-template-retention": "node --test --test-concurrency=1 tests/class_group_template_refinement.test.js tests/backup_total_retention.test.js",
     "test:pinyin-log-layout-permission": "node --test --test-concurrency=1 tests/search_audit_units.test.js tests/pinyin_log_layout_permission.test.js",

@@ -7,8 +7,11 @@ window.TuoguanUI = (() => {
     profileStatuses.indexOf(a.status) - profileStatuses.indexOf(b.status) ||
     compareStudentGradeName(a, b);
   const isManualMoney = (row) =>
-    manualMoneyKinds.includes(row.kind) && row.attendance_id == null;
+    manualMoneyKinds.includes(row.kind) &&
+    row.attendance_id == null &&
+    !row.voided_at;
   let activeDetail = null;
+  const selectedLedgerIds = new Set();
   const grades = ["初一", "初二", "初三"];
   const esc = (v) =>
     String(v ?? "").replace(
@@ -386,12 +389,18 @@ window.TuoguanUI = (() => {
   function matches(s, p = {}) {
     return (!query || s.name.includes(query)) && (!grade || p?.grade === grade);
   }
-  const table = (headers, rows, indexed = false) =>
-    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${indexed ? rowIndexColumn() : ""}${headers.map((h) => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(/^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
+  const table = (headers, rows, indexed = false, selectable = false) =>
+    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${selectable ? '<col data-column-type="select">' : ""}${indexed ? rowIndexColumn() : ""}${headers.map(() => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${selectable ? '<th class="select-col"><input type="checkbox" class="tg-ledger-all" aria-label="全选当前托管资金记录"></th>' : ""}${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(selectable ? /^(<tr[^>]*><td class="select-col[^"]*"[^>]*>.*?<\/td>)/ : /^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed) + Number(selectable)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
   const listTable = (headers, rows) => table(headers, rows, true);
   const tr = (values, attrs = "") =>
     `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
-  function form(title, fields, save, savedMessage = () => "已保存") {
+  function form(
+    title,
+    fields,
+    save,
+    savedMessage = () => "已保存",
+    afterSave = null,
+  ) {
     const host = root,
       owner = auth.user?.id,
       month = day.slice(0, 7);
@@ -414,8 +423,10 @@ window.TuoguanUI = (() => {
       button.textContent = "保存中…";
       try {
         const values = Object.fromEntries(new FormData(e.target));
-        await save(values);
+        const result = await save(values);
+        if (afterSave) await afterSave(result);
         modal.close();
+        if (afterSave) return;
         if (host !== root || owner !== auth.user?.id || !day.startsWith(month))
           return;
         await refresh();
@@ -437,11 +448,12 @@ window.TuoguanUI = (() => {
       : `<label class="filter-field">${esc(label)}<input class="control" name="${name}" type="${type}" value="${esc(value)}" ${type === "number" ? 'step="0.01"' : ""}></label>`;
   const select = (name, label, values, value) =>
     `<label class="filter-field">${esc(label)}<select class="control" name="${name}">${opt(values, value)}</select></label>`;
-  const studentSelect = () =>
+  const studentSelect = (value) =>
     select(
       "student_id",
       "托管学生档案",
       data.students.map((s) => [s.id, studentLabel(s)]),
+      value,
     );
   const pendingRequests = new Map();
   const post = async (action, b) => {
@@ -805,7 +817,7 @@ window.TuoguanUI = (() => {
       top = scroll?.scrollTop || 0;
     const dialog = CourseDetails.dialog(
       "管理学生 · " + month,
-      '<div class="tg-detail-content tg-student-management"><div class="tg-student-groups"></div><p role="status">正在加载…</p><p role="alert"></p></div>',
+      '<div class="tg-detail-content tg-student-management"><div class="tg-actions tg-student-create"><button class="btn primary" type="button" data-new-member disabled>新建托管学生</button></div><div class="tg-student-groups"></div><p role="status">正在加载…</p><p role="alert"></p></div>',
       {
         onClose: async () => {
           await queue;
@@ -839,6 +851,8 @@ window.TuoguanUI = (() => {
     function paint() {
       if (!dialog.element.isConnected || !samePage()) return;
       status.textContent = busy.size ? "正在保存…" : "";
+      dialog.element.querySelector("[data-new-member]").disabled =
+        !ready || busy.size > 0 || studentWrites > 0;
       for (const button of groups.querySelectorAll("[data-member]")) {
         const id = Number(button.dataset.member),
           selected = periods(id).length > 0;
@@ -903,6 +917,60 @@ window.TuoguanUI = (() => {
         error.textContent = e.message;
         status.textContent = "";
       });
+    dialog.element.querySelector("[data-new-member]").onclick = () => {
+      if (!ready || studentWrites || !samePage()) return;
+      const modal = form(
+        "新建托管学生",
+        input("name", "姓名") +
+          select("grade", "年级", grades, "初一") +
+          input("notes", "备注（选填）") +
+          '<p data-name-hint hidden>已有同名档案，建议取消后选择已有学生。确为不同学生时，请填写可辨认备注并确认。</p><label data-same-name hidden><input type="checkbox" name="confirm_same_name">确认为不同学生，独立建档</label>',
+        (values) => {
+          if (!samePage() || !dialog.element.isConnected)
+            throw Error("当前月份已变化，请重新打开");
+          studentWrites++;
+          paint();
+          const operation = queue.then(() =>
+            post("student", {
+              ...values,
+              confirm_same_name: values.confirm_same_name === "on",
+              month,
+            }),
+          );
+          queue = operation
+            .then(
+              (next) => {
+                accept(next);
+                changed = true;
+              },
+              () => {},
+            )
+            .finally(() => {
+              studentWrites--;
+              paint();
+            });
+          return operation;
+        },
+        () => "",
+        async () => {
+          await queue;
+        },
+      );
+      const name = modal.element.querySelector("[name=name]"),
+        notes = modal.element.querySelector("[name=notes]"),
+        confirm = modal.element.querySelector("[name=confirm_same_name]");
+      name.required = true;
+      name.oninput = () => {
+        const duplicate = source.students.some(
+          (s) => s.name === name.value.trim(),
+        );
+        modal.element.querySelector("[data-name-hint]").hidden = !duplicate;
+        modal.element.querySelector("[data-same-name]").hidden = !duplicate;
+        confirm.required = duplicate;
+        notes.required = duplicate;
+        if (!duplicate) confirm.checked = false;
+      };
+    };
     groups.onclick = (event) => {
       const button = event.target.closest("[data-member]");
       if (!button || !ready || button.disabled || !samePage()) return;
@@ -1006,7 +1074,7 @@ window.TuoguanUI = (() => {
       s.periods.find(
         (p) => p.start_date <= date && (!p.end_date || p.end_date >= date),
       );
-    const cellContent = (record, editable) => {
+    const cellContent = (record, editable, defaultStatus = "出勤") => {
       const label = record
         ? record.status === "停课"
           ? "放假"
@@ -1014,7 +1082,7 @@ window.TuoguanUI = (() => {
             ? "原始空白/异常"
             : record.status
         : editable
-          ? "出勤"
+          ? defaultStatus
           : "—";
       return (
         badge(label) +
@@ -1060,7 +1128,11 @@ window.TuoguanUI = (() => {
                       '" ' +
                       (isReadonlyUser() ? "disabled" : "") +
                       ">" +
-                      cellContent(record, true) +
+                      cellContent(
+                        record,
+                        true,
+                        currentPeriod(s, date)?.default_status,
+                      ) +
                       "</button>"
                     : cellContent(record, false)) +
                   "</td>"
@@ -1088,7 +1160,10 @@ window.TuoguanUI = (() => {
           date = button.dataset.date,
           key = id + ":" + date;
         const old = attendance.get(key),
-          shown = old?.status === "停课" ? "放假" : old?.status || "出勤";
+          shown =
+            old?.status === "停课"
+              ? "放假"
+              : old?.status || period(id, date)?.default_status || "出勤";
         openInlineCustomPicker(button, {
           id,
           field: "status",
@@ -1165,7 +1240,11 @@ window.TuoguanUI = (() => {
               )
                 return;
               closeScheduleInlinePicker();
-              button.innerHTML = cellContent(attendance.get(key), true);
+              button.innerHTML = cellContent(
+                attendance.get(key),
+                true,
+                period(id, date)?.default_status,
+              );
               button.focus({ preventScroll: true });
               message(error.message);
             } finally {
@@ -1264,6 +1343,62 @@ window.TuoguanUI = (() => {
             )),
       );
   }
+  function moneyForm(record = null) {
+    if (isReadonlyUser()) return;
+    const methods = { 微信: "wechat", 现金: "cash", 支付宝: "alipay" };
+    const channel = record
+      ? methods[record.method] || (record.method ? "other" : "wechat")
+      : "wechat";
+    const other =
+      channel === "other" ? record.method.replace(/^其他[：:]\s*/, "") : "";
+    const modal = form(
+      record ? "编辑托管资金记录" : "托管资金记录",
+      studentSelect(record?.student_id) +
+        input("date", "业务日期", record?.date || today(), "date") +
+        select("kind", "类型", manualMoneyKinds, record?.kind || "充值") +
+        input(
+          "actual_amount",
+          "实际金额（元）",
+          record ? String(Math.abs(record.actual_amount) / 100) : "0",
+          "number",
+        ) +
+        input(
+          "gift_amount",
+          "赠送金额（元）",
+          record ? String(Math.abs(record.gift_amount) / 100) : "0",
+          "number",
+        ) +
+        select("channel", "支付方式", rechargeChannelOptions, channel) +
+        input("channel_other", "其他渠道说明", other) +
+        input("notes", "备注（选填）", record?.notes || ""),
+      (v) =>
+        post(record ? "money-edit" : "money", {
+          ...v,
+          ...(record ? { id: record.id, version: record.version } : {}),
+          student_id: Number(v.student_id),
+          actual_amount: toCents(v.actual_amount),
+          gift_amount: toCents(v.gift_amount),
+        }),
+      (v) =>
+        (rangeStart && v.date < rangeStart) ||
+        (rangeEnd && v.date > rangeEnd) ||
+        (!rangeStart && !rangeEnd && !v.date.startsWith(day.slice(0, 7)))
+          ? "已保存至 " + v.date + "，不在当前筛选范围内"
+          : "已保存",
+    );
+    const selectChannel = modal.element.querySelector("[name=channel]"),
+      otherInput = modal.element.querySelector("[name=channel_other]");
+    const sync = () => {
+      otherInput.closest("label").hidden = selectChannel.value !== "other";
+      otherInput.required = selectChannel.value === "other";
+      if (selectChannel.value !== "other") otherInput.value = "";
+    };
+    selectChannel.onchange = sync;
+    otherInput.maxLength = 100;
+    sync();
+    modal.element.querySelector("[name=date]").required = true;
+    modal.element.querySelector("[name=student_id]").required = true;
+  }
   function renderLedger(body) {
     const rows = data.ledger.filter(
       (l) =>
@@ -1272,66 +1407,108 @@ window.TuoguanUI = (() => {
         (!rangeStart || l.date >= rangeStart) &&
         (!rangeEnd || l.date <= rangeEnd) &&
         matches(
-          { name: studentName(l.student_id) },
+          data.students.find((s) => s.id === l.student_id) || { name: "" },
           period(l.student_id, l.date) ||
             data.students.find((s) => s.id === l.student_id),
         ),
     );
+    const editable = (r) => !isReadonlyUser() && r.editable !== false;
+    const ids = new Set(rows.filter(editable).map((r) => r.id));
+    for (const id of selectedLedgerIds)
+      if (!ids.has(id)) selectedLedgerIds.delete(id);
     body.innerHTML =
-      '<div class="tg-actions"><button class="btn primary" id="tg-money">新增资金记录</button></div>' +
-      listTable(
+      '<div class="tg-actions transaction-action-row"><button class="btn primary" id="tg-money">新增资金记录</button><button class="btn danger" id="tg-money-delete">批量删除</button></div>' +
+      table(
         ["日期", "学生", "类型", "实际金额", "赠送金额", "支付方式", "备注"],
-        rows.map((l) =>
-          tr([
-            l.date,
-            studentBadge(l.student_id, period(l.student_id, l.date)?.grade),
-            esc(l.kind),
-            money(l.actual_amount),
-            money(l.gift_amount),
-            esc(l.method),
-            esc(l.notes) + (l.legacy_unallocated ? "（旧账归属待核对）" : ""),
-          ]),
+        rows.map(
+          (r) =>
+            '<tr class="tg-ledger-row" data-ledger="' +
+            r.id +
+            '" tabindex="' +
+            (editable(r) ? "0" : "-1") +
+            '"><td class="select-col adaptive-center"><input type="checkbox" class="tg-ledger-select" data-id="' +
+            r.id +
+            '" aria-label="选择托管资金记录" ' +
+            (editable(r) ? "" : "disabled") +
+            "></td>" +
+            [
+              r.date,
+              studentBadge(r.student_id, period(r.student_id, r.date)?.grade),
+              esc(r.kind),
+              money(r.actual_amount),
+              money(r.gift_amount),
+              esc(r.method),
+              esc(r.notes) + (r.editable === false ? "（旧账归属待核对）" : ""),
+            ]
+              .map((v) => "<td>" + v + "</td>")
+              .join("") +
+            "</tr>",
         ),
+        true,
+        true,
       );
-    for (const index of [4, 5])
+    for (const index of [5, 6])
       body.querySelectorAll("col")[index].dataset.alignment = "right";
-    root.querySelector("#tg-money").onclick = () => {
-      const modal = form(
-        "托管资金记录",
-        studentSelect() +
-          input("date", "业务日期", today(), "date") +
-          select("kind", "类型", manualMoneyKinds) +
-          input("actual_amount", "实际金额（元）", "0", "number") +
-          input("gift_amount", "赠送金额（元）", "0", "number") +
-          select("channel", "支付方式", rechargeChannelOptions, "wechat") +
-          input("channel_other", "其他渠道说明") +
-          input("notes", "备注（选填）"),
-        (v) =>
-          post("money", {
-            ...v,
-            student_id: Number(v.student_id),
-            actual_amount: toCents(v.actual_amount),
-            gift_amount: toCents(v.gift_amount),
-          }),
-        (v) =>
-          (rangeStart && v.date < rangeStart) ||
-          (rangeEnd && v.date > rangeEnd) ||
-          (!rangeStart && !rangeEnd && !v.date.startsWith(day.slice(0, 7)))
-            ? "已保存至 " + v.date + "，不在当前筛选范围内"
-            : "已保存",
-      );
-      const channel = modal.element.querySelector("[name=channel]"),
-        other = modal.element.querySelector("[name=channel_other]");
-      const sync = () => {
-        other.closest("label").hidden = channel.value !== "other";
-        other.required = channel.value === "other";
-        if (channel.value !== "other") other.value = "";
+    const all = body.querySelector(".tg-ledger-all"),
+      remove = body.querySelector("#tg-money-delete");
+    const sync = () => {
+      for (const input of body.querySelectorAll(".tg-ledger-select"))
+        input.checked = selectedLedgerIds.has(Number(input.dataset.id));
+      all.checked = ids.size > 0 && selectedLedgerIds.size === ids.size;
+      all.indeterminate = selectedLedgerIds.size > 0 && !all.checked;
+      all.disabled = !ids.size;
+      remove.disabled = !selectedLedgerIds.size;
+      remove.textContent = bulkActionText("批量删除", selectedLedgerIds.size);
+    };
+    for (const input of body.querySelectorAll(".tg-ledger-select"))
+      input.onchange = () => {
+        const id = Number(input.dataset.id);
+        if (input.checked) selectedLedgerIds.add(id);
+        else selectedLedgerIds.delete(id);
+        sync();
       };
-      channel.onchange = sync;
-      other.maxLength = 100;
+    all.onchange = () => {
+      selectedLedgerIds.clear();
+      if (all.checked) for (const id of ids) selectedLedgerIds.add(id);
       sync();
-      modal.element.querySelector("[name=date]").required = true;
-      modal.element.querySelector("[name=student_id]").required = true;
+    };
+    sync();
+    for (const row of body.querySelectorAll("[data-ledger]")) {
+      const open = () => {
+        const record = rows.find((r) => r.id === Number(row.dataset.ledger));
+        if (editable(record)) moneyForm(record);
+        else if (!isReadonlyUser())
+          message("历史记录尚未确认分账，无法安全编辑");
+      };
+      row.onclick = (e) => {
+        if (!e.target.closest("input,.select-col")) open();
+      };
+      row.onkeydown = (e) => {
+        if (e.target === row && e.key === "Enter") {
+          e.preventDefault();
+          open();
+        }
+      };
+    }
+    body.querySelector("#tg-money").onclick = () => moneyForm();
+    remove.onclick = () => {
+      if (remove.disabled || isReadonlyUser()) return;
+      const records = rows
+        .filter((r) => selectedLedgerIds.has(r.id))
+        .map((r) => ({ id: r.id, version: r.version }));
+      const modal = form(
+        "批量删除托管资金",
+        "<p>确定删除选中的" +
+          records.length +
+          "条托管资金记录吗？这些记录可能影响学生实际余额、赠送余额和历史欠费。</p>",
+        async () => {
+          const result = await post("money-delete", { records });
+          selectedLedgerIds.clear();
+          return result;
+        },
+        () => "已删除 " + records.length + " 条记录",
+      );
+      modal.element.querySelector("[type=submit]").textContent = "确认删除";
     };
   }
   function renderFees(body) {
@@ -1567,6 +1744,7 @@ window.TuoguanUI = (() => {
     if (m) m.textContent = s;
   }
   async function mount(el, page) {
+    selectedLedgerIds.clear();
     clearTimeout(filterTimer);
     filterQueued = false;
     const sameAccount = account === auth.user?.id;

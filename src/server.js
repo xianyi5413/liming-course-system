@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-student-status";
+const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-ledger-edit";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -12265,14 +12265,14 @@ async function handleApi(req, res, url) {
         return sendJson(res,TuoguanImport.stage(tuoguanStore,TuoguanImport.preview(Buffer.from(body.base64,'base64')),actor));
       }
       if(action==='import') return sendJson(res,TuoguanImport.commit(tuoguanStore,body,actor));
-      if(action==='money' && body.channel !== undefined) {
+      if(['money','money-edit'].includes(action) && body.channel !== undefined) {
         const channel=normalizeRechargeChannel(body.channel,body.channel_other);
         if(channel.error) return sendError(res,400,channel.error);
         body.method=({wechat:'微信',cash:'现金',alipay:'支付宝',other:'其他'})[channel.channel]+(channel.channel==='other'?'：'+channel.channel_other:'');
       }
       const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
       const result=tuoguanStore.mutate(action,body,actor);
-      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤',money:'托管'+(body.kind||'资金'),rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.rows?.length||body.students?.length||body.dates?.length||1}},req);
+      if(!replay)writeOperationLog(user,{operation_type:({student:'维护托管学生',period:'维护托管参与',attendance:'修改托管考勤',money:'托管'+(body.kind||'资金'),'money-edit':'编辑托管资金','money-delete':'删除托管资金',rule:'新增托管规则',calendar:'维护托管日期','remove-students':'删除托管签到行','add-dates':'添加托管日期','remove-dates':'删除托管日期'})[action]||'托管操作',operation_content:'托管操作完成',target_type:'tuoguan',details:{action,date:body.date||null,month:body.month||null,count:body.records?.length||body.rows?.length||body.students?.length||body.dates?.length||1}},req);
       return sendJson(res,!finance&&action==='attendance'?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);
     }catch(error){if(req.method==='POST')writeOperationLog(user,{operation_type:'托管操作失败',operation_content:action+'：操作未完成',target_type:'tuoguan',result_status:'failure'},req);return sendError(res,error.status||400,error.message);}
   }

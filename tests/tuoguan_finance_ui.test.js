@@ -556,13 +556,13 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
     await b.close();
   }
 });
-test("full v12 split balances round trip and v10 ledger converts without changing original amounts", () => {
+test("full v13 split balances round trip and v10 ledger converts without changing original amounts", () => {
   const file = path.join(dir, "v11.xlsx");
   exportFullData({ dbPath: env.DB_PATH, outputPath: file });
   const verified = verifyFullData(file);
-  assert.equal(verified.version, 12);
+  assert.equal(verified.version, 13);
   const data = verified.data;
-  for (const version of [12, 11, 10]) {
+  for (const version of [13, 12, 11, 10]) {
     const target = path.join(dir, `restored-${version}.sqlite`),
       input = path.join(dir, `version-${version}.xlsx`),
       copy = structuredClone(data);
@@ -1104,7 +1104,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
   };
   const rows = () =>
     c.evaluate(
-      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===8).map(r=>[...r.cells].map(c=>c.textContent))',
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).map(r=>[...r.cells].slice(1).map(c=>c.textContent))',
     );
   const filter = async (id, value) => {
     await c.evaluate(
@@ -1136,7 +1136,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
     assert.doesNotMatch(all.flat().join(" "), /考勤扣费|考勤冲正/);
     assert.equal(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].every(r=>[4,5].every(i=>getComputedStyle(r.cells[i]).textAlign==="right"))',
+        '[...document.querySelectorAll(".tg-table tbody tr")].every(r=>[5,6].every(i=>getComputedStyle(r.cells[i]).textAlign==="right"))',
       ),
       true,
     );

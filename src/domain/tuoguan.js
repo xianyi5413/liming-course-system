@@ -11,6 +11,7 @@ function fail(message, status = 400) {
 function date(value) {
   if (
     !/^\d{4}-\d{2}-\d{2}$/.test(value || "") ||
+    !Number.isFinite(Date.parse(value + "T00:00:00Z")) ||
     new Date(value + "T00:00:00Z").toISOString().slice(0, 10) !== value
   )
     fail("日期无效");
@@ -182,13 +183,14 @@ function createStore(db) {
       );
     else
       run(
-        "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes,default_status) VALUES (?,?,?,?,?,?,?)",
         b.student_id,
         b.grade,
         b.start_date,
         b.end_date || null,
         b.status,
         b.notes || "",
+        b.default_status || "出勤",
       );
   }
   function matrixChange(action, b) {
@@ -255,13 +257,14 @@ function createStore(db) {
           }
           if (before && after)
             run(
-              "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes) VALUES (?,?,?,?,?,?)",
+              "INSERT INTO tg_periods(student_id,grade,start_date,end_date,status,notes,default_status) VALUES (?,?,?,?,?,?,?)",
               p.student_id,
               p.grade,
               next,
               p.end_date,
               p.status,
               p.notes,
+              p.default_status,
             );
         }
       }
@@ -305,6 +308,64 @@ function createStore(db) {
         : calendarSnapshot(b.month)),
     };
   }
+  function money(b, actor, replacesId = null) {
+    student(b.student_id);
+    date(b.date);
+    const split = b.actual_amount !== undefined || b.gift_amount !== undefined;
+    const actual = split ? cents(b.actual_amount) : cents(b.amount),
+      gift = split ? cents(b.gift_amount) : 0;
+    const amount = cents(actual + gift);
+    if (!["充值", "退款", "优惠", "调整", "期初核定"].includes(b.kind))
+      fail("资金类型无效");
+    if (!actual && !gift) fail("实际金额或赠送金额至少一项非零");
+    if (!["充值", "退款"].includes(b.kind) && !b.notes)
+      fail("历史资金调整请填写核对依据");
+    if (b.kind !== "调整" && b.kind !== "期初核定" && (actual < 0 || gift < 0))
+      fail("充值、退款、优惠请填写正金额");
+    if (b.kind === "退款") {
+      const balance = custodyAccount(
+        all(
+          "SELECT * FROM tg_ledger WHERE student_id=? AND date<=?",
+          b.student_id,
+          b.date,
+        ),
+        b.date.slice(0, 7),
+        b.date,
+      );
+      if (
+        actual > Math.max(0, balance.actual_balance) ||
+        gift > balance.gift_balance
+      )
+        fail("退款不能超过对应的实际或赠送余额");
+    }
+    if (
+      b.kind === "期初核定" &&
+      get(
+        "SELECT id FROM tg_ledger WHERE student_id=? AND kind='期初核定'",
+        b.student_id,
+      )
+    )
+      fail("已核定期初，请使用有凭据的调整");
+    const inserted = run(
+      "INSERT INTO tg_ledger(student_id,date,kind,amount,method,voucher,notes,actor,actual_amount,gift_amount,replaces_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      b.student_id,
+      b.date,
+      b.kind,
+      b.kind === "退款" ? -amount : amount,
+      b.method || "",
+      b.voucher || "",
+      String(b.notes || "").slice(0, 2000),
+      actor,
+      (b.kind === "退款" ? -1 : 1) * actual,
+      (b.kind === "退款" ? -1 : 1) * gift,
+      replacesId,
+    );
+
+    return get(
+      "SELECT * FROM tg_ledger WHERE id=?",
+      Number(inserted.lastInsertRowid),
+    );
+  }
   function mutate(action, b, actor) {
     return atomic(b.request_id, { action, b, actor }, () => {
       let result;
@@ -333,6 +394,22 @@ function createStore(db) {
           );
           id = b.id;
         } else {
+          if (b.month) {
+            const names = all(
+              "SELECT grade,notes FROM tg_students WHERE name=?",
+              name,
+            );
+            if (
+              names.length &&
+              (!b.confirm_same_name ||
+                !notes ||
+                names.some((r) => r.grade === grade && r.notes === notes))
+            )
+              fail(
+                "已有同名托管档案，请选择已有学生；确为不同学生时填写可辨认备注并确认同名新建",
+                409,
+              );
+          }
           id = Number(
             run(
               "INSERT INTO tg_students(name,grade,notes,status) VALUES (?,?,?,?)",
@@ -342,7 +419,20 @@ function createStore(db) {
               b.status || "在托",
             ).lastInsertRowid,
           );
-          if (b.start_date)
+          if (b.month) {
+            const { start, end } = require("./tuoguan_calendar").bounds(
+              b.month,
+            );
+            if (b.status && b.status !== "在托") fail("新建学生默认在托");
+            savePeriod({
+              student_id: id,
+              grade,
+              start_date: start,
+              end_date: end,
+              status: "在托",
+              default_status: "不适用",
+            });
+          } else if (b.start_date)
             savePeriod({
               student_id: id,
               grade,
@@ -351,7 +441,13 @@ function createStore(db) {
               notes,
             });
         }
-        result = get("SELECT * FROM tg_students WHERE id=?", id);
+        result = b.month
+          ? {
+              ok: true,
+              student: get("SELECT * FROM tg_students WHERE id=?", id),
+              ...participationSnapshot(b.month),
+            }
+          : get("SELECT * FROM tg_students WHERE id=?", id);
       } else if (action === "attendance") result = attendance(b, actor);
       else if (action === "period") {
         if (b.month) {
@@ -379,6 +475,7 @@ function createStore(db) {
             start_date: start,
             end_date: end,
             status: "在托",
+            default_status: "不适用",
           });
           result = { ok: true, ...participationSnapshot(b.month) };
         } else {
@@ -386,62 +483,16 @@ function createStore(db) {
           result = { ok: true };
         }
       } else if (action === "money") {
-        student(b.student_id);
-        date(b.date);
-        const split =
-          b.actual_amount !== undefined || b.gift_amount !== undefined;
-        const actual = split ? cents(b.actual_amount) : cents(b.amount),
-          gift = split ? cents(b.gift_amount) : 0;
-        const amount = cents(actual + gift);
-        if (!["充值", "退款", "优惠", "调整", "期初核定"].includes(b.kind))
-          fail("资金类型无效");
-        if (!actual && !gift) fail("实际金额或赠送金额至少一项非零");
-        if (!["充值", "退款"].includes(b.kind) && !b.notes)
-          fail("历史资金调整请填写核对依据");
-        if (
-          b.kind !== "调整" &&
-          b.kind !== "期初核定" &&
-          (actual < 0 || gift < 0)
-        )
-          fail("充值、退款、优惠请填写正金额");
-        if (b.kind === "退款") {
-          const balance = custodyAccount(
-            all(
-              "SELECT * FROM tg_ledger WHERE student_id=? AND date<=?",
-              b.student_id,
-              b.date,
-            ),
-            b.date.slice(0, 7),
-            b.date,
-          );
-          if (
-            actual > Math.max(0, balance.actual_balance) ||
-            gift > balance.gift_balance
-          )
-            fail("退款不能超过对应的实际或赠送余额");
-        }
-        if (
-          b.kind === "期初核定" &&
-          get(
-            "SELECT id FROM tg_ledger WHERE student_id=? AND kind='期初核定'",
-            b.student_id,
-          )
-        )
-          fail("已核定期初，请使用有凭据的调整");
-        run(
-          "INSERT INTO tg_ledger(student_id,date,kind,amount,method,voucher,notes,actor,actual_amount,gift_amount) VALUES (?,?,?,?,?,?,?,?,?,?)",
-          b.student_id,
-          b.date,
-          b.kind,
-          b.kind === "退款" ? -amount : amount,
-          b.method || "",
-          b.voucher || "",
-          String(b.notes || "").slice(0, 2000),
-          actor,
-          (b.kind === "退款" ? -1 : 1) * actual,
-          (b.kind === "退款" ? -1 : 1) * gift,
-        );
+        money(b, actor);
         result = { ok: true };
+      } else if (["money-edit", "money-delete"].includes(action)) {
+        result = require("./tuoguan_money").change(
+          db,
+          action,
+          b,
+          actor,
+          (values, replacesId) => money(values, actor, replacesId),
+        );
       } else if (action === "rule") {
         date(b.effective_date);
         if (
@@ -487,7 +538,8 @@ function createStore(db) {
         );
         result = { ok: true };
       } else fail("不支持的操作", 404);
-      audit(actor, action, b);
+      if (!["money-edit", "money-delete"].includes(action))
+        audit(actor, action, b);
       return result;
     });
   }
@@ -517,11 +569,12 @@ function createStore(db) {
       students: all("SELECT * FROM tg_students ORDER BY id"),
       periods: all("SELECT * FROM tg_periods ORDER BY start_date DESC"),
       ledger: all(
-        "SELECT * FROM tg_ledger WHERE kind IN ('充值','退款') AND attendance_id IS NULL AND date BETWEEN ? AND ? ORDER BY date DESC,id DESC",
+        "SELECT * FROM tg_ledger WHERE kind IN ('充值','退款') AND attendance_id IS NULL AND voided_at IS NULL AND date BETWEEN ? AND ? ORDER BY date DESC,id DESC",
         start,
         end,
       ).map((r) => ({
         ...r,
+        editable: r.actual_amount != null && r.gift_amount != null,
         actual_amount: r.actual_amount ?? r.amount,
         gift_amount: r.gift_amount ?? 0,
       })),
@@ -610,6 +663,13 @@ function createStore(db) {
       data.ledger = [...accounts.values()]
         .flatMap((a) => a.ledger)
         .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+      data.ledger.push(
+        ...all(
+          "SELECT * FROM tg_ledger WHERE voided_at IS NOT NULL AND date BETWEEN ? AND ?",
+          start,
+          end,
+        ),
+      );
       data.summary = students.map((s) => {
         const { ledger, ...sums } = accounts.get(s.id);
         const saved = attendance

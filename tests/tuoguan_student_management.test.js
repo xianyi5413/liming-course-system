@@ -305,13 +305,13 @@ test("status and monthly membership enforce versions, month isolation, protectio
   db.close();
 });
 
-test("v4 custody transfer and v12 full backup preserve status; older formats default without changing periods or ledger", async () => {
+test("v5 custody transfer and v13 full backup preserve status; older formats default without changing periods or ledger", async () => {
   const source = new DatabaseSync(env.DB_PATH),
     bundle = T.exportData(source);
-  assert.equal(bundle.version, 4);
+  assert.equal(bundle.version, 5);
   const file = path.join(dir, "status-v12.xlsx");
   exportFullData({ dbPath: env.DB_PATH, outputPath: file });
-  assert.equal(verifyFullData(file).version, 12);
+  assert.equal(verifyFullData(file).version, 13);
   for (const old of [false, true]) {
     const target = path.join(dir, "restore-" + old + ".sqlite");
     assert.equal(
@@ -366,7 +366,7 @@ test("v4 custody transfer and v12 full backup preserve status; older formats def
       );
     db.close();
   }
-  for (const version of [1, 2, 3, 4]) {
+  for (const version of [1, 2, 3, 4, 5]) {
     const db = new DatabaseSync(
       path.join(dir, "transfer-" + version + ".sqlite"),
     );
@@ -830,6 +830,7 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
         '[...document.querySelectorAll(".tg-table th")].map(e=>e.textContent)',
       ),
       [
+        "",
         "序号",
         "日期",
         "学生",
@@ -908,11 +909,11 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
     );
     assert.ok(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===8).some(r=>r.cells[1].textContent==="2026-09-01")',
+        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).some(r=>r.cells[2].textContent==="2026-09-01")',
       ),
     );
     const rows = await c.evaluate(
-      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===8).map(r=>Number(r.cells[0].textContent))',
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).map(r=>Number(r.cells[1].textContent))',
     );
     assert.deepEqual(
       rows,
@@ -931,7 +932,7 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
     await c.evaluate("new Promise(requestAnimationFrame)");
     assert.ok(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===8).every(r=>r.cells[1].textContent.startsWith("2027-02"))',
+        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).every(r=>r.cells[2].textContent.startsWith("2027-02"))',
       ),
     );
     for (const width of [1440, 390])
