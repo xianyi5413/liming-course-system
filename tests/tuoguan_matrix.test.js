@@ -52,6 +52,7 @@ test("class removal preserves IDs, periods, every other historical field, full b
       store.all("SELECT * FROM " + table).map(({ class_name, ...row }) => row),
     ]),
   );
+  before.tg_attendance = before.tg_attendance.map(r=>({...r,status:"不适用",pending:0,rule_json:require('../src/domain/tuoguan_settlement').RULE_JSON,version:r.version+1}));
   const tutoring = store.all("SELECT * FROM students");
   const result = migrate(db);
   assert.ok(result.backup);

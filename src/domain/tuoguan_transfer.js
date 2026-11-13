@@ -33,6 +33,7 @@ const REFS = {
 const TYPE = "liming_custody";
 const VERSION = 5;
 const Billing = require("./tuoguan_settlement");
+const Normalization = require("./tuoguan_normalization");
 const uuid = (value) =>
   typeof value === "string" &&
   /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value);
@@ -267,7 +268,11 @@ function parse(db, text) {
       )
         fail("日期记录无效");
       if (t === "tg_attendance") {
-        if (!HISTORY_STATUSES.includes(r.status) || (r.pending && r.fee !== 0))
+        if (
+          (!HISTORY_STATUSES.includes(r.status) &&
+            !require("./tuoguan_protection").isPlaceholder(r.status)) ||
+          (r.pending && r.fee !== 0)
+        )
           fail("历史考勤或核定金额无效");
         let rule;
         try {
@@ -380,7 +385,30 @@ function parse(db, text) {
     ...i.record,
     id: Number(i.source_key) || n + 1,
   }));
-  const changes = Billing.plan(attendanceRows, ledgerRows);
+  const normalization = Normalization.plan(attendanceRows, ledgerRows);
+  let nextNormalizationAudit =
+    Math.max(
+      0,
+      ...bundle.records.tg_audit.map((i) => Number(i.source_key) || 0),
+    ) + 1;
+  for (const change of normalization.changes) {
+    const { id, ...after } = change.after;
+    Object.assign(attendance.get(id), after);
+    bundle.records.tg_audit.push({
+      uid: Billing.entryUid(id, "placeholder-normalization:" + after.version),
+      source_key: String(nextNormalizationAudit++),
+      record: {
+        actor: "auto-migration",
+        action: "规范占位考勤",
+        payload: JSON.stringify(change),
+        created_at: bundle.exported_at,
+      },
+    });
+  }
+  const changes = Billing.plan(
+    bundle.records.tg_attendance.map((i) => ({ ...i.record, id: i.uid })),
+    ledgerRows,
+  );
   if (bundle.version >= 3 && changes.length)
     fail("自动计费文本包含未结算考勤，请在来源升级后重新复制");
   let nextLedger = Math.max(0, ...ledgerRows.map((r) => r.id)) + 1;

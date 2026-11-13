@@ -280,7 +280,7 @@ test("status and monthly membership enforce versions, month isolation, protectio
           students: [{ id, versions: [] }],
         })
       ).status,
-      400,
+      [1,3].includes(id) ? 400 : 409,
     );
   const inactive = (await call("snapshot?month=2026-09")).data.students.find(
     (s) => s.id === 3,
@@ -769,7 +769,7 @@ test("Edge profile status sorting, four-group membership, queues, conflicts, pro
       await c.evaluate(
         'document.querySelector(".tg-student-management [role=alert]").textContent',
       ),
-      /已有考勤或资金/,
+      /已有考勤/,
     );
     await c.click(".dialog-close");
     assert.equal(
@@ -834,6 +834,7 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
         "序号",
         "日期",
         "学生",
+        "年级",
         "类型",
         "实际金额",
         "赠送金额",
@@ -909,11 +910,11 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
     );
     assert.ok(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).some(r=>r.cells[2].textContent==="2026-09-01")',
+        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).some(r=>r.cells[2].textContent==="2026-09-01")',
       ),
     );
     const rows = await c.evaluate(
-      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).map(r=>Number(r.cells[1].textContent))',
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).map(r=>Number(r.cells[1].textContent))',
     );
     assert.deepEqual(
       rows,
@@ -932,7 +933,7 @@ test("Edge simplified recharge uses shared channel options, Beijing today, optio
     await c.evaluate("new Promise(requestAnimationFrame)");
     assert.ok(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).every(r=>r.cells[2].textContent.startsWith("2027-02"))',
+        '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).every(r=>r.cells[2].textContent.startsWith("2027-02"))',
       ),
     );
     for (const width of [1440, 390])

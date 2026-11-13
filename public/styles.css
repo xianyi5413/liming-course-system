@@ -12326,7 +12326,7 @@ html {
   max-width: 100%;
   padding: 4px 9px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--entity-badge-radius, 999px);
   background: var(--badge-bg, var(--neutral-chip-bg)) !important;
   color: var(--badge-fg, var(--neutral-chip-fg)) !important;
   font-family: inherit;
@@ -12338,6 +12338,8 @@ html {
   text-overflow: clip;
   vertical-align: middle;
 }
+
+.student-badge, .grade-badge { --entity-badge-radius: 6px; }
 
 .student-badge > span:first-child {
   min-width: 0;

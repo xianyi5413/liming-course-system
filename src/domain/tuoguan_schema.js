@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const Billing = require("./tuoguan_settlement");
+const Normalization = require("./tuoguan_normalization");
 const PROFILE_STATUSES = ["在托", "暂停", "已流出", "已毕业"];
 const PROFILE_STATUS_COLUMN =
   "TEXT NOT NULL DEFAULT '在托' CHECK(status IN ('在托','暂停','已流出','已毕业'))";
@@ -174,7 +175,10 @@ function migrate(db, { settle = true } = {}) {
       .some((c) => c.name === "default_status");
   let backup = null;
   if (
-    (settle && Billing.needsMigration(db)) ||
+    (settle &&
+      (Billing.needsMigration(db) ||
+        (exists("tg_attendance") &&
+          Normalization.preview(db).changes.length))) ||
     missingStatus ||
     missingMoney ||
     missingDefault ||
@@ -331,13 +335,14 @@ function migrate(db, { settle = true } = {}) {
       db.prepare(
         "INSERT INTO tg_audit(actor,action,payload) VALUES (?,?,?)",
       ).run("system", "取消托管班级", JSON.stringify(archived));
+    const normalization = settle ? Normalization.apply(db) : null;
     const settlement = settle ? Billing.settle(db) : null;
     if (db.prepare("PRAGMA foreign_key_check").all().length)
       throw Error("迁移外键校验失败，已回滚");
     if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
       throw Error("迁移完整性校验失败，已回滚");
     db.exec("COMMIT");
-    return { migrated, backup, settlement };
+    return { migrated, backup, settlement, normalization };
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;

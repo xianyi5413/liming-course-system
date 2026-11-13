@@ -562,8 +562,9 @@ function restoreFullData({ dbPath, inputPath, onProgress = () => {} }) {
       }
       onProgress('integrity', 95, '正在进行一致性检查');
       const rechargeMigration = migrateRechargeDates(db);
+      const custodyNormalization = require('../domain/tuoguan_normalization').apply(db, 'restore');
       const custodySettlement = require('../domain/tuoguan_settlement').settle(db, 'restore', {reason:'旧备份自动结算'});
-      if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, custody_settlement: custodySettlement, recharge_migration: rechargeMigration, integrity_check: "ok", foreign_key_violation_count: 0 };
+      if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok") throw new FullExcelError("FULL_EXCEL_INTEGRITY_FAILED", "恢复后数据库完整性检查失败"); if (db.prepare("PRAGMA foreign_key_check").all().length) throw new FullExcelError("FULL_EXCEL_FOREIGN_KEY_FAILED", "恢复后存在外键错误"); db.exec("COMMIT"); return { ok: true, counts: verified.counts, custody_settlement: custodySettlement, custody_normalization: custodyNormalization, recharge_migration: rechargeMigration, integrity_check: "ok", foreign_key_violation_count: 0 };
     } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
   } finally { db.close(); }
 }

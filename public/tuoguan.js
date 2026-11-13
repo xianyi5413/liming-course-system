@@ -390,7 +390,7 @@ window.TuoguanUI = (() => {
     return (!query || s.name.includes(query)) && (!grade || p?.grade === grade);
   }
   const table = (headers, rows, indexed = false, selectable = false) =>
-    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${selectable ? '<col data-column-type="select">' : ""}${indexed ? rowIndexColumn() : ""}${headers.map(() => '<col data-column-type="full" data-min-width="0" data-alignment="center">').join("")}</colgroup><thead><tr>${selectable ? '<th class="select-col"><input type="checkbox" class="tg-ledger-all" aria-label="全选当前托管资金记录"></th>' : ""}${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(selectable ? /^(<tr[^>]*><td class="select-col[^"]*"[^>]*>.*?<\/td>)/ : /^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed) + Number(selectable)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
+    `<div class="band"><div class="table-wrap smooth-table-wrap tg-scroll"><table class="uniform-table nowrap-table tg-table" data-adaptive-table="true" data-adaptive-natural="true"><colgroup>${selectable ? '<col data-column-type="select">' : ""}${indexed ? rowIndexColumn() : ""}${headers.map((h) => `<col data-column-type="full" data-min-width="0" data-alignment="${h.alignment || "center"}">`).join("")}</colgroup><thead><tr>${selectable ? '<th class="select-col"><input type="checkbox" class="tg-ledger-all" aria-label="全选当前托管资金记录"></th>' : ""}${indexed ? rowIndexHeader() : ""}${headers.map((h) => `<th>${h.label || h}</th>`).join("")}</tr></thead><tbody>${rows.map((row, i) => (indexed ? row.replace(selectable ? /^(<tr[^>]*><td class="select-col[^"]*"[^>]*>.*?<\/td>)/ : /^(<tr[^>]*>)/, `$1${renderRowIndex(i)}`) : row)).join("") || `<tr><td class="empty" colspan="${headers.length + Number(indexed) + Number(selectable)}">${tab === "流水" ? "暂无充值记录" : empty("暂无符合条件的记录", "调整筛选条件，或使用页面上的新增入口。")}</td></tr>`}</tbody></table></div></div>`;
   const listTable = (headers, rows) => table(headers, rows, true);
   const tr = (values, attrs = "") =>
     `<tr${attrs}>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`;
@@ -506,6 +506,7 @@ window.TuoguanUI = (() => {
       day.slice(0, 7) === month;
     let calendar = new Map(),
       protectedDates = new Set(),
+      protectionReasons = {},
       ready = false,
       changed = false,
       queue = Promise.resolve();
@@ -583,6 +584,7 @@ window.TuoguanUI = (() => {
       source.protected_dates = next.protected_dates;
       calendar = new Map(next.calendar.map((c) => [c.date, c]));
       protectedDates = new Set(next.protected_dates);
+      protectionReasons = next.protected_date_reasons || {};
       ready = true;
       paint();
     }
@@ -592,7 +594,9 @@ window.TuoguanUI = (() => {
         const date = button.dataset.manageDate;
         if (!ready || busy.has(date) || !samePage()) return;
         if (protectedDates.has(date)) {
-          error.textContent = "该日期已有考勤或费用记录，无法直接删除。";
+          error.textContent =
+            protectionReasons[date] ||
+            "该日期有真实考勤或未解决的费用依赖，无法停用。";
           return;
         }
         busy.add(date);
@@ -810,6 +814,7 @@ window.TuoguanUI = (() => {
       changed = false,
       queue = Promise.resolve(),
       protectedIds = new Set(),
+      protectionReasons = {},
       profileSignature = "";
     const busy = new Set(),
       scroll = root.querySelector(".tg-scroll"),
@@ -870,6 +875,7 @@ window.TuoguanUI = (() => {
       source.students = next.students;
       source.periods = next.periods;
       protectedIds = new Set(next.protected_students);
+      protectionReasons = next.protected_student_reasons || {};
       ready = true;
       const signature = JSON.stringify(
         next.students.map((s) => [s.id, s.name, s.grade, s.status, s.notes]),
@@ -978,7 +984,9 @@ window.TuoguanUI = (() => {
         student = source.students.find((s) => s.id === id),
         selected = periods(id).length > 0;
       if (selected && protectedIds.has(id)) {
-        error.textContent = "该学生本月已有考勤或资金记录，无法移除。";
+        error.textContent =
+          protectionReasons[id] ||
+          "该学生本月有真实考勤或未解决的费用依赖，无法移除。";
         return;
       }
       if (!selected && student.status !== "在托") {
@@ -1041,13 +1049,11 @@ window.TuoguanUI = (() => {
       source.attendance.map((a) => [a.student_id + ":" + a.date, a]),
     );
     const calendar = new Map(source.calendar.map((c) => [c.date, c]));
-    const recordedDates = source.attendance.map((a) => a.date);
-    const dates = [
-      ...new Set([
-        ...source.calendar.filter((c) => c.enabled).map((c) => c.date),
-        ...recordedDates,
-      ]),
-    ].sort();
+    // Disabled calendar rows take precedence over preserved attendance evidence.
+    const dates = source.calendar
+      .filter((c) => c.enabled)
+      .map((c) => c.date)
+      .sort();
     const byStudent = new Map();
     for (const p of source.periods) {
       if (!byStudent.has(p.student_id)) byStudent.set(p.student_id, []);
@@ -1384,7 +1390,9 @@ window.TuoguanUI = (() => {
         (rangeEnd && v.date > rangeEnd) ||
         (!rangeStart && !rangeEnd && !v.date.startsWith(day.slice(0, 7)))
           ? "已保存至 " + v.date + "，不在当前筛选范围内"
-          : "已保存",
+          : record
+            ? "已保存"
+            : "",
     );
     const selectChannel = modal.element.querySelector("[name=channel]"),
       otherInput = modal.element.querySelector("[name=channel_other]");
@@ -1500,7 +1508,16 @@ window.TuoguanUI = (() => {
     body.innerHTML =
       '<div class="tg-actions transaction-action-row"><button class="btn primary" id="tg-money">新增资金记录</button><button class="btn danger" id="tg-money-delete">批量删除</button></div>' +
       table(
-        ["日期", "学生", "类型", "实际金额", "赠送金额", "支付方式", "备注"],
+        [
+          "日期",
+          "学生",
+          "年级",
+          "类型",
+          { label: "实际金额", alignment: "right" },
+          { label: "赠送金额", alignment: "right" },
+          "支付方式",
+          "备注",
+        ],
         rows.map(
           (r) =>
             '<tr class="tg-ledger-row" data-ledger="' +
@@ -1514,7 +1531,11 @@ window.TuoguanUI = (() => {
             "></td>" +
             [
               r.date,
-              studentBadge(r.student_id, gradeFor(r)),
+              studentBadge(
+                r.student_id,
+                grades.includes(gradeFor(r)) ? gradeFor(r) : undefined,
+              ),
+              renderGradeBadge(gradeFor(r)),
               esc(r.kind),
               money(r.actual_amount),
               money(r.gift_amount),
@@ -1528,8 +1549,6 @@ window.TuoguanUI = (() => {
         true,
         true,
       );
-    for (const index of [5, 6])
-      body.querySelectorAll("col")[index].dataset.alignment = "right";
     const all = body.querySelector(".tg-ledger-all"),
       remove = body.querySelector("#tg-money-delete");
     const sync = () => {

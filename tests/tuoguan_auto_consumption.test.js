@@ -65,7 +65,7 @@ test("saved four states charge fixed cents; defaults and archived rates never ch
   );
   assert.throws(() => f.write("resolve", { id: 1 }), /不支持/);
 });
-test("historical effective attendance settles without changing anomalies or source evidence, migration is idempotent", (t) => {
+test("historical effective attendance settles and placeholders normalize while source evidence survives idempotently", (t) => {
   const f = fixture(t);
   for (const [i, status] of [
     "出勤",
@@ -82,6 +82,7 @@ test("historical effective attendance settles without changing anomalies or sour
       "SELECT id,status,raw_status,source_cell,reference_fee FROM tg_attendance ORDER BY id",
     )
     .all();
+  original.find(r=>r.status==="未登记").status="不适用";
   const result = TG.migrate(f.db).settlement;
   assert.equal(result.entries, 2);
   assert.equal(result.net_change, 7500);
@@ -100,7 +101,7 @@ test("historical effective attendance settles without changing anomalies or sour
         "SELECT count(*) n FROM tg_attendance WHERE status IN ('未登记','缺勤','停课') AND pending=1",
       )
       .get().n,
-    3,
+    2,
   );
   const signature = T.signature(f.db);
   assert.equal(TG.migrate(f.db).settlement.updated, 0);

@@ -373,6 +373,15 @@ function commit(store, b, actor) {
             r.raw_status ?? r.status,
           );
         }
+        require("./tuoguan_normalization").apply(
+          store.db,
+          actor,
+          store.all(
+            "SELECT * FROM tg_attendance WHERE student_id=? AND source_import_id=?",
+            id,
+            p.id,
+          ),
+        );
         for (const attendance of store.all(
           "SELECT * FROM tg_attendance WHERE student_id=? AND source_import_id=?",
           id,

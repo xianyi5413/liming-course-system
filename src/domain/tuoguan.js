@@ -4,6 +4,7 @@ const HISTORY_STATUSES = [...STATUSES, "未登记", "缺勤", "停课"];
 const GRADES = ["初一", "初二", "初三"];
 const { TABLES, PROFILE_STATUSES, migrate } = require("./tuoguan_schema");
 const Billing = require("./tuoguan_settlement");
+const Protection = require("./tuoguan_protection");
 const { account: custodyAccount } = require("./tuoguan_account");
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
@@ -197,6 +198,7 @@ function createStore(db) {
     const { start, end, previous, next } = require("./tuoguan_calendar").bounds(
       b.month,
     );
+    const protection = Protection.snapshot(db, start, end);
     if (action === "remove-students") {
       if (
         !Array.isArray(b.students) ||
@@ -206,21 +208,8 @@ function createStore(db) {
         fail("请选择学生");
       for (const item of b.students) {
         student(item.id);
-        if (
-          get(
-            "SELECT id FROM tg_attendance WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
-            item.id,
-            start,
-            end,
-          ) ||
-          get(
-            "SELECT id FROM tg_ledger WHERE student_id=? AND date BETWEEN ? AND ? LIMIT 1",
-            item.id,
-            start,
-            end,
-          )
-        )
-          fail("所选学生本月已有考勤或资金记录，不能移除签到行");
+        if (protection.protected_student_reasons[item.id])
+          fail(protection.protected_student_reasons[item.id]);
         const rows = all(
           "SELECT * FROM tg_periods WHERE student_id=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=? ORDER BY id",
           item.id,
@@ -281,13 +270,9 @@ function createStore(db) {
           fail("日期已变化，请刷新", 409);
         if (
           action === "remove-dates" &&
-          (get(
-            "SELECT id FROM tg_attendance WHERE date=? LIMIT 1",
-            item.date,
-          ) ||
-            get("SELECT id FROM tg_ledger WHERE date=? LIMIT 1", item.date))
+          protection.protected_date_reasons[item.date]
         )
-          fail("所选日期已有考勤或资金记录，不能删除");
+          fail(protection.protected_date_reasons[item.date]);
         if (
           action === "add-dates" &&
           (old?.enabled === 1 ||
@@ -519,14 +504,11 @@ function createStore(db) {
         const old = get("SELECT * FROM tg_calendar WHERE date=?", b.date);
         if ((old?.version || 0) !== b.version) fail("日历已变更，请刷新", 409);
         if (![0, 1].includes(b.enabled)) fail("日历状态无效");
-        if (
-          !b.enabled &&
-          get(
-            "SELECT id FROM tg_attendance WHERE date=? AND status NOT IN ('放假','停课','不适用','未登记')",
-            b.date,
-          )
-        )
-          fail("请先更正当日考勤再停用日期");
+        if (!b.enabled) {
+          const reason = Protection.snapshot(db, b.date, b.date)
+            .protected_date_reasons[b.date];
+          if (reason) fail(reason);
+        }
         run(
           "INSERT INTO tg_calendar(date,enabled,teacher_id,time_slot,leave_deadline,notes) VALUES (?,?,?,?,?,?) ON CONFLICT(date) DO UPDATE SET enabled=excluded.enabled,teacher_id=excluded.teacher_id,time_slot=excluded.time_slot,leave_deadline=excluded.leave_deadline,notes=excluded.notes,version=tg_calendar.version+1",
           b.date,
@@ -545,16 +527,13 @@ function createStore(db) {
   }
   function participationSnapshot(month) {
     const { start, end } = require("./tuoguan_calendar").bounds(month);
+    const { protected_students, protected_student_reasons } =
+      Protection.snapshot(db, start, end);
     return {
       students: all("SELECT * FROM tg_students ORDER BY id"),
       periods: all("SELECT * FROM tg_periods ORDER BY start_date DESC,id"),
-      protected_students: all(
-        "SELECT student_id FROM tg_attendance WHERE date BETWEEN ? AND ? UNION SELECT student_id FROM tg_ledger WHERE date BETWEEN ? AND ?",
-        start,
-        end,
-        start,
-        end,
-      ).map((r) => r.student_id),
+      protected_students,
+      protected_student_reasons,
     };
   }
   function ledgerSnapshot(month, start, end) {
@@ -584,11 +563,7 @@ function createStore(db) {
     const { start, end } = require("./tuoguan_calendar").bounds(month);
     const saved =
       attendance ||
-      all(
-        "SELECT date FROM tg_attendance WHERE date BETWEEN ? AND ?",
-        start,
-        end,
-      );
+      all("SELECT * FROM tg_attendance WHERE date BETWEEN ? AND ?", start, end);
     const calendar = require("./tuoguan_calendar").defaults(
       month,
       all(
@@ -599,14 +574,13 @@ function createStore(db) {
       saved,
     );
     if (!protection) return { calendar };
-    const protectedDates = new Set(saved.map((a) => a.date));
-    for (const r of all(
-      "SELECT DISTINCT date FROM tg_ledger WHERE date BETWEEN ? AND ?",
+    const { protected_dates, protected_date_reasons } = Protection.snapshot(
+      db,
       start,
       end,
-    ))
-      protectedDates.add(r.date);
-    return { calendar, protected_dates: [...protectedDates].sort() };
+      saved,
+    );
+    return { calendar, protected_dates, protected_date_reasons };
   }
   function snapshot(month, finance) {
     if (!/^\d{4}-\d{2}$/.test(month)) fail("月份无效");

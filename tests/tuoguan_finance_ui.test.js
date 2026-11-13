@@ -225,7 +225,7 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
       await c.evaluate(
         'document.querySelector(".shared-course-dialog [role=alert]").textContent',
       ),
-      "该日期已有考勤或费用记录，无法直接删除。",
+      "已有考勤（出勤、请假或放假），不能直接移除",
     );
     await c.click(".shared-course-dialog .dialog-close");
     await c.waitFor(
@@ -661,7 +661,7 @@ test("failed old backup settlement rolls back the entire restore including exist
   db.close();
 });
 
-test("calendar metadata protects saved zero-fee, unknown and money-only dates; rejects readonly and stale writes without changing funds", async () => {
+test("calendar metadata protects real attendance but permits placeholder and money-only dates; readonly and stale writes reject", async () => {
   const db = new DatabaseSync(env.DB_PATH);
   const unchanged = () =>
     JSON.stringify(
@@ -679,9 +679,10 @@ test("calendar metadata protects saved zero-fee, unknown and money-only dates; r
     assert.equal(snap.status, 200);
     assert.deepEqual(Object.keys(snap.data).sort(), [
       "calendar",
+      "protected_date_reasons",
       "protected_dates",
     ]);
-    for (const date of ["01", "02", "04", "05", "06"]) {
+    for (const date of ["02", "03", "04"]) {
       const full = "2026-09-" + date;
       assert.ok(snap.data.protected_dates.includes(full));
       assert.equal(
@@ -1008,7 +1009,7 @@ test("Edge calendar queue, conflicts, errors, close synchronization, stale respo
     }
     await month("2026-09");
     await open();
-    for (const date of ["01", "04", "06"]) {
+    for (const date of ["02", "03", "04"]) {
       assert.equal(
         await c.evaluate(
           `document.querySelector('${day("2026-09-" + date)}').dataset.protected`,
@@ -1020,7 +1021,7 @@ test("Edge calendar queue, conflicts, errors, close synchronization, stale respo
         await c.evaluate(
           'document.querySelector(".tg-date-management [role=alert]").textContent',
         ),
-        "该日期已有考勤或费用记录，无法直接删除。",
+        "已有考勤（出勤、请假或放假），不能直接移除",
       );
     }
     await c.click(".shared-course-dialog .dialog-close");
@@ -1104,7 +1105,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
   };
   const rows = () =>
     c.evaluate(
-      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===9).map(r=>[...r.cells].slice(1).map(c=>c.textContent))',
+      '[...document.querySelectorAll(".tg-table tbody tr")].filter(r=>r.cells.length===10).map(r=>[...r.cells].slice(1).map(c=>c.textContent))',
     );
   const filter = async (id, value) => {
     await c.evaluate(
@@ -1130,13 +1131,13 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
       [1, 2],
     );
     assert.deepEqual(
-      [...new Set(all.map((r) => r[3]))].sort(),
+      [...new Set(all.map((r) => r[4]))].sort(),
       [...kinds].sort(),
     );
     assert.doesNotMatch(all.flat().join(" "), /考勤扣费|考勤冲正/);
     assert.equal(
       await c.evaluate(
-        '[...document.querySelectorAll(".tg-table tbody tr")].every(r=>[5,6].every(i=>getComputedStyle(r.cells[i]).textAlign==="right"))',
+        '[...document.querySelectorAll(".tg-table tbody tr")].every(r=>[6,7].every(i=>getComputedStyle(r.cells[i]).textAlign==="right"))',
       ),
       true,
     );
@@ -1144,7 +1145,7 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
       await filter("tg-kind", kind);
       assert.equal((await rows()).length, 1);
       assert.equal((await rows())[0][0], "1");
-      assert.equal((await rows())[0][3], kind);
+      assert.equal((await rows())[0][4], kind);
     }
     await filter("tg-kind", "");
     await filter("tg-grade", "初一");
@@ -1183,10 +1184,10 @@ test("Edge manual ledger excludes settlement, preserves filters, supports one sp
     await c.waitFor(
       'document.querySelector(".tg-table tbody").textContent.includes("合成一次双资金")',
     );
-    const recharge = (await rows()).filter((r) => r[7] === "合成一次双资金");
+    const recharge = (await rows()).filter((r) => r[8] === "合成一次双资金");
     assert.equal(recharge.length, 1);
-    assert.ok(recharge[0][4].replaceAll(",", "").includes("1000.00"));
-    assert.ok(recharge[0][5].includes("100.00"));
+    assert.ok(recharge[0][5].replaceAll(",", "").includes("1000.00"));
+    assert.ok(recharge[0][6].includes("100.00"));
     assert.equal(
       (
         await fetch(`http://127.0.0.1:${port}/api/tuoguan/money`, {

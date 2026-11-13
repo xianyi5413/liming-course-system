@@ -17,6 +17,23 @@ const FEES = Object.freeze({
   放假: 0,
   不适用: 0,
 });
+function chargedAmount(row, entries) {
+  let charged = 0;
+  for (const entry of [...entries].sort((a, b) => a.id - b.id)) {
+    if (entry.student_id !== row.student_id || entry.date !== row.date)
+      throw Error("考勤与消费关联不一致，自动结算已取消");
+    if (entry.kind === "考勤扣费" && entry.amount < 0 && !charged)
+      charged = -entry.amount;
+    else if (
+      entry.kind === "考勤冲正" &&
+      entry.amount === charged &&
+      charged > 0
+    )
+      charged = 0;
+    else throw Error("考勤扣费冲正链异常，自动结算已取消");
+  }
+  return charged;
+}
 function plan(attendance, ledger) {
   const linked = new Map();
   for (const row of ledger) {
@@ -27,22 +44,7 @@ function plan(attendance, ledger) {
   const changes = [];
   for (const row of attendance) {
     if (!Object.hasOwn(FEES, row.status)) continue;
-    let charged = 0;
-    for (const entry of (linked.get(row.id) || []).sort(
-      (a, b) => a.id - b.id,
-    )) {
-      if (entry.student_id !== row.student_id || entry.date !== row.date)
-        throw Error("考勤与消费关联不一致，自动结算已取消");
-      if (entry.kind === "考勤扣费" && entry.amount < 0 && !charged)
-        charged = -entry.amount;
-      else if (
-        entry.kind === "考勤冲正" &&
-        entry.amount === charged &&
-        charged > 0
-      )
-        charged = 0;
-      else throw Error("考勤扣费冲正链异常，自动结算已取消");
-    }
+    const charged = chargedAmount(row, linked.get(row.id) || []);
     const fee = FEES[row.status];
     if (
       charged === fee &&
@@ -180,6 +182,7 @@ module.exports = {
   RULE_JSON,
   FEES,
   plan,
+  chargedAmount,
   apply,
   settle,
   ensureRule,
