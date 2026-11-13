@@ -25,7 +25,17 @@ const CourseDetails = (() => {
     const focus = document.activeElement, element = document.createElement('div');
     element.className = 'modal-backdrop shared-course-dialog';
     element.innerHTML = shell(title, body, size === 'compact' ? 'compact-form-panel' : '');
-    const close = () => { beforeClose(); element.remove(); focus?.focus({ preventScroll: true }); onClose(); };
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      beforeClose();
+      closeCustomSelects(null, element);
+      element.remove();
+      cleanupCustomSelectPortals(element);
+      closed = true;
+      if (focus?.isConnected) focus.focus({ preventScroll: true });
+      onClose();
+    };
     element.querySelector('.dialog-close').onclick = close;
     element.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.stopPropagation(); close(); }

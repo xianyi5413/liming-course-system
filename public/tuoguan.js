@@ -1399,18 +1399,99 @@ window.TuoguanUI = (() => {
     modal.element.querySelector("[name=date]").required = true;
     modal.element.querySelector("[name=student_id]").required = true;
   }
+  function ledgerAnalysis(rows, gradeFor) {
+    let actual = 0,
+      gift = 0,
+      refund = 0,
+      records = 0;
+    const students = new Set(),
+      byGrade = new Map(),
+      byChannel = new Map();
+    for (const row of rows) {
+      const cash = row.actual_amount ?? row.amount,
+        bonus = row.gift_amount ?? 0,
+        recharge = row.kind === "充值";
+      if (recharge) {
+        actual += cash;
+        gift += bonus;
+        records++;
+        students.add(row.student_id);
+      } else refund -= cash + bonus;
+      const method = String(row.method || "").trim();
+      const channel = !method
+        ? "未记录"
+        : ["微信", "现金", "支付宝"].includes(method)
+          ? method
+          : "其他";
+      for (const [map, key, value] of [
+        [byGrade, gradeFor(row), cash + bonus],
+        [byChannel, channel, recharge ? cash : 0],
+      ]) {
+        if (map === byChannel && !recharge) continue;
+        const item = map.get(key) || {
+          name: key,
+          net: 0,
+          records: 0,
+          students: new Set(),
+        };
+        item.net += value;
+        item.records++;
+        item.students.add(row.student_id);
+        map.set(key, item);
+      }
+    }
+    const splits = (map, order) =>
+      [...map.values()]
+        .map((r) => ({ ...r, net: r.net / 100, students: r.students.size }))
+        .sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    return rechargeAnalysisMarkup([], {
+      summary: {
+        byGrade: splits(byGrade, [...grades, "未记录"]),
+        bySource: splits(byChannel, [
+          "微信",
+          "现金",
+          "支付宝",
+          "其他",
+          "未记录",
+        ]),
+      },
+      cards: [
+        ["实际充值合计", actual / 100, "money"],
+        ["赠送充值合计", gift / 100, "money"],
+        ["净账户资金变动", (actual + gift - refund) / 100, "money"],
+        ["充值记录数", records, "number"],
+        ["充值学生数", students.size, "number"],
+        ["退款合计", refund / 100, "money"],
+      ],
+      subtitle: "随当前筛选更新；净账户变动及退款含赠送金额。",
+      gradeTitle: "按业务年级 · 净账户变动",
+      sourceTitle: "按支付渠道 · 实际充值",
+    });
+  }
   function renderLedger(body) {
+    const studentById = new Map(data.students.map((s) => [s.id, s]));
+    const gradesByRecord = new Map();
+    const gradeFor = (row) => {
+      if (!gradesByRecord.has(row.id))
+        gradesByRecord.set(
+          row.id,
+          period(row.student_id, row.date)?.grade || "未记录",
+        );
+      return gradesByRecord.get(row.id);
+    };
     const rows = data.ledger.filter(
       (l) =>
         isManualMoney(l) &&
         (!ledgerKind || l.kind === ledgerKind) &&
         (!rangeStart || l.date >= rangeStart) &&
         (!rangeEnd || l.date <= rangeEnd) &&
-        matches(
-          data.students.find((s) => s.id === l.student_id) || { name: "" },
-          period(l.student_id, l.date) ||
-            data.students.find((s) => s.id === l.student_id),
-        ),
+        matches(studentById.get(l.student_id) || { name: "" }, {
+          grade: gradeFor(l),
+        }),
+    );
+    root.querySelector("#tg-recharge-analysis").innerHTML = ledgerAnalysis(
+      rows,
+      gradeFor,
     );
     const editable = (r) => !isReadonlyUser() && r.editable !== false;
     const ids = new Set(rows.filter(editable).map((r) => r.id));
@@ -1433,7 +1514,7 @@ window.TuoguanUI = (() => {
             "></td>" +
             [
               r.date,
-              studentBadge(r.student_id, period(r.student_id, r.date)?.grade),
+              studentBadge(r.student_id, gradeFor(r)),
               esc(r.kind),
               money(r.actual_amount),
               money(r.gift_amount),
@@ -1591,6 +1672,9 @@ window.TuoguanUI = (() => {
       caret = focusId === "tg-query" ? focus.selectionStart : null;
     root.innerHTML =
       '<section class="tg-panel">' +
+      (tab === "流水"
+        ? '<div id="tg-recharge-analysis" class="recharge-page"></div>'
+        : "") +
       filtersHtml() +
       '<p id="tg-msg" role="status" aria-live="polite"></p><div id="tg-body"></div></section>';
 

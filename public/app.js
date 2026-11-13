@@ -1004,8 +1004,8 @@ function debounce(fn, delay = 200) {
   };
 }
 
-function closeCustomSelects(except = null) {
-  document.querySelectorAll(".custom-select.open").forEach((selectBox) => {
+function closeCustomSelects(except = null, scope = document) {
+  scope.querySelectorAll(".custom-select.open").forEach((selectBox) => {
     if (selectBox === except) return;
     selectBox.classList.remove("open");
     selectBox.classList.remove("open-up");
@@ -1098,9 +1098,15 @@ function syncCustomSelect(select, wrapper) {
   });
 }
 
-function cleanupCustomSelectPortals() {
+function cleanupCustomSelectPortals(scope = null) {
   document.querySelectorAll('.custom-select-menu[data-select-portal="1"]').forEach((menu) => {
-    if (!menu._customSelectOwner?.isConnected) menu.remove();
+    const owner = menu._customSelectOwner;
+    if (scope ? scope.contains(owner) : !owner?.isConnected) {
+      menu.classList.remove("open", "open-up");
+      menu.remove();
+      if (owner) { owner._customSelectMenu = null; owner._customSelectNative = null; }
+      menu._customSelectOwner = null;
+    }
   });
 }
 
@@ -1147,6 +1153,7 @@ function scrollCustomSelectOptionIntoView(wrapper) {
 }
 
 function openCustomSelect(wrapper) {
+  if (!wrapper?.isConnected || !customSelectMenu(wrapper)?.isConnected) return;
   closeOpenMultiSelectMenus();
   closeCustomSelects(wrapper);
   wrapper.classList.add("open");
@@ -1158,7 +1165,7 @@ function openCustomSelect(wrapper) {
   positionCustomSelectMenu(wrapper);
   scrollCustomSelectOptionIntoView(wrapper);
   positionCustomSelectMenu(wrapper);
-  requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }));
+  requestAnimationFrame(() => { if (wrapper.isConnected && wrapper.classList.contains("open")) searchInput?.focus({ preventScroll: true }); });
 }
 
 function closeSearchablePicker() {
@@ -9272,9 +9279,9 @@ function rechargeAnalysisSplitMarkup(title, rows = []) {
   `;
 }
 
-function rechargeAnalysisMarkup(rows = []) {
-  const summary = rechargeAnalysis(rows);
-  const cards = [
+function rechargeAnalysisMarkup(rows = [], options = {}) {
+  const summary = options.summary || rechargeAnalysis(rows);
+  const cards = options.cards || [
     ["本月实际充值合计", summary.actual, "money"],
     ["本月赠送充值合计", summary.gift, "money"],
     ["本月净充值合计", summary.net, "money"],
@@ -9287,7 +9294,7 @@ function rechargeAnalysisMarkup(rows = []) {
       <div class="section-head">
         <div>
           <div class="section-title">充值数据分析汇总</div>
-          <div class="section-subtitle">随当前来源、学生姓名和年级筛选同步更新。</div>
+          <div class="section-subtitle">${escapeHtml(options.subtitle || "随当前来源、学生姓名和年级筛选同步更新。")}</div>
         </div>
       </div>
       <div class="recharge-analysis-grid">
@@ -9299,8 +9306,8 @@ function rechargeAnalysisMarkup(rows = []) {
         `).join("")}
       </div>
       <div class="recharge-analysis-breakdowns">
-        ${rechargeAnalysisSplitMarkup("按年级", summary.byGrade)}
-        ${rechargeAnalysisSplitMarkup("按来源", summary.bySource)}
+        ${rechargeAnalysisSplitMarkup(options.gradeTitle || "按年级", summary.byGrade)}
+        ${rechargeAnalysisSplitMarkup(options.sourceTitle || "按来源", summary.bySource)}
       </div>
     </section>
   `;
