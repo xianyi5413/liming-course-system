@@ -4209,55 +4209,34 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 
 .recharge-analysis-panel {
   display: grid;
-  gap: var(--space-3);
-  margin: var(--space-3) 0 var(--space-4);
-  padding: var(--space-4);
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   background: var(--panel-raised);
 }
 
-.recharge-page > .recharge-analysis-panel {
-  gap: var(--space-2);
-  margin: 0 0 var(--space-4);
-  padding: var(--space-3) var(--space-4);
-}
-
-.recharge-page .recharge-analysis-panel .section-head {
+.recharge-analysis-panel .section-head {
   min-height: 0;
-  padding: 0 0 var(--space-2);
+  padding: 0;
   border-bottom: 0;
   background: transparent;
 }
 
-.recharge-page .recharge-analysis-card {
-  gap: 3px;
-  padding: var(--space-2) var(--space-3);
-}
-
-.recharge-page .recharge-analysis-card strong {
-  font-size: 1.06rem;
-}
-
-.recharge-page .recharge-analysis-breakdowns {
-  gap: var(--space-2);
-}
-
-.recharge-page .recharge-analysis-chip {
-  padding: 4px 7px;
-}
-
 .recharge-analysis-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(116px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
 }
 
-.recharge-analysis-card {
+.recharge-analysis-panel .recharge-analysis-card {
   display: grid;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
-  padding: var(--space-3);
+  min-height: 0;
+  padding: 7px 9px;
+  align-content: center;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   background: var(--input-bg);
@@ -4269,15 +4248,23 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
   font-weight: 750;
 }
 
-.recharge-analysis-card strong {
+.recharge-analysis-panel .recharge-analysis-card strong {
   color: var(--ink-strong);
   font-family: var(--font-number);
-  font-size: 1.18rem;
+  font-size: 1.1rem;
+  margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  font-variant-numeric: tabular-nums;
   font-weight: 900;
   line-height: 1.2;
 }
 
-.recharge-analysis-card.is-negative strong,
+.recharge-analysis-panel .recharge-analysis-card.is-negative strong,
+.recharge-analysis-panel .negative-text,
+.metric-value.negative-text,
+.money-pair .negative-text,
 .negative-text {
   color: var(--manual-fg);
   font-weight: 900;
@@ -4289,14 +4276,16 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 }
 
 .recharge-analysis-breakdowns {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
 }
 
 .recharge-analysis-split {
-  display: grid;
-  gap: var(--space-2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -4309,15 +4298,17 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 .recharge-analysis-chip-list {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 6px;
 }
 
-.recharge-analysis-chip {
+.recharge-analysis-panel .recharge-analysis-chip {
   display: inline-flex;
+  flex-direction: row;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  padding: 6px 8px;
+  padding: 4px 7px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   background: var(--panel);
@@ -4330,6 +4321,9 @@ input[type="date"][data-date-kind="single"]::-webkit-calendar-picker-indicator {
 .recharge-analysis-chip em {
   min-width: 0;
 }
+
+.money-pair { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.money-pair > span { display: inline-block; max-width: 100%; }
 
 .recharge-analysis-chip em {
   color: var(--muted);
@@ -14020,10 +14014,6 @@ table.adaptive-table :is(th, td).adaptive-wrap {
 .class-group-type-cell:hover, .class-group-type-cell:focus-visible { background: var(--surface-hover); outline: 1px solid var(--brand-border); outline-offset: -1px; }
 .class-group-type-cell .schedule-inline-picker-native, .class-group-type-cell .schedule-inline-picker-anchor { position: absolute; opacity: 0; pointer-events: none; inset: 0; width: 100%; height: 100%; }
 .rule-activation { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; cursor: pointer; }
-.recharge-page .recharge-analysis-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--space-3); }
-.recharge-page .recharge-analysis-card { padding: var(--space-3); min-height: 84px; align-content: center; background: var(--panel); }
-.recharge-page .recharge-analysis-card strong { font-size: 1.45rem; font-variant-numeric: tabular-nums; }
-.recharge-page .recharge-analysis-card.is-negative strong { color: var(--manual-fg); }
 .teacher-profile-table.adaptive-table tbody td { padding-top: 4px; padding-bottom: 4px; }
 .teacher-profile-table.adaptive-table .cell-input { min-height: 32px; padding-top: 5px; padding-bottom: 5px; line-height: 20px; }
 @media print { .matrix-view-region .week-grid-scroll { max-height: none; overflow: visible; } .matrix-view-region .week-grid-scroll thead th { position: static; } }
@@ -14072,9 +14062,6 @@ table.uniform-table.compact-rows .rule-activation .teacher-salary-rule-active { 
 
 .lesson-table .lesson-note-input { height: 32px !important; min-height: 32px; max-height: 32px; resize: none; white-space: pre; overflow: hidden; }
 .recharge-analysis-list { display: flex; flex-wrap: wrap; gap: 10px; }
-.recharge-analysis-chip { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; width: 164px; min-height: 96px; gap: 5px; box-sizing: border-box; }
-.recharge-analysis-chip > span { font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
-.recharge-analysis-chip em { color: var(--muted); font-size: var(--text-caption); font-style: normal; }
 :is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value) { appearance: textfield; -moz-appearance: textfield; }
 :is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value)::-webkit-inner-spin-button,
 :is(input.currency-input,input.money-input,input.teacher-salary-rule-batch-value)::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
@@ -14121,11 +14108,11 @@ table.adaptive-table:is(.recharge-table,.student-query-detail-table,.teacher-pro
 .notice-filter-bar .notice-primary-controls > .filter-field { max-width: 100%; width: auto; flex-wrap: wrap; }
 .notice-filter-bar .notice-tail-row { width: 100%; max-width: 100%; grid-template-columns: max-content minmax(0,1fr); }
 .notice-filter-bar .filter-summary { flex: 0 0 auto; }
-.query-head.student-statement-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
-.query-head.student-statement-metrics .metric { width: auto; min-width: 0; max-width: none; padding: 10px; }
+.query-head.student-statement-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 8px; }
+.query-head.student-statement-metrics .metric { width: auto; min-width: 0; max-width: none; min-height: 0; padding: 8px 10px; }
 .query-head.student-statement-metrics .metric-label { white-space: normal; overflow: visible; }
 .query-head.student-statement-metrics .metric-value { font-size: 1.1rem; white-space: normal; overflow-wrap: anywhere; overflow: visible; }
-@media(min-width:1400px) { .query-head.student-statement-metrics { grid-template-columns: repeat(8,minmax(0,1fr)); } }
+@media(min-width:701px) and (max-width:1000px) { .query-head.student-statement-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media(max-width:700px) { .query-head.student-statement-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media(max-width:500px) { .notice-filter-bar .notice-tail-row { grid-template-columns: minmax(0,1fr); } }
 .pricing-unset-summary { color: var(--warning, #a66b12); font-size: var(--text-caption); white-space: nowrap; }
@@ -14202,10 +14189,6 @@ table.adaptive-table td[data-adaptive-alignment="center"] .student-set-badges { 
 .batch-edit-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; align-items: center; margin: 10px 0; }
 
 /* 2026-10-14: content-sized tables and continuous recharge breakdowns. */
-.recharge-page .recharge-analysis-breakdowns { display: flex; flex-wrap: wrap; align-items: center; }
-.recharge-page .recharge-analysis-split,
-.recharge-page .recharge-analysis-chip-list { display: contents; }
-.recharge-page .recharge-analysis-chip { flex: 0 0 auto; }
 .recharge-table.adaptive-table :is(th, td):nth-child(8),
 .recharge-table.adaptive-table td:nth-child(8) .lesson-inline-picker { white-space: nowrap !important; overflow: visible; text-overflow: clip; }
 .profile-table.adaptive-table col { min-width: 0; max-width: none; }
@@ -14370,7 +14353,7 @@ table.adaptive-table td.single-line-note,
 .tg-detail-loading { position: absolute; right: 0; color: var(--muted); }
 .tg-detail-notes:has(> div:not(:empty)) { margin: 0; }
 .tg-detail-notes:not(:has(> div:not(:empty))), .tg-detail-notes > div:empty, .tg-detail-error:empty { display: none; }
-.tg-detail-error { margin: 0; color: var(--danger); }
+.tg-detail-error { position: absolute; top: 100%; left: 0; right: 0; z-index: 1; margin: 0; padding: 4px 8px; color: var(--danger); background: var(--panel); border: 1px solid var(--danger); border-radius: var(--radius-sm); }
 .tg-detail-content { width: 100%; min-width: 0; box-sizing: border-box; }
 .tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); gap: 6px; margin: 0; }
 .tg-student-detail-panel .metric { min-height: 0; padding: 7px 9px; }

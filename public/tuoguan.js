@@ -181,12 +181,9 @@ window.TuoguanUI = (() => {
       controller;
     const fields = [
       ["本月托管消费", "fee"],
-      ["本月实际消费", "actual_consumption"],
-      ["本月赠送消费", "gift_consumption"],
-      ["本月实际充值", "actual_recharge"],
-      ["本月赠送充值", "gift_recharge"],
-      ["月末实际余额", "actual_balance"],
-      ["月末赠送余额", "gift_balance"],
+      ["本月实际/赠送", "actual_consumption", "gift_consumption"],
+      ["本月实际/赠送充值", "actual_recharge", "gift_recharge"],
+      ["月末实际/赠送余额", "actual_balance", "gift_balance"],
     ];
     const initial = showSummary ? data.summary?.find((r) => r.id === id) : null;
     const historyController = new AbortController();
@@ -216,11 +213,11 @@ window.TuoguanUI = (() => {
         ? metrics(fields.map(([label]) => [label, "—"])) +
           '<div class="tg-detail-notes muted-tip"><div></div><div></div></div>'
         : "") +
-      '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong></strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button><span class="tg-detail-loading" role="status" aria-live="polite"></span></div>' +
+      '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong></strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button><span class="tg-detail-loading" role="status" aria-live="polite"></span><p class="tg-detail-error" role="alert"></p></div>' +
       monthCalendar(month, () => "") +
       '<div class="tg-calendar-legend">' +
       statuses.map(badge).join("") +
-      '</div><p class="tg-detail-error" role="alert"></p><section class="tg-history"><h3>历史充值记录</h3><div class="tg-history-body">正在加载…</div></section>';
+      '</div><section class="tg-history"><h3>历史充值记录</h3><div class="tg-history-body">正在加载…</div></section>';
     const values = [...content.querySelectorAll(".metric-value")],
       notes = content.querySelector(".tg-detail-notes"),
       grid = content.querySelector(".tg-detail-calendar"),
@@ -274,9 +271,12 @@ window.TuoguanUI = (() => {
       template.innerHTML = calendar;
       const scrollTop = panel.scrollTop;
       // Commit the complete month synchronously; no empty/loading render in between.
-      values.forEach(
-        (node, index) => (node.textContent = money(a[fields[index][1]])),
-      );
+      values.forEach((node, index) => {
+        const [, actual, gift] = fields[index];
+        node.classList.toggle("money-pair", Boolean(gift));
+        node.classList.toggle("negative-text", !gift && a[actual] < 0);
+        node.innerHTML = gift ? actualGiftMarkup(Number(a[actual] || 0) / 100, Number(a[gift] || 0) / 100) : esc(money(a[actual]));
+      });
       if (notes) {
         notes.children[0].textContent = a.unpaid_current_fee
           ? "本月费用含未付 " + money(a.unpaid_current_fee)

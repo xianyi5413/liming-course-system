@@ -122,7 +122,7 @@ const save = (amount, cookie = ownerCookie) => api('/api/fee-overrides', {method
 const { readZip } = require('../src/excel/xlsx_codec');
 const crypto = require('node:crypto');
 const baselinePath = path.join(__dirname, 'fixtures/student-query-export-baseline.json');
-test('student statement Excel XML, filename, canvas text geometry and pixels match the pre-integration baseline', async()=>{
+test('student statement Excel XML, filename, canvas text geometry and pixels match the reviewed baseline', async()=>{
  const chrome=await launchChrome(path.join(tempRoot,'export-chrome'));
  try {
   const browser=chrome.session;
@@ -139,7 +139,12 @@ test('student statement Excel XML, filename, canvas text geometry and pixels mat
    results.push({range,xml,disposition:response.headers.get('content-disposition'),canvas:{...canvas,sha256:crypto.createHash('sha256').update(png).digest('hex')}});
    if(process.env.CAPTURE_QUERY_BASELINE==='1') {fs.mkdirSync(path.join(tempRoot,'baseline'),{recursive:true});fs.writeFileSync(path.join(tempRoot,'baseline',`${results.length}.xlsx`),buffer);fs.writeFileSync(path.join(tempRoot,'baseline',`${results.length}.png`),png);}
   }
-  if(process.env.CAPTURE_QUERY_BASELINE==='1'){fs.mkdirSync(path.dirname(baselinePath),{recursive:true});fs.writeFileSync(baselinePath,JSON.stringify(results,null,2)+'\n');console.log('Saved synthetic export baseline');}
+  if(process.env.CAPTURE_QUERY_BASELINE==='1'){
+   const previous=JSON.parse(fs.readFileSync(baselinePath,'utf8'));
+   for(let i=0;i<results.length;i++) for(const key of ['range','xml','disposition']) assert.deepEqual(results[i][key],previous[i][key],`PNG update must preserve ${key}`);
+   for(let i=0;i<results.length;i++) assert.equal(results[i].canvas.filename,previous[i].canvas.filename);
+   fs.writeFileSync(baselinePath,JSON.stringify(results,null,2)+'\n');console.log('Saved synthetic PNG baseline; Excel XML and filenames unchanged');
+  }
   else assert.deepEqual(results,JSON.parse(fs.readFileSync(baselinePath,'utf8')));
   assert.deepEqual(browser.exceptions,[]);assert.deepEqual(browser.consoleErrors,[]);
  }finally{await chrome.session.close();chrome.child.kill();}
