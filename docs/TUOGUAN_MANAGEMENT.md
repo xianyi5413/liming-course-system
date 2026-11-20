@@ -1,5 +1,72 @@
 # 托管管理实施与验收记录
 
+## 2026-11-20 紧凑详情、页面权限与课程状态
+
+实现与定向验收完成时间：2026-11-20 10:37（北京时间）。基线 `dd982d5761e863501ccb7a7c58807442dbd6eab8`，分支 `feature/tuoguan-detail-permission-status-fix`，版本 `20261120-detail-permission-status`。开发前工作区干净；fetch后确认origin/main的合并提交f11b224与基线源码相同，未从旧版本覆盖新工作。
+
+### 详情复用与布局
+
+`studentDetail(id, { showSummary })`是唯一详情组件，两页继续复用CourseDetails.dialog、metrics、monthCalendar及原充值表格。学生页新增普通行点击、Enter／空格打开；`bindStudentDetails`共用事件规则，跳过行内按钮和自定义选择器，保留年级快捷修改、状态选择和明确的编辑档案入口。开关弹窗不重载外层页面，不丢失筛选。
+
+旧CSS强制六行×76px，同时空提示占高度、内容内外重复留白。现在最大宽760px，卡片压缩间距及内边距，空提示不占位，日历自动按实际日期排4／5／6行，每行54px、间隔4px。Edge实测2026年9月五行日历286px；桌面面板760px，390px视口下面板358px。七项金额完整，手机长内容正常纵向滚动；历史表格在自身容器中横向滚动，不撑宽面板。明暗主题截图已经人工查看。
+
+切月保留弹窗、卡片、月份导航、日历容器和历史记录节点，请求完成后一次更新当月内容。AbortController、序号及账号／页面归属检查继续处理取消、乱序和关闭；加载期间不清空内容。月份实际行数变化时自然改变内容高度，不以固定六行空白维持高度。
+
+`GET student-detail?student_id=...&month=...`只读取该ID当月考勤和用于显示的年级；`summary=1`时才调用现有custodyAccount计算七项汇总，且必须有tgSummary。学生页snapshot直接读取档案，不再先计算全部费用再删除结果。历史充值沿用独立student-history接口，只在打开时读取一次，按date DESC、id DESC排序，只含有效人工充值／退款，保留实际／赠送金额、渠道、备注；去掉操作者、凭据等详情不需要的字段。关闭时取消历史请求。
+
+### 权限根因与服务端边界
+
+原前端把`finance = canView("tgStudents")`用于每日签到“管理学生”的显示和函数入口；后端student、period、remove-students及students_only读取又要求tgStudents，形成已授权签到页面的半可用状态。现统一由当前页面权限及全局只读决定可用操作。
+
+| 页面或入口 | 允许范围 | 保留的限制 |
+|---|---|---|
+| 每日签到tgAttendance | 管理参与学生、日期、单格及批量签到 | 不开放独立档案编辑、充值流水、资金修改或收费设置 |
+| participants读取 | 复用participationSnapshot，返回管理学生所需档案、参与关系与移除保护 | 需tgAttendance |
+| create-member／join-month写入 | 服务端白名单限定“新档案并入月”／“既有学生入月”，复用student／period事务、版本与同名校验 | 不接受id、历史起止日期、年级改写、资金或任意page来源字段 |
+| remove-students写入 | tgAttendance或tgStudents可操作指定月份参与关系 | 原版本、真实考勤及费用依赖保护不变 |
+| 托管学生tgStudents | 档案编辑、只读单生详情和充值历史 | 不允许summary=1、其他页面或资金修改 |
+| 充值流水／托管费用／托管设置 | 继续按tgLedger／tgSummary／tgSettings分别授权 | 默认角色不变；复制／导入整套托管数据仍需原综合权限 |
+| 全局只读 | 可查看所属页面和详情 | 所有业务写接口统一403，前端编辑入口禁用或隐藏 |
+
+已检查五个托管页面的canView调用。保留“前往另一页面”的导航授权和综合导入权限；没有用扩大全部托管权限修复问题。签到不能直接改已有学生的暂停／毕业等档案状态，这属于独立档案管理边界。
+
+### 课程状态与线上对照
+
+真正的代码缺陷是bootstrapLookups把usedLessonLookups.statuses当作编辑字典，前端又直接使用该列表；没有已使用的“待上”时，默认数组不会补回。“未选”还会提交空字符串，旧状态回退显示“待上”。隔离库及基线函数均已复现。修复统一合并内置、配置自定义和历史已使用状态；状态编辑去掉空选项，服务端拒绝显式空值。保留其他字段的空值、历史课程值及原结算算法，未做数据迁移。详见[课程状态说明](COURSE_STATUS.md)。
+
+只读访问正式站点的首页、静态资源及/api/version。线上版本号为20261113-tuoguan-grade-hover-summary，git_commit为空；app.js、tuoguan.js、styles.css与基线按换行规范化后内容相同。app.js及CSS原始SHA256差异仅由换行符造成，不能据此认定部署逻辑不同。业务bootstrap返回401，因此未读取线上真实候选数据、未检查用户浏览器缓存，也未宣称完成线上登录验收。未部署、未改真实课程。
+
+### 实际测试
+
+测试写入全部在临时隔离数据库及独立Edge资料目录执行，使用Edge 157.0.4341.60。以下18项是不同test用例，不把循环内的断言或复测重复计数。
+
+| 实际命令（PowerShell） | 最终结果 |
+|---|---|
+| `node --test tests/tuoguan_detail_permission_status.test.js` | 11通过 |
+| `node --test --test-name-pattern='course copies' tests/tuoguan_detail_permission_status.test.js` | 收尾新增复制兼容用例1通过 |
+| `$env:TEST_BROWSER='edge'; node --test --test-name-pattern='five permissions\|v14 visible\|Edge detail loads\|Edge grade shortcut\|v14 grade split' tests/tuoguan_stage_ui.test.js` | 5通过 |
+| `$env:TEST_BROWSER='edge'; node --test --test-name-pattern='Edge stable detail' tests/tuoguan_finance_ui.test.js` | 1通过 |
+
+合计18通过、未解决失败0、跳过0；其中8项Edge用例覆盖受限角色、行点击和编辑隔离、四种视口／主题组合、4／5／6行月份、历史只读、延迟／乱序／失败／关闭切月、所有六种状态及自定义状态真实保存、刷新、共享浮层清理、班级管理和家长／老师课程PNG。收尾新增的复制用例验证旧空状态仅在新副本转换、普通新建和批量复制保留手填／历史自定义值，源课程不变；没有为该增量重复执行已通过的无关测试。浏览器未捕获异常与Console错误均0。
+
+首次复现与开发中出现的断言／测试选择器问题已修正后定向复测。旧finance_ui种子缺少新增的学段及年级生效日期，现补齐当前业务校验要求；延迟拦截也改为新的单生详情路径。没有反复运行全量历史测试。
+
+修改的8个JS文件分别执行node --check通过；git diff --check通过。布局截图与测量结果保存在忽略目录`.tuoguan-local/detail-permission-status/`，没有提交真实数据、浏览器资料或凭据。
+
+### Excel与本地历史数据
+
+完整Excel保持v14，无新增字段、无导出系统变更。专项完整导出／恢复逐表比较托管学生、周期、考勤、充值／退款／作废证据、角色、账号及个人页面权限、课程原始状态和自定义状态配置；恢复后重复迁移不重复扣费，历史账本及月度余额不变。另复用了v14可见表、v13兼容及历史年级分界恢复用例。
+
+5177原进程PID44580，工作目录为本项目，未覆盖DATA_DIR／DB_PATH，实际使用data/liming-local.sqlite，启动版本dd982d5。核对进程后停止并原生备份，再更新本地服务；52张表前后指纹仅roles的初始化updated_at变化，角色其他字段及权限完全一致。18份托管档案、649条考勤、635条账本、1864节课程均未变，integrity_check=ok、外键问题0。执行的私有核对命令为`node .tuoguan-local/detail-permission-status/local-check.cjs before`及`after`。真实业务未用于写入验收。
+
+### 文件与后续取舍
+
+主要源码：public/tuoguan.js、public/styles.css、public/app.js、public/index.html、src/server.js、src/domain/tuoguan.js、src/domain/tuoguan_permissions.js。复用course-details.js、tuoguan_account.js，不改结算。新增tests/tuoguan_detail_permission_status.test.js，并维护两份相关现有测试。README、本文、COURSE_STATUS及Excel覆盖文档同步更新。
+
+本轮值得：减少详情无效高度，恢复页面内部完整工作流，修正必填状态候选与提交语义，且后端数据范围仍可审计。两页共用一个详情及行事件辅助函数，没有复制第二套日历、卡片或充值表。共享自定义下拉框渲染本身未发现本轮所报文字丢失问题；问题在候选来源和空值规则，批量复制／新建／冲突编辑已核对同一状态语义。
+
+后续优先：在部署时填写APP_GIT_COMMIT，使线上版本可核对；保持单页权限矩阵的定向测试；如历史充值实际增长明显，再考虑分页。目前不需要重写弹窗／权限框架、不需要升级Excel版本或批量修复历史课程。仍需人工在正式发布后重新登录受限账号，确认线上真实状态候选及缓存；线上未配置字典的历史自定义状态若需改变计费含义，应另立迁移方案，不能混入本轮展示修复。
+
 ## 2026-11-13 托管排序、年级分界、费用范围与矩阵定位
 
 完成时间：2026-11-13 20:45（北京时间）。基线 `edab4992ad17bc1422bd44dd5cd6bcb18d0997e4`，分支 `feature/tuoguan-sorting-grade-hover-summary`，版本 `20261113-tuoguan-grade-hover-summary`。本节覆盖本轮变化，保留既有收费、同步和备份实现及下方历史记录。
