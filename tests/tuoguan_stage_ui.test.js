@@ -143,7 +143,7 @@ test("five permissions enforce each read/write API, legacy equivalent migration,
     }
     assert.equal(
       (await api(cookie, "tuoguan/student-history?student_id=1")).status,
-      ["tgSummary", "tgLedger"].includes(key) ? 200 : 403,
+      ["tgStudents", "tgSummary", "tgLedger"].includes(key) ? 200 : 403,
     );
     for (const [action, permission] of [
       ["student", "tgStudents"],

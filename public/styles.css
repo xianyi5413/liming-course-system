@@ -14343,8 +14343,8 @@ table.adaptive-table td.single-line-note,
 .tg-table.tg-matrix :is(td,th).tg-locate-col { background: var(--surface-hover); }
 .tg-table.tg-matrix td.tg-locate-cell { background: color-mix(in srgb, var(--surface-hover) 82%, var(--brand-border)); box-shadow: inset 0 0 0 1px var(--brand-border); }
 .tg-profile-link { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.tg-fee-row { cursor: pointer; }
-.tg-fee-row:hover td, .tg-fee-row:focus-visible td { background: var(--table-head); }
+.tg-fee-row, .tg-student-row { cursor: pointer; }
+:is(.tg-fee-row,.tg-student-row):is(:hover,:focus-visible) td { background: var(--table-head); }
 .tg-detail-month { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin: var(--space-3) 0; }
 .tg-detail-calendar { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: var(--space-2); }
 .tg-calendar-day { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; min-width: 0; min-height: 65px; text-align: center; border-radius: var(--radius-sm); background: var(--badge-bg,var(--panel)); color: var(--badge-fg,var(--muted)); border: 1px solid color-mix(in srgb,currentColor 18%,transparent); }
@@ -14356,14 +14356,26 @@ table.adaptive-table td.single-line-note,
 .tg-date-choice:disabled { cursor: wait; opacity: .65; }
 .tg-date-management [role="alert"] { color: var(--danger); }
 .tg-date-management :is([role="alert"],[role="status"]):empty { display: none; }
-.tg-student-detail-panel { width: min(1040px, 100%); }
-.tg-student-detail-panel .tg-detail-calendar { grid-template-rows: repeat(6, 76px); }
-.tg-student-detail-panel .tg-detail-month { position: relative; }
+.tg-student-detail-panel { width: min(760px, 100%); }
+.tg-student-detail-panel .modal-head { margin-bottom: 8px; }
+.tg-student-detail-panel .tg-detail-content { display: grid; gap: 8px; padding: 0; }
+.tg-student-detail-panel .tg-history .band { margin: 0; }
+.tg-student-detail-panel .tg-actions { margin: 0; justify-content: flex-start; }
+.tg-student-detail-panel .tg-history { min-width: 0; }
+.tg-student-detail-panel .tg-detail-calendar { grid-auto-rows: 54px; gap: 4px; }
+.tg-student-detail-panel .tg-calendar-day { min-height: 0; padding: 4px 2px; gap: 2px; justify-content: center; }
+.tg-student-detail-panel .tg-detail-month { position: relative; margin: 0; }
+.tg-student-detail-panel .tg-calendar-legend { margin: 0; gap: 4px; }
+.tg-student-detail-panel .tg-history h3 { margin: 0 0 6px; font-size: var(--text-body); }
 .tg-detail-loading { position: absolute; right: 0; color: var(--muted); }
-.tg-detail-notes > div { min-height: 1.4em; }
-.tg-detail-error { min-height: 1.4em; margin: 0; color: var(--danger); }
+.tg-detail-notes:has(> div:not(:empty)) { margin: 0; }
+.tg-detail-notes:not(:has(> div:not(:empty))), .tg-detail-notes > div:empty, .tg-detail-error:empty { display: none; }
+.tg-detail-error { margin: 0; color: var(--danger); }
 .tg-detail-content { width: 100%; min-width: 0; box-sizing: border-box; }
-.tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); }
+.tg-detail-content .tg-metrics { grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); gap: 6px; margin: 0; }
+.tg-student-detail-panel .metric { min-height: 0; padding: 7px 9px; }
+.tg-student-detail-panel .metric-value { margin-top: 3px; font-size: 18px; overflow-wrap: anywhere; }
+.tg-student-detail-panel .metric-label { white-space: normal; }
 @media (min-width: 760px) { .tg-student-detail-panel .tg-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); } }
 .tg-manage-students-panel { width: min(760px,100%); }
 .tg-student-groups { display: grid; gap: var(--space-3); }

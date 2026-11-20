@@ -56,7 +56,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261113-tuoguan-grade-hover-summary";
+const APP_VERSION = process.env.APP_VERSION || "20261120-detail-permission-status";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -6853,7 +6853,7 @@ function bootstrapLookups(currentLessonLookups = usedLessonLookups()) {
     course_types: { junior: courseTypeOptions("初一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))), senior: courseTypeOptions("高一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))) },
     lesson_status: LESSON_STATUS,
     course_status: COURSE_STATUS,
-    status: currentLessonLookups.statuses || [],
+    status: [...new Set([...courseStatusValues(), ...(currentLessonLookups.statuses || [])])],
     classrooms: currentLessonLookups.classrooms || [],
     subjects: currentLessonLookups.subjects || [],
     times: currentLessonLookups.times || [],
@@ -11450,6 +11450,10 @@ function timeSlotValidationError(value) {
 // 但只要填写了时间，就不能把无法识别的原始值静默写入数据库。
 function normalizeLessonPersistenceInput(data = {}) {
   const next = { ...data };
+  if (Object.hasOwn(data, "status")) {
+    next.status = text(data.status);
+    if (!next.status) return { error: "请选择课程状态，状态不能为空" };
+  }
   if (Object.prototype.hasOwnProperty.call(data, "time_slot")) {
     const rawTime = text(data.time_slot);
     if (rawTime) {
@@ -11867,7 +11871,7 @@ function insertLesson(data, options = {}) {
   if (normalizedInput.error) throw new Error(normalizedInput.error);
   data = normalizedInput.data;
   const monthKey = data.month_key || getSetting("month_key");
-  const status = deriveStatus(data);
+  const status = text(data.status) || deriveStatus(data);
   const legacy = legacyStatusFields(status);
   const salary = resolvedTeacherSalaryForLesson(data, options);
   const courseType = resolveCourseType(data, options.preserveCourseType ? data : null);
@@ -12050,7 +12054,7 @@ function copyLessons(body) {
         student_names: src.student_names,
         notes: src.notes || "",
         course_status: resetStatus ? "未上" : src.course_status,
-        status: resetStatus ? "待上" : src.status,
+        status: resetStatus ? "待上" : (text(src.status) || deriveStatus(src)),
         month_key: monthKeyFromDate(pair.target_date),
         sort_order: sortOrder,
       }, { preserveCourseType: true }));
@@ -12230,16 +12234,22 @@ async function handleApi(req, res, url) {
     const has = key => isSuperRole(user.role) || userHasAnyPermission(user,[key]);
     const finance=has('tgSummary') || has('tgLedger');
     const attendanceAction=['attendance','batch-attendance'].includes(action);
-    const required = ({attendance:'tgAttendance','batch-attendance':'tgAttendance','add-dates':'tgAttendance','remove-dates':'tgAttendance',student:'tgStudents',period:'tgStudents','remove-students':'tgStudents',money:'tgLedger','money-edit':'tgLedger','money-delete':'tgLedger',rule:'tgSettings',calendar:'tgSettings'})[action];
+    const required = ({attendance:'tgAttendance','batch-attendance':'tgAttendance','add-dates':'tgAttendance','remove-dates':'tgAttendance','create-member':'tgAttendance','join-month':'tgAttendance',participants:'tgAttendance',student:'tgStudents',period:'tgStudents','remove-students':has('tgAttendance')?'tgAttendance':'tgStudents',money:'tgLedger','money-edit':'tgLedger','money-delete':'tgLedger',rule:'tgSettings',calendar:'tgSettings'})[action];
     const transfer=['transfer-export','transfer-preview','transfer-confirm','preview','import'].includes(action);
     if ((required && !has(required)) || (transfer && !require('../public/tuoguan_config').management.every(has))) return sendError(res,403,'无此托管操作权限');
-    if (!required && !transfer && !['snapshot','student-history'].includes(action)) return sendError(res,404,'不支持的托管操作');
+    if (!required && !transfer && !['snapshot','student-history','student-detail'].includes(action)) return sendError(res,404,'不支持的托管操作');
     try {
+      if(req.method==='GET' && action==='participants') return sendJson(res,tuoguanStore.participationSnapshot(url.searchParams.get('month')));
+      if(req.method==='GET' && action==='student-detail') {
+        const summary=url.searchParams.get('summary')==='1';
+        if(summary ? !has('tgSummary') : !(has('tgStudents') || has('tgSummary'))) return sendError(res,403,'无托管详情查看权限');
+        return sendJson(res,tuoguanStore.studentDetail(Number(url.searchParams.get('student_id')),url.searchParams.get('month'),summary));
+      }
       if(req.method==='GET' && action==='student-history') {
-        if(!finance) return sendError(res,403,'无托管财务查看权限');
+        if(!finance && !has('tgStudents')) return sendError(res,403,'无托管详情查看权限');
         const id=Number(url.searchParams.get('student_id'));
         if(!Number.isSafeInteger(id) || !tuoguanStore.get('SELECT id FROM tg_students WHERE id=?',id))return sendError(res,404,'托管学生不存在');
-        return sendJson(res,{records:tuoguanStore.all("SELECT * FROM tg_ledger WHERE student_id=? AND attendance_id IS NULL AND kind IN ('充值','退款') AND voided_at IS NULL ORDER BY date DESC,id DESC",id)});
+        return sendJson(res,{records:tuoguanStore.all("SELECT id,student_id,date,kind,amount,actual_amount,gift_amount,method,notes FROM tg_ledger WHERE student_id=? AND attendance_id IS NULL AND kind IN ('充值','退款') AND voided_at IS NULL ORDER BY date DESC,id DESC",id)});
       }
       if(req.method==='GET'&&action==='snapshot') {
         const view = url.searchParams.get('students_only')==='1' ? 'tgStudents' : url.searchParams.get('ledger_only')==='1' ? 'tgLedger' : url.searchParams.get('calendar_only')==='1' ? 'tgAttendance' : url.searchParams.get('view') || (has('tgSummary') ? 'tgSummary' : require('./domain/tuoguan_permissions').pages.find(has));
@@ -12249,13 +12259,13 @@ async function handleApi(req, res, url) {
         if(url.searchParams.get('students_only')==='1')return sendJson(res,tuoguanStore.participationSnapshot(month));
         if(url.searchParams.get('calendar_only')==='1')return sendJson(res,tuoguanStore.calendarSnapshot(month));
         if(view==='tgSettings')return sendJson(res,{students:[],periods:[],rules:tuoguanStore.all('SELECT * FROM tg_rules ORDER BY effective_date DESC,id DESC')});
-        const snapshot=tuoguanStore.snapshot(month,view==='tgSummary'||view==='tgStudents');
-        if(view==='tgStudents'){delete snapshot.ledger;delete snapshot.summary;delete snapshot.rules;delete snapshot.billing_rule;snapshot.attendance=snapshot.attendance.map(({fee,reference_fee,rule_json,...r})=>r);}
+        const snapshot=tuoguanStore.snapshot(month,view==='tgSummary',{profiles:view==='tgStudents'});
         if(view==='tgSummary' && (url.searchParams.has('view') || !isSuperRole(user.role))){delete snapshot.ledger;delete snapshot.rules;}
         return sendJson(res,snapshot);
       }
       if(req.method!=='POST') return sendError(res,405,'不支持的请求方法');
       const body=await readBody(req,action.startsWith('transfer-')?14_000_000:2_000_000), actor=String(user.username||user.id);
+      const mutation=['create-member','join-month'].includes(action) ? require('./domain/tuoguan_permissions').attendanceMutation(action,body) : action;
       if(action==='transfer-export') {const bundle=TuoguanTransfer.exportData(db);writeOperationLog(user,{operation_type:'复制托管信息',operation_content:`复制${bundle.records.tg_students.length}名学生、${bundle.records.tg_attendance.length}条考勤和${bundle.records.tg_ledger.length}条流水`,target_type:'tuoguan'},req);return sendJson(res,{text:JSON.stringify(bundle,null,2)});}
       if(action==='transfer-preview') {
         for(const [key,p] of custodyTransferPreviews)if(p.expires<Date.now())custodyTransferPreviews.delete(key);
@@ -12285,9 +12295,9 @@ async function handleApi(req, res, url) {
       }
       const replay=tuoguanStore.get('SELECT key FROM tg_requests WHERE key=?',String(body.request_id||''));
       const auditStart=tuoguanStore.get("SELECT COALESCE(MAX(id),0) id FROM tg_audit").id;
-      const result=tuoguanStore.mutate(action,body,actor);
+      const result=tuoguanStore.mutate(mutation,body,actor);
       if(!replay) {
-        const entry=require('./domain/tuoguan_log').describe(db,action,tuoguanStore.all('SELECT * FROM tg_audit WHERE id>? ORDER BY id',auditStart));
+        const entry=require('./domain/tuoguan_log').describe(db,mutation,tuoguanStore.all('SELECT * FROM tg_audit WHERE id>? ORDER BY id',auditStart));
         if(entry){if(attendanceAction)entry.details={custody_audit_start:auditStart,custody_audit_end:tuoguanStore.get('SELECT MAX(id) id FROM tg_audit').id,count:entry.details.changes.length};writeOperationLog(user,{...entry,target_type:'tuoguan'},req);}
       }
       return sendJson(res,!finance&&attendanceAction?{ok:true,rows:result.map(({fee,reference_fee,rule_json,...row})=>row)}:result);

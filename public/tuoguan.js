@@ -48,7 +48,6 @@ window.TuoguanUI = (() => {
     tab = "签到",
     query = "",
     grade = "",
-    finance = false,
     epoch = 0;
   let ledgerKind = "",
     rangeStart = "",
@@ -171,7 +170,7 @@ window.TuoguanUI = (() => {
       "</div>"
     );
   }
-  function studentDetail(id) {
+  function studentDetail(id, { showSummary = true } = {}) {
     const host = root,
       owner = auth.user?.id,
       student = data.students.find((s) => s.id === id);
@@ -189,7 +188,8 @@ window.TuoguanUI = (() => {
       ["月末实际余额", "actual_balance"],
       ["月末赠送余额", "gift_balance"],
     ];
-    const initial = data.summary.find((r) => r.id === id);
+    const initial = showSummary ? data.summary?.find((r) => r.id === id) : null;
+    const historyController = new AbortController();
     const dialog = CourseDetails.dialog(
       student.name + " · 托管详情",
       '<div class="tg-detail-content"></div>',
@@ -197,6 +197,7 @@ window.TuoguanUI = (() => {
         onClose: () => {
           sequence++;
           controller?.abort();
+          historyController.abort();
           if (activeDetail === dialog) activeDetail = null;
         },
       },
@@ -211,8 +212,10 @@ window.TuoguanUI = (() => {
       renderStudentBadge(student, { grade: initial?.grade || student.grade }) +
       renderGradeBadge(initial?.grade || student.grade) +
       "</div>" +
-      metrics(fields.map(([label]) => [label, "—"])) +
-      '<div class="tg-detail-notes muted-tip"><div></div><div></div></div>' +
+      (showSummary
+        ? metrics(fields.map(([label]) => [label, "—"])) +
+          '<div class="tg-detail-notes muted-tip"><div></div><div></div></div>'
+        : "") +
       '<div class="tg-detail-month"><button class="date-range-nav" data-detail-step="-1" aria-label="上个月">‹</button><strong></strong><button class="date-range-nav" data-detail-step="1" aria-label="下个月">›</button><span class="tg-detail-loading" role="status" aria-live="polite"></span></div>' +
       monthCalendar(month, () => "") +
       '<div class="tg-calendar-legend">' +
@@ -230,8 +233,8 @@ window.TuoguanUI = (() => {
       host === root &&
       owner === auth.user?.id;
     function render(snapshot, wanted) {
-      const a = snapshot.summary.find((r) => r.id === id);
-      if (!a) throw Error("学生档案已变化，请重新打开详情");
+      const a = snapshot.summary;
+      if (!snapshot.student || (showSummary && !a)) throw Error("学生档案已变化，请重新打开详情");
       const byDate = new Map(
         snapshot.attendance
           .filter((r) => r.student_id === id)
@@ -274,12 +277,16 @@ window.TuoguanUI = (() => {
       values.forEach(
         (node, index) => (node.textContent = money(a[fields[index][1]])),
       );
-      notes.children[0].textContent = a.unpaid_current_fee
-        ? "本月费用含未付 " + money(a.unpaid_current_fee)
-        : "";
-      notes.children[1].textContent = a.prior_debt_gift_offset
-        ? "赠送余额抵扣结转或调整欠费 " + money(a.prior_debt_gift_offset)
-        : "";
+      if (notes) {
+        notes.children[0].textContent = a.unpaid_current_fee
+          ? "本月费用含未付 " + money(a.unpaid_current_fee)
+          : "";
+        notes.children[1].textContent = a.prior_debt_gift_offset
+          ? "赠送余额抵扣结转或调整欠费 " + money(a.prior_debt_gift_offset)
+          : "";
+      }
+      content.querySelector(".tg-actions").innerHTML =
+        renderStudentBadge(student, { grade: snapshot.student.grade }) + renderGradeBadge(snapshot.student.grade);
       const [year, m] = wanted.split("-").map(Number);
       title.textContent = year + "年" + m + "月";
       grid.replaceChildren(
@@ -305,7 +312,7 @@ window.TuoguanUI = (() => {
         error.textContent = "";
         try {
           const next = await api(
-            "snapshot?view=tgSummary&month=" + wanted,
+            "student-detail?student_id=" + id + "&month=" + wanted + (showSummary ? "&summary=1" : ""),
             undefined,
             controller.signal,
           );
@@ -325,7 +332,7 @@ window.TuoguanUI = (() => {
         }
       };
     const history = content.querySelector(".tg-history-body");
-    api("student-history?student_id=" + id)
+    api("student-history?student_id=" + id, undefined, historyController.signal)
       .then(({ records }) => {
         if (!current()) return;
         history.innerHTML = records.length
@@ -347,8 +354,26 @@ window.TuoguanUI = (() => {
       .catch((e) => {
         if (current()) history.textContent = e.message;
       });
-    render(data, month);
+    render({
+      student: { ...student, grade: initial?.grade || student.grade },
+      summary: initial,
+      attendance: data.attendance,
+    }, month);
     content.dataset.loading = "false";
+  }
+  function bindStudentDetails(body, selector, options) {
+    body.querySelectorAll(selector).forEach((row) => {
+      row.onclick = (e) => {
+        if (!e.target.closest("button,a,input,select,textarea,.custom-select"))
+          studentDetail(Number(row.dataset.student), options);
+      };
+      row.onkeydown = (e) => {
+        if (e.target === row && ["Enter", " "].includes(e.key)) {
+          e.preventDefault();
+          studentDetail(Number(row.dataset.student), options);
+        }
+      };
+    });
   }
   async function api(action, body, signal) {
     const r = await fetch("/api/tuoguan/" + action, {
@@ -867,7 +892,7 @@ window.TuoguanUI = (() => {
     };
   }
   function manageMatrixStudents() {
-    if (!finance || isReadonlyUser()) return;
+    if (!canView("tgAttendance") || isReadonlyUser()) return;
     if (cellWrites || dateWrites || studentWrites)
       return message("请等待保存完成");
     clearTimeout(filterTimer);
@@ -1000,7 +1025,7 @@ window.TuoguanUI = (() => {
         )
         .join("");
     }
-    const latest = () => api("snapshot?month=" + month + "&students_only=1");
+    const latest = () => api("participants?month=" + month);
     queue = latest()
       .then((next) => {
         if (!dialog.element.isConnected || !samePage()) return;
@@ -1024,7 +1049,7 @@ window.TuoguanUI = (() => {
           studentWrites++;
           paint();
           const operation = queue.then(() =>
-            post("student", {
+            post("create-member", {
               ...values,
               confirm_same_name: values.confirm_same_name === "on",
               month,
@@ -1091,7 +1116,7 @@ window.TuoguanUI = (() => {
             rows = periods(id);
           accept(
             await post(
-              rows.length ? "remove-students" : "period",
+              rows.length ? "remove-students" : "join-month",
               rows.length
                 ? {
                     month,
@@ -1239,10 +1264,10 @@ window.TuoguanUI = (() => {
     };
     body.innerHTML =
       '<div class="tg-actions tg-matrix-actions">' +
-      (finance
+      (canWrite
         ? '<button class="btn" id="tg-manage-students">管理学生</button>'
         : "") +
-      (canView("tgAttendance")
+      (canWrite
         ? '<button class="btn" id="tg-manage-dates">管理日期</button>'
         : "") +
       (canWrite
@@ -1678,20 +1703,12 @@ window.TuoguanUI = (() => {
       .filter((s) => matches(s, s))
       .sort(compareProfiles);
     body.innerHTML =
-      '<div class="tg-actions"><button class="btn primary" id="tg-new">新建托管学生</button></div>' +
+      '<div class="tg-actions"><button class="btn primary" id="tg-new" ' + (isReadonlyUser() ? 'disabled' : '') + '>新建托管学生</button></div>' +
       listTable(
-        ["学生", "年级", "状态", "托管首日", "上次在托"],
+        ["学生", "年级", "状态", "托管首日", "上次在托", "操作"],
         students.map((s) => {
           return tr([
-            '<button class="tg-profile-link" data-id="' +
-              s.id +
-              '" aria-label="修改' +
-              esc(s.name) +
-              '的资料" ' +
-              (isReadonlyUser() ? "disabled" : "") +
-              ">" +
-              studentBadge(s.id) +
-              "</button>",
+            studentBadge(s.id),
             '<button class="tg-profile-link tg-profile-grade" data-id="' +
               s.id +
               '" aria-label="修改' +
@@ -1704,7 +1721,8 @@ window.TuoguanUI = (() => {
             `<select class="cell-select inline-status-select tg-profile-status" data-field="status" data-student="${s.id}" aria-label="${esc(s.name)}档案状态" ${isReadonlyUser() ? "disabled" : ""}>${opt(profileStatuses, s.status)}</select>`,
             s.first_attendance_date || "—",
             s.last_attendance_date || "—",
-          ]);
+            '<button class="btn tg-profile-link tg-edit-profile" data-id="' + s.id + '" ' + (isReadonlyUser() ? 'disabled' : '') + '>编辑档案</button>',
+          ], ' class="tg-student-row" data-student="' + s.id + '" tabindex="0" role="button" aria-label="查看' + esc(s.name) + '托管详情"');
         }),
       );
     const host = root,
@@ -1746,6 +1764,7 @@ window.TuoguanUI = (() => {
             b.classList.contains("tg-profile-grade"),
           )),
     );
+    bindStudentDetails(body, ".tg-student-row", { showSummary: false });
   }
   function moneyForm(record = null) {
     if (isReadonlyUser()) return;
@@ -2098,18 +2117,7 @@ window.TuoguanUI = (() => {
           ),
         ),
       );
-    body.querySelectorAll(".tg-fee-row").forEach((row) => {
-      row.onclick = (e) => {
-        if (!e.target.closest("button,a,input,select,textarea"))
-          studentDetail(Number(row.dataset.student));
-      };
-      row.onkeydown = (e) => {
-        if (e.target === row && ["Enter", " "].includes(e.key)) {
-          e.preventDefault();
-          studentDetail(Number(row.dataset.student));
-        }
-      };
-    });
+    bindStudentDetails(body, ".tg-fee-row", { showSummary: true });
   }
   function draw() {
     if (!root?.isConnected) return;
@@ -2380,7 +2388,6 @@ window.TuoguanUI = (() => {
     const host = document.createElement("div");
     el.replaceChildren(host);
     root = host;
-    finance = canView("tgStudents");
     tab = page;
     root.innerHTML =
       '<div class="band"><div class="loading" role="status">正在加载托管数据…</div></div>';

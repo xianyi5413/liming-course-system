@@ -742,7 +742,30 @@ function createStore(db) {
     );
     return { calendar, protected_dates, protected_date_reasons };
   }
-  function snapshot(month, finance) {
+  function studentDetail(id, month, summary = false) {
+    const { start, end } = require("./tuoguan_calendar").bounds(month);
+    const profile = Number.isSafeInteger(id) &&
+      get("SELECT id,name,grade FROM tg_students WHERE id=?", id);
+    if (!profile) fail("托管学生不存在", 404);
+    const attendance = all(
+      "SELECT student_id,date,status,notes,raw_status,grade FROM tg_attendance WHERE student_id=? AND date BETWEEN ? AND ? ORDER BY date",
+      id, start, end,
+    );
+    const grade = attendance.find((a) => a.grade)?.grade || get(
+      "SELECT grade FROM tg_periods WHERE student_id=? AND start_date<=? AND COALESCE(end_date,'9999-12-31')>=? ORDER BY start_date DESC LIMIT 1",
+      id, end, start,
+    )?.grade || profile.grade;
+    const detail = { student: { ...profile, grade }, attendance };
+    if (summary) {
+      const { ledger, ...sums } = custodyAccount(all(
+        "SELECT * FROM tg_ledger WHERE student_id=? AND date<=? ORDER BY date,id",
+        id, end,
+      ), month);
+      detail.summary = { ...detail.student, ...sums };
+    }
+    return detail;
+  }
+  function snapshot(month, finance, { profiles = false } = {}) {
     if (!/^\d{4}-\d{2}$/.test(month)) fail("月份无效");
     date(month + "-01");
     const start = month + "-01",
@@ -758,7 +781,7 @@ function createStore(db) {
     );
     const calendarState = calendarSnapshot(month, attendance, finance);
     const data = {
-      students: finance
+      students: finance || profiles
         ? students
         : students.map(({ id, name, grade, status }) => ({
             id,
@@ -843,6 +866,7 @@ function createStore(db) {
     db,
     mutate,
     snapshot,
+    studentDetail,
     calendarSnapshot,
     participationSnapshot,
     ledgerSnapshot,

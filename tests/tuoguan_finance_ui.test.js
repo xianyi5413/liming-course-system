@@ -66,10 +66,11 @@ before(async () => {
   ])
     write("student", { name, grade, start_date: "2026-09-01" });
   write("rule", {
+    stage: "初中",
     effective_date: "2026-09-01",
     present: 5000,
     leave_fee: 2500,
-    absent: 5000,
+    absent: 0,
   });
   for (const [id, actual, gift] of [
     [1, 10000, 3000],
@@ -105,7 +106,7 @@ before(async () => {
       { student_id: 4, status: "不适用", version: 0 },
     ],
   });
-  write("student", { id: 1, name: "合成甲", grade: "初三", version: 1 });
+  write("student", { id: 1, name: "合成甲", grade: "初三", grade_effective_date: "2028-03-01", version: 1 });
   db.exec(
     "INSERT INTO tg_attendance(student_id,date,status,grade,rule_json,fee,pending,raw_status,source_cell) VALUES(1,'2026-09-06','未登记','初一','{}',0,1,'26','E13');INSERT INTO users(username,display_name,role,password_hash,readonly_override,permission_override_enabled) SELECT 'finance-readonly','合成只读','academic',password_hash,1,1 FROM users WHERE username='boss';INSERT INTO user_page_permissions(user_id,permission_key) SELECT id,'tgFinance' FROM users WHERE username='finance-readonly';INSERT INTO user_page_permissions(user_id,permission_key) SELECT id,'tgAttendance' FROM users WHERE username='finance-readonly'",
   );
@@ -125,7 +126,7 @@ before(async () => {
   cookie = await login("boss");
 });
 after(async () => {
-  if (server?.exitCode == null) {
+  if (server && server.exitCode == null) {
     const ended = new Promise((r) => server.once("exit", r));
     server.kill();
     await ended;
@@ -478,7 +479,7 @@ test("Edge indices, three frozen columns, calendar date management, colored opti
       "",
     );
     await c.evaluate(
-      'window.normalDetailFetch=window.fetch;window.fetch=async(...args)=>{const r=await normalDetailFetch(...args);if(String(args[0]).includes("snapshot?month=2026-10"))await new Promise(resolve=>window.releaseDetail=resolve);return r}',
+      'window.normalDetailFetch=window.fetch;window.fetch=async(...args)=>{const r=await normalDetailFetch(...args);if(String(args[0]).includes("student-detail?student_id=1&month=2026-10"))await new Promise(resolve=>window.releaseDetail=resolve);return r}',
     );
     await c.click('[data-detail-step="1"]');
     await c.waitFor('typeof window.releaseDetail==="function"');
@@ -1281,7 +1282,7 @@ test("Edge stable detail retains nodes, height and scroll during delayed month l
         await c.evaluate(`document.documentElement.dataset.theme='${theme}'`);
         await show();
         await c.evaluate(
-          `window.stableNodes=[document.querySelector('.tg-detail-content'),...document.querySelectorAll('.tg-detail-content .tg-actions,.tg-detail-content .metric,.tg-detail-content .metric-value,.tg-detail-month,.tg-detail-month button,.tg-detail-calendar,.tg-calendar-legend')];window.shellMutations=0;window.observer=new MutationObserver(()=>shellMutations++);observer.observe(stableNodes[0],{childList:true});document.querySelector('.tg-student-detail-panel').scrollTop=100;window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('snapshot?month='))await new Promise(resolve=>window.releaseDetail=resolve);return r;}`,
+          `window.stableNodes=[document.querySelector('.tg-detail-content'),...document.querySelectorAll('.tg-detail-content .tg-actions,.tg-detail-content .metric,.tg-detail-content .metric-value,.tg-detail-month,.tg-detail-month button,.tg-detail-calendar,.tg-calendar-legend')];window.shellMutations=0;window.observer=new MutationObserver(()=>shellMutations++);observer.observe(stableNodes[0],{childList:true});document.querySelector('.tg-student-detail-panel').scrollTop=100;window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('student-detail?student_id='))await new Promise(resolve=>window.releaseDetail=resolve);return r;}`,
         );
         const before = await capture();
         await c.click('[data-detail-step="1"]');
@@ -1333,7 +1334,7 @@ test("Edge stable detail retains nodes, height and scroll during delayed month l
       }
     await show();
     await c.evaluate(
-      `window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('snapshot?month=2026-10'))await new Promise(resolve=>window.releaseDetail=resolve);return r}`,
+      `window.detailFetch=fetch;window.releaseDetail=null;window.fetch=async(...args)=>{const r=await detailFetch(...args);if(String(args[0]).includes('student-detail?student_id=1&month=2026-10'))await new Promise(resolve=>window.releaseDetail=resolve);return r}`,
     );
     await c.click('[data-detail-step="1"]');
     await c.waitFor('typeof releaseDetail==="function"');

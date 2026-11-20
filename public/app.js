@@ -4902,12 +4902,12 @@ function renderSummaryFilterBar(rows, filteredRows) {
 }
 
 function statusValues() {
-  return state?.lookups?.status || defaultCourseStatuses;
+  return [...new Set([...defaultCourseStatuses, ...(state?.lookups?.status || [])])];
 }
 
 function rowStatus(row = {}) {
   const current = String(row.status || "").trim();
-  if (statusValues().includes(current)) return current;
+  if (current) return current;
   if (row.lesson_status === "试课") return "试课";
   if (row.lesson_status === "考试") return "考试";
   if (row.lesson_status === "上课（未缴费）") return "未缴费";
@@ -6248,7 +6248,7 @@ function lessonInlinePickerCell(row, field, tdClass = "") {
 }
 
 function scheduleInlinePickerOptions(row = {}, field = "") {
-  const current = row[field] || "";
+  const current = field === "status" ? rowStatus(row) : row[field] || "";
   const manualLabel = lessonManualLabel(field);
   if (field === "course_type") return courseTypeSelectOptions(row.grade, current, false);
   if (field === "time_slot" || field === "classroom") {
@@ -6268,7 +6268,7 @@ function scheduleInlinePickerOptions(row = {}, field = "") {
     grade: getGradeOptions(),
     subject: getSubjectOptions(),
   }[field] || [];
-  return manualSelectOptions(values, current, manualLabel, { emptyText: "未选" });
+  return manualSelectOptions(values, current, manualLabel, { emptyText: field === "status" ? "" : "未选" });
 }
 
 function closeScheduleInlinePicker({ restoreFocus = false } = {}) {
@@ -7191,7 +7191,7 @@ function batchCopyInputCell(index, field, value, type = "text", extra = "") {
 function batchCopySelectCell(index, field, value, { emptyText = "未选" } = {}) {
   return `
     <select class="control batch-copy-field batch-copy-select" data-index="${index}" data-field="${field}">
-      ${manualSelectOptions(lessonFieldOptionValues(field, value), value, lessonManualLabel(field), { emptyText })}
+      ${manualSelectOptions(lessonFieldOptionValues(field, value), value, lessonManualLabel(field), { emptyText: field === "status" ? "" : emptyText })}
     </select>
   `;
 }
