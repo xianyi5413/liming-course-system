@@ -1312,7 +1312,7 @@ test("Edge stable detail retains nodes, height and scroll during delayed month l
           await call("snapshot?month=2026-10")
         ).data.summary.find((s) => s.id === 1);
         assert.deepEqual(
-          next.amounts.map((x) =>
+          next.amounts.flatMap(x => x.split('/')).map((x) =>
             Math.round(Number(x.replace(/[^0-9.-]/g, "")) * 100),
           ),
           [

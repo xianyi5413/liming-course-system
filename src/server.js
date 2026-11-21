@@ -1,5 +1,6 @@
 const { planFeeRestore, planFeeSet, migrateStudentFeeMode, automaticStudentFee } = require('./domain/fee_restore');
 const StudentDisplay = require('../public/student-display');
+const CourseStatus = require('../public/course-status');
 const { WorkerJobs } = require('./backup/worker_jobs');
 const { timeTokenToMinutes, formatTimeMinutes, normalizeTimeSlot, parseTimeRange } = require("./domain/lesson_time");
 const SalaryWorkflow = require("./domain/salary_workflow");
@@ -56,7 +57,7 @@ const publicDir = path.join(rootDir, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, "data"));
 const dbPath = path.resolve(process.env.DB_PATH || path.join(dataDir, "liming-local.sqlite"));
 const port = Number(process.env.PORT || 5177);
-const APP_VERSION = process.env.APP_VERSION || "20261120-detail-permission-status";
+const APP_VERSION = process.env.APP_VERSION || "20261120-finance-metrics";
 function gitInfo(...args) {
   try { return execFileSync('git', args, { cwd: rootDir, encoding:'utf8', windowsHide:true, timeout:2000, stdio:['ignore','pipe','ignore'] }).trim(); }
   catch { return ''; }
@@ -74,7 +75,7 @@ const sessions = new Map();
 
 const LESSON_STATUS = ["上课", "试课", "监考", "休息", "上课（未缴费）", "待定", "请假", "考试"];
 const COURSE_STATUS = ["未上", "已上", "请假", "暂停一次", "暂停一阵"];
-const STATUS = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
+const STATUS = CourseStatus.defaults;
 const STUDENT_STATUS_VALUES = ["在读", "暂停", "已毕业", "已流出"];
 
 function normalizeStudentStatus(value = "") {
@@ -1944,12 +1945,17 @@ function weekdayCn(dateValue) {
 }
 
 function courseStatusValues() {
-  return mergeLookupValues(STATUS, "custom_course_statuses");
+  return CourseStatus.candidates(historicalCourseStatusValues());
+}
+
+function historicalCourseStatusValues() {
+  return mergeLookupValues([...STATUS, "未缴费"], "custom_course_statuses");
 }
 
 function deriveStatus(row = {}, knownStatuses = null) {
   const current = text(row.status);
-  const statuses = knownStatuses || courseStatusValues();
+  // Historical financial interpretation is independent of selectable UI candidates.
+  const statuses = knownStatuses || historicalCourseStatusValues();
   if ((statuses instanceof Set ? statuses.has(current) : statuses.includes(current))) return current;
   if (row.lesson_status === "试课") return "试课";
   if (row.lesson_status === "考试") return "考试";
@@ -1969,7 +1975,7 @@ function compareGradeName(a, b) {
 }
 
 function legacyStatusFields(statusValue) {
-  const status = courseStatusValues().includes(text(statusValue)) ? text(statusValue) : "待上";
+  const status = historicalCourseStatusValues().includes(text(statusValue)) ? text(statusValue) : "待上";
   if (status === "试课") return { lesson_status: "试课", course_status: "未上" };
   if (status === "考试") return { lesson_status: "考试", course_status: "未上" };
   if (status === "未缴费") return { lesson_status: "上课（未缴费）", course_status: "已上" };
@@ -4381,7 +4387,7 @@ function usedLessonLookups() {
       if (!value || seen.has(value)) return false;
       seen.add(value);
       return true;
-    }).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+    }).filter(value => key !== "statuses" || !CourseStatus.isLegacyUnpaid(value)).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
   };
   const lookups = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, distinct(key, field)]));
   lookups.students = uniqueNames(all(`
@@ -6536,7 +6542,7 @@ function studentPricingScopedLessons(rows, user) {
   return canonicalRole(user.role) === "teacher" ? scoped.filter(row => teachers.includes(row.teacher_name)) : scoped;
 }
 
-function studentPricingLessonMatches(rule, lesson, knownStatuses = new Set(courseStatusValues())) {
+function studentPricingLessonMatches(rule, lesson, knownStatuses = new Set(historicalCourseStatusValues())) {
   return deriveStatus(lesson, knownStatuses) === "已上"
     && splitStudents(lesson.student_names).includes(text(rule.student_name))
     && studentPricingRuleKey(rule) === studentPricingRuleKey({ ...lesson, student_name: rule.student_name });
@@ -6553,7 +6559,7 @@ function studentPricingRows(monthKey, metrics = null, user = null, scope = null)
   const { createdRules } = syncStudentPricingCandidatesFromLessons({ lessons, rules: storedRules });
   const matchesByRule = new Map(), totalsByRule = new Map();
   if (metrics) metrics.sql_queries += 1;
-  const knownStatuses = new Set(courseStatusValues());
+  const knownStatuses = new Set(historicalCourseStatusValues());
   const parsedStudentSets = new Map();
   const parseStudentSet = (value) => {
     const raw = text(value);
@@ -6638,7 +6644,7 @@ function studentCourseDetailRow(row, student, statuses, lookups, user) {
 }
 
 function studentQueryCourseDetails(student, user, range) {
-  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all,student);
+  const statuses = new Set(historicalCourseStatusValues()), lookups = feePricingLookups(all,student);
   return studentPricingScopedLessons(all("SELECT * FROM lessons WHERE date>=? AND date<=? ORDER BY date,time_slot,id",[range.start,range.end]),user)
     .filter(row=>splitStudents(row.student_names).includes(student))
     .map(row=>studentCourseDetailRow(row,student,statuses,lookups,user));
@@ -6650,7 +6656,7 @@ function studentRuleCourseDetails(rules, user, range = null, includeAll = false)
   if (!rules.length) return groups;
   const byKey = new Map(rules.map(rule => [studentPricingRuleKey(rule), rule]));
   const students = [...new Set(rules.map(rule => rule.student_name))];
-  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all, students.length === 1 ? students[0] : "");
+  const statuses = new Set(historicalCourseStatusValues()), lookups = feePricingLookups(all, students.length === 1 ? students[0] : "");
   const lessons = studentPricingScopedLessons(all("SELECT * FROM lessons" + (range ? " WHERE date>=? AND date<=?" : "") + " ORDER BY date,time_slot,id", range ? [range.start, range.end] : []), user);
   for (const row of lessons) {
     const status = deriveStatus(row, statuses), names = splitStudents(row.student_names);
@@ -6672,7 +6678,7 @@ function saveStudentFeeOverride(lessonId, studentName, unitPrice) {
 
 const feeRestorePreviews = new Map();
 function feeRestorePlan(ids, student, user, range, mode = "restore") {
-  const statuses = new Set(courseStatusValues()), lookups = feePricingLookups(all, student);
+  const statuses = new Set(historicalCourseStatusValues()), lookups = feePricingLookups(all, student);
   const lessons = all(`SELECT * FROM lessons WHERE id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`, ids);
   if (lessons.length !== ids.length) throw Object.assign(new Error('课程已删除，请刷新'), {status:409});
   const items = lessons.map(lesson => {
@@ -6707,7 +6713,7 @@ function studentPricingRow(monthKey, id) {
   const subject = text(row.subject);
   const studentNames = normalizedStudents(row.student_names);
   const key = studentPricingRuleKey(row);
-  const statuses = new Set(courseStatusValues());
+  const statuses = new Set(historicalCourseStatusValues());
   const matches = all("SELECT id, month_key, grade, subject, student_names, status, lesson_status, course_status FROM lessons ORDER BY id")
     .filter(lesson => deriveStatus(lesson, statuses) === "已上")
     .map((lesson) => {
@@ -6853,7 +6859,7 @@ function bootstrapLookups(currentLessonLookups = usedLessonLookups()) {
     course_types: { junior: courseTypeOptions("初一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))), senior: courseTypeOptions("高一", Object.fromEntries(all("SELECT key,value FROM settings").map(row => [row.key, row.value]))) },
     lesson_status: LESSON_STATUS,
     course_status: COURSE_STATUS,
-    status: [...new Set([...courseStatusValues(), ...(currentLessonLookups.statuses || [])])],
+    status: CourseStatus.candidates([...courseStatusValues(), ...(currentLessonLookups.statuses || [])]),
     classrooms: currentLessonLookups.classrooms || [],
     subjects: currentLessonLookups.subjects || [],
     times: currentLessonLookups.times || [],
@@ -11448,8 +11454,11 @@ function timeSlotValidationError(value) {
 // 所有课程写入口在落库前经过这一处：时间写为标准格式，学生名单按系统
 // 既有的去空、去重、排序、顿号分隔口径保存。空时间仍允许快速建行补录，
 // 但只要填写了时间，就不能把无法识别的原始值静默写入数据库。
-function normalizeLessonPersistenceInput(data = {}) {
+function normalizeLessonPersistenceInput(data = {}, { allowLegacyUnpaid = false, current = null } = {}) {
   const next = { ...data };
+  if (!allowLegacyUnpaid && ["status", "lesson_status"].some(key => CourseStatus.isLegacyUnpaid(data[key]) && data[key] !== current?.[key])) {
+    return { error: "未缴费属于历史财务标记，请选择课程状态" };
+  }
   if (Object.hasOwn(data, "status")) {
     next.status = text(data.status);
     if (!next.status) return { error: "请选择课程状态，状态不能为空" };
@@ -11704,7 +11713,7 @@ function applyAuditPatch(issue) {
       if (Object.prototype.hasOwnProperty.call(patch, field)) payload[field] = patch[field];
     }
     if (Object.keys(payload).length) {
-      const normalized = normalizeLessonPersistenceInput(payload);
+      const normalized = normalizeLessonPersistenceInput(payload, { allowLegacyUnpaid: true });
       if (normalized.error) return false;
       Object.assign(payload, normalized.data);
       if (Object.prototype.hasOwnProperty.call(payload, "status")) Object.assign(payload, legacyStatusFields(payload.status));
@@ -11867,7 +11876,7 @@ function resolveCourseType(data, current = null) {
 }
 
 function insertLesson(data, options = {}) {
-  const normalizedInput = normalizeLessonPersistenceInput(data);
+  const normalizedInput = normalizeLessonPersistenceInput(data, { allowLegacyUnpaid: options.allowLegacyUnpaid || options.explicitSource === "import" });
   if (normalizedInput.error) throw new Error(normalizedInput.error);
   data = normalizedInput.data;
   const monthKey = data.month_key || getSetting("month_key");
@@ -11909,6 +11918,13 @@ function insertLesson(data, options = {}) {
 
 function lessonStatusPatchPayload(current, nextData) {
   const payload = {};
+  // Saving a displayed "已上" must not settle a historical receivable implicitly.
+  if (isUnpaid(current) && ["已上", current.status].includes(nextData.status)) {
+    return {
+      status: current.status, lesson_status: current.lesson_status, course_status: current.course_status,
+      ...(!Object.hasOwn(nextData, "teacher_salary") ? { teacher_salary: current.teacher_salary, teacher_salary_source: current.teacher_salary_source, teacher_salary_rule_id: current.teacher_salary_rule_id } : {}),
+    };
+  }
   if (Object.prototype.hasOwnProperty.call(nextData, "status")) {
     Object.assign(payload, legacyStatusFields(nextData.status));
   } else if (Object.prototype.hasOwnProperty.call(nextData, "lesson_status") || Object.prototype.hasOwnProperty.call(nextData, "course_status")) {
@@ -12057,7 +12073,7 @@ function copyLessons(body) {
         status: resetStatus ? "待上" : (text(src.status) || deriveStatus(src)),
         month_key: monthKeyFromDate(pair.target_date),
         sort_order: sortOrder,
-      }, { preserveCourseType: true }));
+      }, { preserveCourseType: true, allowLegacyUnpaid: true }));
     }
     return { created: created.length, lessons: created };
   });
@@ -14149,6 +14165,15 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
+    if (Object.hasOwn(body, "custom_course_statuses")) {
+      let values;
+      try { values = typeof body.custom_course_statuses === "string" ? JSON.parse(body.custom_course_statuses) : body.custom_course_statuses; }
+      catch { return sendError(res, 400, "课程状态配置必须是数组"); }
+      if (!Array.isArray(values) || values.some(value => typeof value !== "string")) return sendError(res, 400, "课程状态配置必须是名称数组");
+      const previous = jsonArraySetting("custom_course_statuses");
+      if (values.some(value => CourseStatus.isLegacyUnpaid(value) && !previous.includes(value))) return sendError(res, 400, "未缴费属于历史财务标记，不能新增为课程状态");
+      body.custom_course_statuses = JSON.stringify(values);
+    }
     if (Object.prototype.hasOwnProperty.call(body, "custom_time_slots")) {
       const normalized = normalizeCustomTimeSlotSetting(body.custom_time_slots);
       if (normalized.error) return sendError(res, 400, normalized.error);
@@ -14355,14 +14380,14 @@ async function handleApi(req, res, url) {
   if (lessonMatch && req.method === "PATCH") {
     const body = await readBody(req);
     if (Object.hasOwn(body, "course_type") || Object.hasOwn(body, "course_type_source")) return sendError(res, 400, "课程类型请在班级管理中修改");
-    const normalized = normalizeLessonPersistenceInput(body);
+    const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
+    const normalized = normalizeLessonPersistenceInput(body, { current });
     if (normalized.error) return sendError(res, 400, normalized.error);
     const incoming = normalized.data;
     if (Object.prototype.hasOwnProperty.call(incoming, "teacher_name")) {
       const nameError = teacherNameError(incoming.teacher_name);
       if (nameError) return sendError(res, 400, nameError);
     }
-    const current = get("SELECT * FROM lessons WHERE id = ?", [Number(lessonMatch[1])]) || {};
     const payload = { ...incoming, updated_at: new Date().toISOString() };
     try { payload.course_type = resolveCourseType({ ...current, ...incoming }, current); }
     catch (error) { return sendError(res, 400, error.message); }
@@ -14665,7 +14690,7 @@ async function handleApi(req, res, url) {
       SELECT teacher_name, grade, subject, student_names, date, time_slot,
              classroom, status, course_status, lesson_status FROM lessons
     `), user);
-    const completedStatuses = new Set(courseStatusValues());
+    const completedStatuses = new Set(historicalCourseStatusValues());
     const courseKeys = new Set(scopedLessons.filter(lesson => deriveStatus(lesson, completedStatuses) === "已上").flatMap(lesson =>
       splitStudents(lesson.student_names).map(student_name => studentPricingRuleKey({ ...lesson, student_name }))));
     if (before.some(row => !courseKeys.has(studentPricingRuleKey(row)))) {
@@ -14966,7 +14991,7 @@ async function handleApi(req, res, url) {
     const empty = body.unit_price === "" || body.unit_price == null;
     const unitPrice = empty ? null : Number(body.unit_price);
     if (!empty && (!["number", "string"].includes(typeof body.unit_price) || String(body.unit_price).trim() === "" || !Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 10000 || Math.abs(unitPrice * 100 - Math.round(unitPrice * 100)) > 0.000001)) return sendError(res, 400, "单价须为0至10000元且最多两位小数");
-    const actualPrice = () => unitPriceFor({studentName, subject:lesson.subject, grade:lesson.grade, studentCount:splitStudents(lesson.student_names).length, lessonId, status:deriveStatus(lesson, new Set(courseStatusValues())), studentNames:normalizedStudents(lesson.student_names)});
+    const actualPrice = () => unitPriceFor({studentName, subject:lesson.subject, grade:lesson.grade, studentCount:splitStudents(lesson.student_names).length, lessonId, status:deriveStatus(lesson, new Set(historicalCourseStatusValues())), studentNames:normalizedStudents(lesson.student_names)});
     const previousPrice = actualPrice().unit_price;
     const before = get("SELECT * FROM fee_overrides WHERE lesson_id = ? AND student_name = ?", [lessonId, studentName]);
     saveStudentFeeOverride(lessonId,studentName,unitPrice);

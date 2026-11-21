@@ -73,7 +73,8 @@ test('attendance-only role can manage month membership without profile or financ
 test('course candidates include defaults and custom values when no pending lessons exist', async () => {
   const r = await api(admin, 'bootstrap?month=2026-11-01');
   assert.equal(r.status, 200);
-  for (const value of ['待上', '已上', '请假', '试课', '考试', '未缴费', '自定义状态', '历史自定义']) assert.ok(r.data.lookups.status.includes(value), value);
+  for (const value of ['待上', '已上', '请假', '试课', '考试', '自定义状态', '历史自定义']) assert.ok(r.data.lookups.status.includes(value), value);
+  assert.equal(r.data.lookups.status.includes('未缴费'), false);
 });
 
 test('scoped student detail separates duplicate names and exposes only permitted read data', async () => {
@@ -122,12 +123,12 @@ test('role page boundaries, readonly and forged sources cannot grant unrelated w
 test('course status saves exact values and rejects explicit empty without touching historical rows', async () => {
   const db = new DatabaseSync(env.DB_PATH, { readOnly: true });
   const old = db.prepare('SELECT * FROM lessons WHERE id=2').get();
-  for (const status of ['待上', '已上', '请假', '试课', '考试', '未缴费', '自定义状态', '新手填状态']) {
+  for (const status of ['待上', '已上', '请假', '试课', '考试', '自定义状态', '新手填状态']) {
     const r = await api(admin, 'lessons/1', { status, allow_conflicts: true }, 'PATCH');
     assert.equal(r.status, 200, JSON.stringify(r.data));
     assert.equal(db.prepare('SELECT status FROM lessons WHERE id=1').get().status, status);
   }
-  for (const status of ['', ' ', null]) assert.equal((await api(admin, 'lessons/1', { status }, 'PATCH')).status, 400);
+  for (const status of ['', ' ', null, '未缴费', '上课（未缴费）']) assert.equal((await api(admin, 'lessons/1', { status }, 'PATCH')).status, 400);
   assert.equal(db.prepare('SELECT status FROM lessons WHERE id=1').get().status, '新手填状态');
   assert.deepEqual(db.prepare('SELECT * FROM lessons WHERE id=2').get(), old);
   assert.equal(db.prepare('SELECT count(*) n FROM lessons').get().n, 2);
@@ -275,7 +276,10 @@ test('Edge compact fee dialog fits desktop/mobile themes with 4/5/6 calendar row
     assert.equal(g.rows, 5);
     assert.equal(g.days, 30);
     assert.equal(g.overflow, false);
-    assert.equal(g.amounts.length, 7);
+    assert.equal(g.amounts.length, 4);
+    const s = (await api(admin, 'tuoguan/student-detail?student_id=1&month=2026-09&summary=1')).data.summary;
+    const money = n => '¥' + (Number(n || 0) / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    assert.deepEqual(g.amounts.map(a => a.text), [money(s.fee), money(s.actual_consumption) + '/' + money(s.gift_consumption), money(s.actual_recharge) + '/' + money(s.gift_recharge), money(s.actual_balance) + '/' + money(s.gift_balance)]);
     assert.ok(g.amounts.every(a => !a.overflow && a.text !== '—'));
     assert.ok(g.calendar <= 300);
     assert.ok(g.width <= Math.min(760, width - 32));
@@ -307,11 +311,12 @@ test('Edge course status candidates, exact save, legacy display and shared picke
   for (const theme of ['light', 'dark']) {
     await c.evaluate(`document.documentElement.dataset.theme='${theme}'`);
     if (!await c.evaluate('scheduleMode')) await c.click('.schedule-mode-toggle');
-    for (const status of ['待上', '已上', '请假', '试课', '考试', '未缴费', '自定义状态']) {
+    for (const status of ['待上', '已上', '请假', '试课', '考试', '自定义状态']) {
       await c.click('[data-lesson-id="1"][data-field="status"]');
       const options = await c.evaluate('[...document.querySelectorAll(".custom-select-menu.open [data-value]")].map(e=>({value:e.dataset.value,text:e.textContent.trim()}))');
       assert.ok(options.some(o => o.value === '待上' && o.text.includes('待上')));
       assert.equal(options.some(o => o.value === ''), false);
+      assert.equal(options.some(o => o.value === '未缴费'), false);
       await c.click(`.custom-select-menu.open [data-value="${status}"]`);
       await c.waitFor(`!activeScheduleInlinePicker && state.lessons.find(r=>r.id===1)?.status===${JSON.stringify(status)}`);
       const db = new DatabaseSync(env.DB_PATH, { readOnly: true });

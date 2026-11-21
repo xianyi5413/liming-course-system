@@ -52,7 +52,6 @@ const FIELD_TIERS = {
 const gradeOrder = ["初一", "初二", "初三", "高一", "高二", "高三"];
 const gradeSortOrder = [...gradeOrder, "已毕业"];
 const studentStatusOptions = ["在读", "暂停", "已毕业", "已流出"];
-const defaultCourseStatuses = ["待上", "已上", "请假", "试课", "考试", "未缴费"];
 const DEFAULT_COURSE_STATUS_COLORS = {
   "待上": { background: "#e8f1fb", color: "#1d4f91" },
   "已上": { background: "#e7f6ed", color: "#16713a" },
@@ -4902,10 +4901,14 @@ function renderSummaryFilterBar(rows, filteredRows) {
 }
 
 function statusValues() {
-  return [...new Set([...defaultCourseStatuses, ...(state?.lookups?.status || [])])];
+  return CourseStatus.candidates(state?.lookups?.status);
 }
 
 function rowStatus(row = {}) {
+  return CourseStatus.display(financialRowStatus(row));
+}
+
+function financialRowStatus(row = {}) {
   const current = String(row.status || "").trim();
   if (current) return current;
   if (row.lesson_status === "试课") return "试课";
@@ -4950,6 +4953,7 @@ function safeBadgeColor(color, fallback) {
 }
 
 function getCourseStatusColor(status) {
+  status = CourseStatus.display(status);
   const colors = configuredColorMap("course_status_colors", DEFAULT_COURSE_STATUS_COLORS);
   const item = colors[status] || DEFAULT_GENERIC_STATUS_COLORS[status] || generatedBadgeColor(status);
   return { background: safeBadgeColor(item.background, "#eef0f3"), color: safeBadgeColor(item.color, "#4b5563") };
@@ -5019,7 +5023,7 @@ function renderSubjectBadge(subject, className = "") {
 }
 
 function renderCourseStatusBadge(value, className = "") {
-  const status = String(value || "").trim() || "待上";
+  const status = CourseStatus.display(value) || "待上";
   return `<span class="entity-badge status-badge ${statusClass(status)} ${className}"${badgeColorStyle(getCourseStatusColor(status))}>${escapeHtml(status)}</span>`;
 }
 
@@ -5037,20 +5041,20 @@ function statusBadge(value) {
 
 function isEffective(row) {
   if (typeof row.effective === "boolean") return row.effective;
-  const status = rowStatus(row);
+  const status = financialRowStatus(row);
   return status === "已上" || status === "未缴费";
 }
 
 function isCompletedLesson(row) {
-  return rowStatus(row) === "已上";
+  return financialRowStatus(row) === "已上";
 }
 
 function isReceivable(row) {
-  return rowStatus(row) === "未缴费";
+  return financialRowStatus(row) === "未缴费";
 }
 
 function isAbnormal(row) {
-  const status = rowStatus(row);
+  const status = financialRowStatus(row);
   return status && status !== "已上";
 }
 
@@ -6703,7 +6707,7 @@ function getActiveStudentOptions(current = [], { includeCurrent = false } = {}) 
 }
 
 function getStatusOptions(current = "", { includeCurrent = true } = {}) {
-  return optionValuesWithCurrent(statusValues(), current, includeCurrent);
+  return optionValuesWithCurrent(statusValues(), CourseStatus.display(current), includeCurrent);
 }
 
 function getRoomOptions(current = "", { includeCurrent = true } = {}) {
@@ -7189,6 +7193,7 @@ function batchCopyInputCell(index, field, value, type = "text", extra = "") {
 }
 
 function batchCopySelectCell(index, field, value, { emptyText = "未选" } = {}) {
+  if (field === "status") value = CourseStatus.display(value);
   return `
     <select class="control batch-copy-field batch-copy-select" data-index="${index}" data-field="${field}">
       ${manualSelectOptions(lessonFieldOptionValues(field, value), value, lessonManualLabel(field), { emptyText: field === "status" ? "" : emptyText })}
@@ -8192,7 +8197,7 @@ function lessonConflictEditModal() {
           <label class="filter-field"><span>教室</span><select class="control conflict-edit-field conflict-edit-candidate" data-field="classroom">${lessonCandidateSelectOptions({ field: "classroom", values: getRoomOptions(draft.classroom), current: draft.classroom, candidate, excludeLessonId: draft.id, manualLabel: lessonManualLabel("classroom") })}</select></label>
           <label class="filter-field"><span>年级</span><select class="control conflict-edit-field" data-field="grade">${manualSelectOptions(getGradeOptions(draft.grade), draft.grade, lessonManualLabel("grade"))}</select></label>
           <label class="filter-field"><span>科目</span><select class="control conflict-edit-field" data-field="subject">${manualSelectOptions(getSubjectOptions(draft.subject), draft.subject, lessonManualLabel("subject"))}</select></label>
-          <label class="filter-field"><span>状态</span><select class="control conflict-edit-field" data-field="status">${manualSelectOptions(getStatusOptions(draft.status || rowStatus(draft)), draft.status || rowStatus(draft), lessonManualLabel("status"), { emptyText: "" })}</select></label>
+          <label class="filter-field"><span>状态</span><select class="control conflict-edit-field" data-field="status">${manualSelectOptions(getStatusOptions(rowStatus(draft)), rowStatus(draft), lessonManualLabel("status"), { emptyText: "" })}</select></label>
           <label class="filter-field"><span>备注</span><textarea class="control conflict-edit-field" data-field="notes" rows="2">${escapeHtml(draft.notes || "")}</textarea></label>
           <div class="filter-field conflict-edit-student-field"><span>学生</span>${studentSelector}</div>
         </div>
@@ -9602,18 +9607,30 @@ function studentStatementHasGift(summary = {}) {
   return [summary.opening_gift_balance, summary.cur_gift, summary.closing_gift_balance ?? summary.gift_balance].some(value => numberValue(value) !== 0);
 }
 
+function formatActualGift(actual, gift) {
+  return `${formatMoney(actual)}/${formatMoney(gift)}`;
+}
+
+function actualGiftMarkup(actual, gift) {
+  return [actual, gift].map(value => `<span class="${Number(value) < 0 ? "negative-text" : ""}">${escapeHtml(formatMoney(value))}</span>`).join("/");
+}
+
+function statementMetricValueMarkup(card) {
+  return card.parts ? actualGiftMarkup(...card.parts) : escapeHtml(card.value);
+}
+
 function studentStatementMetricCards(summary = {}, { parent = false } = {}) {
   const hideGift = parent && !studentStatementHasGift(summary);
+  const pair = (label, actual, gift) => hideGift
+    ? { label, value: formatMoney(actual), negative: Number(actual) < 0 }
+    : { label: label + "/赠送", value: formatActualGift(actual, gift), parts: [actual, gift] };
   return [
     { label: "有效上课次数", value: String(summary.lesson_count || 0) },
     { label: "课程费用", value: formatMoney(summary.total_fee || 0) },
-    { label: "开始日期前剩余现金", value: formatMoney(summary.opening_actual_balance ?? 0), negative: numberValue(summary.opening_actual_balance) < 0 },
-    { label: "开始日期前剩余赠送", value: formatMoney(summary.opening_gift_balance ?? 0) },
-    { label: "期间充值现金", value: formatMoney(summary.cur_recharge || 0) },
-    { label: "期间充值赠送", value: formatMoney(summary.cur_gift || 0) },
-    { label: "结束日期后剩余现金", value: formatMoney(summary.closing_actual_balance ?? summary.actual_balance ?? 0), negative: numberValue(summary.closing_actual_balance ?? summary.actual_balance) < 0 },
-    { label: "结束日期后剩余赠送", value: formatMoney(summary.closing_gift_balance ?? summary.gift_balance ?? 0) },
-  ].filter(card => !hideGift || !card.label.includes("赠送"));
+    pair("开始日期前剩余现金", summary.opening_actual_balance ?? 0, summary.opening_gift_balance ?? 0),
+    pair("期间充值现金", summary.cur_recharge ?? 0, summary.cur_gift ?? 0),
+    pair("结束日期后剩余现金", summary.closing_actual_balance ?? summary.actual_balance ?? 0, summary.closing_gift_balance ?? summary.gift_balance ?? 0),
+  ];
 }
 
 function drawShotMetricCards(ctx, colors, cards, x, y, width, columns = cards.length) {
@@ -9629,11 +9646,31 @@ function drawShotMetricCards(ctx, colors, cards, x, y, width, columns = cards.le
     ctx.strokeStyle = colors.line;
     ctx.stroke();
     ctx.fillStyle = colors.muted;
-    ctx.font = "14px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-    shotText(ctx, card.label, left + 14, y + 26, cardWidth - 28);
-    ctx.fillStyle = card.negative ? "#b42318" : colors.brandDark;
-    ctx.font = "800 21px Microsoft YaHei, PingFang SC, Arial, sans-serif";
-    shotText(ctx, card.value, left + 14, y + 56, cardWidth - 28);
+    const fitFont = (value, size, weight = "400") => {
+      ctx.font = `${weight} ${size}px Microsoft YaHei, PingFang SC, Arial, sans-serif`;
+      const measured = ctx.measureText(value).width;
+      if (measured > cardWidth - 28) ctx.font = `${weight} ${size * (cardWidth - 28) / measured}px Microsoft YaHei, PingFang SC, Arial, sans-serif`;
+    };
+    fitFont(card.label, 14);
+    ctx.fillText(card.label, left + 14, y + 26);
+    fitFont(card.value, 21, "800");
+    const wrapPair = card.parts && parseFloat(ctx.font.replace(/^800 /, "")) < 13;
+    const parts = card.parts ? [{ value: formatMoney(card.parts[0]), negative: Number(card.parts[0]) < 0 }, { value: "/" }, { value: formatMoney(card.parts[1]), negative: Number(card.parts[1]) < 0 }] : [card];
+    if (wrapPair) {
+      const lines = [{ ...parts[0], value: parts[0].value + "/" }, parts[2]];
+      lines.forEach((part, line) => {
+        fitFont(part.value, 16, "800");
+        ctx.fillStyle = part.negative ? "#b42318" : colors.brandDark;
+        ctx.fillText(part.value, left + 14, y + 47 + line * 20);
+      });
+      return;
+    }
+    let valueX = left + 14;
+    for (const part of parts) {
+      ctx.fillStyle = part.negative ? "#b42318" : colors.brandDark;
+      ctx.fillText(part.value, valueX, y + 56);
+      valueX += ctx.measureText(part.value).width;
+    }
   });
 }
 
@@ -9709,13 +9746,12 @@ function studentStatementCanvas(report = studentStatementReport()) {
   const contentWidth = width - contentX - 56;
   const monthTableHeight = 40 + Math.max(1, monthRows.length) * 36;
   const detailTableHeight = 42 + Math.max(1, details.length) * 38;
-  const height = 48 + 96 + 104 + 96 + 36 + monthTableHeight + 54 + detailTableHeight + 54;
+  const height = 246 + 18 + monthTableHeight + 42 + 18 + detailTableHeight + 54;
   const { canvas, ctx } = setupShotCanvas(width, height, colors);
   drawStudentStatementHeader(ctx, colors, report?.student_name || selectedStudent || "未选择学生", dateRange, width);
   const metricCards = studentStatementMetricCards(summary, { parent: true });
-  drawShotMetricCards(ctx, colors, metricCards.slice(0, 4), contentX, 142, contentWidth, 4);
-  drawShotMetricCards(ctx, colors, metricCards.slice(4), contentX, 238, contentWidth, 4);
-  let y = 342;
+  drawShotMetricCards(ctx, colors, metricCards, contentX, 142, contentWidth);
+  let y = 246;
   drawShotSectionTitle(ctx, colors, "月份汇总", contentX, y, contentWidth);
   y += 18;
   const monthColumns = studentQueryMonthColumns(report, { parent: true });
@@ -9910,7 +9946,7 @@ function studentStatementMetricCardsMarkup(summary = {}) {
   return studentStatementMetricCards(summary).map((card, index) => `
     <div class="metric" data-student-statement-metric="${index}">
       <div class="metric-label">${escapeHtml(card.label)}</div>
-      <div class="metric-value ${card.negative ? "negative" : ""}">${escapeHtml(card.value)}</div>
+      <div class="metric-value ${card.parts ? "money-pair" : ""} ${card.negative ? "negative" : ""}">${statementMetricValueMarkup(card)}</div>
     </div>
   `).join("");
 }
@@ -9990,8 +10026,9 @@ function updateStudentQueryResultsOnly(report = studentStatementReport(), {prese
     const value = card.querySelector(".metric-value");
     if (label) label.textContent = metric.label;
     if (value) {
-      value.textContent = metric.value;
+      value.innerHTML = statementMetricValueMarkup(metric);
       value.classList.toggle("negative", Boolean(metric.negative));
+      value.classList.toggle("money-pair", Boolean(metric.parts));
     }
   });
   const comparison = resultRegion.querySelector("[data-student-query-comparison-panel]");
@@ -10948,7 +10985,7 @@ function normalizeBaseDataValues(key, values = []) {
     const clean = String(raw || "").replace(/\u3000/g, " ").replace(/\s+/g, " ").trim();
     return key === "times" ? normalizeTimeSlot(clean) : clean;
   }).filter(Boolean);
-  return uniqueSorted(normalized);
+  return uniqueSorted(normalized.filter(value => key !== "statuses" || !CourseStatus.isLegacyUnpaid(value)));
 }
 
 function baseDataCandidateValues(def) {
@@ -12919,7 +12956,7 @@ function renderCourseNoticePreview(item, mode = "parent", title = "课程通知"
 function courseNoticeCellValue(row = {}, key = "") {
   if (key === "weekday") return row.weekday || weekdayCn(row.date);
   if (key === "student_names") return row.display_student_names || StudentDisplay.text(row.student_names || "");
-  if (key === "status") return String(row.status || rowStatus(row) || "").trim();
+  if (key === "status") return rowStatus(row);
   return row[key] || "";
 }
 
@@ -15616,6 +15653,7 @@ function wireEvents() {
       const input = document.querySelector(`.base-data-new-value[data-setting-key="${selectorEscape(settingKey)}"]`);
       let value = String(input?.value || "").trim();
       if (!def || !value) return alert("请先填写有效内容");
+      if (settingKey === "custom_course_statuses" && CourseStatus.isLegacyUnpaid(value)) return alert("未缴费属于历史财务标记，不能新增为课程状态");
       if (settingKey === "custom_time_slots") {
         const normalized = normalizeTimeSlot(value);
         if (!normalized) return alert("常用时间格式无效，请使用 HH:mm-HH:mm，例如 08:30-10:30");

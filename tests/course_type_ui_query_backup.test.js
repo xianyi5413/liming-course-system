@@ -87,7 +87,10 @@ test('API stores dictionaries, class defaults, explicit edits, lessons and copie
   assert.equal(copied.status, 201); assert.equal(copied.data.lessons[0].course_type, '高中特训');
   const denied = await api('/api/lessons', 'POST', { course_type: '高中特训' }, ''); assert.equal(denied.status, 401);
   for (const [date, subject, status] of [['2026-07-11','物理','已上'],['2026-07-12','英语','请假'],['2026-07-13','化学','未缴费'],['2026-08-03','物理','已上']]) {
-    assert.equal((await api('/api/lessons', 'POST', { teacher_name: '合成老师', grade: '高一', subject, student_names: '合成学生', date, month_key: date.slice(0, 7) + '-01', time_slot: '09:00-11:00', classroom: '合成教室', status })).status, 201);
+    const created = await api('/api/lessons', 'POST', { teacher_name: '合成老师', grade: '高一', subject, student_names: '合成学生', date, month_key: date.slice(0, 7) + '-01', time_slot: '09:00-11:00', classroom: '合成教室', status: status === '未缴费' ? '待上' : status });
+    assert.equal(created.status, 201);
+    // Historical fixture only: new course writes no longer accept this financial marker.
+    if (status === '未缴费') { const db = new DatabaseSync(dbPath); db.prepare("UPDATE lessons SET status='未缴费',lesson_status='上课（未缴费）',course_status='已上' WHERE id=?").run(created.data.id); db.close(); }
   }
 });
 
@@ -190,7 +193,7 @@ test('Chromium: logo, sidebar, teacher serials, query model, refresh and sticky 
     await browser.evaluate("(async () => { setActiveView('studentQuery'); selectedStudent='合成学生'; studentQueryRange={mode:'range',start:'2026-07-01',end:'2026-08-31'}; await load({refreshGlobal:false}); })()");
     await browser.waitFor("Boolean(document.querySelector('.refresh-student-query'))");
     const model = await browser.evaluate(`(() => { const report=studentStatementReport(); return { columns:studentQueryMonthColumns(report).map(x=>x.label), parent:studentQueryMonthColumns(report,{parent:true}).map(x=>x.label), zero:studentStatementMetricCards({}, {parent:true}).map(x=>x.label), gift:studentStatementMetricCards({cur_gift:1},{parent:true}).length, image:studentStatementCanvas(report).toDataURL().length }; })()`);
-    assert.deepEqual(model.columns, ['月份','有效课次','数学','物理','当月课费','现金充值','赠送充值']); assert.ok(!model.parent.includes('赠送充值')); assert.equal(model.zero.length, 5); assert.ok(model.zero.every(x=>!x.includes('赠送'))); assert.equal(model.gift, 8); assert.ok(model.image > 1000);
+    assert.deepEqual(model.columns, ['月份','有效课次','数学','物理','当月课费','现金充值','赠送充值']); assert.ok(!model.parent.includes('赠送充值')); assert.equal(model.zero.length, 5); assert.ok(model.zero.every(x=>!x.includes('赠送'))); assert.equal(model.gift, 5); assert.ok(model.image > 1000);
     const beforeFilter = await browser.evaluate('JSON.stringify({selectedStudent,studentQueryRange})'); const n = browser.responses.length;
     await browser.click('.refresh-student-query'); await browser.waitFor("!document.querySelector('.refresh-student-query').disabled");
     assert.equal(await browser.evaluate('JSON.stringify({selectedStudent,studentQueryRange})'), beforeFilter); assert.ok(browser.responses.slice(n).some(row=>row.url.includes('refresh=1')));
